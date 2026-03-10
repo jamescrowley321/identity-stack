@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
-
-from app.dependencies.auth import get_current_user, get_claims
 from py_identity_model.identity import ClaimsPrincipal
+
+from app.dependencies.auth import get_claims, get_current_user
 
 router = APIRouter()
 

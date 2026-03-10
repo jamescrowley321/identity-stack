@@ -1,13 +1,11 @@
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import JSONResponse
-
 from py_identity_model import (
-    DiscoveryDocumentRequest,
     TokenValidationConfig,
     to_principal,
 )
-from py_identity_model.aio import get_discovery_document, validate_token
+from py_identity_model.aio import validate_token
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 
 class TokenValidationMiddleware(BaseHTTPMiddleware):
@@ -33,6 +31,7 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
             config = TokenValidationConfig(
                 perform_disco=True,
                 algorithms=["RS256"],
+                audience=self.descope_project_id,
             )
             claims = await validate_token(
                 jwt=token,
