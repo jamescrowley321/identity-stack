@@ -144,6 +144,21 @@ jobs:
           }
           EOF
 
+      - name: Configure TF Cloud credentials
+        run: |
+          cat > ~/.terraform.d/credentials.tfrc.json << EOF
+          {
+            "credentials": {
+              "app.terraform.io": {
+                "token": "${{ secrets.TF_API_TOKEN }}"
+              }
+            }
+          }
+          EOF
+
+      - name: Terraform init
+        run: cd infra && terraform init -no-color
+
       - name: Terraform plan
         if: env.DESCOPE_MANAGEMENT_KEY != ''
         run: |
