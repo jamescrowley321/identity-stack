@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+
 from app.main import app
 
 
@@ -63,7 +64,7 @@ async def test_protected_route_accepts_valid_token(mock_validate, client):
     claim_types = {c["type"]: c for c in identity["claims"]}
     assert claim_types["sub"]["value"] == "user123"
     assert claim_types["email"]["value"] == "test@example.com"
-    assert claim_types["sub"]["issuer"] == "LOCAL AUTHORITY"
+    assert claim_types["sub"]["issuer"] == "https://test.example.com"
 
 
 @pytest.mark.anyio
