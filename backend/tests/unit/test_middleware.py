@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from py_identity_model import to_principal
 
 from app.main import app
 
@@ -45,25 +46,26 @@ async def test_protected_route_rejects_invalid_token(client):
 
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-@patch("app.middleware.auth.to_principal")
-async def test_protected_route_accepts_valid_token(mock_to_principal, mock_validate, client):
+async def test_protected_route_accepts_valid_token(mock_validate, client):
     """Protected endpoints should pass through with a valid token."""
-    mock_claims = {"sub": "user123", "email": "test@example.com", "name": "Test User"}
+    mock_claims = {
+        "sub": "user123",
+        "email": "test@example.com",
+        "name": "Test User",
+        "iss": "https://test.example.com",
+    }
     mock_validate.return_value = mock_claims
-
-    def _find_first(self, key):
-        if key in mock_claims:
-            return type("Claim", (), {"value": mock_claims.get(key)})()
-        return None
-
-    mock_principal = type("FakePrincipal", (), {"find_first": _find_first})()
-    mock_to_principal.return_value = mock_principal
 
     response = await client.get("/api/me", headers={"Authorization": "Bearer valid.mock.token"})
     assert response.status_code == 200
     data = response.json()
-    assert data["sub"] == "user123"
-    assert data["email"] == "test@example.com"
+    identity = data["identity"]
+    assert identity["is_authenticated"] is True
+    assert identity["authentication_type"] == "Descope"
+    claim_types = {c["type"]: c for c in identity["claims"]}
+    assert claim_types["sub"]["value"] == "user123"
+    assert claim_types["email"]["value"] == "test@example.com"
+    assert claim_types["sub"]["issuer"] == "https://test.example.com"
 
 
 @pytest.mark.anyio
