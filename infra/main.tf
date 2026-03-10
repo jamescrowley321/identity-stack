@@ -1,4 +1,12 @@
 terraform {
+  cloud {
+    organization = "jamescrowley321"
+
+    workspaces {
+      name = "descope-saas-starter-dev"
+    }
+  }
+
   required_providers {
     descope = {
       # Uses the fork at jamescrowley321/terraform-provider-descope.
