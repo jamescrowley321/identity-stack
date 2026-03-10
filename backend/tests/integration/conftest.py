@@ -1,4 +1,8 @@
-"""Shared fixtures for integration tests against a live Descope instance."""
+"""Shared fixtures for integration tests against a live Descope instance.
+
+Infrastructure (OIDC application, access key) is provisioned by Terraform.
+Tests consume the credentials via environment variables.
+"""
 
 import os
 
@@ -74,7 +78,6 @@ def anyio_backend():
 @pytest.fixture
 async def client():
     """Async test client for the FastAPI app."""
-    # Import here so DESCOPE_PROJECT_ID is set before app initializes
     from app.main import app
 
     transport = ASGITransport(app=app)

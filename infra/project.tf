@@ -71,6 +71,13 @@ resource "descope_project" "starter" {
   # Phase 5b: Connectors will be configured here
   # connectors = { ... }
 
-  # Phase 5d: Applications will be configured here
-  # applications = { ... }
+  # Phase 5d: OIDC application for client credentials flow
+  applications = {
+    oidc_applications = [
+      {
+        name        = "Integration Tests"
+        description = "OIDC application used by CI integration tests"
+      }
+    ]
+  }
 }

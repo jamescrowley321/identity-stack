@@ -1,19 +1,19 @@
 services:
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        VITE_DESCOPE_PROJECT_ID: ${DESCOPE_PROJECT_ID}
     ports:
       - "3000:80"
     depends_on:
       - backend
-    environment:
-      - VITE_DESCOPE_PROJECT_ID=${DESCOPE_PROJECT_ID}
 
   backend:
     build: ./backend
     ports:
       - "8000:8000"
     env_file:
-      - ./backend/.env
+      - .env
     environment:
-      - DESCOPE_PROJECT_ID=${DESCOPE_PROJECT_ID}
       - FRONTEND_URL=http://localhost:3000

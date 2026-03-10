@@ -66,11 +66,16 @@ make dev  # installs binary + creates ~/.terraformrc with dev_overrides
 
 ```bash
 cd infra
-cp .env.example .env
-# Edit .env with your DESCOPE_MANAGEMENT_KEY
-source .env
+export DESCOPE_MANAGEMENT_KEY=your-management-key
 terraform init
 terraform apply -var-file=environments/dev.tfvars
+```
+
+Terraform provisions the full project config including an OIDC application and access key for integration tests. After applying, retrieve the test credentials:
+
+```bash
+terraform output integration_test_access_key_id         # → DESCOPE_CLIENT_ID
+terraform output integration_test_access_key_cleartext   # → DESCOPE_CLIENT_SECRET
 ```
 
 ### 4. Run the backend
@@ -97,10 +102,13 @@ npm run dev
 ### Or use Docker Compose
 
 ```bash
-cp backend/.env.example backend/.env
-# Edit backend/.env
-DESCOPE_PROJECT_ID=your-project-id docker-compose up
+# Create a .env in the project root with your Descope credentials:
+#   DESCOPE_PROJECT_ID=your-project-id
+#   DESCOPE_MANAGEMENT_KEY=your-management-key
+docker compose up --build
 ```
+
+The frontend is available at http://localhost:3000 and the backend at http://localhost:8000.
 
 ## Project Structure
 
@@ -124,6 +132,7 @@ descope-saas-starter/
 ├── infra/             # Terraform (descope provider fork)
 │   ├── main.tf
 │   ├── project.tf
+│   ├── access_key.tf
 │   └── environments/
 └── docker-compose.yml
 ```

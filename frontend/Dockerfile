@@ -3,6 +3,7 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install
 COPY . .
+ARG VITE_DESCOPE_PROJECT_ID
 RUN npm run build
 
 FROM nginx:alpine
