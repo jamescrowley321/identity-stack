@@ -31,3 +31,10 @@ variable "github_oauth_client_secret" {
   default     = ""
   sensitive   = true
 }
+
+# GitHub Actions
+variable "github_repository" {
+  description = "GitHub repository name (without owner) for CI secrets"
+  type        = string
+  default     = "descope-saas-starter"
+}

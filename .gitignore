@@ -22,6 +22,7 @@ build/
 *.tfplan
 .terraform.lock.hcl
 crash.log
+infra/expired_token.txt
 
 # IDE
 .vscode/

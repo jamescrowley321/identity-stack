@@ -18,7 +18,19 @@ terraform {
       # with dev_overrides pointing descope/descope to the local build.
       source = "descope/descope"
     }
+    github = {
+      source  = "integrations/github"
+      version = "~> 6.0"
+    }
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.5"
+    }
   }
 }
 
 provider "descope" {}
+
+provider "github" {
+  owner = "jamescrowley321"
+}

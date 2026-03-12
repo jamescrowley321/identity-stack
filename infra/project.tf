@@ -1,10 +1,16 @@
-# Descope project configuration
-# Each phase will add blocks here as features are implemented.
+# Consolidated Descope project configuration.
+# This is the single shared project used by all repos:
+#   - descope-saas-starter (authentication, OIDC app)
+#   - py-identity-model (authorization, project settings)
+#   - terraform-provider-descope (CI integration tests)
 
 resource "descope_project" "starter" {
   name = var.descope_project_name
 
-  # Phase 1b: Authentication methods
+  project_settings = {
+    access_key_session_token_expiration = "3 minutes"
+  }
+
   authentication = {
     otp = {
       disabled        = false
@@ -56,27 +62,34 @@ resource "descope_project" "starter" {
     }
   }
 
-  # Phase 2b: Roles and permissions will be configured here
-  # authorization = { ... }
+  authorization = {
+    permissions = [
+      { name = "users.create", description = "Create users" },
+      { name = "users.read", description = "Read users" },
+      { name = "users.delete", description = "Delete users" },
+    ]
+    roles = [
+      {
+        name        = "admin"
+        key         = "admin"
+        description = "Full administrative access"
+        permissions = ["users.create", "users.read", "users.delete"]
+      },
+      {
+        name        = "viewer"
+        key         = "viewer"
+        description = "Read-only access"
+        permissions = ["users.read"]
+      },
+    ]
+  }
 
-  # Phase 2c: Custom attributes will be configured here
-  # attributes = { ... }
-
-  # Phase 1c: Session/token settings will be configured here
-  # project_settings = { ... }
-
-  # Phase 4b: JWT templates will be configured here
-  # jwt_templates = { ... }
-
-  # Phase 5b: Connectors will be configured here
-  # connectors = { ... }
-
-  # Phase 5d: OIDC application for client credentials flow
   applications = {
     oidc_applications = [
       {
-        name        = "Integration Tests"
-        description = "OIDC application used by CI integration tests"
+        name           = "Integration Tests"
+        description    = "OIDC application used by CI integration tests"
+        login_page_url = "https://localhost"
       }
     ]
   }
