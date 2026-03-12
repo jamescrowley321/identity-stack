@@ -4,7 +4,7 @@
 resource "github_actions_secret" "descope_project_id" {
   repository      = var.github_repository
   secret_name     = "DESCOPE_PROJECT_ID"
-  plaintext_value = descope_project.starter.id
+  plaintext_value = var.descope_project_id
 }
 
 resource "github_actions_secret" "descope_client_id" {
@@ -31,7 +31,7 @@ resource "terraform_data" "expired_token" {
   provisioner "local-exec" {
     command = <<-EOT
       TOKEN=$(curl -s -X POST https://api.descope.com/v1/auth/accesskey/exchange \
-        -H "Authorization: Bearer ${descope_project.starter.id}:${descope_access_key.integration_tests.cleartext}" \
+        -H "Authorization: Bearer ${var.descope_project_id}:${descope_access_key.integration_tests.cleartext}" \
         -H "Content-Type: application/json" \
         -d '{"loginId": "${descope_access_key.integration_tests.client_id}"}' \
         | python3 -c "import sys,json; print(json.load(sys.stdin).get('sessionJwt',''))")

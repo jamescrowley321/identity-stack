@@ -1,7 +1,8 @@
-variable "descope_project_name" {
-  description = "Name for the Descope project"
+variable "descope_management_key" {
+  description = "Descope management key. Set via DESCOPE_MANAGEMENT_KEY env var."
   type        = string
-  default     = "SaaS Starter"
+  sensitive   = true
+  default     = ""
 }
 
 # OAuth2 - Google

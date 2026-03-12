@@ -1,6 +1,6 @@
 output "project_id" {
   description = "The Descope project ID"
-  value       = descope_project.starter.id
+  value       = var.descope_project_id
 }
 
 output "integration_test_access_key_id" {
