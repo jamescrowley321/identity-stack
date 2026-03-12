@@ -1,5 +1,6 @@
 import { useAuth } from "react-oidc-context";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
+import { useApiClient } from "../hooks/useApiClient";
 
 const preStyle = {
   background: "#f4f4f4",
@@ -14,13 +15,13 @@ const labelStyle = { fontSize: "0.75rem", color: "#666", fontWeight: "normal" as
 
 export default function Dashboard() {
   const auth = useAuth();
+  const { apiFetch } = useApiClient();
   const [health, setHealth] = useState<string>("checking...");
   const [accessTokenClaims, setAccessTokenClaims] = useState<Record<string, unknown> | null>(null);
   const [idTokenClaims, setIdTokenClaims] = useState<Record<string, unknown> | null>(null);
   const [identity, setIdentity] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const accessToken = auth.user?.access_token;
   const idToken = auth.user?.id_token;
 
   useEffect(() => {
@@ -31,11 +32,9 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    if (!accessToken) return;
+    if (!auth.user?.access_token) return;
 
-    const headers = { Authorization: `Bearer ${accessToken}` };
-
-    fetch("/api/claims", { headers })
+    apiFetch("/api/claims")
       .then((res) => {
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
         return res.json();
@@ -43,17 +42,17 @@ export default function Dashboard() {
       .then(setAccessTokenClaims)
       .catch((err) => setError(err.message));
 
-    fetch("/api/me", { headers })
+    apiFetch("/api/me")
       .then((res) => {
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
         return res.json();
       })
       .then(setIdentity)
       .catch(() => {});
-  }, [accessToken]);
+  }, [auth.user?.access_token, apiFetch]);
 
   useEffect(() => {
-    if (!idToken || !accessToken) return;
+    if (!idToken || !auth.user?.access_token) return;
 
     fetch("/api/validate-id-token", {
       method: "POST",
@@ -65,7 +64,17 @@ export default function Dashboard() {
       })
       .then(setIdTokenClaims)
       .catch(() => {});
-  }, [idToken, accessToken]);
+  }, [idToken, auth.user?.access_token]);
+
+  const handleLogout = useCallback(async () => {
+    // Notify the backend before clearing the OIDC session.
+    try {
+      await apiFetch("/api/auth/logout", { method: "POST" });
+    } catch {
+      // Best-effort — proceed with logout even if the call fails.
+    }
+    auth.signoutRedirect();
+  }, [apiFetch, auth]);
 
   const identityName = identity?.identity as Record<string, unknown> | undefined;
 
@@ -73,7 +82,7 @@ export default function Dashboard() {
     <div style={{ padding: "2rem", maxWidth: "900px", margin: "0 auto" }}>
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <h1>Descope SaaS Starter</h1>
-        <button onClick={() => auth.signoutRedirect()}>Logout</button>
+        <button onClick={handleLogout}>Logout</button>
       </header>
       <section style={{ marginTop: "2rem" }}>
         <h2>Welcome, {(identityName?.name as string) || auth.user?.profile?.email || "User"}</h2>

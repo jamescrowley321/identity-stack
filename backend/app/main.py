@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.middleware.auth import TokenValidationMiddleware
-from app.routers import health, protected
+from app.routers import auth, health, protected
 
 app = FastAPI(title="Descope SaaS Starter API")
 
@@ -25,4 +25,5 @@ app.add_middleware(
 )
 
 app.include_router(health.router, prefix="/api")
+app.include_router(auth.router, prefix="/api")
 app.include_router(protected.router, prefix="/api")
