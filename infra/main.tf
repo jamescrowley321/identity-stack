@@ -29,7 +29,9 @@ terraform {
   }
 }
 
-provider "descope" {}
+provider "descope" {
+  project_id = var.descope_project_id
+}
 
 provider "github" {
   owner = "jamescrowley321"
