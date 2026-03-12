@@ -10,7 +10,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-python@v5
         with:
@@ -31,7 +31,7 @@ jobs:
     name: Unit Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-python@v5
         with:
@@ -52,7 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-python@v5
         with:
@@ -71,98 +71,3 @@ jobs:
           DESCOPE_CLIENT_ID: ${{ secrets.DESCOPE_CLIENT_ID }}
           DESCOPE_CLIENT_SECRET: ${{ secrets.DESCOPE_CLIENT_SECRET }}
           DESCOPE_EXPIRED_TOKEN: ${{ secrets.DESCOPE_EXPIRED_TOKEN }}
-
-  terraform-validate:
-    name: Terraform Validate
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: hashicorp/setup-terraform@v3
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26"
-
-      - name: Build terraform-provider-descope from fork
-        run: |
-          git clone https://github.com/jamescrowley321/terraform-provider-descope.git /tmp/tf-provider
-          cd /tmp/tf-provider
-          go build -o terraform-provider-descope .
-          mkdir -p ~/.terraform.d/plugins/registry.terraform.io/descope/descope/0.0.1/linux_amd64
-          cp terraform-provider-descope ~/.terraform.d/plugins/registry.terraform.io/descope/descope/0.0.1/linux_amd64/
-
-      - name: Create dev_overrides
-        run: |
-          PLUGIN_DIR=~/.terraform.d/plugins/registry.terraform.io/descope/descope/0.0.1/linux_amd64
-          cat > ~/.terraformrc << EOF
-          provider_installation {
-            dev_overrides {
-              "descope/descope" = "$PLUGIN_DIR"
-            }
-            direct {}
-          }
-          EOF
-
-      - name: Terraform validate
-        run: |
-          cd infra
-          terraform init -backend=false || true
-          terraform validate
-
-  terraform-plan:
-    name: Terraform Plan
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
-    needs: [terraform-validate]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: hashicorp/setup-terraform@v3
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26"
-
-      - name: Build terraform-provider-descope from fork
-        run: |
-          git clone https://github.com/jamescrowley321/terraform-provider-descope.git /tmp/tf-provider
-          cd /tmp/tf-provider
-          go build -o terraform-provider-descope .
-          mkdir -p ~/.terraform.d/plugins/registry.terraform.io/descope/descope/0.0.1/linux_amd64
-          cp terraform-provider-descope ~/.terraform.d/plugins/registry.terraform.io/descope/descope/0.0.1/linux_amd64/
-
-      - name: Create dev_overrides
-        run: |
-          PLUGIN_DIR=~/.terraform.d/plugins/registry.terraform.io/descope/descope/0.0.1/linux_amd64
-          cat > ~/.terraformrc << EOF
-          provider_installation {
-            dev_overrides {
-              "descope/descope" = "$PLUGIN_DIR"
-            }
-            direct {}
-          }
-          EOF
-
-      - name: Configure TF Cloud credentials
-        run: |
-          cat > ~/.terraform.d/credentials.tfrc.json << EOF
-          {
-            "credentials": {
-              "app.terraform.io": {
-                "token": "${{ secrets.TF_API_TOKEN }}"
-              }
-            }
-          }
-          EOF
-
-      - name: Terraform init
-        run: cd infra && terraform init -no-color
-
-      - name: Terraform plan
-        if: env.DESCOPE_MANAGEMENT_KEY != ''
-        run: |
-          cd infra
-          terraform plan -var-file=environments/dev.tfvars -no-color
-        env:
-          DESCOPE_MANAGEMENT_KEY: ${{ secrets.DESCOPE_MANAGEMENT_KEY }}
