@@ -19,7 +19,10 @@ async def test_me_with_valid_token(client, access_token):
     )
     assert response.status_code == 200
     data = response.json()
-    assert "sub" in data
+    identity = data["identity"]
+    assert identity["is_authenticated"] is True
+    claim_types = {c["type"] for c in identity["claims"]}
+    assert "sub" in claim_types
 
 
 @pytest.mark.anyio

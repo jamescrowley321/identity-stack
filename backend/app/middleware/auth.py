@@ -1,7 +1,4 @@
-from py_identity_model import (
-    TokenValidationConfig,
-    to_principal,
-)
+from py_identity_model import TokenValidationConfig, to_principal
 from py_identity_model.aio import validate_token
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -30,7 +27,6 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
         try:
             config = TokenValidationConfig(
                 perform_disco=True,
-                algorithms=["RS256"],
                 audience=self.descope_project_id,
             )
             claims = await validate_token(
