@@ -1,23 +1,28 @@
-from fastapi import APIRouter, Depends
-from py_identity_model.identity import ClaimsPrincipal
+import os
 
-from app.dependencies.auth import get_current_user
+import httpx
+from fastapi import APIRouter, Depends
+
+from app.dependencies.auth import get_claims
 
 router = APIRouter()
 
+DESCOPE_BASE_URL = os.getenv("DESCOPE_BASE_URL", "https://api.descope.com")
+
 
 @router.post("/auth/logout")
-async def logout(principal: ClaimsPrincipal = Depends(get_current_user)):
-    """Acknowledge a logout request from an authenticated user.
+async def logout(claims: dict = Depends(get_claims)):
+    """Log out the current user by revoking all their Descope sessions."""
+    project_id = os.environ["DESCOPE_PROJECT_ID"]
+    management_key = os.getenv("DESCOPE_MANAGEMENT_KEY", "")
+    user_id = claims.get("sub")
 
-    The frontend is responsible for clearing tokens and redirecting.
-    This endpoint validates the session is still active and signals
-    that the backend is aware of the logout.
-    """
-    sub = None
-    if principal.identity:
-        for claim in principal.identity.claims:
-            if claim.claim_type == "sub":
-                sub = claim.value
-                break
-    return {"status": "logged_out", "sub": sub}
+    if user_id and management_key:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"{DESCOPE_BASE_URL}/v1/mgmt/user/logout",
+                headers={"Authorization": f"Bearer {project_id}:{management_key}"},
+                json={"userId": user_id},
+            )
+
+    return {"status": "logged_out", "sub": user_id}
