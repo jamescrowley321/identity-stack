@@ -49,7 +49,7 @@ export function useApiClient() {
           // Silent renewal failed — session is unrecoverable.
         }
         await currentAuth.removeUser();
-        navigate("/login");
+        navigate("/login", { state: { sessionExpired: true } });
       }
 
       return response;
