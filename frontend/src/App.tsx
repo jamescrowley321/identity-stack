@@ -1,9 +1,23 @@
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route, Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "react-oidc-context";
+import { useEffect } from "react";
 import Dashboard from "./pages/Dashboard";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const auth = useAuth();
+  const navigate = useNavigate();
+
+  // When automatic silent renewal fails and the access token expires,
+  // clear local state so the ProtectedRoute redirect kicks in.
+  useEffect(() => {
+    const handleExpired = () => {
+      auth.removeUser();
+      navigate("/login");
+    };
+
+    auth.events.addAccessTokenExpired(handleExpired);
+    return () => auth.events.removeAccessTokenExpired(handleExpired);
+  }, [auth, navigate]);
 
   // Show loading during initial load AND during code exchange
   if (auth.isLoading) {
