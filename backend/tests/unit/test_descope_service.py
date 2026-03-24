@@ -250,6 +250,67 @@ class TestDescopeManagementClient:
             json={"id": "k1"},
         )
 
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_invite_user(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_http.post.return_value = MagicMock(
+            status_code=200,
+            raise_for_status=MagicMock(),
+            json=MagicMock(return_value={"user": {"userId": "u1", "email": "a@b.com"}}),
+        )
+
+        result = await client.invite_user("a@b.com", "t1", ["member"])
+        assert result["email"] == "a@b.com"
+        mock_http.post.assert_called_once_with(
+            "https://api.descope.com/v1/mgmt/user/create",
+            headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
+            json={"loginId": "a@b.com", "email": "a@b.com", "tenants": [{"tenantId": "t1", "roleNames": ["member"]}]},
+        )
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_search_tenant_users(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_http.post.return_value = MagicMock(
+            status_code=200,
+            raise_for_status=MagicMock(),
+            json=MagicMock(return_value={"users": [{"userId": "u1"}]}),
+        )
+
+        result = await client.search_tenant_users("t1")
+        assert len(result) == 1
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_update_user_status(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+
+        await client.update_user_status("u1", "disabled")
+        mock_http.post.assert_called_once_with(
+            "https://api.descope.com/v1/mgmt/user/updateStatus",
+            headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
+            json={"loginId": "u1", "status": "disabled"},
+        )
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_delete_user(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+
+        await client.delete_user("u1")
+        mock_http.post.assert_called_once_with(
+            "https://api.descope.com/v1/mgmt/user/delete",
+            headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
+            json={"loginId": "u1"},
+        )
+
 
 class TestGetDescopeClient:
     def test_creates_client_from_env(self, monkeypatch):

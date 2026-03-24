@@ -167,3 +167,22 @@ async def test_invite_without_tenant_rejected(mock_validate, client):
         json={"email": "new@test.com"},
     )
     assert response.status_code == 403
+
+
+@pytest.mark.anyio
+@patch("app.routers.users.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_invite_with_default_role(mock_validate, mock_factory, client):
+    """Invite without specifying role should default to 'member'."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.invite_user.return_value = {"userId": "new", "email": "default@test.com"}
+    mock_factory.return_value = mock_client
+
+    response = await client.post(
+        "/api/members/invite",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"email": "default@test.com"},
+    )
+    assert response.status_code == 200
+    mock_client.invite_user.assert_called_once_with("default@test.com", "tenant-abc", ["member"])
