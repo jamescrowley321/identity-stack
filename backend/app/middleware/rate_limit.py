@@ -30,5 +30,7 @@ def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> JSO
     """Return a JSON 429 response with Retry-After header."""
     response = JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)
     response.headers["Retry-After"] = "60"
-    response = request.app.state.limiter._inject_headers(response, request.state.view_rate_limit)
+    view_rate_limit = getattr(request.state, "view_rate_limit", None)
+    if view_rate_limit:
+        response = request.app.state.limiter._inject_headers(response, view_rate_limit)
     return response
