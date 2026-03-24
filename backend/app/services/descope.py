@@ -93,6 +93,39 @@ class DescopeManagementClient:
             )
             resp.raise_for_status()
 
+    async def load_user(self, user_id: str) -> dict:
+        """Load a user by login ID. Returns user object including customAttributes."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.base_url}/v1/mgmt/user/load",
+                headers=self._headers(),
+                json={"loginId": user_id},
+            )
+            resp.raise_for_status()
+            return resp.json().get("user", {})
+
+    async def update_user_custom_attribute(
+        self, user_id: str, attribute_key: str, attribute_value: str | int | bool | float | None
+    ) -> None:
+        """Set a single custom attribute on a user."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.base_url}/v1/mgmt/user/update/customAttribute",
+                headers=self._headers(),
+                json={"loginId": user_id, "attributeKey": attribute_key, "attributeValue": attribute_value},
+            )
+            resp.raise_for_status()
+
+    async def update_tenant_custom_attributes(self, tenant_id: str, custom_attributes: dict) -> None:
+        """Update custom attributes on a tenant."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.base_url}/v1/mgmt/tenant/update",
+                headers=self._headers(),
+                json={"id": tenant_id, "customAttributes": custom_attributes},
+            )
+            resp.raise_for_status()
+
 
 def get_descope_client() -> DescopeManagementClient:
     """Factory that creates a DescopeManagementClient from environment variables."""
