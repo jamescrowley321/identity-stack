@@ -18,3 +18,13 @@ output "integration_test_access_key_cleartext" {
   value       = descope_access_key.integration_tests.cleartext
   sensitive   = true
 }
+
+output "tenant_acme_id" {
+  description = "Tenant ID for Acme Corp"
+  value       = descope_tenant.acme.id
+}
+
+output "tenant_globex_id" {
+  description = "Tenant ID for Globex Inc"
+  value       = descope_tenant.globex.id
+}
