@@ -36,6 +36,7 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
             )
             request.state.claims = claims
             request.state.principal = to_principal(claims, "Descope")
+            request.state.tenant_id = claims.get("dct")
         except Exception:
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
