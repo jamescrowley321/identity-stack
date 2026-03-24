@@ -90,6 +90,26 @@ class DescopeManagementClient:
 # Module-level singleton for shared client
 _descope_client: DescopeManagementClient | None = None
 
+    async def assign_roles(self, user_id: str, tenant_id: str, role_names: list[str]) -> None:
+        """Assign roles to a user within a specific tenant."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.base_url}/v1/mgmt/user/update/role/add",
+                headers=self._headers(),
+                json={"loginId": user_id, "tenantId": tenant_id, "roleNames": role_names},
+            )
+            resp.raise_for_status()
+
+    async def remove_roles(self, user_id: str, tenant_id: str, role_names: list[str]) -> None:
+        """Remove roles from a user within a specific tenant."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.base_url}/v1/mgmt/user/update/role/remove",
+                headers=self._headers(),
+                json={"loginId": user_id, "tenantId": tenant_id, "roleNames": role_names},
+            )
+            resp.raise_for_status()
+
 
 def get_descope_client() -> DescopeManagementClient:
     """Return the module-level DescopeManagementClient singleton.
