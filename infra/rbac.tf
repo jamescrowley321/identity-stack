@@ -113,7 +113,6 @@ resource "descope_role" "member" {
     descope_permission.members_invite.name,
     descope_permission.documents_read.name,
     descope_permission.documents_write.name,
-    descope_permission.documents_delete.name,
   ]
 }
 
