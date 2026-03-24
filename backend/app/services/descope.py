@@ -126,6 +126,80 @@ class DescopeManagementClient:
             )
             resp.raise_for_status()
 
+    async def create_access_key(
+        self,
+        name: str,
+        tenant_id: str,
+        expire_time: int | None = None,
+        role_names: list[str] | None = None,
+    ) -> dict:
+        """Create an access key scoped to a tenant. Returns key object with cleartext (shown once)."""
+        body: dict = {"name": name, "tenantId": tenant_id}
+        if expire_time is not None:
+            body["expireTime"] = expire_time
+        if role_names:
+            body["roleNames"] = role_names
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.base_url}/v1/mgmt/accesskey/create",
+                headers=self._headers(),
+                json=body,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def search_access_keys(self, tenant_id: str) -> list[dict]:
+        """List access keys, optionally filtered by tenant."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.base_url}/v1/mgmt/accesskey/search",
+                headers=self._headers(),
+                json={"tenantIds": [tenant_id]},
+            )
+            resp.raise_for_status()
+            return resp.json().get("keys", [])
+
+    async def load_access_key(self, key_id: str) -> dict:
+        """Load a single access key by ID."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.base_url}/v1/mgmt/accesskey/load",
+                headers=self._headers(),
+                json={"id": key_id},
+            )
+            resp.raise_for_status()
+            return resp.json().get("key", {})
+
+    async def deactivate_access_key(self, key_id: str) -> None:
+        """Deactivate (revoke) an access key."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.base_url}/v1/mgmt/accesskey/deactivate",
+                headers=self._headers(),
+                json={"id": key_id},
+            )
+            resp.raise_for_status()
+
+    async def activate_access_key(self, key_id: str) -> None:
+        """Reactivate a previously deactivated access key."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.base_url}/v1/mgmt/accesskey/activate",
+                headers=self._headers(),
+                json={"id": key_id},
+            )
+            resp.raise_for_status()
+
+    async def delete_access_key(self, key_id: str) -> None:
+        """Permanently delete an access key."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.base_url}/v1/mgmt/accesskey/delete",
+                headers=self._headers(),
+                json={"id": key_id},
+            )
+            resp.raise_for_status()
+
 
 def get_descope_client() -> DescopeManagementClient:
     """Factory that creates a DescopeManagementClient from environment variables."""
