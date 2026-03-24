@@ -149,7 +149,7 @@ export default function Dashboard() {
         <p>
           <Link to="/profile">Profile</Link>
           {currentTenantId && <>{" | "}<Link to="/settings">Tenant Settings</Link></>}
-          {isAdmin && <>{" | "}<Link to="/roles">Manage Roles</Link>{" | "}<Link to="/keys">Access Keys</Link></>}
+          {isAdmin && <>{" | "}<Link to="/roles">Manage Roles</Link>{" | "}<Link to="/keys">Access Keys</Link>{" | "}<Link to="/members">Members</Link></>}
         </p>
       </section>
 
