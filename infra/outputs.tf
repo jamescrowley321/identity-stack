@@ -1,11 +1,11 @@
 output "project_id" {
   description = "The Descope project ID"
-  value       = data.descope_project.project.id
+  value       = descope_project.main.id
 }
 
 output "project_name" {
   description = "The Descope project name"
-  value       = data.descope_project.project.name
+  value       = descope_project.main.name
 }
 
 output "integration_test_access_key_id" {

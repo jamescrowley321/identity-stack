@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate, useNavigate } from "react-router-dom";
+import { Routes, Route, Navigate, useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "react-oidc-context";
 import { useEffect } from "react";
 import Dashboard from "./pages/Dashboard";
@@ -7,16 +7,18 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const auth = useAuth();
   const navigate = useNavigate();
 
-  // When automatic silent renewal fails and the access token expires,
-  // clear local state so the ProtectedRoute redirect kicks in.
   useEffect(() => {
     const handleExpired = () => {
       auth.removeUser();
-      navigate("/login");
+      navigate("/login", { state: { sessionExpired: true } });
     };
 
     auth.events.addAccessTokenExpired(handleExpired);
-    return () => auth.events.removeAccessTokenExpired(handleExpired);
+    auth.events.addSilentRenewError(handleExpired);
+    return () => {
+      auth.events.removeAccessTokenExpired(handleExpired);
+      auth.events.removeSilentRenewError(handleExpired);
+    };
   }, [auth, navigate]);
 
   // Show loading during initial load AND during code exchange
@@ -43,6 +45,8 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
 function Login() {
   const auth = useAuth();
+  const location = useLocation();
+  const sessionExpired = (location.state as { sessionExpired?: boolean })?.sessionExpired;
 
   if (auth.isLoading) {
     return <div style={{ padding: "2rem" }}>Loading...</div>;
@@ -55,6 +59,7 @@ function Login() {
   return (
     <div style={{ display: "flex", justifyContent: "center", alignItems: "center", minHeight: "100vh", flexDirection: "column", gap: "1rem" }}>
       <h1>Descope SaaS Starter</h1>
+      {sessionExpired && <p style={{ color: "orange" }}>Your session has expired. Please sign in again.</p>}
       {auth.error && <p style={{ color: "red" }}>{auth.error.message}</p>}
       <button onClick={() => auth.signinRedirect()}>Sign In</button>
     </div>
