@@ -195,6 +195,27 @@ All API responses include security headers via `SecurityHeadersMiddleware`:
 
 Set `ENVIRONMENT=production` to enable HSTS and strict CSP. Override CSP with `CSP_POLICY` env var.
 
+### Rate Limiting
+
+API endpoints are rate limited via [slowapi](https://github.com/laurentS/slowapi) to protect against abuse:
+
+| Tier | Limit | Endpoints |
+|------|-------|-----------|
+| Auth-sensitive | 10/minute | `POST /auth/logout`, `POST /validate-id-token`, `POST /keys`, `POST /members/invite` |
+| Default | 60/minute | All other API endpoints |
+| Exempt | No limit | `GET /health` |
+
+Rate limits are applied per-route per-key. Authenticated requests are keyed by user `sub` claim; unauthenticated requests are keyed by client IP.
+
+When a limit is exceeded, the API returns `429 Too Many Requests` with a `Retry-After` header.
+
+Configure limits via environment variables:
+
+```bash
+RATE_LIMIT_DEFAULT=60/minute   # Default limit for all endpoints
+RATE_LIMIT_AUTH=10/minute      # Stricter limit for auth-sensitive endpoints
+```
+
 ## Project Structure
 
 ```
@@ -208,7 +229,7 @@ descope-saas-starter/
 │   └── ...
 ├── backend/           # FastAPI + py-identity-model
 │   ├── app/
-│   │   ├── middleware/ # Token validation
+│   │   ├── middleware/ # Token validation, rate limiting, security headers
 │   │   ├── dependencies/# Auth dependencies
 │   │   ├── routers/   # API routes
 │   │   ├── models/    # DB models
