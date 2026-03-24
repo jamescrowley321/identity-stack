@@ -136,6 +136,14 @@ The frontend is available at http://localhost:3000 and the backend at http://loc
 | POST | `/api/roles/assign` | Assign roles to a user (requires owner/admin) |
 | POST | `/api/roles/remove` | Remove roles from a user (requires owner/admin) |
 
+### User Profile & Attributes
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/profile` | Load current user's profile and custom attributes |
+| PATCH | `/api/profile` | Update a custom attribute (`department`, `job_title`, `avatar_url`) |
+| GET | `/api/tenants/current/settings` | Load current tenant's custom attributes |
+| PATCH | `/api/tenants/current/settings` | Update tenant attributes (requires owner/admin) |
+
 Tenant isolation is enforced via the `dct` (Descope current tenant) JWT claim. Users can only access resources belonging to their active tenant.
 
 ### RBAC
