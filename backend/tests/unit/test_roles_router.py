@@ -138,3 +138,28 @@ async def test_remove_roles_rejected_for_viewer(mock_validate, client):
         json={"user_id": "target-user", "tenant_id": "tenant-abc", "role_names": ["admin"]},
     )
     assert response.status_code == 403
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_roles_me_viewer(mock_validate, client):
+    """Viewer should see their own roles and permissions."""
+    mock_validate.return_value = VIEWER_CLAIMS
+    response = await client.get("/api/roles/me", headers={"Authorization": "Bearer valid.token"})
+    assert response.status_code == 200
+    data = response.json()
+    assert "viewer" in data["roles"]
+    assert "documents.read" in data["permissions"]
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_assign_roles_rejected_without_tenant(mock_validate, client):
+    """Role assignment should fail when user has no tenant context."""
+    mock_validate.return_value = NO_TENANT_CLAIMS
+    response = await client.post(
+        "/api/roles/assign",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"user_id": "target-user", "tenant_id": "tenant-abc", "role_names": ["member"]},
+    )
+    assert response.status_code == 403
