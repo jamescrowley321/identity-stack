@@ -2,6 +2,7 @@ import { Routes, Route, Navigate, useNavigate, useLocation } from "react-router-
 import { useAuth } from "react-oidc-context";
 import { useEffect } from "react";
 import Dashboard from "./pages/Dashboard";
+import RoleManagement from "./pages/RoleManagement";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const auth = useAuth();
@@ -75,6 +76,14 @@ export default function App() {
         element={
           <ProtectedRoute>
             <Dashboard />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/roles"
+        element={
+          <ProtectedRoute>
+            <RoleManagement />
           </ProtectedRoute>
         }
       />
