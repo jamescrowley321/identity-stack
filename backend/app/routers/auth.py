@@ -1,9 +1,10 @@
 import os
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from app.dependencies.auth import get_claims
+from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 
 router = APIRouter()
 
@@ -11,7 +12,8 @@ DESCOPE_BASE_URL = os.getenv("DESCOPE_BASE_URL", "https://api.descope.com")
 
 
 @router.post("/auth/logout")
-async def logout(claims: dict = Depends(get_claims)):
+@limiter.limit(RATE_LIMIT_AUTH)
+async def logout(request: Request, claims: dict = Depends(get_claims)):
     """Log out the current user by revoking all their Descope sessions."""
     project_id = os.environ["DESCOPE_PROJECT_ID"]
     management_key = os.getenv("DESCOPE_MANAGEMENT_KEY", "")

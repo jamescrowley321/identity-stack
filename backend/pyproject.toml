@@ -10,6 +10,7 @@ dependencies = [
     "sqlmodel>=0.0.22,<1",
     "httpx>=0.28,<1",
     "pydantic[email]>=2.0",
+    "slowapi>=0.1.9,<1",
 ]
 
 [project.optional-dependencies]

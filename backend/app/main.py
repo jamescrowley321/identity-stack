@@ -3,8 +3,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from app.middleware.auth import TokenValidationMiddleware
+from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.middleware.security import SecurityHeadersMiddleware
 from app.models.database import create_db_and_tables
 from app.routers import accesskeys, attributes, auth, health, protected, roles, tenants, users
@@ -18,7 +21,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Descope SaaS Starter API", lifespan=lifespan)
 
-# CORS for frontend dev server
+# Rate limiter state and exception handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
+# Middleware stack (last added = outermost, processes request first)
+# 1. CORS — innermost
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[os.getenv("FRONTEND_URL", "http://localhost:3000")],
@@ -27,14 +35,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Token validation middleware — skips public paths
+# 2. Token validation — skips public paths
 app.add_middleware(
     TokenValidationMiddleware,
     descope_project_id=os.getenv("DESCOPE_PROJECT_ID", ""),
     excluded_paths={"/api/health", "/api/validate-id-token", "/docs", "/openapi.json"},
 )
 
-# Security headers — outermost middleware so headers are set on all responses including auth rejections
+# 3. Rate limiting — before auth so brute-force attempts are caught
+app.add_middleware(SlowAPIMiddleware)
+
+# 4. Security headers — outermost so headers are set on all responses including 429s
 app.add_middleware(SecurityHeadersMiddleware, environment=os.getenv("ENVIRONMENT", "development"))
 
 app.include_router(health.router, prefix="/api")
