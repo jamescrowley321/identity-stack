@@ -193,3 +193,16 @@ async def test_get_key(mock_validate, mock_factory, client):
     response = await client.get("/api/keys/key123", headers={"Authorization": "Bearer valid.token"})
     assert response.status_code == 200
     assert response.json()["name"] == "Test"
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_create_key_rejected_without_tenant(mock_validate, client):
+    """Key creation should fail when user has no tenant context."""
+    mock_validate.return_value = {"sub": "user789", "tenants": {}}
+    response = await client.post(
+        "/api/keys",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"name": "No Tenant Key"},
+    )
+    assert response.status_code == 403
