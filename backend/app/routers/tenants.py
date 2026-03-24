@@ -36,7 +36,11 @@ async def create_tenant(body: CreateTenantRequest, claims: dict = Depends(get_cl
 async def list_user_tenants(tenant_claims: dict = Depends(get_tenant_claims)):
     """List all tenants the current user belongs to (from JWT claims)."""
     tenants = [
-        {"id": tenant_id, "roles": info.get("roles", []), "permissions": info.get("permissions", [])}
+        {
+            "id": tenant_id,
+            "roles": info.get("roles", []) if isinstance(info, dict) else [],
+            "permissions": info.get("permissions", []) if isinstance(info, dict) else [],
+        }
         for tenant_id, info in tenant_claims.items()
     ]
     return {"tenants": tenants}
