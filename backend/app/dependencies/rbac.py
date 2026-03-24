@@ -18,7 +18,7 @@ def require_role(*roles: str):
         tenant_info = claims.get("tenants", {}).get(tenant_id, {})
         user_roles = tenant_info.get("roles", []) if isinstance(tenant_info, dict) else []
         if not any(r in user_roles for r in roles):
-            raise HTTPException(status_code=403, detail=f"Requires one of roles: {', '.join(roles)}")
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
         return user_roles
 
     return dependency
@@ -41,7 +41,7 @@ def require_permission(*permissions: str):
         tenant_info = claims.get("tenants", {}).get(tenant_id, {})
         user_permissions = tenant_info.get("permissions", []) if isinstance(tenant_info, dict) else []
         if not any(p in user_permissions for p in permissions):
-            raise HTTPException(status_code=403, detail=f"Requires one of permissions: {', '.join(permissions)}")
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
         return user_permissions
 
     return dependency

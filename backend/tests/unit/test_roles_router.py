@@ -48,6 +48,17 @@ VIEWER_CLAIMS = {
     },
 }
 
+OWNER_CLAIMS = {
+    "sub": "owner1",
+    "dct": "tenant-abc",
+    "tenants": {
+        "tenant-abc": {
+            "roles": ["owner"],
+            "permissions": ["projects.create", "members.update_role", "billing.manage"],
+        },
+    },
+}
+
 NO_TENANT_CLAIMS = {
     "sub": "user789",
     "tenants": {},
@@ -161,5 +172,76 @@ async def test_assign_roles_rejected_without_tenant(mock_validate, client):
         "/api/roles/assign",
         headers={"Authorization": "Bearer valid.token"},
         json={"user_id": "target-user", "tenant_id": "tenant-abc", "role_names": ["member"]},
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_assign_roles_rejected_cross_tenant(mock_validate, client):
+    """Admin in tenant-abc cannot assign roles in tenant-other."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    response = await client.post(
+        "/api/roles/assign",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"user_id": "target-user", "tenant_id": "tenant-other", "role_names": ["member"]},
+    )
+    assert response.status_code == 403
+    assert "different tenant" in response.json()["detail"]
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_admin_cannot_assign_owner_role(mock_validate, client):
+    """Admin should not be able to escalate to owner."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    response = await client.post(
+        "/api/roles/assign",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"user_id": "target-user", "tenant_id": "tenant-abc", "role_names": ["owner"]},
+    )
+    assert response.status_code == 403
+    assert "owner" in response.json()["detail"].lower()
+
+
+@pytest.mark.anyio
+@patch("app.routers.roles.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_owner_can_assign_owner_role(mock_validate, mock_factory, client):
+    """Owner should be able to assign the owner role."""
+    mock_validate.return_value = OWNER_CLAIMS
+    mock_client = AsyncMock()
+    mock_factory.return_value = mock_client
+
+    response = await client.post(
+        "/api/roles/assign",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"user_id": "target-user", "tenant_id": "tenant-abc", "role_names": ["owner"]},
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_assign_empty_role_names_rejected(mock_validate, client):
+    """Empty role_names list should be rejected by validation."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    response = await client.post(
+        "/api/roles/assign",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"user_id": "target-user", "tenant_id": "tenant-abc", "role_names": []},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_remove_roles_rejected_cross_tenant(mock_validate, client):
+    """Admin cannot remove roles in a different tenant."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    response = await client.post(
+        "/api/roles/remove",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"user_id": "target-user", "tenant_id": "tenant-other", "role_names": ["member"]},
     )
     assert response.status_code == 403
