@@ -164,3 +164,23 @@ async def test_update_tenant_settings_rejected_for_viewer(mock_validate, client)
         json={"custom_attributes": {"plan_tier": "enterprise"}},
     )
     assert response.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_update_profile_rejects_unauthenticated(client):
+    response = await client.patch("/api/profile", json={"key": "department", "value": "Eng"})
+    assert response.status_code == 401
+
+
+@pytest.mark.anyio
+@patch("app.routers.attributes.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_get_tenant_settings_handles_api_failure(mock_validate, mock_factory, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.load_tenant.side_effect = Exception("API down")
+    mock_factory.return_value = mock_client
+
+    response = await client.get("/api/tenants/current/settings", headers={"Authorization": "Bearer valid.token"})
+    assert response.status_code == 200
+    assert response.json()["custom_attributes"] == {}
