@@ -6,15 +6,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
+from app.logging_config import get_logger, setup_logging
 from app.middleware.auth import TokenValidationMiddleware
+from app.middleware.correlation import CorrelationIdMiddleware
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.middleware.security import SecurityHeadersMiddleware
 from app.models.database import create_db_and_tables
 from app.routers import accesskeys, attributes, auth, health, protected, roles, tenants, users
 
+logger = get_logger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    setup_logging()
+    logger.info("Starting Descope SaaS Starter API")
     create_db_and_tables()
     yield
 
@@ -45,8 +51,11 @@ app.add_middleware(
 # 3. Rate limiting — before auth so brute-force attempts are caught
 app.add_middleware(SlowAPIMiddleware)
 
-# 4. Security headers — outermost so headers are set on all responses including 429s
+# 4. Security headers
 app.add_middleware(SecurityHeadersMiddleware, environment=os.getenv("ENVIRONMENT", "development"))
+
+# 5. Correlation ID — outermost so all middleware and handlers have access
+app.add_middleware(CorrelationIdMiddleware)
 
 app.include_router(health.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
