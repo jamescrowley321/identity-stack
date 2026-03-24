@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.dependencies.auth import get_claims
@@ -9,6 +9,8 @@ from app.services.descope import get_descope_client
 router = APIRouter()
 
 AttributeValue = str | int | bool | float | None
+
+ALLOWED_USER_ATTRIBUTES = {"department", "job_title", "avatar_url"}
 
 
 class UpdateAttributeRequest(BaseModel):
@@ -45,7 +47,11 @@ async def update_profile_attribute(
     claims: dict = Depends(get_claims),
 ):
     """Update a single custom attribute on the current user's profile."""
-    user_id = claims.get("sub", "")
+    user_id = claims.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Missing user identity (sub claim)")
+    if body.key not in ALLOWED_USER_ATTRIBUTES:
+        raise HTTPException(status_code=400, detail=f"Attribute '{body.key}' is not allowed")
     client = get_descope_client()
     await client.update_user_custom_attribute(user_id, body.key, body.value)
     return {"status": "updated", "key": body.key, "value": body.value}

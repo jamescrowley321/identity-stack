@@ -184,3 +184,31 @@ async def test_get_tenant_settings_handles_api_failure(mock_validate, mock_facto
     response = await client.get("/api/tenants/current/settings", headers={"Authorization": "Bearer valid.token"})
     assert response.status_code == 200
     assert response.json()["custom_attributes"] == {}
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_update_profile_rejects_disallowed_key(mock_validate, client):
+    """Should reject attribute keys not in the allowlist."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    response = await client.patch(
+        "/api/profile",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"key": "admin_override", "value": "true"},
+    )
+    assert response.status_code == 400
+    assert "not allowed" in response.json()["detail"]
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_update_profile_rejects_missing_sub(mock_validate, client):
+    """Should return 400 if the JWT has no sub claim."""
+    mock_validate.return_value = {"email": "test@example.com", "dct": "tenant-abc", "tenants": {}}
+    response = await client.patch(
+        "/api/profile",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"key": "department", "value": "Eng"},
+    )
+    assert response.status_code == 400
+    assert "sub" in response.json()["detail"]
