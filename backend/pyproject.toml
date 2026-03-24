@@ -9,6 +9,7 @@ dependencies = [
     "py-identity-model>=2.1.0,<3",
     "sqlmodel>=0.0.22,<1",
     "httpx>=0.28,<1",
+    "slowapi>=0.1.9,<1",
 ]
 
 [project.optional-dependencies]

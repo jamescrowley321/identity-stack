@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
+from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.descope import get_descope_client
 
 router = APIRouter()
@@ -25,7 +26,9 @@ async def _verify_key_tenant(key_id: str, tenant_id: str) -> dict:
 
 
 @router.post("/keys")
+@limiter.limit(RATE_LIMIT_AUTH)
 async def create_access_key(
+    request: Request,
     body: CreateAccessKeyRequest,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),

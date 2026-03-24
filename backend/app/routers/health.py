@@ -1,8 +1,11 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
+
+from app.middleware.rate_limit import limiter
 
 router = APIRouter()
 
 
 @router.get("/health")
-async def health():
+@limiter.exempt
+async def health(request: Request):
     return {"status": "ok"}

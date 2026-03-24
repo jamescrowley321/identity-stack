@@ -1,11 +1,12 @@
 import os
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Request
 from py_identity_model import TokenValidationConfig
 from py_identity_model.aio import validate_token
 from py_identity_model.identity import ClaimsPrincipal
 
 from app.dependencies.auth import get_claims, get_current_user
+from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 
 router = APIRouter()
 
@@ -42,7 +43,8 @@ async def claims(claims: dict = Depends(get_claims)):
 
 
 @router.post("/validate-id-token")
-async def validate_id_token(authorization: str = Header()):
+@limiter.limit(RATE_LIMIT_AUTH)
+async def validate_id_token(request: Request, authorization: str = Header()):
     """Validate an ID token server-side and return its claims."""
     if not authorization.startswith("Bearer "):
         return {"error": "Invalid authorization header"}
