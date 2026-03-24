@@ -125,6 +125,7 @@ async def activate_access_key(
         client = get_descope_client()
         await _verify_key_tenant(key_id, tenant_id, client)
         await client.activate_access_key(key_id)
+        logger.info("accesskey.activated key_id=%s tenant=%s", key_id, tenant_id)
         return {"status": "activated", "key_id": key_id}
     except HTTPException:
         raise
@@ -144,6 +145,7 @@ async def delete_access_key(
         client = get_descope_client()
         await _verify_key_tenant(key_id, tenant_id, client)
         await client.delete_access_key(key_id)
+        logger.info("accesskey.deleted key_id=%s tenant=%s", key_id, tenant_id)
         return {"status": "deleted", "key_id": key_id}
     except HTTPException:
         raise
