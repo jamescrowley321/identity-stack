@@ -216,6 +216,35 @@ RATE_LIMIT_DEFAULT=60/minute   # Default limit for all endpoints
 RATE_LIMIT_AUTH=10/minute      # Stricter limit for auth-sensitive endpoints
 ```
 
+### Structured Logging
+
+All requests are assigned a unique correlation ID (`X-Correlation-ID` header) for distributed tracing. Auth events are logged with structured data — no sensitive tokens or secrets are ever logged.
+
+**Log format:**
+- **Development** (default): Human-readable with timestamp, level, correlation ID, and message
+- **Production** (`ENVIRONMENT=production`): JSON with `timestamp`, `level`, `name`, `message`, `correlation_id`
+
+**Logged events:**
+
+| Event | Level | Details |
+|-------|-------|---------|
+| Token validated | DEBUG | sub, tenant, path |
+| Missing auth header | INFO | path |
+| Invalid/expired token | WARNING | path |
+| RBAC role denied | WARNING | sub, tenant, required vs actual roles |
+| RBAC permission denied | WARNING | sub, tenant, required permissions |
+| Access key created | INFO | name, tenant |
+| Access key deactivated/activated/deleted | INFO | key_id, tenant |
+
+**Configuration:**
+
+```bash
+LOG_LEVEL=INFO          # DEBUG, INFO, WARNING, ERROR (default: INFO)
+ENVIRONMENT=production  # Enables JSON log format
+```
+
+Incoming `X-Correlation-ID` headers are accepted for distributed tracing (validated: alphanumeric, hyphens, underscores, dots, max 128 chars). Invalid values are replaced with a generated UUID. Error responses (401) include `correlation_id` in the JSON body for debugging.
+
 ## Project Structure
 
 ```
