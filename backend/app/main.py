@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.middleware.auth import TokenValidationMiddleware
 from app.models.database import create_db_and_tables
-from app.routers import accesskeys, attributes, auth, health, protected, roles, tenants
+from app.routers import accesskeys, attributes, auth, health, protected, roles, tenants, users
 
 
 @asynccontextmanager
@@ -40,3 +40,4 @@ app.include_router(tenants.router, prefix="/api")
 app.include_router(roles.router, prefix="/api")
 app.include_router(attributes.router, prefix="/api")
 app.include_router(accesskeys.router, prefix="/api")
+app.include_router(users.router, prefix="/api")

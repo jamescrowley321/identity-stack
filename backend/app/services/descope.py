@@ -200,6 +200,51 @@ class DescopeManagementClient:
             )
             resp.raise_for_status()
 
+    async def invite_user(self, email: str, tenant_id: str, role_names: list[str] | None = None) -> dict:
+        """Create a user and assign them to a tenant with roles."""
+        tenants = [{"tenantId": tenant_id}]
+        if role_names:
+            tenants[0]["roleNames"] = role_names
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.base_url}/v1/mgmt/user/create",
+                headers=self._headers(),
+                json={"loginId": email, "email": email, "tenants": tenants},
+            )
+            resp.raise_for_status()
+            return resp.json().get("user", {})
+
+    async def search_tenant_users(self, tenant_id: str) -> list[dict]:
+        """Search for users belonging to a specific tenant."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.base_url}/v1/mgmt/user/search",
+                headers=self._headers(),
+                json={"tenantIds": [tenant_id]},
+            )
+            resp.raise_for_status()
+            return resp.json().get("users", [])
+
+    async def update_user_status(self, user_id: str, status: str) -> None:
+        """Update user status. status must be 'enabled' or 'disabled'."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.base_url}/v1/mgmt/user/updateStatus",
+                headers=self._headers(),
+                json={"loginId": user_id, "status": status},
+            )
+            resp.raise_for_status()
+
+    async def delete_user(self, user_id: str) -> None:
+        """Delete a user permanently."""
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self.base_url}/v1/mgmt/user/delete",
+                headers=self._headers(),
+                json={"loginId": user_id},
+            )
+            resp.raise_for_status()
+
 
 def get_descope_client() -> DescopeManagementClient:
     """Factory that creates a DescopeManagementClient from environment variables."""
