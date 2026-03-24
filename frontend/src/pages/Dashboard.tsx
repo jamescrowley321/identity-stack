@@ -146,9 +146,11 @@ export default function Dashboard() {
         {tenants.length > 0 && (
           <p>Tenant memberships: <strong>{tenants.map((t) => t.id).join(", ")}</strong></p>
         )}
-        {isAdmin && (
-          <p><Link to="/roles">Manage Roles</Link></p>
-        )}
+        <p>
+          <Link to="/profile">Profile</Link>
+          {currentTenantId && <>{" | "}<Link to="/settings">Tenant Settings</Link></>}
+          {isAdmin && <>{" | "}<Link to="/roles">Manage Roles</Link></>}
+        </p>
       </section>
 
       {error && (

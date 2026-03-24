@@ -3,6 +3,8 @@ import { useAuth } from "react-oidc-context";
 import { useEffect } from "react";
 import Dashboard from "./pages/Dashboard";
 import RoleManagement from "./pages/RoleManagement";
+import UserProfile from "./pages/UserProfile";
+import TenantSettings from "./pages/TenantSettings";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const auth = useAuth();
@@ -84,6 +86,22 @@ export default function App() {
         element={
           <ProtectedRoute>
             <RoleManagement />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/profile"
+        element={
+          <ProtectedRoute>
+            <UserProfile />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/settings"
+        element={
+          <ProtectedRoute>
+            <TenantSettings />
           </ProtectedRoute>
         }
       />
