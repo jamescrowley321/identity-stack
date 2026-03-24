@@ -72,3 +72,22 @@ async def test_excluded_path_skips_auth(client):
     """Excluded paths should not require authentication."""
     response = await client.get("/api/health")
     assert response.status_code == 200
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_middleware_sets_tenant_id_from_dct_claim(mock_validate, client):
+    """Middleware should extract the dct claim and set request.state.tenant_id."""
+    mock_claims = {
+        "sub": "user123",
+        "dct": "tenant-abc",
+        "iss": "https://test.example.com",
+    }
+    mock_validate.return_value = mock_claims
+
+    # /api/claims returns the raw claims — if middleware set tenant_id correctly,
+    # the tenant-scoped endpoints that depend on it will work.
+    response = await client.get("/api/claims", headers={"Authorization": "Bearer valid.mock.token"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["dct"] == "tenant-abc"

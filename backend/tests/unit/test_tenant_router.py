@@ -69,6 +69,16 @@ async def test_list_tenants_rejects_unauthenticated(client):
 
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_list_user_tenants_empty(mock_validate, client):
+    """User with no tenants claim should get an empty list."""
+    mock_validate.return_value = {"sub": "user123"}
+    response = await client.get("/api/tenants", headers={"Authorization": "Bearer valid.token"})
+    assert response.status_code == 200
+    assert response.json()["tenants"] == []
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_list_user_tenants(mock_validate, client):
     mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
     response = await client.get("/api/tenants", headers={"Authorization": "Bearer valid.token"})
@@ -105,6 +115,23 @@ async def test_get_current_tenant_returns_403_without_dct(mock_validate, client)
 
 
 @pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_get_current_tenant_handles_descope_api_failure(mock_validate, client):
+    """When Descope API fails to load tenant info, still return tenant_id with null tenant."""
+    mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
+    with patch("app.routers.tenants.get_descope_client") as mock_factory:
+        mock_client = AsyncMock()
+        mock_client.load_tenant.side_effect = Exception("API unavailable")
+        mock_factory.return_value = mock_client
+
+        response = await client.get("/api/tenants/current", headers={"Authorization": "Bearer valid.token"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["tenant_id"] == "tenant-abc"
+        assert data["tenant"] is None
+
+
+@pytest.mark.anyio
 @patch("app.routers.tenants.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_create_tenant(mock_validate, mock_factory, client):
@@ -120,6 +147,31 @@ async def test_create_tenant(mock_validate, mock_factory, client):
     )
     assert response.status_code == 200
     assert response.json()["id"] == "new-tenant-id"
+
+
+@pytest.mark.anyio
+@patch("app.routers.tenants.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_create_tenant_with_domains(mock_validate, mock_factory, client):
+    """Create tenant with self-provisioning domains."""
+    mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
+    mock_client = AsyncMock()
+    mock_client.create_tenant.return_value = {"id": "domain-tenant"}
+    mock_factory.return_value = mock_client
+
+    response = await client.post(
+        "/api/tenants",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"name": "Domain Corp", "self_provisioning_domains": ["domain.com"]},
+    )
+    assert response.status_code == 200
+    mock_client.create_tenant.assert_called_once_with(name="Domain Corp", self_provisioning_domains=["domain.com"])
+
+
+@pytest.mark.anyio
+async def test_create_tenant_rejects_unauthenticated(client):
+    response = await client.post("/api/tenants", json={"name": "Sneaky"})
+    assert response.status_code == 401
 
 
 @pytest.mark.anyio
