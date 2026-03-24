@@ -156,6 +156,15 @@ The frontend is available at http://localhost:3000 and the backend at http://loc
 
 All access key operations require owner/admin role and verify the key belongs to the caller's tenant.
 
+### Member Management
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/members` | List members in current tenant (requires owner/admin) |
+| POST | `/api/members/invite` | Invite user by email with role assignment |
+| POST | `/api/members/{id}/deactivate` | Deactivate a member |
+| POST | `/api/members/{id}/activate` | Reactivate a member |
+| DELETE | `/api/members/{id}` | Remove a member permanently |
+
 Tenant isolation is enforced via the `dct` (Descope current tenant) JWT claim. Users can only access resources belonging to their active tenant.
 
 ### RBAC
