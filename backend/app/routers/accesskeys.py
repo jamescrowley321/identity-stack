@@ -3,9 +3,11 @@ from pydantic import BaseModel
 
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
+from app.logging_config import get_logger
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.descope import get_descope_client
 
+logger = get_logger(__name__)
 router = APIRouter()
 
 
@@ -41,6 +43,7 @@ async def create_access_key(
         expire_time=body.expire_time,
         role_names=body.role_names,
     )
+    logger.info("accesskey.created name=%s tenant=%s", body.name, tenant_id)
     return result
 
 
@@ -76,6 +79,7 @@ async def deactivate_access_key(
     await _verify_key_tenant(key_id, tenant_id)
     client = get_descope_client()
     await client.deactivate_access_key(key_id)
+    logger.info("accesskey.deactivated key_id=%s tenant=%s", key_id, tenant_id)
     return {"status": "deactivated", "key_id": key_id}
 
 
@@ -89,6 +93,7 @@ async def activate_access_key(
     await _verify_key_tenant(key_id, tenant_id)
     client = get_descope_client()
     await client.activate_access_key(key_id)
+    logger.info("accesskey.activated key_id=%s tenant=%s", key_id, tenant_id)
     return {"status": "activated", "key_id": key_id}
 
 
@@ -102,4 +107,5 @@ async def delete_access_key(
     await _verify_key_tenant(key_id, tenant_id)
     client = get_descope_client()
     await client.delete_access_key(key_id)
+    logger.info("accesskey.deleted key_id=%s tenant=%s", key_id, tenant_id)
     return {"status": "deleted", "key_id": key_id}

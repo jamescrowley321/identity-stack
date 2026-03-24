@@ -4,6 +4,10 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 class TokenValidationMiddleware(BaseHTTPMiddleware):
     """Validates Descope JWTs on protected routes using py-identity-model."""
@@ -20,7 +24,12 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
 
         auth_header = request.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
-            return JSONResponse({"detail": "Missing or invalid authorization header"}, status_code=401)
+            logger.info("auth.missing_header path=%s", request.url.path)
+            cid = getattr(request.state, "correlation_id", None)
+            body = {"detail": "Missing or invalid authorization header"}
+            if cid:
+                body["correlation_id"] = cid
+            return JSONResponse(body, status_code=401)
 
         token = auth_header.removeprefix("Bearer ")
 
@@ -37,7 +46,18 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
             request.state.claims = claims
             request.state.principal = to_principal(claims, "Descope")
             request.state.tenant_id = claims.get("dct")
+            logger.debug(
+                "auth.token_validated sub=%s tenant=%s path=%s",
+                claims.get("sub"),
+                claims.get("dct"),
+                request.url.path,
+            )
         except Exception:
-            return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+            logger.warning("auth.token_invalid path=%s", request.url.path)
+            cid = getattr(request.state, "correlation_id", None)
+            body = {"detail": "Invalid or expired token"}
+            if cid:
+                body["correlation_id"] = cid
+            return JSONResponse(body, status_code=401)
 
         return await call_next(request)
