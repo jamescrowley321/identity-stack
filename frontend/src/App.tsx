@@ -7,6 +7,7 @@ import UserProfile from "./pages/UserProfile";
 import TenantSettings from "./pages/TenantSettings";
 import AccessKeys from "./pages/AccessKeys";
 import MemberManagement from "./pages/MemberManagement";
+import Documents from "./pages/Documents";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const auth = useAuth();
@@ -120,6 +121,14 @@ export default function App() {
         element={
           <ProtectedRoute>
             <MemberManagement />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/documents"
+        element={
+          <ProtectedRoute>
+            <Documents />
           </ProtectedRoute>
         }
       />
