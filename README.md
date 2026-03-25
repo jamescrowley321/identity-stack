@@ -112,6 +112,17 @@ The frontend is available at http://localhost:3000 and the backend at http://loc
 
 ## API Endpoints
 
+### Health Checks
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/health` | Full health check — verifies database and Descope API. Returns 503 if degraded |
+| GET | `/api/health/live` | Liveness probe — always returns 200 if process is running |
+| GET | `/api/health/ready` | Readiness probe — same as `/health` (checks all dependencies) |
+
+Response format: `{"status": "healthy"|"degraded", "dependencies": {"database": "ok"|"error: ...", "descope": "ok"|"error: ..."}}`
+
+Results are cached for 30 seconds. Suitable for Kubernetes liveness/readiness probes.
+
 ### Authentication
 | Method | Path | Description |
 |--------|------|-------------|
@@ -203,7 +214,7 @@ API endpoints are rate limited via [slowapi](https://github.com/laurentS/slowapi
 |------|-------|-----------|
 | Auth-sensitive | 10/minute | `POST /auth/logout`, `POST /validate-id-token`, `POST /keys`, `POST /members/invite` |
 | Default | 60/minute | All other API endpoints |
-| Exempt | No limit | `GET /health` |
+| Exempt | No limit | `GET /health`, `GET /health/live`, `GET /health/ready` |
 
 Rate limits are applied per-route per-key. Authenticated requests are keyed by user `sub` claim; unauthenticated requests are keyed by client IP.
 
