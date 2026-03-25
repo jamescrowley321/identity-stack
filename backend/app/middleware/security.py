@@ -11,6 +11,15 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     In development mode, omits HSTS (HTTP) and relaxes CSP for localhost.
     """
 
+    # Swagger UI loads scripts/styles from cdn.jsdelivr.net and uses inline styles
+    DOCS_PATHS = {"/docs", "/openapi.json", "/redoc"}
+    DOCS_CSP = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "img-src 'self' data: https://fastapi.tiangolo.com"
+    )
+
     def __init__(self, app, environment: str = "development"):
         super().__init__(app)
         self.is_production = environment == "production"
@@ -25,7 +34,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["X-XSS-Protection"] = "0"
-        response.headers["Content-Security-Policy"] = self.csp
+        if request.url.path in self.DOCS_PATHS:
+            response.headers["Content-Security-Policy"] = self.DOCS_CSP
+        else:
+            response.headers["Content-Security-Policy"] = self.csp
         if self.is_production:
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
