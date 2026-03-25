@@ -45,7 +45,14 @@ app.add_middleware(
 app.add_middleware(
     TokenValidationMiddleware,
     descope_project_id=os.getenv("DESCOPE_PROJECT_ID", ""),
-    excluded_paths={"/api/health", "/api/validate-id-token", "/docs", "/openapi.json"},
+    excluded_paths={
+        "/api/health",
+        "/api/health/live",
+        "/api/health/ready",
+        "/api/validate-id-token",
+        "/docs",
+        "/openapi.json",
+    },
 )
 
 # 3. Rate limiting — before auth so brute-force attempts are caught
