@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
+from app.services.audit import AuditEventType, audit_event
 from app.services.descope import get_descope_client
 
 router = APIRouter()
@@ -36,11 +37,13 @@ async def invite_member(
     """Invite a user to the current tenant by email with specified roles."""
     client = get_descope_client()
     user = await client.invite_user(body.email, tenant_id, body.role_names)
+    audit_event(request, AuditEventType.USER_INVITED, {"email": body.email, "role_names": body.role_names})
     return {"status": "invited", "email": body.email, "user": user}
 
 
 @router.post("/members/{user_id}/deactivate")
 async def deactivate_member(
+    request: Request,
     user_id: str,
     _tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
@@ -48,11 +51,13 @@ async def deactivate_member(
     """Deactivate a member. They will not be able to log in."""
     client = get_descope_client()
     await client.update_user_status(user_id, "disabled")
+    audit_event(request, AuditEventType.USER_DEACTIVATED, {"user_id": user_id})
     return {"status": "deactivated", "user_id": user_id}
 
 
 @router.post("/members/{user_id}/activate")
 async def activate_member(
+    request: Request,
     user_id: str,
     _tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
@@ -60,11 +65,13 @@ async def activate_member(
     """Reactivate a previously deactivated member."""
     client = get_descope_client()
     await client.update_user_status(user_id, "enabled")
+    audit_event(request, AuditEventType.USER_ACTIVATED, {"user_id": user_id})
     return {"status": "activated", "user_id": user_id}
 
 
 @router.delete("/members/{user_id}")
 async def remove_member(
+    request: Request,
     user_id: str,
     _tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
@@ -72,4 +79,5 @@ async def remove_member(
     """Remove a member permanently."""
     client = get_descope_client()
     await client.delete_user(user_id)
+    audit_event(request, AuditEventType.USER_REMOVED, {"user_id": user_id})
     return {"status": "removed", "user_id": user_id}

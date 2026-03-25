@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from app.dependencies.auth import get_claims
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
+from app.services.audit import AuditEventType, audit_event
 from app.services.descope import get_descope_client
 
 router = APIRouter()
@@ -43,6 +44,7 @@ async def get_profile(claims: dict = Depends(get_claims)):
 
 @router.patch("/profile")
 async def update_profile_attribute(
+    request: Request,
     body: UpdateAttributeRequest,
     claims: dict = Depends(get_claims),
 ):
@@ -54,6 +56,7 @@ async def update_profile_attribute(
         raise HTTPException(status_code=400, detail=f"Attribute '{body.key}' is not allowed")
     client = get_descope_client()
     await client.update_user_custom_attribute(user_id, body.key, body.value)
+    audit_event(request, AuditEventType.PROFILE_UPDATED, {"key": body.key})
     return {"status": "updated", "key": body.key, "value": body.value}
 
 
@@ -74,6 +77,7 @@ async def get_tenant_settings(tenant_id: str = Depends(get_tenant_id)):
 
 @router.patch("/tenants/current/settings")
 async def update_tenant_settings(
+    request: Request,
     body: UpdateTenantSettingsRequest,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
@@ -81,4 +85,5 @@ async def update_tenant_settings(
     """Update custom attributes on the current tenant. Requires owner or admin role."""
     client = get_descope_client()
     await client.update_tenant_custom_attributes(tenant_id, body.custom_attributes)
+    audit_event(request, AuditEventType.TENANT_SETTINGS_UPDATED, {"tenant_id": tenant_id})
     return {"status": "updated", "tenant_id": tenant_id, "custom_attributes": body.custom_attributes}

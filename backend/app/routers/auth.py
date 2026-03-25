@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Request
 
 from app.dependencies.auth import get_claims
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
+from app.services.audit import AuditEventType, audit_event
 
 router = APIRouter()
 
@@ -27,4 +28,5 @@ async def logout(request: Request, claims: dict = Depends(get_claims)):
                 json={"userId": user_id},
             )
 
+    audit_event(request, AuditEventType.USER_LOGOUT, {"user_id": user_id})
     return {"status": "logged_out", "sub": user_id}

@@ -3,11 +3,10 @@ from pydantic import BaseModel
 
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
-from app.logging_config import get_logger
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
+from app.services.audit import AuditEventType, audit_event
 from app.services.descope import get_descope_client
 
-logger = get_logger(__name__)
 router = APIRouter()
 
 
@@ -43,7 +42,7 @@ async def create_access_key(
         expire_time=body.expire_time,
         role_names=body.role_names,
     )
-    logger.info("accesskey.created name=%s tenant=%s", body.name, tenant_id)
+    audit_event(request, AuditEventType.ACCESS_KEY_CREATED, {"key_name": body.name})
     return result
 
 
@@ -71,6 +70,7 @@ async def get_access_key(
 
 @router.post("/keys/{key_id}/deactivate")
 async def deactivate_access_key(
+    request: Request,
     key_id: str,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
@@ -79,12 +79,13 @@ async def deactivate_access_key(
     await _verify_key_tenant(key_id, tenant_id)
     client = get_descope_client()
     await client.deactivate_access_key(key_id)
-    logger.info("accesskey.deactivated key_id=%s tenant=%s", key_id, tenant_id)
+    audit_event(request, AuditEventType.ACCESS_KEY_DEACTIVATED, {"key_id": key_id})
     return {"status": "deactivated", "key_id": key_id}
 
 
 @router.post("/keys/{key_id}/activate")
 async def activate_access_key(
+    request: Request,
     key_id: str,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
@@ -93,12 +94,13 @@ async def activate_access_key(
     await _verify_key_tenant(key_id, tenant_id)
     client = get_descope_client()
     await client.activate_access_key(key_id)
-    logger.info("accesskey.activated key_id=%s tenant=%s", key_id, tenant_id)
+    audit_event(request, AuditEventType.ACCESS_KEY_ACTIVATED, {"key_id": key_id})
     return {"status": "activated", "key_id": key_id}
 
 
 @router.delete("/keys/{key_id}")
 async def delete_access_key(
+    request: Request,
     key_id: str,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
@@ -107,5 +109,5 @@ async def delete_access_key(
     await _verify_key_tenant(key_id, tenant_id)
     client = get_descope_client()
     await client.delete_access_key(key_id)
-    logger.info("accesskey.deleted key_id=%s tenant=%s", key_id, tenant_id)
+    audit_event(request, AuditEventType.ACCESS_KEY_DELETED, {"key_id": key_id})
     return {"status": "deleted", "key_id": key_id}
