@@ -332,3 +332,121 @@ async def test_update_tenant_settings_emits_audit_event(mock_validate, mock_fact
         )
     assert response.status_code == 200
     assert any("audit.tenant_settings_updated" in r.message for r in caplog.records)
+
+
+@pytest.mark.anyio
+@patch("app.routers.users.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_deactivate_member_emits_audit_event(mock_validate, mock_factory, client, caplog):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_factory.return_value = mock_client
+
+    with caplog.at_level(logging.INFO, logger="audit"):
+        response = await client.post(
+            "/api/members/user1/deactivate",
+            headers={"Authorization": "Bearer tok"},
+        )
+    assert response.status_code == 200
+    assert any("audit.user_deactivated" in r.message for r in caplog.records)
+
+
+@pytest.mark.anyio
+@patch("app.routers.users.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_activate_member_emits_audit_event(mock_validate, mock_factory, client, caplog):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_factory.return_value = mock_client
+
+    with caplog.at_level(logging.INFO, logger="audit"):
+        response = await client.post(
+            "/api/members/user1/activate",
+            headers={"Authorization": "Bearer tok"},
+        )
+    assert response.status_code == 200
+    assert any("audit.user_activated" in r.message for r in caplog.records)
+
+
+@pytest.mark.anyio
+@patch("app.routers.accesskeys._verify_key_tenant", new_callable=AsyncMock)
+@patch("app.routers.accesskeys.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_deactivate_access_key_emits_audit_event(mock_validate, mock_factory, mock_verify, client, caplog):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_factory.return_value = mock_client
+    mock_verify.return_value = {"id": "k1"}
+
+    with caplog.at_level(logging.INFO, logger="audit"):
+        response = await client.post(
+            "/api/keys/k1/deactivate",
+            headers={"Authorization": "Bearer tok"},
+        )
+    assert response.status_code == 200
+    assert any("audit.access_key_deactivated" in r.message for r in caplog.records)
+
+
+@pytest.mark.anyio
+@patch("app.routers.accesskeys._verify_key_tenant", new_callable=AsyncMock)
+@patch("app.routers.accesskeys.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_activate_access_key_emits_audit_event(mock_validate, mock_factory, mock_verify, client, caplog):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_factory.return_value = mock_client
+    mock_verify.return_value = {"id": "k1"}
+
+    with caplog.at_level(logging.INFO, logger="audit"):
+        response = await client.post(
+            "/api/keys/k1/activate",
+            headers={"Authorization": "Bearer tok"},
+        )
+    assert response.status_code == 200
+    assert any("audit.access_key_activated" in r.message for r in caplog.records)
+
+
+@pytest.mark.anyio
+@patch("app.routers.accesskeys._verify_key_tenant", new_callable=AsyncMock)
+@patch("app.routers.accesskeys.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_delete_access_key_emits_audit_event(mock_validate, mock_factory, mock_verify, client, caplog):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_factory.return_value = mock_client
+    mock_verify.return_value = {"id": "k1"}
+
+    with caplog.at_level(logging.INFO, logger="audit"):
+        response = await client.delete(
+            "/api/keys/k1",
+            headers={"Authorization": "Bearer tok"},
+        )
+    assert response.status_code == 200
+    assert any("audit.access_key_deleted" in r.message for r in caplog.records)
+
+
+class TestAuditEventContent:
+    """Verify audit event extra fields contain correct data."""
+
+    @pytest.mark.anyio
+    @patch("app.routers.roles.get_descope_client")
+    @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+    async def test_audit_event_contains_actor_and_target(self, mock_validate, mock_factory, client, caplog):
+        mock_validate.return_value = ADMIN_CLAIMS
+        mock_client = AsyncMock()
+        mock_factory.return_value = mock_client
+
+        with caplog.at_level(logging.INFO, logger="audit"):
+            await client.post(
+                "/api/roles/assign",
+                headers={"Authorization": "Bearer tok"},
+                json={"user_id": "target-user", "tenant_id": "tenant-abc", "role_names": ["editor"]},
+            )
+
+        audit_record = next(r for r in caplog.records if "audit.role_assigned" in r.message)
+        event = audit_record.audit_event
+        assert event["actor_id"] == "user123"
+        assert event["tenant_id"] == "tenant-abc"
+        assert event["target"]["user_id"] == "target-user"
+        assert event["target"]["role_names"] == ["editor"]
+        assert event["result"] == "success"
