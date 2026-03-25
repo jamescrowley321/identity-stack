@@ -178,6 +178,19 @@ All access key operations require owner/admin role and verify the key belongs to
 
 Tenant isolation is enforced via the `dct` (Descope current tenant) JWT claim. Users can only access resources belonging to their active tenant.
 
+### Documents (FGA / ReBAC)
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/documents` | Create a document (auto-assigns FGA owner relation) |
+| GET | `/api/documents` | List documents the user can view (FGA query) |
+| GET | `/api/documents/{id}` | Get document (requires FGA `can_view`) |
+| PUT | `/api/documents/{id}` | Update document (requires FGA `can_edit`) |
+| DELETE | `/api/documents/{id}` | Delete document (requires FGA `can_delete` / owner) |
+| POST | `/api/documents/{id}/share` | Share with user as `viewer` or `editor` (owner only) |
+| DELETE | `/api/documents/{id}/share/{user_id}` | Revoke user's access (owner only) |
+
+Documents use **layered authorization**: RBAC checks tenant membership (via JWT), then FGA checks resource-level permissions (owner/editor/viewer). See ReBAC section below.
+
 ### RBAC
 
 Four roles are defined via Terraform (`infra/rbac.tf`):
@@ -190,6 +203,23 @@ Four roles are defined via Terraform (`infra/rbac.tf`):
 | `viewer` | Read-only access | Read projects and documents |
 
 Backend endpoints enforce authorization via `require_role()` and `require_permission()` dependency factories. Frontend uses `<RequireRole>` and `<RequirePermission>` components for conditional UI rendering.
+
+### ReBAC (Fine-Grained Authorization)
+
+Document-level access control uses Descope FGA (Fine-Grained Authorization) — an OpenFGA-compatible relationship-based access control system.
+
+**When to use RBAC vs. ReBAC:**
+- **RBAC** (JWT claims): "What can this user do in this tenant?" — role-based, tenant-scoped
+- **ReBAC** (FGA): "What is this user's relationship to this specific resource?" — resource-scoped
+
+**FGA schema** (`infra/fga.tf`):
+```
+document: owner → can_view, can_edit, can_delete
+          editor → can_view, can_edit
+          viewer → can_view
+```
+
+The `require_fga(resource_type, relation)` dependency factory checks FGA permissions before allowing access to document endpoints. FGA relations are managed via the Descope AuthZ Management API (`app/services/fga.py`).
 
 ### Security Headers
 
