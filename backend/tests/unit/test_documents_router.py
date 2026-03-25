@@ -169,7 +169,7 @@ async def test_share_invalid_relation(mock_validate, mock_fga_dep, client):
         headers={"Authorization": "Bearer tok"},
         json={"user_id": "user456", "relation": "admin"},
     )
-    assert response.status_code == 400
+    assert response.status_code == 422  # Pydantic validates Literal["viewer", "editor"]
 
 
 @pytest.mark.anyio

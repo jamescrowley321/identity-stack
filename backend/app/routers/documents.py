@@ -1,3 +1,5 @@
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlmodel import Session, select
@@ -12,8 +14,6 @@ from app.services.fga import DescopeFGAClient, get_fga_client
 logger = get_logger(__name__)
 router = APIRouter()
 
-VALID_SHARE_RELATIONS = {"viewer", "editor"}
-
 
 class CreateDocumentRequest(BaseModel):
     title: str
@@ -27,7 +27,7 @@ class UpdateDocumentRequest(BaseModel):
 
 class ShareDocumentRequest(BaseModel):
     user_id: str
-    relation: str  # "viewer" or "editor"
+    relation: Literal["viewer", "editor"]
 
 
 @router.post("/documents")
@@ -44,13 +44,14 @@ async def create_document(
         raise HTTPException(status_code=400, detail="Missing user identity")
 
     doc = Document(tenant_id=tenant_id, title=body.title, content=body.content, created_by=user_id)
+
+    # Create FGA owner relation first — if this fails, we don't persist the document
+    fga = get_fga_client()
+    await fga.create_relation("document", doc.id, "owner", user_id)
+
     session.add(doc)
     session.commit()
     session.refresh(doc)
-
-    # Create owner relation in FGA
-    fga = get_fga_client()
-    await fga.create_relation("document", doc.id, "owner", user_id)
 
     logger.info("document.created id=%s tenant=%s", doc.id, tenant_id)
     return doc.model_dump()
@@ -151,9 +152,6 @@ async def share_document(
     session: Session = Depends(get_session),
 ):
     """Share a document with another user. Only the owner can share."""
-    if body.relation not in VALID_SHARE_RELATIONS:
-        raise HTTPException(status_code=400, detail=f"Invalid relation: must be one of {VALID_SHARE_RELATIONS}")
-
     doc = session.get(Document, document_id)
     if not doc or doc.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Document not found")
