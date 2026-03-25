@@ -1,3 +1,4 @@
+import asyncio
 import os
 import time
 
@@ -22,14 +23,20 @@ CACHE_TTL = 30
 _cache: dict = {"result": None, "timestamp": 0.0}
 
 
-def _check_database() -> str:
-    """Verify database connectivity with a simple query."""
+def _check_database_sync() -> str:
+    """Verify database connectivity with a simple query (blocking)."""
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         return "ok"
     except Exception as exc:
-        return f"error: {exc}"
+        logger.warning("health.database_check_failed: %s", exc)
+        return f"error: {type(exc).__name__}"
+
+
+async def _check_database() -> str:
+    """Verify database connectivity without blocking the event loop."""
+    return await asyncio.to_thread(_check_database_sync)
 
 
 async def _check_descope() -> str:
@@ -43,7 +50,8 @@ async def _check_descope() -> str:
             resp.raise_for_status()
         return "ok"
     except Exception as exc:
-        return f"error: {exc}"
+        logger.warning("health.descope_check_failed: %s", exc)
+        return f"error: {type(exc).__name__}"
 
 
 async def _build_readiness_response() -> tuple[dict, int]:
@@ -52,7 +60,7 @@ async def _build_readiness_response() -> tuple[dict, int]:
     if _cache["result"] is not None and (now - _cache["timestamp"]) < CACHE_TTL:
         return _cache["result"]
 
-    db_status = _check_database()
+    db_status = await _check_database()
     descope_status = await _check_descope()
 
     all_ok = db_status == "ok" and descope_status == "ok"

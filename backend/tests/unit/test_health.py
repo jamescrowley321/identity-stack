@@ -165,14 +165,15 @@ async def test_readiness_no_auth_required(client):
 
 class TestCheckDatabase:
     def test_returns_ok_when_connected(self):
-        result = health_module._check_database()
+        result = health_module._check_database_sync()
         assert result == "ok"
 
     @patch("app.routers.health.engine")
     def test_returns_error_on_failure(self, mock_engine):
         mock_engine.connect.side_effect = Exception("connection refused")
-        result = health_module._check_database()
+        result = health_module._check_database_sync()
         assert result.startswith("error:")
+        assert "Exception" in result
 
 
 class TestCheckDescope:
@@ -201,4 +202,4 @@ class TestCheckDescope:
         mock_client.get.side_effect = Exception("timeout")
 
         result = await health_module._check_descope()
-        assert result.startswith("error:")
+        assert result == "error: Exception"
