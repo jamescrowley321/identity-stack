@@ -254,6 +254,16 @@ LOG_LEVEL=INFO          # DEBUG, INFO, WARNING, ERROR (default: INFO)
 ENVIRONMENT=production  # Enables JSON log format
 ```
 
+### Descope API Retry
+
+All Descope Management API calls use automatic retry with exponential backoff and jitter. Retries on connection errors, timeouts, 429 (rate limit), and 502/503/504. Client errors (400, 401, 403, 404) fail immediately.
+
+```bash
+DESCOPE_MAX_RETRIES=3          # Maximum retry attempts (default: 3)
+DESCOPE_RETRY_BASE_DELAY=0.5   # Base delay in seconds (default: 0.5)
+DESCOPE_RETRY_MAX_DELAY=30     # Maximum delay cap in seconds (default: 30)
+```
+
 Incoming `X-Correlation-ID` headers are accepted for distributed tracing (validated: alphanumeric, hyphens, underscores, dots, max 128 chars). Invalid values are replaced with a generated UUID. Error responses (401) include `correlation_id` in the JSON body for debugging.
 
 ## Project Structure
