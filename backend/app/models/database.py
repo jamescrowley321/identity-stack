@@ -9,6 +9,9 @@ engine = create_engine(DATABASE_URL, echo=False, connect_args=connect_args)
 
 
 def create_db_and_tables():
+    from app.models.document import Document  # noqa: F401
+    from app.models.tenant import TenantResource  # noqa: F401
+
     SQLModel.metadata.create_all(engine)
 
 
