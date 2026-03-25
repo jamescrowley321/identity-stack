@@ -216,5 +216,5 @@ async def test_main_app_health_not_rate_limited():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         for _ in range(5):
-            response = await client.get("/api/health")
+            response = await client.get("/api/health/live")
             assert response.status_code == 200
