@@ -8,7 +8,9 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from app.logging_config import setup_logging
 from app.middleware.auth import TokenValidationMiddleware
+from app.middleware.correlation import CorrelationIdMiddleware
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.middleware.security import SecurityHeadersMiddleware
 from app.models.database import create_db_and_tables
@@ -20,6 +22,7 @@ TRUSTED_PROXY_HOSTS = os.getenv("TRUSTED_PROXY_HOSTS", "127.0.0.1").split(",")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    setup_logging()
     create_db_and_tables()
     http_client = httpx.AsyncClient(timeout=30.0)
     init_descope_client(http_client=http_client)
@@ -60,7 +63,10 @@ app.add_middleware(SlowAPIMiddleware)
 # 4. Security headers — set on all responses including 429s
 app.add_middleware(SecurityHeadersMiddleware, environment=os.getenv("ENVIRONMENT", "development"))
 
-# 5. Proxy headers — outermost, sets request.client from X-Forwarded-For
+# 5. Correlation ID — generates/validates X-Correlation-ID for request tracing
+app.add_middleware(CorrelationIdMiddleware)
+
+# 6. Proxy headers — outermost, sets request.client from X-Forwarded-For
 #    so rate limiting keys on real client IP, not the load balancer's
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=TRUSTED_PROXY_HOSTS)
 
