@@ -138,6 +138,11 @@ NO_AMR_CLAIMS = {
     "sub": "user-noamr",
 }
 
+WEBAUTHN_CLAIMS = {
+    "sub": "user-passkey",
+    "amr": ["webauthn"],
+}
+
 MULTI_AMR_CLAIMS = {
     "sub": "user-multi",
     "amr": ["pwd", "mfa"],
@@ -214,6 +219,18 @@ async def test_auth_method_mfa(mock_validate, client):
     data = response.json()
     assert data["method"] == "password"
     assert data["amr"] == ["pwd", "mfa"]
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_auth_method_passkey(mock_validate, client):
+    mock_validate.return_value = WEBAUTHN_CLAIMS
+    response = await client.get("/api/auth/method", headers={"Authorization": "Bearer tok"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["method"] == "passkey"
+    assert data["provider"] is None
+    assert data["amr"] == ["webauthn"]
 
 
 @pytest.mark.anyio

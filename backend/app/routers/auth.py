@@ -62,6 +62,8 @@ def _detect_auth_method(claims: dict) -> dict:
         method = "otp"
     elif "mfa" in amr:
         method = "mfa"
+    elif "webauthn" in amr:
+        method = "passkey"
     elif "magiclink" in amr:
         method = "magiclink"
     else:
@@ -75,6 +77,7 @@ async def auth_method(claims: dict = Depends(get_claims)):
     """Return the authentication method used for the current session.
 
     Inspects the ``amr`` JWT claim to detect whether the user logged in
-    via social OAuth (Google, GitHub, etc.), password, OTP, or another method.
+    via social OAuth (Google, GitHub, etc.), password, passkey (WebAuthn),
+    OTP, or another method.
     """
     return _detect_auth_method(claims)
