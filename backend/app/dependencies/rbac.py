@@ -77,7 +77,11 @@ def require_all_permissions(*permissions: str):
     Unlike ``require_permission`` (any-of), this requires every listed permission.
 
     Returns the user's permission list for downstream use.
+
+    Raises ``ValueError`` if called with zero permissions (fail-closed).
     """
+    if not permissions:
+        raise ValueError("require_all_permissions requires at least one permission")
 
     def dependency(request: Request) -> list[str]:
         claims = getattr(request.state, "claims", None)

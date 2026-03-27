@@ -137,6 +137,10 @@ class TestRequireAnyPermissionAlias:
 
 
 class TestRequireAllPermissions:
+    def test_rejects_zero_args(self):
+        with pytest.raises(ValueError, match="at least one permission"):
+            require_all_permissions()
+
     def test_allows_when_user_has_all(self):
         dep = require_all_permissions("projects.create", "projects.read")
         result = dep(_make_request(CLAIMS_ADMIN))
