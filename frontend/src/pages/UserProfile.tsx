@@ -11,9 +11,32 @@ interface ProfileData {
   custom_attributes: Record<string, string>;
 }
 
+interface AuthMethodData {
+  method: string;
+  provider: string | null;
+  amr: string[];
+}
+
+const METHOD_LABELS: Record<string, string> = {
+  oauth: "OAuth",
+  password: "Password",
+  otp: "One-Time Password",
+  mfa: "Multi-Factor",
+  magiclink: "Magic Link",
+  unknown: "Unknown",
+};
+
+function formatAuthMethod(data: AuthMethodData): string {
+  if (data.provider) {
+    return `${data.provider.charAt(0).toUpperCase() + data.provider.slice(1)} OAuth`;
+  }
+  return METHOD_LABELS[data.method] || data.method;
+}
+
 export default function UserProfile() {
   const { apiFetch } = useApiClient();
   const [profile, setProfile] = useState<ProfileData | null>(null);
+  const [authMethod, setAuthMethod] = useState<AuthMethodData | null>(null);
   const [editKey, setEditKey] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [status, setStatus] = useState<string | null>(null);
@@ -22,6 +45,10 @@ export default function UserProfile() {
     apiFetch("/api/profile")
       .then((res) => (res.ok ? res.json() : null))
       .then(setProfile)
+      .catch(() => {});
+    apiFetch("/api/auth/method")
+      .then((res) => (res.ok ? res.json() : null))
+      .then(setAuthMethod)
       .catch(() => {});
   }, [apiFetch]);
 
@@ -62,6 +89,29 @@ export default function UserProfile() {
         <p><strong>Name:</strong> {profile.name || "Not set"}</p>
         <p><strong>Email:</strong> {profile.email || "Not set"}</p>
       </section>
+
+      {authMethod && (
+        <section style={{ marginTop: "2rem" }}>
+          <h2>Authentication Method</h2>
+          <p>
+            <strong>Method:</strong>{" "}
+            <span style={{
+              display: "inline-block",
+              padding: "0.15rem 0.5rem",
+              borderRadius: "4px",
+              background: authMethod.method === "oauth" ? "#e3f2fd" : "#f3e5f5",
+              fontSize: "0.9rem",
+            }}>
+              {formatAuthMethod(authMethod)}
+            </span>
+          </p>
+          {authMethod.amr.length > 0 && (
+            <p style={{ fontSize: "0.8rem", color: "#666" }}>
+              amr: {authMethod.amr.join(", ")}
+            </p>
+          )}
+        </section>
+      )}
 
       <section style={{ marginTop: "2rem" }}>
         <h2>Custom Attributes</h2>
