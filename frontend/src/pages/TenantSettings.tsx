@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
-import { Link } from "react-router-dom";
 import { useApiClient } from "../hooks/useApiClient";
 import { useRBAC } from "../hooks/useRBAC";
+import { PageHeader } from "../components/layout/PageHeader";
 
 interface TenantSettingsData {
   tenant_id: string;
@@ -58,56 +58,59 @@ export default function TenantSettings() {
     }
   }, [planTier, maxMembers, apiFetch]);
 
-  if (!settings) return <div style={{ padding: "2rem" }}>Loading...</div>;
+  if (!settings) {
+    return (
+      <div className="flex items-center justify-center p-8">
+        <p className="text-muted-foreground">Loading...</p>
+      </div>
+    );
+  }
 
   const attrs = settings.custom_attributes;
 
   return (
-    <div style={{ padding: "2rem", maxWidth: "900px", margin: "0 auto" }}>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h1>Tenant Settings</h1>
-        <Link to="/">Back to Dashboard</Link>
-      </header>
-
-      <section style={{ marginTop: "2rem" }}>
-        <p><strong>Tenant:</strong> {settings.name || settings.tenant_id}</p>
-        <p><strong>Plan:</strong> {String(attrs.plan_tier ?? "free")}</p>
-        <p><strong>Max Members:</strong> {String(attrs.max_members ?? "Not set")}</p>
-      </section>
-
-      {isAdmin && (
-        <section style={{ marginTop: "2rem" }}>
-          <h2>Edit Settings</h2>
-          <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", marginTop: "0.5rem" }}>
-            <label>
-              Plan Tier:{" "}
-              <select value={planTier} onChange={(e) => setPlanTier(e.target.value)}>
-                {PLAN_TIERS.map((t) => (
-                  <option key={t} value={t}>{t}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Max Members:{" "}
-              <input
-                type="number"
-                value={maxMembers}
-                onChange={(e) => setMaxMembers(e.target.value)}
-                style={{ width: "80px", padding: "0.25rem" }}
-                min="1"
-              />
-            </label>
-            <button onClick={handleSave}>Save</button>
-          </div>
-          {status && <p style={{ marginTop: "0.5rem", fontStyle: "italic" }}>{status}</p>}
+    <>
+      <PageHeader title="Tenant Settings" description={settings.name || settings.tenant_id} />
+      <div className="p-6 space-y-6">
+        <section>
+          <p><strong>Plan:</strong> {String(attrs.plan_tier ?? "free")}</p>
+          <p><strong>Max Members:</strong> {String(attrs.max_members ?? "Not set")}</p>
         </section>
-      )}
 
-      {!isAdmin && (
-        <p style={{ marginTop: "2rem", color: "#666" }}>
-          Contact an admin to change tenant settings.
-        </p>
-      )}
-    </div>
+        {isAdmin && (
+          <section>
+            <h2>Edit Settings</h2>
+            <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", marginTop: "0.5rem" }}>
+              <label>
+                Plan Tier:{" "}
+                <select value={planTier} onChange={(e) => setPlanTier(e.target.value)}>
+                  {PLAN_TIERS.map((t) => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Max Members:{" "}
+                <input
+                  type="number"
+                  value={maxMembers}
+                  onChange={(e) => setMaxMembers(e.target.value)}
+                  style={{ width: "80px", padding: "0.25rem" }}
+                  min="1"
+                />
+              </label>
+              <button onClick={handleSave}>Save</button>
+            </div>
+            {status && <p style={{ marginTop: "0.5rem", fontStyle: "italic" }}>{status}</p>}
+          </section>
+        )}
+
+        {!isAdmin && (
+          <p style={{ color: "#666" }}>
+            Contact an admin to change tenant settings.
+          </p>
+        )}
+      </div>
+    </>
   );
 }

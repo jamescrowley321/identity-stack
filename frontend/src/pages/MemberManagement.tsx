@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
-import { Link } from "react-router-dom";
 import { useApiClient } from "../hooks/useApiClient";
+import { PageHeader } from "../components/layout/PageHeader";
 
 const AVAILABLE_ROLES = ["owner", "admin", "member", "viewer"];
 
@@ -72,13 +72,10 @@ export default function MemberManagement() {
   );
 
   return (
-    <div style={{ padding: "2rem", maxWidth: "900px", margin: "0 auto" }}>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h1>Members</h1>
-        <Link to="/">Back to Dashboard</Link>
-      </header>
-
-      <section style={{ marginTop: "2rem" }}>
+    <>
+      <PageHeader title="Members" description="Invite and manage team members" />
+      <div className="p-6 space-y-6">
+      <section>
         <h2>Invite Member</h2>
         <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
           <input
@@ -98,7 +95,7 @@ export default function MemberManagement() {
         {status && <p style={{ marginTop: "0.5rem", fontStyle: "italic" }}>{status}</p>}
       </section>
 
-      <section style={{ marginTop: "2rem" }}>
+      <section>
         <h2>Team ({members.length})</h2>
         {members.length === 0 ? (
           <p style={{ color: "#666" }}>No members found.</p>
@@ -155,6 +152,7 @@ export default function MemberManagement() {
           </table>
         )}
       </section>
-    </div>
+      </div>
+    </>
   );
 }

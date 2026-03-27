@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
-import { Link } from "react-router-dom";
 import { useApiClient } from "../hooks/useApiClient";
+import { PageHeader } from "../components/layout/PageHeader";
 
 const EXPIRATION_OPTIONS = [
   { label: "Never", value: 0 },
@@ -100,13 +100,10 @@ export default function AccessKeys() {
   }, [newKeySecret]);
 
   return (
-    <div style={{ padding: "2rem", maxWidth: "900px", margin: "0 auto" }}>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h1>Access Keys</h1>
-        <Link to="/">Back to Dashboard</Link>
-      </header>
-
-      <section style={{ marginTop: "2rem" }}>
+    <>
+      <PageHeader title="Access Keys" description="Create and manage API access keys" />
+      <div className="p-6 space-y-6">
+      <section>
         <h2>Create Key</h2>
         <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
           <input
@@ -156,7 +153,7 @@ export default function AccessKeys() {
         </section>
       )}
 
-      <section style={{ marginTop: "2rem" }}>
+      <section>
         <h2>Keys</h2>
         {keys.length === 0 ? (
           <p style={{ color: "#666" }}>No access keys yet.</p>
@@ -196,6 +193,7 @@ export default function AccessKeys() {
           </table>
         )}
       </section>
-    </div>
+      </div>
+    </>
   );
 }

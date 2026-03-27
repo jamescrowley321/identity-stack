@@ -1,11 +1,10 @@
 import { useAuth } from "react-oidc-context";
 import { useEffect, useState, useCallback } from "react";
-import { Link } from "react-router-dom";
 import { useApiClient } from "../hooks/useApiClient";
 import { useTenants } from "../hooks/useTenants";
 import { useRBAC } from "../hooks/useRBAC";
-import TenantSwitcher from "../components/layout/TenantSwitcher";
 import { RequirePermission } from "../components/auth/RequirePermission";
+import { PageHeader } from "../components/layout/PageHeader";
 
 const preStyle = {
   background: "#f4f4f4",
@@ -30,7 +29,7 @@ export default function Dashboard() {
   const auth = useAuth();
   const { apiFetch } = useApiClient();
   const { currentTenantId, tenants } = useTenants();
-  const { roles, isAdmin } = useRBAC();
+  const { roles } = useRBAC();
   const [health, setHealth] = useState<string>("checking...");
   const [accessTokenClaims, setAccessTokenClaims] = useState<Record<string, unknown> | null>(null);
   const [idTokenClaims, setIdTokenClaims] = useState<Record<string, unknown> | null>(null);
@@ -83,7 +82,6 @@ export default function Dashboard() {
       .catch(() => {});
   }, [idToken, auth.user?.access_token]);
 
-  // Fetch tenant-scoped resources when tenant context is available
   const loadResources = useCallback(() => {
     if (!currentTenantId || !auth.user?.access_token) return;
     apiFetch(`/api/tenants/${currentTenantId}/resources`)
@@ -118,100 +116,79 @@ export default function Dashboard() {
     }
   }, [currentTenantId, newResourceName, apiFetch, loadResources]);
 
-  const handleLogout = useCallback(async () => {
-    try {
-      await apiFetch("/api/auth/logout", { method: "POST" });
-    } catch {
-      // Best-effort
-    }
-    auth.signoutRedirect();
-  }, [apiFetch, auth]);
-
   const identityName = identity?.identity as Record<string, unknown> | undefined;
 
   return (
-    <div style={{ padding: "2rem", maxWidth: "900px", margin: "0 auto" }}>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h1>Descope SaaS Starter</h1>
-        <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-          <TenantSwitcher />
-          <button onClick={handleLogout}>Logout</button>
-        </div>
-      </header>
-      <section style={{ marginTop: "2rem" }}>
-        <h2>Welcome, {(identityName?.name as string) || auth.user?.profile?.email || "User"}</h2>
-        <p>Backend status: <strong>{health}</strong></p>
-        {currentTenantId && <p>Current tenant: <strong>{currentTenantId}</strong></p>}
-        {roles.length > 0 && <p>Roles: <strong>{roles.join(", ")}</strong></p>}
+    <>
+      <PageHeader
+        title={`Welcome, ${(identityName?.name as string) || auth.user?.profile?.email || "User"}`}
+        description={`Backend: ${health} · Tenant: ${currentTenantId ?? "none"} · Roles: ${roles.join(", ") || "none"}`}
+      />
+      <div className="p-6 space-y-6">
         {tenants.length > 0 && (
-          <p>Tenant memberships: <strong>{tenants.map((t) => t.id).join(", ")}</strong></p>
+          <p style={{ fontSize: "0.9rem" }}>
+            Tenant memberships: <strong>{tenants.map((t) => t.id).join(", ")}</strong>
+          </p>
         )}
-        <p>
-          <Link to="/profile">Profile</Link>
-          {currentTenantId && <>{" | "}<Link to="/settings">Tenant Settings</Link></>}
-          {isAdmin && <>{" | "}<Link to="/roles">Manage Roles</Link>{" | "}<Link to="/keys">Access Keys</Link>{" | "}<Link to="/members">Members</Link></>}
-        </p>
-      </section>
 
-      {error && (
-        <section style={{ marginTop: "2rem" }}>
+        {error && (
           <pre style={{ ...preStyle, background: "#fff0f0", color: "red" }}>{error}</pre>
+        )}
+
+        {currentTenantId && (
+          <section>
+            <h3>Tenant Resources <span style={labelStyle}>(scoped to {currentTenantId})</span></h3>
+            <RequirePermission permission="documents.write">
+              <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
+                <input
+                  type="text"
+                  placeholder="Resource name"
+                  value={newResourceName}
+                  onChange={(e) => setNewResourceName(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleCreateResource()}
+                  style={{ padding: "0.25rem 0.5rem", flex: 1 }}
+                />
+                <button onClick={handleCreateResource} disabled={!newResourceName.trim()}>
+                  Create
+                </button>
+              </div>
+            </RequirePermission>
+            {resources.length === 0 ? (
+              <p style={{ color: "#666", fontSize: "0.9rem" }}>No resources yet. Create one above.</p>
+            ) : (
+              <ul style={{ listStyle: "none", padding: 0 }}>
+                {resources.map((r) => (
+                  <li key={r.id} style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>
+                    <strong>{r.name}</strong>
+                    <span style={{ ...labelStyle, marginLeft: "0.5rem" }}>{r.id}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        )}
+
+        <section>
+          <h3>ClaimsIdentity <span style={labelStyle}>(py-identity-model ClaimsPrincipal)</span></h3>
+          <pre style={preStyle}>
+            {identity ? JSON.stringify(identity, null, 2) : "Loading..."}
+          </pre>
         </section>
-      )}
 
-      {currentTenantId && (
-        <section style={{ marginTop: "2rem" }}>
-          <h3>Tenant Resources <span style={labelStyle}>(scoped to {currentTenantId})</span></h3>
-          <RequirePermission permission="documents.write">
-            <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
-              <input
-                type="text"
-                placeholder="Resource name"
-                value={newResourceName}
-                onChange={(e) => setNewResourceName(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleCreateResource()}
-                style={{ padding: "0.25rem 0.5rem", flex: 1 }}
-              />
-              <button onClick={handleCreateResource} disabled={!newResourceName.trim()}>
-                Create
-              </button>
-            </div>
-          </RequirePermission>
-          {resources.length === 0 ? (
-            <p style={{ color: "#666", fontSize: "0.9rem" }}>No resources yet. Create one above.</p>
-          ) : (
-            <ul style={{ listStyle: "none", padding: 0 }}>
-              {resources.map((r) => (
-                <li key={r.id} style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>
-                  <strong>{r.name}</strong>
-                  <span style={{ ...labelStyle, marginLeft: "0.5rem" }}>{r.id}</span>
-                </li>
-              ))}
-            </ul>
-          )}
+        <section>
+          <h3>Access Token Claims <span style={labelStyle}>(validated by py-identity-model)</span></h3>
+          <pre style={preStyle}>
+            {accessTokenClaims ? JSON.stringify(accessTokenClaims, null, 2) : "Loading..."}
+          </pre>
         </section>
-      )}
 
-      <section style={{ marginTop: "2rem" }}>
-        <h3>ClaimsIdentity <span style={labelStyle}>(py-identity-model ClaimsPrincipal)</span></h3>
-        <pre style={preStyle}>
-          {identity ? JSON.stringify(identity, null, 2) : "Loading..."}
-        </pre>
-      </section>
-
-      <section style={{ marginTop: "2rem" }}>
-        <h3>Access Token Claims <span style={labelStyle}>(validated by py-identity-model)</span></h3>
-        <pre style={preStyle}>
-          {accessTokenClaims ? JSON.stringify(accessTokenClaims, null, 2) : "Loading..."}
-        </pre>
-      </section>
-
-      <section style={{ marginTop: "2rem" }}>
-        <h3>ID Token Claims <span style={labelStyle}>(validated by py-identity-model)</span></h3>
-        <pre style={preStyle}>
-          {idTokenClaims ? JSON.stringify(idTokenClaims, null, 2) : "Loading..."}
-        </pre>
-      </section>
-    </div>
+        <section>
+          <h3>ID Token Claims <span style={labelStyle}>(validated by py-identity-model)</span></h3>
+          <pre style={preStyle}>
+            {idTokenClaims ? JSON.stringify(idTokenClaims, null, 2) : "Loading..."}
+          </pre>
+        </section>
+      </div>
+    </>
   );
 }
