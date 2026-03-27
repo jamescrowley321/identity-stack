@@ -20,7 +20,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_create_tenant(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
@@ -39,7 +39,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_create_tenant_without_domains(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
@@ -54,7 +54,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_list_tenants(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
@@ -68,7 +68,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_load_tenant(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
@@ -82,7 +82,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_delete_tenant(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
@@ -99,7 +99,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_add_user_to_tenant(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
@@ -206,5 +206,11 @@ class TestGetDescopeClient:
 
     def test_raises_without_project_id(self, monkeypatch):
         monkeypatch.delenv("DESCOPE_PROJECT_ID", raising=False)
+        with pytest.raises(KeyError):
+            get_descope_client()
+
+    def test_raises_without_management_key(self, monkeypatch):
+        monkeypatch.setenv("DESCOPE_PROJECT_ID", "proj-env")
+        monkeypatch.delenv("DESCOPE_MANAGEMENT_KEY", raising=False)
         with pytest.raises(KeyError):
             get_descope_client()
