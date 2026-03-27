@@ -1,5 +1,5 @@
 import { useAuth } from "react-oidc-context";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Link } from "react-router-dom";
 import { useApiClient } from "../hooks/useApiClient";
 import { useTenants } from "../hooks/useTenants";
@@ -40,6 +40,9 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
 
   const idToken = auth.user?.id_token;
+  const isAuthenticated = !!auth.user?.access_token;
+  const hasFetchedDashboard = useRef(false);
+  const hasFetchedIdToken = useRef(false);
 
   useEffect(() => {
     fetch("/api/health")
@@ -49,7 +52,8 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    if (!auth.user?.access_token) return;
+    if (!isAuthenticated || hasFetchedDashboard.current) return;
+    hasFetchedDashboard.current = true;
 
     apiFetch("/api/claims")
       .then((res) => {
@@ -66,10 +70,11 @@ export default function Dashboard() {
       })
       .then(setIdentity)
       .catch(() => {});
-  }, [auth.user?.access_token, apiFetch]);
+  }, [isAuthenticated, apiFetch]);
 
   useEffect(() => {
-    if (!idToken || !auth.user?.access_token) return;
+    if (!idToken || !isAuthenticated || hasFetchedIdToken.current) return;
+    hasFetchedIdToken.current = true;
 
     fetch("/api/validate-id-token", {
       method: "POST",
@@ -81,7 +86,7 @@ export default function Dashboard() {
       })
       .then(setIdTokenClaims)
       .catch(() => {});
-  }, [idToken, auth.user?.access_token]);
+  }, [idToken, isAuthenticated]);
 
   // Fetch tenant-scoped resources when tenant context is available
   const loadResources = useCallback(() => {
@@ -149,7 +154,7 @@ export default function Dashboard() {
         <p>
           <Link to="/profile">Profile</Link>
           {currentTenantId && <>{" | "}<Link to="/settings">Tenant Settings</Link></>}
-          {isAdmin && <>{" | "}<Link to="/roles">Manage Roles</Link></>}
+          {isAdmin && <>{" | "}<Link to="/roles">Manage Roles</Link>{" | "}<Link to="/keys">Access Keys</Link></>}
         </p>
       </section>
 

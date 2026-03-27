@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.middleware.auth import TokenValidationMiddleware
 from app.models.database import create_db_and_tables
-from app.routers import attributes, auth, health, protected, roles, tenants
+from app.routers import accesskeys, attributes, auth, health, protected, roles, tenants
 from app.services.descope import init_descope_client, shutdown_descope_client
 
 
@@ -36,7 +36,14 @@ app.add_middleware(
 app.add_middleware(
     TokenValidationMiddleware,
     descope_project_id=os.getenv("DESCOPE_PROJECT_ID", ""),
-    excluded_paths={"/api/health", "/api/validate-id-token", "/docs", "/openapi.json"},
+    excluded_paths={
+        "/api/health",
+        "/api/health/live",
+        "/api/health/ready",
+        "/api/validate-id-token",
+        "/docs",
+        "/openapi.json",
+    },
 )
 
 app.include_router(health.router, prefix="/api")
@@ -45,3 +52,4 @@ app.include_router(protected.router, prefix="/api")
 app.include_router(tenants.router, prefix="/api")
 app.include_router(roles.router, prefix="/api")
 app.include_router(attributes.router, prefix="/api")
+app.include_router(accesskeys.router, prefix="/api")

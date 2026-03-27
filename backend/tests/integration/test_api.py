@@ -7,7 +7,10 @@ import pytest
 async def test_health_endpoint(client):
     response = await client.get("/api/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    body = response.json()
+    assert body["status"] == "healthy"
+    assert body["dependencies"]["database"] == "ok"
+    assert body["dependencies"]["descope"] == "ok"
 
 
 @pytest.mark.anyio

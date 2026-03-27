@@ -1,5 +1,9 @@
 from fastapi import HTTPException, Request
 
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 def require_role(*roles: str):
     """Dependency factory that enforces the user has one of the specified roles
@@ -18,6 +22,13 @@ def require_role(*roles: str):
         tenant_info = claims.get("tenants", {}).get(tenant_id, {})
         user_roles = tenant_info.get("roles", []) if isinstance(tenant_info, dict) else []
         if not any(r in user_roles for r in roles):
+            logger.warning(
+                "rbac.role_denied sub=%s tenant=%s required=%s actual=%s",
+                claims.get("sub"),
+                tenant_id,
+                roles,
+                user_roles,
+            )
             raise HTTPException(status_code=403, detail="Insufficient permissions")
         return user_roles
 
@@ -41,6 +52,12 @@ def require_permission(*permissions: str):
         tenant_info = claims.get("tenants", {}).get(tenant_id, {})
         user_permissions = tenant_info.get("permissions", []) if isinstance(tenant_info, dict) else []
         if not any(p in user_permissions for p in permissions):
+            logger.warning(
+                "rbac.permission_denied sub=%s tenant=%s required=%s",
+                claims.get("sub"),
+                tenant_id,
+                permissions,
+            )
             raise HTTPException(status_code=403, detail="Insufficient permissions")
         return user_permissions
 

@@ -112,6 +112,17 @@ The frontend is available at http://localhost:3000 and the backend at http://loc
 
 ## API Endpoints
 
+### Health Checks
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/health` | Full health check — verifies database and Descope API. Returns 503 if degraded |
+| GET | `/api/health/live` | Liveness probe — always returns 200 if process is running |
+| GET | `/api/health/ready` | Readiness probe — same as `/health` (checks all dependencies) |
+
+Response format: `{"status": "healthy"|"degraded", "dependencies": {"database": "ok"|"error: ...", "descope": "ok"|"error: ..."}}`
+
+Results are cached for 30 seconds. Suitable for Kubernetes liveness/readiness probes.
+
 ### Authentication
 | Method | Path | Description |
 |--------|------|-------------|
@@ -144,6 +155,18 @@ The frontend is available at http://localhost:3000 and the backend at http://loc
 | GET | `/api/tenants/current/settings` | Load current tenant's custom attributes |
 | PATCH | `/api/tenants/current/settings` | Update tenant attributes (requires owner/admin) |
 
+### Access Keys
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/keys` | Create an access key (returns secret once, requires owner/admin) |
+| GET | `/api/keys` | List access keys for current tenant |
+| GET | `/api/keys/{id}` | Load a single access key |
+| POST | `/api/keys/{id}/deactivate` | Revoke an access key |
+| POST | `/api/keys/{id}/activate` | Reactivate an access key |
+| DELETE | `/api/keys/{id}` | Permanently delete an access key |
+
+All access key operations require owner/admin role and verify the key belongs to the caller's tenant.
+
 Tenant isolation is enforced via the `dct` (Descope current tenant) JWT claim. Users can only access resources belonging to their active tenant.
 
 ### RBAC
@@ -159,6 +182,70 @@ Four roles are defined via Terraform (`infra/rbac.tf`):
 
 Backend endpoints enforce authorization via `require_role()` and `require_permission()` dependency factories. Frontend uses `<RequireRole>` and `<RequirePermission>` components for conditional UI rendering.
 
+### Security Headers
+
+All API responses include security headers via `SecurityHeadersMiddleware`:
+
+| Header | Value |
+|--------|-------|
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `DENY` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `X-XSS-Protection` | `0` (disabled in favor of CSP) |
+| `Content-Security-Policy` | `default-src 'self'` (configurable via `CSP_POLICY`) |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` (production only) |
+
+Set `ENVIRONMENT=production` to enable HSTS and strict CSP. Override CSP with `CSP_POLICY` env var.
+
+### Rate Limiting
+
+API endpoints are rate limited via [slowapi](https://github.com/laurentS/slowapi) to protect against abuse:
+
+| Tier | Limit | Endpoints |
+|------|-------|-----------|
+| Auth-sensitive | 10/minute | `POST /auth/logout`, `POST /validate-id-token`, `POST /keys`, `POST /members/invite` |
+| Default | 60/minute | All other API endpoints |
+| Exempt | No limit | `GET /health`, `GET /health/live`, `GET /health/ready` |
+
+Rate limits are applied per-route per-key. Authenticated requests are keyed by user `sub` claim; unauthenticated requests are keyed by client IP.
+
+When a limit is exceeded, the API returns `429 Too Many Requests` with a `Retry-After` header.
+
+Configure limits via environment variables:
+
+```bash
+RATE_LIMIT_DEFAULT=60/minute   # Default limit for all endpoints
+RATE_LIMIT_AUTH=10/minute      # Stricter limit for auth-sensitive endpoints
+```
+
+### Structured Logging
+
+All requests are assigned a unique correlation ID (`X-Correlation-ID` header) for distributed tracing. Auth events are logged with structured data — no sensitive tokens or secrets are ever logged.
+
+**Log format:**
+- **Development** (default): Human-readable with timestamp, level, correlation ID, and message
+- **Production** (`ENVIRONMENT=production`): JSON with `timestamp`, `level`, `name`, `message`, `correlation_id`
+
+**Logged events:**
+
+| Event | Level | Details |
+|-------|-------|---------|
+| Token validated | DEBUG | sub, tenant, path |
+| Missing auth header | INFO | path |
+| Invalid/expired token | WARNING | path |
+| RBAC role denied | WARNING | sub, tenant, required vs actual roles |
+| RBAC permission denied | WARNING | sub, tenant, required permissions |
+| Access key created | INFO | name, tenant |
+| Access key deactivated/activated/deleted | INFO | key_id, tenant |
+
+**Configuration:**
+
+```bash
+LOG_LEVEL=INFO          # DEBUG, INFO, WARNING, ERROR (default: INFO)
+ENVIRONMENT=production  # Enables JSON log format
+```
+
+Incoming `X-Correlation-ID` headers are accepted for distributed tracing (validated: alphanumeric, hyphens, underscores, dots, max 128 chars). Invalid values are replaced with a generated UUID. Error responses (401) include `correlation_id` in the JSON body for debugging.
 ## Project Structure
 
 ```
