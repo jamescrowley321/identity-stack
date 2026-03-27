@@ -63,6 +63,8 @@ resource "descope_permission" "billing_manage" {
 
 # Roles
 # Each role includes a curated set of permissions.
+# Implicit hierarchy (by permission superset): owner > admin > member > viewer
+# Descope resolves permissions at login — the JWT contains the flattened set.
 
 resource "descope_role" "owner" {
   name        = "owner"
@@ -104,8 +106,9 @@ resource "descope_role" "admin" {
 }
 
 resource "descope_role" "member" {
-  name        = "member"
-  description = "Standard team member with read/write access"
+  name         = "member"
+  description  = "Standard team member with read/write access"
+  default_role = true
 
   permission_names = [
     descope_permission.projects_read.name,
