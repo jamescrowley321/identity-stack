@@ -7,6 +7,7 @@ A comprehensive reference project demonstrating Descope's identity platform feat
 ```
 ┌────────────────────────────────────┐
 │  React Frontend (Vite + TS)        │
+│  - Tailwind CSS v4 + shadcn/ui    │
 │  - react-oidc-context (OIDC auth)  │
 │  - Tenant-aware routing            │
 │  - Role-based UI rendering         │
@@ -33,6 +34,7 @@ A comprehensive reference project demonstrating Descope's identity platform feat
 | Layer | Technology | Purpose |
 |---|---|---|
 | Frontend | React + Vite + TypeScript | SPA |
+| UI Framework | Tailwind CSS v4 + shadcn/ui (Radix) | Design system and components |
 | Auth (Frontend) | react-oidc-context + oidc-client-ts | Vendor-agnostic OIDC |
 | Backend | FastAPI | REST API |
 | Auth (Backend) | py-identity-model | Vendor-agnostic token validation |
@@ -224,6 +226,7 @@ descope-saas-starter/
 │   ├── src/
 │   │   ├── pages/     # Route pages
 │   │   ├── components/# UI components
+│   │   │   └── ui/   # shadcn/ui components
 │   │   ├── hooks/     # Custom React hooks
 │   │   └── api/       # Backend API client
 │   └── ...
