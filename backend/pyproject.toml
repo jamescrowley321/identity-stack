@@ -28,7 +28,10 @@ line-length = 120
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W"]
+select = ["E", "F", "I", "W", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106"]  # assert, hardcoded passwords OK in tests
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -40,5 +43,6 @@ markers = [
 
 [dependency-groups]
 dev = [
+    "pip-audit>=2.9",
     "pytest-playwright>=0.7.2",
 ]

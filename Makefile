@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup lint test-unit test-frontend test-integration test-e2e test-all dev-backend dev-frontend dev
+.PHONY: help setup lint test-unit test-frontend test-integration test-e2e test-all security dev-backend dev-frontend dev
 
 help: ## show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -25,6 +25,10 @@ test-e2e: ## run e2e tests (requires running frontend + backend)
 	cd backend && python -m pytest tests/e2e/ -v
 
 test-all: lint test-unit test-frontend test-integration ## run all checks
+
+security: ## run security scans (pip-audit, npm audit)
+	cd backend && pip-audit --desc --ignore-vuln CVE-2026-4539
+	cd frontend && npm audit --omit=dev --audit-level=high
 
 dev-backend: ## start backend dev server
 	cd backend && uvicorn app.main:app --reload
