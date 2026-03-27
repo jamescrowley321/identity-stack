@@ -53,6 +53,14 @@ NO_TENANT_CLAIMS = {
     "tenants": {},
 }
 
+NON_DICT_TENANT_CLAIMS = {
+    "sub": "user-bad",
+    "dct": "tenant-abc",
+    "tenants": {
+        "tenant-abc": None,
+    },
+}
+
 
 # --- /rbac/hierarchy (public, no auth) ---
 
@@ -164,3 +172,40 @@ async def test_check_403_without_tenant(mock_validate, client):
     mock_validate.return_value = NO_TENANT_CLAIMS
     response = await client.get("/api/rbac/check/projects.read", headers={"Authorization": "Bearer tok"})
     assert response.status_code == 403
+
+
+# --- Edge cases: non-dict tenant info ---
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_effective_handles_non_dict_tenant_info(mock_validate, client):
+    """When tenant info is None (corrupt claim), return empty roles/permissions."""
+    mock_validate.return_value = NON_DICT_TENANT_CLAIMS
+    response = await client.get("/api/rbac/effective", headers={"Authorization": "Bearer tok"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["roles"] == []
+    assert data["permissions"] == []
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_check_handles_non_dict_tenant_info(mock_validate, client):
+    """When tenant info is None, permission check should return allowed=False."""
+    mock_validate.return_value = NON_DICT_TENANT_CLAIMS
+    response = await client.get("/api/rbac/check/projects.read", headers={"Authorization": "Bearer tok"})
+    assert response.status_code == 200
+    assert response.json()["allowed"] is False
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_check_nonexistent_permission(mock_validate, client):
+    """Checking a permission that doesn't exist in the system should return allowed=False."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    response = await client.get("/api/rbac/check/totally.fake.perm", headers={"Authorization": "Bearer tok"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["permission"] == "totally.fake.perm"
+    assert data["allowed"] is False
