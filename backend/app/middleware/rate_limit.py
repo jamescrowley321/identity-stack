@@ -66,8 +66,6 @@ def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> JSO
         try:
             response = request.app.state.limiter._inject_headers(response, view_rate_limit)
         except Exception:
-            logger.debug("_inject_headers failed, setting Retry-After manually")
-            response.headers["Retry-After"] = retry_after
-    else:
-        response.headers["Retry-After"] = retry_after
+            logger.debug("_inject_headers failed, skipping rate limit headers")
+    response.headers["Retry-After"] = retry_after
     return response
