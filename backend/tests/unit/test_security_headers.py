@@ -21,7 +21,7 @@ async def client():
 @pytest.mark.anyio
 async def test_security_headers_present(client):
     """All security headers should be present on responses."""
-    response = await client.get("/api/health")
+    response = await client.get("/api/health/live")
     assert response.status_code == 200
     assert response.headers["X-Content-Type-Options"] == "nosniff"
     assert response.headers["X-Frame-Options"] == "DENY"
@@ -33,14 +33,14 @@ async def test_security_headers_present(client):
 @pytest.mark.anyio
 async def test_no_hsts_in_development(client):
     """HSTS should not be set in development mode (default)."""
-    response = await client.get("/api/health")
+    response = await client.get("/api/health/live")
     assert "Strict-Transport-Security" not in response.headers
 
 
 @pytest.mark.anyio
 async def test_csp_includes_localhost_in_development(client):
     """CSP in development should allow localhost."""
-    response = await client.get("/api/health")
+    response = await client.get("/api/health/live")
     csp = response.headers["Content-Security-Policy"]
     assert "localhost" in csp
 

@@ -70,7 +70,7 @@ async def test_protected_route_accepts_valid_token(mock_validate, client):
 @pytest.mark.anyio
 async def test_excluded_path_skips_auth(client):
     """Excluded paths should not require authentication."""
-    response = await client.get("/api/health")
+    response = await client.get("/api/health/live")
     assert response.status_code == 200
 
 

@@ -63,7 +63,7 @@ class TestSetupLogging:
 @pytest.mark.anyio
 async def test_correlation_id_in_response_header(client):
     """Health endpoint should return X-Correlation-ID header."""
-    response = await client.get("/api/health")
+    response = await client.get("/api/health/live")
     assert response.status_code == 200
     cid = response.headers.get("X-Correlation-ID")
     assert cid is not None
@@ -75,7 +75,7 @@ async def test_correlation_id_in_response_header(client):
 async def test_accepts_incoming_correlation_id(client):
     """Middleware should accept and echo back an incoming X-Correlation-ID."""
     custom_cid = "my-trace-id-999"
-    response = await client.get("/api/health", headers={"X-Correlation-ID": custom_cid})
+    response = await client.get("/api/health/live", headers={"X-Correlation-ID": custom_cid})
     assert response.status_code == 200
     assert response.headers["X-Correlation-ID"] == custom_cid
 
@@ -83,8 +83,8 @@ async def test_accepts_incoming_correlation_id(client):
 @pytest.mark.anyio
 async def test_each_request_gets_unique_correlation_id(client):
     """Each request without an incoming ID should get a unique correlation ID."""
-    r1 = await client.get("/api/health")
-    r2 = await client.get("/api/health")
+    r1 = await client.get("/api/health/live")
+    r2 = await client.get("/api/health/live")
     cid1 = r1.headers["X-Correlation-ID"]
     cid2 = r2.headers["X-Correlation-ID"]
     assert cid1 != cid2
@@ -120,6 +120,6 @@ async def test_missing_auth_logs_info(client, caplog):
 @pytest.mark.anyio
 async def test_correlation_id_on_security_headers_response(client):
     """Correlation ID should be present alongside security headers."""
-    response = await client.get("/api/health")
+    response = await client.get("/api/health/live")
     assert "X-Correlation-ID" in response.headers
     assert "X-Content-Type-Options" in response.headers
