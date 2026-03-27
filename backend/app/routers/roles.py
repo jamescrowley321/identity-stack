@@ -1,3 +1,6 @@
+from typing import Literal
+
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -7,11 +10,32 @@ from app.services.descope import get_descope_client
 
 router = APIRouter()
 
+# M3: Constrain to known Descope role names
+ValidRole = Literal["owner", "admin", "member", "viewer"]
+
+# M1: Role hierarchy — higher number = more privilege
+ROLE_HIERARCHY: dict[str, int] = {"owner": 4, "admin": 3, "member": 2, "viewer": 1}
+
+
+def _check_role_hierarchy(caller_roles: list[str], target_roles: list[ValidRole]) -> None:
+    """Ensure caller's highest role outranks every target role.
+
+    Raises HTTPException 403 if the caller tries to assign/remove a role
+    at or above their own level.
+    """
+    caller_max = max((ROLE_HIERARCHY.get(r, 0) for r in caller_roles), default=0)
+    for role in target_roles:
+        if ROLE_HIERARCHY.get(role, 0) >= caller_max:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Insufficient privileges to manage the '{role}' role",
+            )
+
 
 class RoleAssignmentRequest(BaseModel):
     user_id: str
     tenant_id: str
-    role_names: list[str] = Field(min_length=1)
+    role_names: list[ValidRole] = Field(min_length=1)
 
 
 @router.get("/roles/me")
@@ -34,15 +58,19 @@ async def get_my_roles(
 async def assign_roles(
     body: RoleAssignmentRequest,
     current_tenant: str = Depends(get_tenant_id),
-    admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    caller_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
     """Assign roles to a user in a tenant. Requires owner or admin role."""
     if body.tenant_id != current_tenant:
         raise HTTPException(status_code=403, detail="Cannot manage roles for a different tenant")
-    if "owner" in body.role_names and "owner" not in admin_roles:
-        raise HTTPException(status_code=403, detail="Only owners can assign the owner role")
+    _check_role_hierarchy(caller_roles, body.role_names)
     client = get_descope_client()
-    await client.assign_roles(body.user_id, body.tenant_id, body.role_names)
+    try:
+        await client.assign_roles(body.user_id, body.tenant_id, list(body.role_names))
+    except httpx.HTTPStatusError as exc:
+        if 400 <= exc.response.status_code < 500:
+            raise HTTPException(status_code=400, detail="Role operation failed: invalid request")
+        raise HTTPException(status_code=502, detail="Role operation failed: upstream service error")
     return {"status": "roles_assigned", "user_id": body.user_id, "role_names": body.role_names}
 
 
@@ -50,13 +78,17 @@ async def assign_roles(
 async def remove_roles(
     body: RoleAssignmentRequest,
     current_tenant: str = Depends(get_tenant_id),
-    admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    caller_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
     """Remove roles from a user in a tenant. Requires owner or admin role."""
     if body.tenant_id != current_tenant:
         raise HTTPException(status_code=403, detail="Cannot manage roles for a different tenant")
-    if "owner" in body.role_names and "owner" not in admin_roles:
-        raise HTTPException(status_code=403, detail="Only owners can remove the owner role")
+    _check_role_hierarchy(caller_roles, body.role_names)
     client = get_descope_client()
-    await client.remove_roles(body.user_id, body.tenant_id, body.role_names)
+    try:
+        await client.remove_roles(body.user_id, body.tenant_id, list(body.role_names))
+    except httpx.HTTPStatusError as exc:
+        if 400 <= exc.response.status_code < 500:
+            raise HTTPException(status_code=400, detail="Role operation failed: invalid request")
+        raise HTTPException(status_code=502, detail="Role operation failed: upstream service error")
     return {"status": "roles_removed", "user_id": body.user_id, "role_names": body.role_names}
