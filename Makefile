@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup lint test-unit test-integration test-all dev-backend dev-frontend dev
+.PHONY: help setup lint test-unit test-frontend test-integration test-e2e test-all dev-backend dev-frontend dev
 
 help: ## show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -18,7 +18,13 @@ test-unit: ## run backend unit tests
 test-integration: ## run backend integration tests (requires env vars)
 	cd backend && python -m pytest tests/integration/ -v
 
-test-all: lint test-unit test-integration ## run all checks
+test-frontend: ## run frontend unit tests
+	cd frontend && npm test
+
+test-e2e: ## run e2e tests (requires running frontend + backend)
+	cd backend && python -m pytest tests/e2e/ -v
+
+test-all: lint test-unit test-frontend test-integration ## run all checks
 
 dev-backend: ## start backend dev server
 	cd backend && uvicorn app.main:app --reload

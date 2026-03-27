@@ -37,3 +37,8 @@ asyncio_default_test_loop_scope = "session"
 markers = [
     "anyio: mark test to run with anyio",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest-playwright>=0.7.2",
+]
