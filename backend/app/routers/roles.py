@@ -20,10 +20,12 @@ ROLE_HIERARCHY: dict[str, int] = {"owner": 4, "admin": 3, "member": 2, "viewer":
 def _check_role_hierarchy(caller_roles: list[str], target_roles: list[ValidRole]) -> None:
     """Ensure caller's highest role outranks every target role.
 
-    Raises HTTPException 403 if the caller tries to assign/remove a role
-    at or above their own level.
+    Owners can manage any role. All others can only manage roles strictly
+    below their own level. Raises HTTPException 403 on violation.
     """
     caller_max = max((ROLE_HIERARCHY.get(r, 0) for r in caller_roles), default=0)
+    if caller_max >= ROLE_HIERARCHY["owner"]:
+        return  # owners can assign/remove any role
     for role in target_roles:
         if ROLE_HIERARCHY.get(role, 0) >= caller_max:
             raise HTTPException(
