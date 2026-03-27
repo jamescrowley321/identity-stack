@@ -1,6 +1,5 @@
 """E2E tests for the login page and unauthenticated flows."""
 
-import pytest
 from playwright.sync_api import Page, expect
 
 
