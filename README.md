@@ -127,6 +127,7 @@ Results are cached for 30 seconds. Suitable for Kubernetes liveness/readiness pr
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/auth/logout` | Revoke user sessions via Descope Management API |
+| GET | `/api/auth/method` | Detect login method (OAuth provider, password, OTP, etc.) from `amr` claim |
 | POST | `/api/validate-id-token` | Validate an ID token server-side |
 | GET | `/api/me` | Return ClaimsPrincipal from py-identity-model |
 | GET | `/api/claims` | Return raw access token claims |
@@ -217,6 +218,27 @@ Backend endpoints enforce authorization via dependency factories:
 - `require_all_permissions()` — user must have ALL specified permissions
 
 Frontend uses `<RequireRole>` and `<RequirePermission>` components for conditional UI rendering. The Role Management page includes an effective permissions display and role hierarchy table.
+
+### Social Login (Google, GitHub)
+
+Google and GitHub OAuth are configured as Descope system providers in `infra/project.tf`. Descope handles the OAuth dance — the app only talks to Descope's OIDC endpoint.
+
+**Setup:**
+
+1. Create OAuth credentials:
+   - **Google:** [Google Cloud Console](https://console.cloud.google.com/) > APIs & Services > Credentials > OAuth 2.0 Client ID
+   - **GitHub:** [GitHub Developer Settings](https://github.com/settings/developers) > OAuth Apps > New
+2. Supply credentials via Terraform variables:
+   ```bash
+   terraform apply \
+     -var google_oauth_client_id=YOUR_ID \
+     -var google_oauth_client_secret=YOUR_SECRET \
+     -var github_oauth_client_id=YOUR_ID \
+     -var github_oauth_client_secret=YOUR_SECRET
+   ```
+3. Providers are disabled by default (empty credentials). Both are configured with `merge_user_accounts = true` so social accounts are linked by email.
+
+**Detection:** The `GET /api/auth/method` endpoint inspects the JWT `amr` claim to report whether the user authenticated via OAuth (and which provider), password, OTP, or another method. The User Profile page displays this information.
 
 ### ReBAC (Fine-Grained Authorization)
 
