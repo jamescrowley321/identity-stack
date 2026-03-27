@@ -35,17 +35,14 @@ def test_protected_endpoint_rejects_invalid_token(api_context: APIRequestContext
 def test_protected_endpoints_all_reject_no_auth(api_context: APIRequestContext, backend_url: str):
     """All protected API endpoints return 401 without auth."""
     endpoints = [
-        ("GET", "/api/claims"),
-        ("GET", "/api/me"),
-        ("GET", "/api/profile"),
-        ("GET", "/api/roles/me"),
-        ("GET", "/api/tenants"),
-        ("GET", "/api/keys"),
-        ("GET", "/api/members"),
+        "/api/claims",
+        "/api/me",
+        "/api/profile",
+        "/api/roles/me",
+        "/api/tenants",
+        "/api/keys",
+        "/api/members",
     ]
-    for method, path in endpoints:
-        if method == "GET":
-            response = api_context.get(f"{backend_url}{path}")
-        else:
-            response = api_context.post(f"{backend_url}{path}")
-        assert response.status == 401, f"{method} {path} returned {response.status}, expected 401"
+    for path in endpoints:
+        response = api_context.get(f"{backend_url}{path}")
+        assert response.status == 401, f"GET {path} returned {response.status}, expected 401"

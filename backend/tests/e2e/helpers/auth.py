@@ -8,6 +8,7 @@ Uses two approaches:
 The test user is created via Management API with `test: True`.
 """
 
+import base64
 import json
 import os
 
@@ -35,8 +36,13 @@ def ensure_test_user(
     tenant_id: str = "",
     roles: list[str] | None = None,
 ) -> dict:
-    """Create a test user if it doesn't already exist."""
+    """Create a test user if it doesn't already exist.
+
+    Raises RuntimeError if E2E_TEST_EMAIL is not configured.
+    """
     email = email or E2E_TEST_EMAIL
+    if not email:
+        raise RuntimeError("E2E_TEST_EMAIL must be set — cannot create test user with empty email")
     tenant_id = tenant_id or E2E_TEST_TENANT_ID
     roles = roles or ["owner", "admin"]
 
@@ -46,8 +52,9 @@ def ensure_test_user(
             headers=_auth_header(),
             json={"loginId": email},
         )
-        if resp.status_code == 200 and resp.json().get("user"):
-            return resp.json()["user"]
+        data = resp.json()
+        if resp.status_code == 200 and data.get("user"):
+            return data["user"]
 
         tenants = [{"tenantId": tenant_id, "roleNames": roles}] if tenant_id else []
         resp = client.post(
@@ -99,6 +106,17 @@ def get_oidc_access_token() -> str:
     return response.token["access_token"]
 
 
+def _decode_jwt_payload(token: str) -> dict:
+    """Decode JWT payload with proper base64 padding handling."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        raise ValueError(f"Invalid JWT format: expected 3 parts, got {len(parts)}")
+    payload_b64 = parts[1]
+    # Add correct padding — base64 requires length to be multiple of 4
+    payload_b64 += "=" * (-len(payload_b64) % 4)
+    return json.loads(base64.urlsafe_b64decode(payload_b64))
+
+
 def create_authenticated_context(browser, frontend_url: str, access_token: str) -> BrowserContext:
     """Create a browser context with OIDC tokens injected into sessionStorage.
 
@@ -109,11 +127,7 @@ def create_authenticated_context(browser, frontend_url: str, access_token: str) 
     authority = f"{DESCOPE_BASE_URL}/{DESCOPE_PROJECT_ID}"
     storage_key = f"oidc.user:{authority}:{DESCOPE_PROJECT_ID}"
 
-    # Decode the JWT to extract the sub claim for the profile
-    import base64
-
-    parts = access_token.split(".")
-    payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=="))
+    payload = _decode_jwt_payload(access_token)
 
     oidc_user = {
         "id_token": access_token,
