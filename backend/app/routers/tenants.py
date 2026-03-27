@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.dependencies.auth import get_claims
 from app.dependencies.tenant import get_tenant_claims, get_tenant_id
+from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.models.database import get_session
 from app.models.tenant import TenantResource
 from app.services.descope import get_descope_client
@@ -22,7 +23,8 @@ class CreateResourceRequest(BaseModel):
 
 
 @router.post("/tenants")
-async def create_tenant(body: CreateTenantRequest, claims: dict = Depends(get_claims)):
+@limiter.limit(RATE_LIMIT_AUTH)
+async def create_tenant(request: Request, body: CreateTenantRequest, claims: dict = Depends(get_claims)):
     """Create a new tenant via the Descope Management API."""
     client = get_descope_client()
     result = await client.create_tenant(
@@ -73,7 +75,9 @@ async def list_tenant_resources(
 
 
 @router.post("/tenants/{tenant_id}/resources")
+@limiter.limit(RATE_LIMIT_AUTH)
 async def create_tenant_resource(
+    request: Request,
     tenant_id: str,
     body: CreateResourceRequest,
     current_tenant: str = Depends(get_tenant_id),

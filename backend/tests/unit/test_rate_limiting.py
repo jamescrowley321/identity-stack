@@ -6,14 +6,17 @@ from httpx import ASGITransport, AsyncClient
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from slowapi.util import get_remote_address
 
-from app.middleware.rate_limit import get_rate_limit_key
+from app.middleware.rate_limit import (
+    _get_retry_after,
+    get_rate_limit_key,
+    rate_limit_exceeded_handler,
+)
 
 
 def _create_test_app(default_limit: str = "3/minute", auth_limit: str = "2/minute"):
     """Create a minimal FastAPI app with rate limiting for testing."""
-    limiter = Limiter(key_func=get_remote_address, default_limits=[default_limit])
+    limiter = Limiter(key_func=get_rate_limit_key, default_limits=[default_limit])
 
     app = FastAPI()
     app.state.limiter = limiter
@@ -218,3 +221,64 @@ async def test_main_app_health_not_rate_limited():
         for _ in range(5):
             response = await client.get("/api/health")
             assert response.status_code == 200
+
+
+class TestGetRetryAfter:
+    """Test _get_retry_after computes Retry-After from the rate limit window."""
+
+    def _make_exc(self, detail: str):
+        """Create a mock RateLimitExceeded with a given detail string."""
+        from unittest.mock import MagicMock
+
+        exc = MagicMock(spec=RateLimitExceeded)
+        exc.detail = detail
+        # Make get_expiry raise so we fall through to detail-string parsing
+        exc.limit.limit.get_expiry.side_effect = AttributeError
+        return exc
+
+    def test_parses_minute_window_from_detail(self):
+        """Should return 60 for a 'per 1 minute' limit."""
+        result = _get_retry_after(self._make_exc("10 per 1 minute"))
+        assert result == "60"
+
+    def test_parses_hour_window_from_detail(self):
+        """Should return 3600 for a 'per 1 hour' limit."""
+        result = _get_retry_after(self._make_exc("100 per 1 hour"))
+        assert result == "3600"
+
+    def test_parses_second_window_from_detail(self):
+        """Should return 1 for a 'per 1 second' limit."""
+        result = _get_retry_after(self._make_exc("5 per 1 second"))
+        assert result == "1"
+
+    def test_defaults_to_60_for_unknown(self):
+        """Should default to 60 when the detail string is unrecognized."""
+        result = _get_retry_after(self._make_exc("rate limit exceeded"))
+        assert result == "60"
+
+    def test_uses_get_expiry_when_available(self):
+        """Should use limit.limit.get_expiry() when it returns a value."""
+        from unittest.mock import MagicMock
+
+        exc = MagicMock(spec=RateLimitExceeded)
+        exc.limit.limit.get_expiry.return_value = 120
+        result = _get_retry_after(exc)
+        assert result == "120"
+
+
+async def test_real_handler_sets_retry_after():
+    """The real rate_limit_exceeded_handler should include a Retry-After header."""
+    app = _create_test_app(default_limit="2/minute")
+    # Replace the test app's handler with the real one
+    app.exception_handlers[RateLimitExceeded] = rate_limit_exceeded_handler
+    # Rebuild middleware to pick up handler change
+    app.middleware_stack = app.build_middleware_stack()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        for _ in range(2):
+            await client.get("/data")
+        response = await client.get("/data")
+        assert response.status_code == 429
+        assert "Retry-After" in response.headers
+        assert response.headers["Retry-After"].isdigit()

@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_claims, get_tenant_id
+from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.descope import get_descope_client
 
 router = APIRouter()
@@ -31,7 +32,9 @@ async def get_my_roles(
 
 
 @router.post("/roles/assign")
+@limiter.limit(RATE_LIMIT_AUTH)
 async def assign_roles(
+    request: Request,
     body: RoleAssignmentRequest,
     current_tenant: str = Depends(get_tenant_id),
     admin_roles: list[str] = Depends(require_role("owner", "admin")),
@@ -47,7 +50,9 @@ async def assign_roles(
 
 
 @router.post("/roles/remove")
+@limiter.limit(RATE_LIMIT_AUTH)
 async def remove_roles(
+    request: Request,
     body: RoleAssignmentRequest,
     current_tenant: str = Depends(get_tenant_id),
     admin_roles: list[str] = Depends(require_role("owner", "admin")),
