@@ -1,4 +1,3 @@
-/// <reference types="vitest" />
 import { type ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { vi } from "vitest";
