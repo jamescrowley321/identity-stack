@@ -3,6 +3,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
+from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.descope import get_descope_client
 
 router = APIRouter()
@@ -35,9 +36,10 @@ async def list_members(
 
 
 @router.post("/members/invite")
+@limiter.limit(RATE_LIMIT_AUTH)
 async def invite_member(
-    body: InviteUserRequest,
     request: Request,
+    body: InviteUserRequest,
     tenant_id: str = Depends(get_tenant_id),
     caller_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
