@@ -1,6 +1,7 @@
 import os
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
@@ -12,6 +13,7 @@ from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.middleware.security import SecurityHeadersMiddleware
 from app.models.database import create_db_and_tables
 from app.routers import accesskeys, attributes, auth, health, protected, roles, tenants, users
+from app.services.descope import init_descope_client, shutdown_descope_client
 
 TRUSTED_PROXY_HOSTS = os.getenv("TRUSTED_PROXY_HOSTS", "127.0.0.1").split(",")
 
@@ -19,7 +21,11 @@ TRUSTED_PROXY_HOSTS = os.getenv("TRUSTED_PROXY_HOSTS", "127.0.0.1").split(",")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     create_db_and_tables()
+    http_client = httpx.AsyncClient(timeout=30.0)
+    init_descope_client(http_client=http_client)
     yield
+    await http_client.aclose()
+    shutdown_descope_client()
 
 
 app = FastAPI(title="Descope SaaS Starter API", lifespan=lifespan)
