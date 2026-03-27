@@ -1,7 +1,16 @@
 import { useEffect, useState, useCallback } from "react";
-import { useApiClient } from "../hooks/useApiClient";
-import { useRBAC } from "../hooks/useRBAC";
-import { PageHeader } from "../components/layout/PageHeader";
+import { toast } from "sonner";
+import { useApiClient } from "@/hooks/useApiClient";
+import { useRBAC } from "@/hooks/useRBAC";
+import { PageHeader } from "@/components/layout/PageHeader";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
 
 interface TenantSettingsData {
   tenant_id: string;
@@ -17,7 +26,6 @@ export default function TenantSettings() {
   const [settings, setSettings] = useState<TenantSettingsData | null>(null);
   const [planTier, setPlanTier] = useState("free");
   const [maxMembers, setMaxMembers] = useState("10");
-  const [status, setStatus] = useState<string | null>(null);
 
   useEffect(() => {
     apiFetch("/api/tenants/current/settings")
@@ -33,7 +41,6 @@ export default function TenantSettings() {
   }, [apiFetch]);
 
   const handleSave = useCallback(async () => {
-    setStatus(null);
     try {
       const res = await apiFetch("/api/tenants/current/settings", {
         method: "PATCH",
@@ -43,7 +50,7 @@ export default function TenantSettings() {
         }),
       });
       if (res.ok) {
-        setStatus("Settings saved");
+        toast.success("Settings saved");
         setSettings((prev) =>
           prev
             ? { ...prev, custom_attributes: { ...prev.custom_attributes, plan_tier: planTier, max_members: parseInt(maxMembers, 10) || 10 } }
@@ -51,18 +58,21 @@ export default function TenantSettings() {
         );
       } else {
         const err = await res.json();
-        setStatus(`Error: ${err.detail || res.statusText}`);
+        toast.error(err.detail || res.statusText);
       }
     } catch {
-      setStatus("Failed to save");
+      toast.error("Failed to save");
     }
   }, [planTier, maxMembers, apiFetch]);
 
   if (!settings) {
     return (
-      <div className="flex items-center justify-center p-8">
-        <p className="text-muted-foreground">Loading...</p>
-      </div>
+      <>
+        <PageHeader title="Tenant Settings" />
+        <div className="p-6 space-y-6">
+          <Skeleton className="h-32 w-full" />
+        </div>
+      </>
     );
   }
 
@@ -72,43 +82,64 @@ export default function TenantSettings() {
     <>
       <PageHeader title="Tenant Settings" description={settings.name || settings.tenant_id} />
       <div className="p-6 space-y-6">
-        <section>
-          <p><strong>Plan:</strong> {String(attrs.plan_tier ?? "free")}</p>
-          <p><strong>Max Members:</strong> {String(attrs.max_members ?? "Not set")}</p>
-        </section>
+        <Card>
+          <CardHeader>
+            <CardTitle>Current Settings</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted-foreground">Plan:</span>
+              <Badge variant="outline">{String(attrs.plan_tier ?? "free")}</Badge>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted-foreground">Max Members:</span>
+              <span className="text-sm font-medium">{String(attrs.max_members ?? "Not set")}</span>
+            </div>
+          </CardContent>
+        </Card>
 
         {isAdmin && (
-          <section>
-            <h2>Edit Settings</h2>
-            <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", marginTop: "0.5rem" }}>
-              <label>
-                Plan Tier:{" "}
-                <select value={planTier} onChange={(e) => setPlanTier(e.target.value)}>
-                  {PLAN_TIERS.map((t) => (
-                    <option key={t} value={t}>{t}</option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Max Members:{" "}
-                <input
-                  type="number"
-                  value={maxMembers}
-                  onChange={(e) => setMaxMembers(e.target.value)}
-                  style={{ width: "80px", padding: "0.25rem" }}
-                  min="1"
-                />
-              </label>
-              <button onClick={handleSave}>Save</button>
-            </div>
-            {status && <p style={{ marginTop: "0.5rem", fontStyle: "italic" }}>{status}</p>}
-          </section>
+          <Card>
+            <CardHeader>
+              <CardTitle>Edit Settings</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="flex gap-4 flex-wrap items-end">
+                <div className="space-y-1">
+                  <Label>Plan Tier</Label>
+                  <Select value={planTier} onValueChange={setPlanTier}>
+                    <SelectTrigger className="w-36">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {PLAN_TIERS.map((t) => (
+                        <SelectItem key={t} value={t}>{t}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label>Max Members</Label>
+                  <Input
+                    type="number"
+                    value={maxMembers}
+                    onChange={(e) => setMaxMembers(e.target.value)}
+                    className="w-24"
+                    min="1"
+                  />
+                </div>
+                <Button onClick={handleSave}>Save</Button>
+              </div>
+            </CardContent>
+          </Card>
         )}
 
         {!isAdmin && (
-          <p style={{ color: "#666" }}>
-            Contact an admin to change tenant settings.
-          </p>
+          <Alert>
+            <AlertDescription>
+              Contact an admin to change tenant settings.
+            </AlertDescription>
+          </Alert>
         )}
       </div>
     </>
