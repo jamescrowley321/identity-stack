@@ -1,14 +1,14 @@
-import logging
-
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
+from app.logging_config import get_logger
+from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.descope import DescopeManagementClient, get_descope_client
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -54,6 +54,7 @@ async def create_access_key(
             expire_time=body.expire_time,
             role_names=body.role_names,
         )
+        logger.info("accesskey.created name=%s tenant=%s", body.name, tenant_id)
         return result
     except httpx.HTTPStatusError as exc:
         logger.warning("Descope API error creating access key: %s", exc.response.status_code)
@@ -104,6 +105,7 @@ async def deactivate_access_key(
         client = get_descope_client()
         await _verify_key_tenant(key_id, tenant_id, client)
         await client.deactivate_access_key(key_id)
+        logger.info("accesskey.deactivated key_id=%s tenant=%s", key_id, tenant_id)
         return {"status": "deactivated", "key_id": key_id}
     except HTTPException:
         raise

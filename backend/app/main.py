@@ -7,12 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.middleware.auth import TokenValidationMiddleware
 from app.models.database import create_db_and_tables
-<<<<<<< HEAD
 from app.routers import accesskeys, attributes, auth, health, protected, roles, tenants
-=======
-from app.routers import attributes, auth, health, protected, roles, tenants
 from app.services.descope import init_descope_client, shutdown_descope_client
->>>>>>> origin/main
 
 
 @asynccontextmanager
