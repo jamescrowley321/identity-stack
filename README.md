@@ -129,7 +129,27 @@ The frontend is available at http://localhost:3000 and the backend at http://loc
 | GET | `/api/tenants/{id}/resources` | List tenant-scoped resources |
 | POST | `/api/tenants/{id}/resources` | Create a tenant-scoped resource |
 
+### Role Management (RBAC)
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/roles/me` | Get current user's roles and permissions in active tenant |
+| POST | `/api/roles/assign` | Assign roles to a user (requires owner/admin) |
+| POST | `/api/roles/remove` | Remove roles from a user (requires owner/admin) |
+
 Tenant isolation is enforced via the `dct` (Descope current tenant) JWT claim. Users can only access resources belonging to their active tenant.
+
+### RBAC
+
+Four roles are defined via Terraform (`infra/rbac.tf`):
+
+| Role | Description | Key Permissions |
+|------|-------------|-----------------|
+| `owner` | Full access including billing | All permissions |
+| `admin` | Full access except billing | All except `billing.manage` |
+| `member` | Standard read/write access | Read/write documents, invite members |
+| `viewer` | Read-only access | Read projects and documents |
+
+Backend endpoints enforce authorization via `require_role()` and `require_permission()` dependency factories. Frontend uses `<RequireRole>` and `<RequirePermission>` components for conditional UI rendering.
 
 ## Project Structure
 
@@ -155,6 +175,7 @@ descope-saas-starter/
 │   ├── project.tf
 │   ├── access_key.tf
 │   ├── tenants.tf     # Default tenant definitions
+│   ├── rbac.tf        # Permissions and role definitions
 │   └── environments/
 └── docker-compose.yml
 ```

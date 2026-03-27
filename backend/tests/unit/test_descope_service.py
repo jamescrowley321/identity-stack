@@ -112,6 +112,40 @@ class TestDescopeManagementClient:
             json={"loginId": "user1", "tenantId": "t1"},
         )
 
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_assign_roles(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(
+            status_code=200,
+            raise_for_status=MagicMock(),
+        )
+
+        await client.assign_roles("user1", "t1", ["admin", "member"])
+        mock_http.post.assert_called_once_with(
+            "https://api.descope.com/v1/mgmt/user/update/role/add",
+            headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
+            json={"loginId": "user1", "tenantId": "t1", "roleNames": ["admin", "member"]},
+        )
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_remove_roles(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(
+            status_code=200,
+            raise_for_status=MagicMock(),
+        )
+
+        await client.remove_roles("user1", "t1", ["member"])
+        mock_http.post.assert_called_once_with(
+            "https://api.descope.com/v1/mgmt/user/update/role/remove",
+            headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
+            json={"loginId": "user1", "tenantId": "t1", "roleNames": ["member"]},
+        )
+
 
 class TestGetDescopeClient:
     def test_creates_client_from_env(self, monkeypatch):
