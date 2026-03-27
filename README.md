@@ -180,6 +180,21 @@ Four roles are defined via Terraform (`infra/rbac.tf`):
 
 Backend endpoints enforce authorization via `require_role()` and `require_permission()` dependency factories. Frontend uses `<RequireRole>` and `<RequirePermission>` components for conditional UI rendering.
 
+### Security Headers
+
+All API responses include security headers via `SecurityHeadersMiddleware`:
+
+| Header | Value |
+|--------|-------|
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `DENY` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `X-XSS-Protection` | `0` (disabled in favor of CSP) |
+| `Content-Security-Policy` | `default-src 'self'` (configurable via `CSP_POLICY`) |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` (production only) |
+
+Set `ENVIRONMENT=production` to enable HSTS and strict CSP. Override CSP with `CSP_POLICY` env var.
+
 ## Project Structure
 
 ```
