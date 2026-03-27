@@ -1,28 +1,24 @@
 """E2E authentication helpers.
 
-Uses the client credentials (access key) flow to get OIDC-compatible tokens.
-This produces tokens with the correct issuer for py-identity-model validation.
+Uses two approaches:
+1. Client credentials (access key) for API-only tests — OIDC-compatible tokens
+2. Session token injection for browser tests — uses client credentials tokens
+   injected into sessionStorage for react-oidc-context to pick up
 
-For test user management, uses the Descope Management API.
+The test user is created via Management API with `test: True`.
 """
 
+import json
 import os
 
 import httpx
-from py_identity_model import (
-    ClientCredentialsTokenRequest,
-    DiscoveryDocumentRequest,
-    get_discovery_document,
-    request_client_credentials_token,
-)
+from playwright.sync_api import BrowserContext
 
 DESCOPE_BASE_URL = os.environ.get("DESCOPE_BASE_URL", "https://api.descope.com")
 DESCOPE_PROJECT_ID = os.environ.get("DESCOPE_PROJECT_ID", "")
 DESCOPE_MANAGEMENT_KEY = os.environ.get("DESCOPE_MANAGEMENT_KEY", "")
-DESCOPE_CLIENT_ID = os.environ.get("DESCOPE_CLIENT_ID", "")
-DESCOPE_CLIENT_SECRET = os.environ.get("DESCOPE_CLIENT_SECRET", "")
 
-E2E_TEST_EMAIL = "e2e-test@descope-saas-starter.test"
+E2E_TEST_EMAIL = os.environ.get("E2E_TEST_EMAIL", "")
 E2E_TEST_TENANT_ID = os.environ.get("E2E_TEST_TENANT_ID", "")
 
 
@@ -34,21 +30,65 @@ def _mgmt_url(path: str) -> str:
     return f"{DESCOPE_BASE_URL}{path}"
 
 
-def get_access_token_via_client_credentials() -> str:
-    """Get an OIDC-compatible access token via client credentials flow.
+def ensure_test_user(
+    email: str = "",
+    tenant_id: str = "",
+    roles: list[str] | None = None,
+) -> dict:
+    """Create a test user if it doesn't already exist."""
+    email = email or E2E_TEST_EMAIL
+    tenant_id = tenant_id or E2E_TEST_TENANT_ID
+    roles = roles or ["owner", "admin"]
 
-    Uses DESCOPE_CLIENT_ID and DESCOPE_CLIENT_SECRET (access key credentials).
-    The resulting token has the correct issuer for py-identity-model validation.
-    """
-    disco_address = f"{DESCOPE_BASE_URL}/{DESCOPE_PROJECT_ID}/.well-known/openid-configuration"
-    disco = get_discovery_document(DiscoveryDocumentRequest(address=disco_address))
+    with httpx.Client(timeout=30) as client:
+        resp = client.post(
+            _mgmt_url("/v1/mgmt/user"),
+            headers=_auth_header(),
+            json={"loginId": email},
+        )
+        if resp.status_code == 200 and resp.json().get("user"):
+            return resp.json()["user"]
+
+        tenants = [{"tenantId": tenant_id, "roleNames": roles}] if tenant_id else []
+        resp = client.post(
+            _mgmt_url("/v1/mgmt/user/create"),
+            headers=_auth_header(),
+            json={
+                "loginId": email,
+                "email": email,
+                "name": "E2E Test User",
+                "tenants": tenants,
+                "verifiedEmail": True,
+                "test": True,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json().get("user", {})
+
+
+def get_oidc_access_token() -> str:
+    """Get an OIDC-compatible access token via client credentials flow."""
+    from py_identity_model import (
+        ClientCredentialsTokenRequest,
+        DiscoveryDocumentRequest,
+        get_discovery_document,
+        request_client_credentials_token,
+    )
+
+    client_id = os.environ.get("DESCOPE_CLIENT_ID", "")
+    client_secret = os.environ.get("DESCOPE_CLIENT_SECRET", "")
+    if not client_id or not client_secret:
+        raise RuntimeError("DESCOPE_CLIENT_ID/DESCOPE_CLIENT_SECRET not set")
+
+    disco_addr = f"{DESCOPE_BASE_URL}/{DESCOPE_PROJECT_ID}/.well-known/openid-configuration"
+    disco = get_discovery_document(DiscoveryDocumentRequest(address=disco_addr))
     if not disco.is_successful:
         raise RuntimeError(f"Discovery failed: {disco.error}")
 
     response = request_client_credentials_token(
         ClientCredentialsTokenRequest(
-            client_id=DESCOPE_CLIENT_ID,
-            client_secret=DESCOPE_CLIENT_SECRET,
+            client_id=client_id,
+            client_secret=client_secret,
             address=disco.token_endpoint,
             scope="openid",
         )
@@ -59,47 +99,49 @@ def get_access_token_via_client_credentials() -> str:
     return response.token["access_token"]
 
 
-def ensure_test_user(
-    email: str = E2E_TEST_EMAIL,
-    tenant_id: str = "",
-    roles: list[str] | None = None,
-) -> dict:
-    """Create a test user if it doesn't already exist. Returns the user dict."""
-    tenant_id = tenant_id or E2E_TEST_TENANT_ID
-    roles = roles or ["admin"]
+def create_authenticated_context(
+    browser, frontend_url: str, access_token: str
+) -> BrowserContext:
+    """Create a browser context with OIDC tokens injected into sessionStorage.
 
-    with httpx.Client(timeout=30) as client:
-        # Try to load the user first
-        resp = client.post(
-            _mgmt_url("/v1/mgmt/user"),
-            headers=_auth_header(),
-            json={"loginId": email},
-        )
-        if resp.status_code == 200 and resp.json().get("user"):
-            return resp.json()["user"]
+    Uses context.add_init_script() to inject the access token as an OIDC user
+    object BEFORE the page loads, so react-oidc-context finds an authenticated
+    session on first render.
+    """
+    authority = f"{DESCOPE_BASE_URL}/{DESCOPE_PROJECT_ID}"
+    storage_key = f"oidc.user:{authority}:{DESCOPE_PROJECT_ID}"
 
-        # Create the user
-        tenants = [{"tenantId": tenant_id}]
-        if roles:
-            tenants[0]["roleNames"] = roles
+    # Decode the JWT to extract the sub claim for the profile
+    import base64
+    parts = access_token.split(".")
+    payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=="))
 
-        resp = client.post(
-            _mgmt_url("/v1/mgmt/user/create"),
-            headers=_auth_header(),
-            json={
-                "loginId": email,
-                "email": email,
-                "name": "E2E Test User",
-                "tenants": tenants if tenant_id else [],
-                "test": True,
-            },
-        )
-        resp.raise_for_status()
-        return resp.json().get("user", {})
+    oidc_user = {
+        "id_token": access_token,
+        "session_state": None,
+        "access_token": access_token,
+        "refresh_token": "",
+        "token_type": "Bearer",
+        "scope": "openid profile email",
+        "profile": {
+            "sub": payload.get("sub", ""),
+        },
+        "expires_at": payload.get("exp", 9999999999),
+    }
+
+    init_script = (
+        f"sessionStorage.setItem({json.dumps(storage_key)}, "
+        f"{json.dumps(json.dumps(oidc_user))});"
+    )
+
+    context = browser.new_context(viewport={"width": 1280, "height": 720})
+    context.add_init_script(init_script)
+    return context
 
 
-def cleanup_test_user(email: str = E2E_TEST_EMAIL) -> None:
+def cleanup_test_user(email: str = "") -> None:
     """Delete the test user."""
+    email = email or E2E_TEST_EMAIL
     with httpx.Client(timeout=30) as client:
         client.post(
             _mgmt_url("/v1/mgmt/user/delete"),

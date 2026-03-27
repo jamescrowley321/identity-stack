@@ -39,11 +39,11 @@ def test_tenants_endpoint_lists_user_tenants(auth_api_context: APIRequestContext
     assert "tenants" in body
 
 
-def test_validate_id_token(auth_api_context: APIRequestContext, backend_url: str, access_token: str):
+def test_validate_id_token(auth_api_context: APIRequestContext, backend_url: str, auth_access_token: str):
     """POST /api/validate-id-token validates the access token."""
     response = auth_api_context.post(
         f"{backend_url}/api/validate-id-token",
-        headers={"Authorization": f"Bearer {access_token}"},
+        headers={"Authorization": f"Bearer {auth_access_token}"},
     )
     assert response.status == 200
     body = response.json()
