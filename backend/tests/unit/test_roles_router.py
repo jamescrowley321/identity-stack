@@ -356,3 +356,47 @@ async def test_assign_roles_descope_5xx_returns_502(mock_validate, mock_factory,
     )
     assert response.status_code == 502
     assert "upstream service error" in response.json()["detail"]
+
+
+@pytest.mark.anyio
+@patch("app.routers.roles.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_remove_roles_descope_4xx_returns_400(mock_validate, mock_factory, client):
+    """Descope 4xx errors on remove should map to 400 with generic message."""
+    mock_validate.return_value = OWNER_CLAIMS
+    mock_client = AsyncMock()
+    mock_response = MagicMock(status_code=404)
+    mock_client.remove_roles.side_effect = httpx.HTTPStatusError(
+        "Not Found", request=MagicMock(), response=mock_response
+    )
+    mock_factory.return_value = mock_client
+
+    response = await client.post(
+        "/api/roles/remove",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"user_id": "target-user", "tenant_id": "tenant-abc", "role_names": ["member"]},
+    )
+    assert response.status_code == 400
+    assert "invalid request" in response.json()["detail"]
+
+
+@pytest.mark.anyio
+@patch("app.routers.roles.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_remove_roles_descope_5xx_returns_502(mock_validate, mock_factory, client):
+    """Descope 5xx errors on remove should map to 502 with generic message."""
+    mock_validate.return_value = OWNER_CLAIMS
+    mock_client = AsyncMock()
+    mock_response = MagicMock(status_code=500)
+    mock_client.remove_roles.side_effect = httpx.HTTPStatusError(
+        "Server Error", request=MagicMock(), response=mock_response
+    )
+    mock_factory.return_value = mock_client
+
+    response = await client.post(
+        "/api/roles/remove",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"user_id": "target-user", "tenant_id": "tenant-abc", "role_names": ["member"]},
+    )
+    assert response.status_code == 502
+    assert "upstream service error" in response.json()["detail"]
