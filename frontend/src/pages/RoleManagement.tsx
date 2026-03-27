@@ -5,6 +5,11 @@ import { Link } from "react-router-dom";
 
 const AVAILABLE_ROLES = ["owner", "admin", "member", "viewer"];
 
+interface RoleHierarchyEntry {
+  description: string;
+  permissions: string[];
+}
+
 export default function RoleManagement() {
   const { apiFetch } = useApiClient();
   const { roles, permissions, isAdmin, currentTenantId } = useRBAC();
@@ -13,11 +18,16 @@ export default function RoleManagement() {
   const [status, setStatus] = useState<string | null>(null);
 
   const [myRoles, setMyRoles] = useState<{ roles: string[]; permissions: string[] } | null>(null);
+  const [hierarchy, setHierarchy] = useState<Record<string, RoleHierarchyEntry> | null>(null);
 
   useEffect(() => {
     apiFetch("/api/roles/me")
       .then((res) => (res.ok ? res.json() : null))
       .then(setMyRoles)
+      .catch(() => {});
+    apiFetch("/api/rbac/hierarchy")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => data && setHierarchy(data.roles))
       .catch(() => {});
   }, [apiFetch]);
 
@@ -115,6 +125,63 @@ export default function RoleManagement() {
         <p style={{ marginTop: "2rem", color: "#666" }}>
           You need an admin or owner role to manage other users' roles.
         </p>
+      )}
+
+      <section style={{ marginTop: "2rem" }}>
+        <h2>Effective Permissions</h2>
+        <p style={{ fontSize: "0.85rem", color: "#666" }}>
+          These are the permissions Descope resolved for your current session via JWT claims.
+        </p>
+        {permissions.length > 0 ? (
+          <ul style={{ columns: 2, listStyle: "none", padding: 0, margin: "0.5rem 0" }}>
+            {permissions.map((p) => (
+              <li key={p} style={{ padding: "0.15rem 0", fontFamily: "monospace", fontSize: "0.9rem" }}>
+                {p}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p>No permissions resolved.</p>
+        )}
+      </section>
+
+      {hierarchy && (
+        <section style={{ marginTop: "2rem" }}>
+          <h2>Role Hierarchy</h2>
+          <p style={{ fontSize: "0.85rem", color: "#666" }}>
+            Each higher role is a superset of the one below it.
+          </p>
+          <table style={{ borderCollapse: "collapse", width: "100%", marginTop: "0.5rem" }}>
+            <thead>
+              <tr style={{ borderBottom: "2px solid #ccc", textAlign: "left" }}>
+                <th style={{ padding: "0.4rem 0.6rem" }}>Role</th>
+                <th style={{ padding: "0.4rem 0.6rem" }}>Description</th>
+                <th style={{ padding: "0.4rem 0.6rem" }}>Permissions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {AVAILABLE_ROLES.map((role) => {
+                const entry = hierarchy[role];
+                if (!entry) return null;
+                const isMyRole = roles.includes(role);
+                return (
+                  <tr key={role} style={{ borderBottom: "1px solid #eee", background: isMyRole ? "#e8f5e9" : undefined }}>
+                    <td style={{ padding: "0.4rem 0.6rem", fontWeight: "bold" }}>
+                      {role}{isMyRole ? " *" : ""}
+                    </td>
+                    <td style={{ padding: "0.4rem 0.6rem", fontSize: "0.9rem" }}>{entry.description}</td>
+                    <td style={{ padding: "0.4rem 0.6rem", fontFamily: "monospace", fontSize: "0.8rem" }}>
+                      {entry.permissions.join(", ")}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <p style={{ fontSize: "0.8rem", color: "#666", marginTop: "0.3rem" }}>
+            * = your current role
+          </p>
+        </section>
       )}
     </div>
   );
