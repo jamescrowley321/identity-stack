@@ -11,7 +11,7 @@ dependencies = [
     "httpx>=0.28,<1",
     "pydantic[email]>=2.0",
     "slowapi>=0.1.9,<1",
-    "python-json-logger>=3.0,<4",
+    "python-json-logger>=3.0,<5",
 ]
 
 [project.optional-dependencies]
