@@ -1,7 +1,7 @@
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.dependencies.fga import require_fga
@@ -9,6 +9,7 @@ from app.dependencies.tenant import get_tenant_id
 from app.logging_config import get_logger
 from app.models.database import get_session
 from app.models.document import Document
+from app.services.descope import get_descope_client
 from app.services.fga import DescopeFGAClient, get_fga_client
 
 logger = get_logger(__name__)
@@ -16,12 +17,12 @@ router = APIRouter()
 
 
 class CreateDocumentRequest(BaseModel):
-    title: str
+    title: str = Field(max_length=500)
     content: str = ""
 
 
 class UpdateDocumentRequest(BaseModel):
-    title: str | None = None
+    title: str | None = Field(default=None, max_length=500)
     content: str | None = None
 
 
@@ -49,9 +50,18 @@ async def create_document(
     fga = get_fga_client()
     await fga.create_relation("document", doc.id, "owner", user_id)
 
-    session.add(doc)
-    session.commit()
-    session.refresh(doc)
+    # M1: If DB commit fails, compensate by deleting the FGA relation
+    try:
+        session.add(doc)
+        session.commit()
+        session.refresh(doc)
+    except Exception:
+        logger.warning("document.create db_commit_failed, rolling back FGA relation id=%s", doc.id)
+        try:
+            await fga.delete_relation("document", doc.id, "owner", user_id)
+        except Exception:
+            logger.error("document.create fga_rollback_failed id=%s", doc.id)
+        raise
 
     logger.info("document.created id=%s tenant=%s", doc.id, tenant_id)
     return doc.model_dump()
@@ -76,7 +86,7 @@ async def list_documents(
     if not viewable_ids:
         return {"documents": []}
 
-    # Filter to current tenant's documents
+    # M2: Filter to current tenant's documents (prevents cross-tenant info leak)
     docs = session.exec(select(Document).where(Document.tenant_id == tenant_id, Document.id.in_(viewable_ids))).all()
     return {"documents": [d.model_dump() for d in docs]}
 
@@ -89,6 +99,7 @@ async def get_document(
     session: Session = Depends(get_session),
 ):
     """Get a document by ID. Requires can_view permission via FGA."""
+    # M2: Verify document belongs to caller's tenant
     doc = session.get(Document, document_id)
     if not doc or doc.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -131,11 +142,15 @@ async def delete_document(
     if not doc or doc.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # Clean up FGA relations
+    # M4: Clean up all FGA relations first — abort if any fail
     fga = get_fga_client()
     relations = await fga.list_relations("document", document_id)
     for rel in relations:
-        await fga.delete_relation("document", document_id, rel.get("relation", ""), rel.get("target", ""))
+        try:
+            await fga.delete_relation("document", document_id, rel.get("relation", ""), rel.get("target", ""))
+        except Exception:
+            logger.error("document.delete fga_cleanup_failed id=%s relation=%s", document_id, rel)
+            raise HTTPException(status_code=502, detail="Failed to clean up document permissions. Delete aborted.")
 
     session.delete(doc)
     session.commit()
@@ -155,6 +170,17 @@ async def share_document(
     doc = session.get(Document, document_id)
     if not doc or doc.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    # M5: Verify target user exists in the same tenant
+    descope = get_descope_client()
+    try:
+        target_user = await descope.load_user(body.user_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Target user not found")
+    raw_tenants = target_user.get("userTenants") or []
+    user_tenants = [t.get("tenantId", "") for t in raw_tenants]
+    if tenant_id not in user_tenants:
+        raise HTTPException(status_code=403, detail="Cannot share with users outside your tenant")
 
     fga = get_fga_client()
     await fga.create_relation("document", document_id, body.relation, body.user_id)

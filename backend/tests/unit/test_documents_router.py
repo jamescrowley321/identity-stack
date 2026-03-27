@@ -122,10 +122,11 @@ async def test_get_document_denied(mock_validate, mock_fga_dep, client):
 
 
 @pytest.mark.anyio
+@patch("app.routers.documents.get_descope_client")
 @patch("app.dependencies.fga.get_fga_client")
 @patch("app.routers.documents.get_fga_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_share_document(mock_validate, mock_fga_factory, mock_fga_dep, client):
+async def test_share_document(mock_validate, mock_fga_factory, mock_fga_dep, mock_descope, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_fga = AsyncMock()
     mock_fga.create_relation.return_value = None
@@ -133,6 +134,10 @@ async def test_share_document(mock_validate, mock_fga_factory, mock_fga_dep, cli
     mock_fga_dep_instance = AsyncMock()
     mock_fga_dep_instance.check_permission.return_value = True
     mock_fga_dep.return_value = mock_fga_dep_instance
+    # Mock Descope client to validate target user is in the same tenant
+    mock_descope_client = AsyncMock()
+    mock_descope_client.load_user.return_value = {"userTenants": [{"tenantId": "tenant-abc"}]}
+    mock_descope.return_value = mock_descope_client
 
     # Create document first
     create_resp = await client.post(

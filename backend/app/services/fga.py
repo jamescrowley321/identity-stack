@@ -89,9 +89,15 @@ class DescopeFGAClient(DescopeManagementClient):
         return resp.json().get("resources", [])
 
 
+_fga_client: DescopeFGAClient | None = None
+
+
 def get_fga_client() -> DescopeFGAClient:
-    """Factory that creates a DescopeFGAClient from environment variables."""
-    project_id = os.environ["DESCOPE_PROJECT_ID"]
-    management_key = os.getenv("DESCOPE_MANAGEMENT_KEY", "")
-    base_url = os.getenv("DESCOPE_BASE_URL", "https://api.descope.com")
-    return DescopeFGAClient(project_id, management_key, base_url)
+    """Return a cached DescopeFGAClient singleton (one per process)."""
+    global _fga_client
+    if _fga_client is None:
+        project_id = os.environ["DESCOPE_PROJECT_ID"]
+        management_key = os.getenv("DESCOPE_MANAGEMENT_KEY", "")
+        base_url = os.getenv("DESCOPE_BASE_URL", "https://api.descope.com")
+        _fga_client = DescopeFGAClient(project_id, management_key, base_url)
+    return _fga_client
