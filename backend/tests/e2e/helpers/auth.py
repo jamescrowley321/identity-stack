@@ -99,9 +99,7 @@ def get_oidc_access_token() -> str:
     return response.token["access_token"]
 
 
-def create_authenticated_context(
-    browser, frontend_url: str, access_token: str
-) -> BrowserContext:
+def create_authenticated_context(browser, frontend_url: str, access_token: str) -> BrowserContext:
     """Create a browser context with OIDC tokens injected into sessionStorage.
 
     Uses context.add_init_script() to inject the access token as an OIDC user
@@ -113,6 +111,7 @@ def create_authenticated_context(
 
     # Decode the JWT to extract the sub claim for the profile
     import base64
+
     parts = access_token.split(".")
     payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=="))
 
@@ -129,10 +128,7 @@ def create_authenticated_context(
         "expires_at": payload.get("exp", 9999999999),
     }
 
-    init_script = (
-        f"sessionStorage.setItem({json.dumps(storage_key)}, "
-        f"{json.dumps(json.dumps(oidc_user))});"
-    )
+    init_script = f"sessionStorage.setItem({json.dumps(storage_key)}, {json.dumps(json.dumps(oidc_user))});"
 
     context = browser.new_context(viewport={"width": 1280, "height": 720})
     context.add_init_script(init_script)

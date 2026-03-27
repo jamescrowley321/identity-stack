@@ -14,9 +14,7 @@ FRONTEND_URL = os.environ.get("E2E_FRONTEND_URL", "http://localhost:3000")
 BACKEND_URL = os.environ.get("E2E_BACKEND_URL", "http://localhost:8000")
 
 _has_mgmt_key = bool(os.environ.get("DESCOPE_MANAGEMENT_KEY"))
-_has_client_creds = bool(
-    os.environ.get("DESCOPE_CLIENT_ID") and os.environ.get("DESCOPE_CLIENT_SECRET")
-)
+_has_client_creds = bool(os.environ.get("DESCOPE_CLIENT_ID") and os.environ.get("DESCOPE_CLIENT_SECRET"))
 
 
 @pytest.fixture(scope="session")

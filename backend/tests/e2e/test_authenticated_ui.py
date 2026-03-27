@@ -10,8 +10,7 @@ import pytest
 from playwright.sync_api import Page, expect
 
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("DESCOPE_MANAGEMENT_KEY")
-    or not os.environ.get("DESCOPE_CLIENT_ID"),
+    not os.environ.get("DESCOPE_MANAGEMENT_KEY") or not os.environ.get("DESCOPE_CLIENT_ID"),
     reason="DESCOPE credentials not set",
 )
 
