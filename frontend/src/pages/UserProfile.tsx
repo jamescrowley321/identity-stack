@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
-import { Link } from "react-router-dom";
 import { useApiClient } from "../hooks/useApiClient";
+import { PageHeader } from "../components/layout/PageHeader";
 
 const USER_ATTRIBUTES = ["department", "job_title", "avatar_url"];
 
@@ -49,64 +49,68 @@ export default function UserProfile() {
     }
   }, [editKey, editValue, apiFetch]);
 
-  if (!profile) return <div style={{ padding: "2rem" }}>Loading...</div>;
+  if (!profile) {
+    return (
+      <div className="flex items-center justify-center p-8">
+        <p className="text-muted-foreground">Loading...</p>
+      </div>
+    );
+  }
 
   return (
-    <div style={{ padding: "2rem", maxWidth: "900px", margin: "0 auto" }}>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h1>User Profile</h1>
-        <Link to="/">Back to Dashboard</Link>
-      </header>
+    <>
+      <PageHeader title="User Profile" description={profile.email || undefined} />
+      <div className="p-6 space-y-6">
+        <section>
+          <p><strong>Name:</strong> {profile.name || "Not set"}</p>
+          <p><strong>Email:</strong> {profile.email || "Not set"}</p>
+        </section>
 
-      <section style={{ marginTop: "2rem" }}>
-        <p><strong>Name:</strong> {profile.name || "Not set"}</p>
-        <p><strong>Email:</strong> {profile.email || "Not set"}</p>
-      </section>
-
-      <section style={{ marginTop: "2rem" }}>
-        <h2>Custom Attributes</h2>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ddd" }}>Attribute</th>
-              <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ddd" }}>Value</th>
-              <th style={{ padding: "0.5rem", borderBottom: "1px solid #ddd" }}></th>
-            </tr>
-          </thead>
-          <tbody>
-            {USER_ATTRIBUTES.map((key) => (
-              <tr key={key}>
-                <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>{key}</td>
-                <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>
-                  {editKey === key ? (
-                    <input
-                      type="text"
-                      value={editValue}
-                      onChange={(e) => setEditValue(e.target.value)}
-                      style={{ padding: "0.25rem", width: "100%" }}
-                    />
-                  ) : (
-                    profile.custom_attributes[key] || <span style={{ color: "#999" }}>Not set</span>
-                  )}
-                </td>
-                <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee", textAlign: "right" }}>
-                  {editKey === key ? (
-                    <>
-                      <button onClick={handleSave}>Save</button>{" "}
-                      <button onClick={() => setEditKey(null)}>Cancel</button>
-                    </>
-                  ) : (
-                    <button onClick={() => { setEditKey(key); setEditValue(profile.custom_attributes[key] || ""); }}>
-                      Edit
-                    </button>
-                  )}
-                </td>
+        <section>
+          <h2>Custom Attributes</h2>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ddd" }}>Attribute</th>
+                <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "1px solid #ddd" }}>Value</th>
+                <th style={{ padding: "0.5rem", borderBottom: "1px solid #ddd" }}></th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-        {status && <p style={{ marginTop: "0.5rem", fontStyle: "italic" }}>{status}</p>}
-      </section>
-    </div>
+            </thead>
+            <tbody>
+              {USER_ATTRIBUTES.map((key) => (
+                <tr key={key}>
+                  <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>{key}</td>
+                  <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>
+                    {editKey === key ? (
+                      <input
+                        type="text"
+                        value={editValue}
+                        onChange={(e) => setEditValue(e.target.value)}
+                        style={{ padding: "0.25rem", width: "100%" }}
+                      />
+                    ) : (
+                      profile.custom_attributes[key] || <span style={{ color: "#999" }}>Not set</span>
+                    )}
+                  </td>
+                  <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee", textAlign: "right" }}>
+                    {editKey === key ? (
+                      <>
+                        <button onClick={handleSave}>Save</button>{" "}
+                        <button onClick={() => setEditKey(null)}>Cancel</button>
+                      </>
+                    ) : (
+                      <button onClick={() => { setEditKey(key); setEditValue(profile.custom_attributes[key] || ""); }}>
+                        Edit
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {status && <p style={{ marginTop: "0.5rem", fontStyle: "italic" }}>{status}</p>}
+        </section>
+      </div>
+    </>
   );
 }
