@@ -1,7 +1,14 @@
 import { useEffect, useState, useCallback } from "react";
-import { useApiClient } from "../hooks/useApiClient";
-import { useRBAC } from "../hooks/useRBAC";
-import { PageHeader } from "../components/layout/PageHeader";
+import { toast } from "sonner";
+import { useApiClient } from "@/hooks/useApiClient";
+import { useRBAC } from "@/hooks/useRBAC";
+import { PageHeader } from "@/components/layout/PageHeader";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 const AVAILABLE_ROLES = ["owner", "admin", "member", "viewer"];
 
@@ -10,7 +17,6 @@ export default function RoleManagement() {
   const { roles, permissions, isAdmin, currentTenantId } = useRBAC();
   const [userId, setUserId] = useState("");
   const [selectedRole, setSelectedRole] = useState(AVAILABLE_ROLES[2]);
-  const [status, setStatus] = useState<string | null>(null);
 
   const [myRoles, setMyRoles] = useState<{ roles: string[]; permissions: string[] } | null>(null);
 
@@ -23,7 +29,6 @@ export default function RoleManagement() {
 
   const handleAssign = useCallback(async () => {
     if (!userId.trim() || !currentTenantId) return;
-    setStatus(null);
     try {
       const res = await apiFetch("/api/roles/assign", {
         method: "POST",
@@ -31,20 +36,19 @@ export default function RoleManagement() {
         body: JSON.stringify({ user_id: userId.trim(), tenant_id: currentTenantId, role_names: [selectedRole] }),
       });
       if (res.ok) {
-        setStatus(`Assigned "${selectedRole}" to ${userId.trim()}`);
+        toast.success(`Assigned "${selectedRole}" to ${userId.trim()}`);
         setUserId("");
       } else {
         const err = await res.json();
-        setStatus(`Error: ${err.detail || res.statusText}`);
+        toast.error(err.detail || res.statusText);
       }
     } catch {
-      setStatus("Failed to assign role");
+      toast.error("Failed to assign role");
     }
   }, [userId, selectedRole, currentTenantId, apiFetch]);
 
   const handleRemove = useCallback(async () => {
     if (!userId.trim() || !currentTenantId) return;
-    setStatus(null);
     try {
       const res = await apiFetch("/api/roles/remove", {
         method: "POST",
@@ -52,14 +56,14 @@ export default function RoleManagement() {
         body: JSON.stringify({ user_id: userId.trim(), tenant_id: currentTenantId, role_names: [selectedRole] }),
       });
       if (res.ok) {
-        setStatus(`Removed "${selectedRole}" from ${userId.trim()}`);
+        toast.success(`Removed "${selectedRole}" from ${userId.trim()}`);
         setUserId("");
       } else {
         const err = await res.json();
-        setStatus(`Error: ${err.detail || res.statusText}`);
+        toast.error(err.detail || res.statusText);
       }
     } catch {
-      setStatus("Failed to remove role");
+      toast.error("Failed to remove role");
     }
   }, [userId, selectedRole, currentTenantId, apiFetch]);
 
@@ -67,51 +71,74 @@ export default function RoleManagement() {
     <>
       <PageHeader title="Role Management" description="View and manage user roles" />
       <div className="p-6 space-y-6">
-        <section>
-          <h2>Your Roles</h2>
-          <p>
-            <strong>Roles:</strong> {roles.length > 0 ? roles.join(", ") : "None"}
-          </p>
-          <p>
-            <strong>Permissions:</strong> {permissions.length > 0 ? permissions.join(", ") : "None"}
-          </p>
-          {myRoles && (
-            <p style={{ fontSize: "0.85rem", color: "#666" }}>
-              (Server-confirmed: {myRoles.roles.join(", ") || "none"})
-            </p>
-          )}
-        </section>
+        <Card>
+          <CardHeader>
+            <CardTitle>Your Roles</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted-foreground">Roles:</span>
+              <div className="flex gap-1">
+                {roles.length > 0 ? roles.map((r) => (
+                  <Badge key={r} variant="outline">{r}</Badge>
+                )) : <span className="text-sm text-muted-foreground">None</span>}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted-foreground">Permissions:</span>
+              <div className="flex gap-1 flex-wrap">
+                {permissions.length > 0 ? permissions.map((p) => (
+                  <Badge key={p} variant="secondary">{p}</Badge>
+                )) : <span className="text-sm text-muted-foreground">None</span>}
+              </div>
+            </div>
+            {myRoles && (
+              <p className="text-xs text-muted-foreground">
+                Server-confirmed: {myRoles.roles.join(", ") || "none"}
+              </p>
+            )}
+          </CardContent>
+        </Card>
 
         {isAdmin && (
-          <section>
-            <h2>Manage User Roles</h2>
-            <p style={{ fontSize: "0.85rem", color: "#666" }}>
-              Assign or remove roles for users in tenant <strong>{currentTenantId}</strong>.
-            </p>
-            <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.5rem", flexWrap: "wrap" }}>
-              <input
-                type="text"
-                placeholder="User ID (login ID)"
-                value={userId}
-                onChange={(e) => setUserId(e.target.value)}
-                style={{ padding: "0.25rem 0.5rem", minWidth: "200px" }}
-              />
-              <select value={selectedRole} onChange={(e) => setSelectedRole(e.target.value)} style={{ padding: "0.25rem 0.5rem" }}>
-                {AVAILABLE_ROLES.map((r) => (
-                  <option key={r} value={r}>{r}</option>
-                ))}
-              </select>
-              <button onClick={handleAssign} disabled={!userId.trim()}>Assign</button>
-              <button onClick={handleRemove} disabled={!userId.trim()}>Remove</button>
-            </div>
-            {status && <p style={{ marginTop: "0.5rem", fontStyle: "italic" }}>{status}</p>}
-          </section>
+          <Card>
+            <CardHeader>
+              <CardTitle>Manage User Roles</CardTitle>
+              <CardDescription>
+                Assign or remove roles for users in tenant {currentTenantId}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex gap-2 flex-wrap">
+                <Input
+                  placeholder="User ID (login ID)"
+                  value={userId}
+                  onChange={(e) => setUserId(e.target.value)}
+                  className="max-w-xs"
+                />
+                <Select value={selectedRole} onValueChange={setSelectedRole}>
+                  <SelectTrigger className="w-32">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {AVAILABLE_ROLES.map((r) => (
+                      <SelectItem key={r} value={r}>{r}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button onClick={handleAssign} disabled={!userId.trim()}>Assign</Button>
+                <Button variant="outline" onClick={handleRemove} disabled={!userId.trim()}>Remove</Button>
+              </div>
+            </CardContent>
+          </Card>
         )}
 
         {!isAdmin && (
-          <p style={{ color: "#666" }}>
-            You need an admin or owner role to manage other users' roles.
-          </p>
+          <Alert>
+            <AlertDescription>
+              You need an admin or owner role to manage other users' roles.
+            </AlertDescription>
+          </Alert>
         )}
       </div>
     </>
