@@ -33,6 +33,13 @@ variable "github_oauth_client_secret" {
   sensitive   = true
 }
 
+# Passkeys (WebAuthn/FIDO2)
+variable "passkey_top_level_domain" {
+  description = "WebAuthn Relying Party ID — passkeys are usable on this domain and all subdomains (leave empty to disable)"
+  type        = string
+  default     = ""
+}
+
 # GitHub Actions
 variable "github_repository" {
   description = "GitHub repository name (without owner) for CI secrets"

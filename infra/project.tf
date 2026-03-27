@@ -30,9 +30,17 @@ resource "descope_project" "main" {
     inactivity_time                     = var.inactivity_time
   }
 
-  # Social login providers — disabled by default; supply credentials via tfvars
-  # to enable. Descope handles the OAuth dance and issues OIDC tokens to the app.
+  # Authentication methods — each disabled by default; supply credentials/config
+  # via tfvars to enable. Descope handles all auth flows before OIDC token issuance.
   authentication {
+    # Passkeys (WebAuthn/FIDO2) — passwordless authentication via biometrics or
+    # security keys. Requires a top-level domain for the Relying Party ID.
+    passkeys {
+      disabled         = var.passkey_top_level_domain == ""
+      top_level_domain = var.passkey_top_level_domain
+    }
+
+    # Social login providers
     oauth {
       system {
         google {
