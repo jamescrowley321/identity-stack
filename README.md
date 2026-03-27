@@ -238,7 +238,21 @@ Google and GitHub OAuth are configured as Descope system providers in `infra/pro
    ```
 3. Providers are disabled by default (empty credentials). Both are configured with `merge_user_accounts = true` so social accounts are linked by email.
 
-**Detection:** The `GET /api/auth/method` endpoint inspects the JWT `amr` claim to report whether the user authenticated via OAuth (and which provider), password, OTP, or another method. The User Profile page displays this information.
+**Detection:** The `GET /api/auth/method` endpoint inspects the JWT `amr` claim to report whether the user authenticated via OAuth (and which provider), passkey, password, OTP, or another method. The User Profile page displays this information.
+
+### Passkeys (WebAuthn/FIDO2)
+
+Passkey authentication enables passwordless login via biometrics (fingerprint, face scan) or hardware security keys. Configured in `infra/project.tf` as a Descope authentication method.
+
+**Setup:**
+
+```bash
+terraform apply -var passkey_top_level_domain=example.com
+```
+
+The `top_level_domain` is the WebAuthn Relying Party ID — passkeys registered on this domain work on all its subdomains. Disabled by default when no domain is provided.
+
+**Browser support:** Chrome 67+, Safari 14+, Firefox 60+, Edge 18+.
 
 ### ReBAC (Fine-Grained Authorization)
 
