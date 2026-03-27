@@ -29,4 +29,25 @@ resource "descope_project" "main" {
     enable_inactivity                   = var.enable_inactivity
     inactivity_time                     = var.inactivity_time
   }
+
+  # Social login providers — disabled by default; supply credentials via tfvars
+  # to enable. Descope handles the OAuth dance and issues OIDC tokens to the app.
+  authentication {
+    oauth {
+      system {
+        google {
+          client_id      = var.google_oauth_client_id
+          client_secret  = var.google_oauth_client_secret
+          disabled       = var.google_oauth_client_id == ""
+          allowed_grant_types = ["authorization_code"]
+        }
+        github {
+          client_id      = var.github_oauth_client_id
+          client_secret  = var.github_oauth_client_secret
+          disabled       = var.github_oauth_client_id == ""
+          allowed_grant_types = ["authorization_code"]
+        }
+      }
+    }
+  }
 }
