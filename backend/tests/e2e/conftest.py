@@ -5,9 +5,9 @@ import os
 import pytest
 
 from tests.e2e.helpers.auth import (
+    create_authenticated_context,
     ensure_test_user,
     get_oidc_access_token,
-    create_authenticated_context,
 )
 
 FRONTEND_URL = os.environ.get("E2E_FRONTEND_URL", "http://localhost:3000")
