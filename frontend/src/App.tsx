@@ -5,6 +5,8 @@ import Dashboard from "./pages/Dashboard";
 import RoleManagement from "./pages/RoleManagement";
 import UserProfile from "./pages/UserProfile";
 import TenantSettings from "./pages/TenantSettings";
+import AccessKeys from "./pages/AccessKeys";
+import MemberManagement from "./pages/MemberManagement";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const auth = useAuth();
@@ -102,6 +104,22 @@ export default function App() {
         element={
           <ProtectedRoute>
             <TenantSettings />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/keys"
+        element={
+          <ProtectedRoute>
+            <AccessKeys />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/members"
+        element={
+          <ProtectedRoute>
+            <MemberManagement />
           </ProtectedRoute>
         }
       />

@@ -1,4 +1,5 @@
 import os
+from typing import Literal
 
 import httpx
 
@@ -114,6 +115,71 @@ class DescopeManagementClient:
         await self._request(
             "/v1/mgmt/tenant/update",
             {"id": tenant_id, "customAttributes": custom_attributes},
+        )
+
+    async def create_access_key(
+        self,
+        name: str,
+        tenant_id: str,
+        expire_time: int | None = None,
+        role_names: list[str] | None = None,
+    ) -> dict:
+        """Create an access key scoped to a tenant."""
+        body: dict = {"name": name, "tenantId": tenant_id}
+        if expire_time is not None:
+            body["expireTime"] = expire_time
+        if role_names:
+            body["roleNames"] = role_names
+        resp = await self._request("/v1/mgmt/accesskey/create", body)
+        return resp.json()
+
+    async def search_access_keys(self, tenant_id: str) -> list[dict]:
+        """List access keys filtered by tenant."""
+        resp = await self._request("/v1/mgmt/accesskey/search", {"tenantIds": [tenant_id]})
+        return resp.json().get("keys", [])
+
+    async def load_access_key(self, key_id: str) -> dict:
+        """Load a single access key by ID."""
+        resp = await self._request("/v1/mgmt/accesskey/load", {"id": key_id})
+        return resp.json().get("key", {})
+
+    async def deactivate_access_key(self, key_id: str) -> None:
+        """Deactivate (revoke) an access key."""
+        await self._request("/v1/mgmt/accesskey/deactivate", {"id": key_id})
+
+    async def activate_access_key(self, key_id: str) -> None:
+        """Reactivate a previously deactivated access key."""
+        await self._request("/v1/mgmt/accesskey/activate", {"id": key_id})
+
+    async def delete_access_key(self, key_id: str) -> None:
+        """Permanently delete an access key."""
+        await self._request("/v1/mgmt/accesskey/delete", {"id": key_id})
+
+    async def invite_user(self, email: str, tenant_id: str, role_names: list[str] | None = None) -> dict:
+        """Create a user and assign them to a tenant with roles."""
+        tenants = [{"tenantId": tenant_id}]
+        if role_names:
+            tenants[0]["roleNames"] = role_names
+        resp = await self._request(
+            "/v1/mgmt/user/create",
+            {"loginId": email, "email": email, "tenants": tenants},
+        )
+        return resp.json().get("user", {})
+
+    async def search_tenant_users(self, tenant_id: str) -> list[dict]:
+        """Search for users belonging to a specific tenant."""
+        resp = await self._request("/v1/mgmt/user/search", {"tenantIds": [tenant_id]})
+        return resp.json().get("users", [])
+
+    async def update_user_status(self, user_id: str, status: Literal["enabled", "disabled"]) -> None:
+        """Update user status."""
+        await self._request("/v1/mgmt/user/updateStatus", {"loginId": user_id, "status": status})
+
+    async def remove_user_from_tenant(self, user_id: str, tenant_id: str) -> None:
+        """Remove a user from a specific tenant (does not delete the user globally)."""
+        await self._request(
+            "/v1/mgmt/user/update/tenant/remove",
+            {"loginId": user_id, "tenantId": tenant_id},
         )
 
     async def close(self) -> None:

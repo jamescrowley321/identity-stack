@@ -144,6 +144,27 @@ The frontend is available at http://localhost:3000 and the backend at http://loc
 | GET | `/api/tenants/current/settings` | Load current tenant's custom attributes |
 | PATCH | `/api/tenants/current/settings` | Update tenant attributes (requires owner/admin) |
 
+### Access Keys
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/keys` | Create an access key (returns secret once, requires owner/admin) |
+| GET | `/api/keys` | List access keys for current tenant |
+| GET | `/api/keys/{id}` | Load a single access key |
+| POST | `/api/keys/{id}/deactivate` | Revoke an access key |
+| POST | `/api/keys/{id}/activate` | Reactivate an access key |
+| DELETE | `/api/keys/{id}` | Permanently delete an access key |
+
+All access key operations require owner/admin role and verify the key belongs to the caller's tenant.
+
+### Member Management
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/members` | List members in current tenant (requires owner/admin) |
+| POST | `/api/members/invite` | Invite user by email with role assignment |
+| POST | `/api/members/{id}/deactivate` | Deactivate a member |
+| POST | `/api/members/{id}/activate` | Reactivate a member |
+| DELETE | `/api/members/{id}` | Remove a member permanently |
+
 Tenant isolation is enforced via the `dct` (Descope current tenant) JWT claim. Users can only access resources belonging to their active tenant.
 
 ### RBAC
@@ -158,6 +179,21 @@ Four roles are defined via Terraform (`infra/rbac.tf`):
 | `viewer` | Read-only access | Read projects and documents |
 
 Backend endpoints enforce authorization via `require_role()` and `require_permission()` dependency factories. Frontend uses `<RequireRole>` and `<RequirePermission>` components for conditional UI rendering.
+
+### Security Headers
+
+All API responses include security headers via `SecurityHeadersMiddleware`:
+
+| Header | Value |
+|--------|-------|
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `DENY` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `X-XSS-Protection` | `0` (disabled in favor of CSP) |
+| `Content-Security-Policy` | `default-src 'self'` (configurable via `CSP_POLICY`) |
+| `Strict-Transport-Security` | `max-age=31536000; includeSubDomains` (production only) |
+
+Set `ENVIRONMENT=production` to enable HSTS and strict CSP. Override CSP with `CSP_POLICY` env var.
 
 ## Project Structure
 

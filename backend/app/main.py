@@ -6,8 +6,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.middleware.auth import TokenValidationMiddleware
+from app.middleware.security import SecurityHeadersMiddleware
 from app.models.database import create_db_and_tables
-from app.routers import attributes, auth, health, protected, roles, tenants
+from app.routers import accesskeys, attributes, auth, health, protected, roles, tenants, users
 from app.services.descope import init_descope_client, shutdown_descope_client
 
 
@@ -39,9 +40,14 @@ app.add_middleware(
     excluded_paths={"/api/health", "/api/validate-id-token", "/docs", "/openapi.json"},
 )
 
+# Security headers — outermost middleware so headers are set on all responses including auth rejections
+app.add_middleware(SecurityHeadersMiddleware, environment=os.getenv("ENVIRONMENT", "development"))
+
 app.include_router(health.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(protected.router, prefix="/api")
 app.include_router(tenants.router, prefix="/api")
 app.include_router(roles.router, prefix="/api")
 app.include_router(attributes.router, prefix="/api")
+app.include_router(accesskeys.router, prefix="/api")
+app.include_router(users.router, prefix="/api")
