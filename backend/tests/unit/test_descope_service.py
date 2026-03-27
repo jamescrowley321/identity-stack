@@ -193,7 +193,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_create_access_key(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
@@ -212,7 +212,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_search_access_keys(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
@@ -226,7 +226,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_deactivate_access_key(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
 
         await client.deactivate_access_key("k1")
@@ -240,7 +240,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_delete_access_key(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
 
         await client.delete_access_key("k1")
@@ -254,7 +254,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_invite_user(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
@@ -273,7 +273,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_search_tenant_users(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
@@ -287,7 +287,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_update_user_status(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
 
         await client.update_user_status("u1", "disabled")
@@ -301,7 +301,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_remove_user_from_tenant(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
 
         await client.remove_user_from_tenant("u1", "t1")
