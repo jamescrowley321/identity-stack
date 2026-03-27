@@ -1,21 +1,19 @@
 import { useAuth } from "react-oidc-context";
 import { useEffect, useState, useCallback } from "react";
-import { useApiClient } from "../hooks/useApiClient";
-import { useTenants } from "../hooks/useTenants";
-import { useRBAC } from "../hooks/useRBAC";
-import { RequirePermission } from "../components/auth/RequirePermission";
-import { PageHeader } from "../components/layout/PageHeader";
-
-const preStyle = {
-  background: "#f4f4f4",
-  padding: "1rem",
-  borderRadius: "4px",
-  overflow: "auto" as const,
-  maxHeight: "400px",
-  fontSize: "0.85rem",
-};
-
-const labelStyle = { fontSize: "0.75rem", color: "#666", fontWeight: "normal" as const };
+import { toast } from "sonner";
+import { useApiClient } from "@/hooks/useApiClient";
+import { useTenants } from "@/hooks/useTenants";
+import { useRBAC } from "@/hooks/useRBAC";
+import { RequirePermission } from "@/components/auth/RequirePermission";
+import { PageHeader } from "@/components/layout/PageHeader";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Skeleton } from "@/components/ui/skeleton";
 
 interface TenantResource {
   id: string;
@@ -108,87 +106,150 @@ export default function Dashboard() {
         body: JSON.stringify({ name: newResourceName.trim(), description: "" }),
       });
       if (res.ok) {
+        toast.success(`Resource "${newResourceName.trim()}" created`);
         setNewResourceName("");
         loadResources();
+      } else {
+        const err = await res.json();
+        toast.error(err.detail || "Failed to create resource");
       }
     } catch {
-      // Silently handle — error shown elsewhere if needed
+      toast.error("Failed to create resource");
     }
   }, [currentTenantId, newResourceName, apiFetch, loadResources]);
 
   const identityName = identity?.identity as Record<string, unknown> | undefined;
+  const displayName = (identityName?.name as string) || auth.user?.profile?.email || "User";
 
   return (
     <>
-      <PageHeader
-        title={`Welcome, ${(identityName?.name as string) || auth.user?.profile?.email || "User"}`}
-        description={`Backend: ${health} · Tenant: ${currentTenantId ?? "none"} · Roles: ${roles.join(", ") || "none"}`}
-      />
-      <div className="p-6 space-y-6">
-        {tenants.length > 0 && (
-          <p style={{ fontSize: "0.9rem" }}>
-            Tenant memberships: <strong>{tenants.map((t) => t.id).join(", ")}</strong>
-          </p>
-        )}
-
+      <PageHeader title={`Welcome, ${displayName}`} />
+      <div className="p-6">
         {error && (
-          <pre style={{ ...preStyle, background: "#fff0f0", color: "red" }}>{error}</pre>
+          <Alert variant="destructive" className="mb-6">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
         )}
 
-        {currentTenantId && (
-          <section>
-            <h3>Tenant Resources <span style={labelStyle}>(scoped to {currentTenantId})</span></h3>
-            <RequirePermission permission="documents.write">
-              <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
-                <input
-                  type="text"
-                  placeholder="Resource name"
-                  value={newResourceName}
-                  onChange={(e) => setNewResourceName(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleCreateResource()}
-                  style={{ padding: "0.25rem 0.5rem", flex: 1 }}
-                />
-                <button onClick={handleCreateResource} disabled={!newResourceName.trim()}>
-                  Create
-                </button>
-              </div>
-            </RequirePermission>
-            {resources.length === 0 ? (
-              <p style={{ color: "#666", fontSize: "0.9rem" }}>No resources yet. Create one above.</p>
-            ) : (
-              <ul style={{ listStyle: "none", padding: 0 }}>
-                {resources.map((r) => (
-                  <li key={r.id} style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>
-                    <strong>{r.name}</strong>
-                    <span style={{ ...labelStyle, marginLeft: "0.5rem" }}>{r.id}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-        )}
+        <Tabs defaultValue="overview">
+          <TabsList>
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            {currentTenantId && <TabsTrigger value="resources">Resources</TabsTrigger>}
+            <TabsTrigger value="claims">Claims</TabsTrigger>
+          </TabsList>
 
-        <section>
-          <h3>ClaimsIdentity <span style={labelStyle}>(py-identity-model ClaimsPrincipal)</span></h3>
-          <pre style={preStyle}>
-            {identity ? JSON.stringify(identity, null, 2) : "Loading..."}
-          </pre>
-        </section>
+          <TabsContent value="overview" className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle>Status</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-muted-foreground">Backend:</span>
+                  <Badge variant={health === "ok" ? "secondary" : "destructive"}>
+                    {health}
+                  </Badge>
+                </div>
+                {currentTenantId && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-muted-foreground">Tenant:</span>
+                    <Badge variant="outline">{currentTenantId}</Badge>
+                  </div>
+                )}
+                {roles.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-muted-foreground">Roles:</span>
+                    <div className="flex gap-1">
+                      {roles.map((role) => (
+                        <Badge key={role} variant="outline">{role}</Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {tenants.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-muted-foreground">Memberships:</span>
+                    <span className="text-sm">{tenants.map((t) => t.id).join(", ")}</span>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
 
-        <section>
-          <h3>Access Token Claims <span style={labelStyle}>(validated by py-identity-model)</span></h3>
-          <pre style={preStyle}>
-            {accessTokenClaims ? JSON.stringify(accessTokenClaims, null, 2) : "Loading..."}
-          </pre>
-        </section>
+          {currentTenantId && (
+            <TabsContent value="resources" className="space-y-4">
+              <Card>
+                <CardHeader>
+                  <CardTitle>Tenant Resources</CardTitle>
+                  <CardDescription>Scoped to {currentTenantId}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <RequirePermission permission="documents.write">
+                    <div className="flex gap-2">
+                      <Input
+                        placeholder="Resource name"
+                        value={newResourceName}
+                        onChange={(e) => setNewResourceName(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && handleCreateResource()}
+                        className="max-w-sm"
+                      />
+                      <Button onClick={handleCreateResource} disabled={!newResourceName.trim()}>
+                        Create
+                      </Button>
+                    </div>
+                  </RequirePermission>
+                  {resources.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No resources yet.</p>
+                  ) : (
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Name</TableHead>
+                          <TableHead>ID</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {resources.map((r) => (
+                          <TableRow key={r.id}>
+                            <TableCell className="font-medium">{r.name}</TableCell>
+                            <TableCell className="text-xs text-muted-foreground">{r.id}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
+          )}
 
-        <section>
-          <h3>ID Token Claims <span style={labelStyle}>(validated by py-identity-model)</span></h3>
-          <pre style={preStyle}>
-            {idTokenClaims ? JSON.stringify(idTokenClaims, null, 2) : "Loading..."}
-          </pre>
-        </section>
+          <TabsContent value="claims" className="space-y-4">
+            <ClaimsCard title="ClaimsIdentity" description="py-identity-model ClaimsPrincipal" data={identity} />
+            <ClaimsCard title="Access Token Claims" description="Validated by py-identity-model" data={accessTokenClaims} />
+            <ClaimsCard title="ID Token Claims" description="Validated by py-identity-model" data={idTokenClaims} />
+          </TabsContent>
+        </Tabs>
       </div>
     </>
+  );
+}
+
+function ClaimsCard({ title, description, data }: { title: string; description: string; data: Record<string, unknown> | null }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+        <CardDescription>{description}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {data ? (
+          <pre className="rounded-lg bg-muted p-4 overflow-auto max-h-96 text-xs font-mono">
+            {JSON.stringify(data, null, 2)}
+          </pre>
+        ) : (
+          <Skeleton className="h-32 w-full" />
+        )}
+      </CardContent>
+    </Card>
   );
 }
