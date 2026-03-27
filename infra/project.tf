@@ -36,16 +36,18 @@ resource "descope_project" "main" {
     oauth {
       system {
         google {
-          client_id      = var.google_oauth_client_id
-          client_secret  = var.google_oauth_client_secret
-          disabled       = var.google_oauth_client_id == ""
-          allowed_grant_types = ["authorization_code"]
+          client_id            = var.google_oauth_client_id
+          client_secret        = var.google_oauth_client_secret
+          disabled             = var.google_oauth_client_id == "" || var.google_oauth_client_secret == ""
+          merge_user_accounts  = true
+          allowed_grant_types  = ["authorization_code"]
         }
         github {
-          client_id      = var.github_oauth_client_id
-          client_secret  = var.github_oauth_client_secret
-          disabled       = var.github_oauth_client_id == ""
-          allowed_grant_types = ["authorization_code"]
+          client_id            = var.github_oauth_client_id
+          client_secret        = var.github_oauth_client_secret
+          disabled             = var.github_oauth_client_id == "" || var.github_oauth_client_secret == ""
+          merge_user_accounts  = true
+          allowed_grant_types  = ["authorization_code"]
         }
       }
     }
