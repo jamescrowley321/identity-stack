@@ -191,18 +191,32 @@ Tenant isolation is enforced via the `dct` (Descope current tenant) JWT claim. U
 
 Documents use **layered authorization**: RBAC checks tenant membership (via JWT), then FGA checks resource-level permissions (owner/editor/viewer). See ReBAC section below.
 
+### RBAC Demo
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/rbac/hierarchy` | Role hierarchy with permissions per role (public, no auth) |
+| GET | `/api/rbac/effective` | Current user's resolved roles and permissions from JWT |
+| GET | `/api/rbac/check/{permission}` | Check if user has a specific permission |
+
 ### RBAC
 
-Four roles are defined via Terraform (`infra/rbac.tf`):
+Four roles are defined via Terraform (`infra/rbac.tf`), forming an implicit hierarchy by permission superset:
 
-| Role | Description | Key Permissions |
-|------|-------------|-----------------|
-| `owner` | Full access including billing | All permissions |
-| `admin` | Full access except billing | All except `billing.manage` |
-| `member` | Standard read/write access | Read/write documents, invite members |
-| `viewer` | Read-only access | Read projects and documents |
+| Role | Description | Key Permissions | Default |
+|------|-------------|-----------------|---------|
+| `owner` | Full access including billing | All permissions | |
+| `admin` | Full access except billing | All except `billing.manage` | |
+| `member` | Standard read/write access | Read/write documents, invite members | Yes |
+| `viewer` | Read-only access | Read projects and documents | |
 
-Backend endpoints enforce authorization via `require_role()` and `require_permission()` dependency factories. Frontend uses `<RequireRole>` and `<RequirePermission>` components for conditional UI rendering.
+The `member` role is the default — new users are automatically assigned it.
+
+Backend endpoints enforce authorization via dependency factories:
+- `require_role()` — user must have at least one of the specified roles
+- `require_permission()` / `require_any_permission()` — user must have at least one of the specified permissions
+- `require_all_permissions()` — user must have ALL specified permissions
+
+Frontend uses `<RequireRole>` and `<RequirePermission>` components for conditional UI rendering. The Role Management page includes an effective permissions display and role hierarchy table.
 
 ### ReBAC (Fine-Grained Authorization)
 
