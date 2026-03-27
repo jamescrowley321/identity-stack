@@ -299,16 +299,16 @@ class TestDescopeManagementClient:
 
     @pytest.mark.anyio
     @patch("app.services.descope.httpx.AsyncClient")
-    async def test_delete_user(self, mock_cls, client):
+    async def test_remove_user_from_tenant(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
         mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
 
-        await client.delete_user("u1")
+        await client.remove_user_from_tenant("u1", "t1")
         mock_http.post.assert_called_once_with(
-            "https://api.descope.com/v1/mgmt/user/delete",
+            "https://api.descope.com/v1/mgmt/user/update/tenant/remove",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
-            json={"loginId": "u1"},
+            json={"loginId": "u1", "tenantId": "t1"},
         )
 
 

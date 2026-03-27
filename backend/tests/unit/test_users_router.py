@@ -112,6 +112,7 @@ async def test_invite_member_rejected_for_viewer(mock_validate, client):
 async def test_deactivate_member(mock_validate, mock_factory, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
+    mock_client.load_user.return_value = {"userId": "user1", "userTenants": [{"tenantId": "tenant-abc"}]}
     mock_factory.return_value = mock_client
 
     response = await client.post(
@@ -120,6 +121,7 @@ async def test_deactivate_member(mock_validate, mock_factory, client):
     )
     assert response.status_code == 200
     assert response.json()["status"] == "deactivated"
+    mock_client.load_user.assert_called_once_with("user1")
     mock_client.update_user_status.assert_called_once_with("user1", "disabled")
 
 
@@ -129,6 +131,7 @@ async def test_deactivate_member(mock_validate, mock_factory, client):
 async def test_activate_member(mock_validate, mock_factory, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
+    mock_client.load_user.return_value = {"userId": "user1", "userTenants": [{"tenantId": "tenant-abc"}]}
     mock_factory.return_value = mock_client
 
     response = await client.post(
@@ -137,6 +140,7 @@ async def test_activate_member(mock_validate, mock_factory, client):
     )
     assert response.status_code == 200
     assert response.json()["status"] == "activated"
+    mock_client.load_user.assert_called_once_with("user1")
     mock_client.update_user_status.assert_called_once_with("user1", "enabled")
 
 
@@ -146,6 +150,7 @@ async def test_activate_member(mock_validate, mock_factory, client):
 async def test_remove_member(mock_validate, mock_factory, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
+    mock_client.load_user.return_value = {"userId": "user1", "userTenants": [{"tenantId": "tenant-abc"}]}
     mock_factory.return_value = mock_client
 
     response = await client.delete(
@@ -154,7 +159,119 @@ async def test_remove_member(mock_validate, mock_factory, client):
     )
     assert response.status_code == 200
     assert response.json()["status"] == "removed"
-    mock_client.delete_user.assert_called_once_with("user1")
+    mock_client.load_user.assert_called_once_with("user1")
+    mock_client.remove_user_from_tenant.assert_called_once_with("user1", "tenant-abc")
+
+
+OWNER_CLAIMS = {
+    "sub": "owner1",
+    "dct": "tenant-abc",
+    "tenants": {
+        "tenant-abc": {"roles": ["owner"], "permissions": ["members.invite", "members.remove"]},
+    },
+}
+
+
+@pytest.mark.anyio
+@patch("app.routers.users.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_deactivate_member_cross_tenant_rejected(mock_validate, mock_factory, client):
+    """M1: Admin cannot deactivate a user who belongs to a different tenant."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.load_user.return_value = {"userId": "user1", "userTenants": [{"tenantId": "other-tenant"}]}
+    mock_factory.return_value = mock_client
+
+    response = await client.post(
+        "/api/members/user1/deactivate",
+        headers={"Authorization": "Bearer valid.token"},
+    )
+    assert response.status_code == 403
+    assert "does not belong to your tenant" in response.json()["detail"]
+    mock_client.update_user_status.assert_not_called()
+
+
+@pytest.mark.anyio
+@patch("app.routers.users.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_remove_member_cross_tenant_rejected(mock_validate, mock_factory, client):
+    """M1: Admin cannot remove a user from a different tenant."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.load_user.return_value = {"userId": "user1", "userTenants": [{"tenantId": "other-tenant"}]}
+    mock_factory.return_value = mock_client
+
+    response = await client.delete(
+        "/api/members/user1",
+        headers={"Authorization": "Bearer valid.token"},
+    )
+    assert response.status_code == 403
+    mock_client.remove_user_from_tenant.assert_not_called()
+
+
+@pytest.mark.anyio
+@patch("app.routers.users.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_activate_member_cross_tenant_rejected(mock_validate, mock_factory, client):
+    """M1: Admin cannot activate a user who belongs to a different tenant."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.load_user.return_value = {"userId": "user1", "userTenants": [{"tenantId": "other-tenant"}]}
+    mock_factory.return_value = mock_client
+
+    response = await client.post(
+        "/api/members/user1/activate",
+        headers={"Authorization": "Bearer valid.token"},
+    )
+    assert response.status_code == 403
+    assert "does not belong to your tenant" in response.json()["detail"]
+    mock_client.update_user_status.assert_not_called()
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_invite_member_invalid_email_rejected(mock_validate, client):
+    """M3: Invalid email strings are rejected by pydantic EmailStr."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    response = await client.post(
+        "/api/members/invite",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"email": "not-an-email", "role_names": ["member"]},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_admin_cannot_assign_owner_role(mock_validate, client):
+    """M4: Admin cannot invite a user with the owner role."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    response = await client.post(
+        "/api/members/invite",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"email": "new@test.com", "role_names": ["owner"]},
+    )
+    assert response.status_code == 403
+    assert "Only owners can assign the owner role" in response.json()["detail"]
+
+
+@pytest.mark.anyio
+@patch("app.routers.users.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_owner_can_assign_owner_role(mock_validate, mock_factory, client):
+    """M4: Owner CAN invite a user with the owner role."""
+    mock_validate.return_value = OWNER_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.invite_user.return_value = {"userId": "new", "email": "new@test.com"}
+    mock_factory.return_value = mock_client
+
+    response = await client.post(
+        "/api/members/invite",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"email": "new@test.com", "role_names": ["owner"]},
+    )
+    assert response.status_code == 200
+    mock_client.invite_user.assert_called_once_with("new@test.com", "tenant-abc", ["owner"])
 
 
 @pytest.mark.anyio
