@@ -1,4 +1,4 @@
-"""Unit tests for the auth router (logout endpoint)."""
+"""Unit tests for the auth router (logout and auth method endpoints)."""
 
 from unittest.mock import AsyncMock, patch
 
@@ -110,3 +110,119 @@ async def test_logout_skips_api_call_without_management_key(mock_validate, mock_
     )
     assert response.status_code == 200
     mock_httpx_cls.return_value.__aenter__.return_value.post.assert_not_called()
+
+
+# --- /api/auth/method tests ---
+
+OAUTH_GOOGLE_CLAIMS = {
+    "sub": "user-google",
+    "amr": ["google"],
+}
+
+OAUTH_GITHUB_CLAIMS = {
+    "sub": "user-github",
+    "amr": ["github"],
+}
+
+PASSWORD_CLAIMS = {
+    "sub": "user-pwd",
+    "amr": ["pwd"],
+}
+
+OTP_CLAIMS = {
+    "sub": "user-otp",
+    "amr": ["otp"],
+}
+
+NO_AMR_CLAIMS = {
+    "sub": "user-noamr",
+}
+
+MULTI_AMR_CLAIMS = {
+    "sub": "user-multi",
+    "amr": ["pwd", "mfa"],
+}
+
+
+@pytest.mark.anyio
+async def test_auth_method_rejects_unauthenticated(client):
+    response = await client.get("/api/auth/method")
+    assert response.status_code == 401
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_auth_method_google(mock_validate, client):
+    mock_validate.return_value = OAUTH_GOOGLE_CLAIMS
+    response = await client.get("/api/auth/method", headers={"Authorization": "Bearer tok"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["method"] == "oauth"
+    assert data["provider"] == "google"
+    assert data["amr"] == ["google"]
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_auth_method_github(mock_validate, client):
+    mock_validate.return_value = OAUTH_GITHUB_CLAIMS
+    response = await client.get("/api/auth/method", headers={"Authorization": "Bearer tok"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["method"] == "oauth"
+    assert data["provider"] == "github"
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_auth_method_password(mock_validate, client):
+    mock_validate.return_value = PASSWORD_CLAIMS
+    response = await client.get("/api/auth/method", headers={"Authorization": "Bearer tok"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["method"] == "password"
+    assert data["provider"] is None
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_auth_method_otp(mock_validate, client):
+    mock_validate.return_value = OTP_CLAIMS
+    response = await client.get("/api/auth/method", headers={"Authorization": "Bearer tok"})
+    assert response.status_code == 200
+    assert response.json()["method"] == "otp"
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_auth_method_no_amr(mock_validate, client):
+    mock_validate.return_value = NO_AMR_CLAIMS
+    response = await client.get("/api/auth/method", headers={"Authorization": "Bearer tok"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["method"] == "unknown"
+    assert data["provider"] is None
+    assert data["amr"] == []
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_auth_method_mfa(mock_validate, client):
+    mock_validate.return_value = MULTI_AMR_CLAIMS
+    response = await client.get("/api/auth/method", headers={"Authorization": "Bearer tok"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["method"] == "password"
+    assert data["amr"] == ["pwd", "mfa"]
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_auth_method_invalid_amr_type(mock_validate, client):
+    """amr claim that is not a list should be treated as empty."""
+    mock_validate.return_value = {"sub": "u1", "amr": "not-a-list"}
+    response = await client.get("/api/auth/method", headers={"Authorization": "Bearer tok"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["method"] == "unknown"
+    assert data["amr"] == []

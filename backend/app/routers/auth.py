@@ -28,3 +28,53 @@ async def logout(request: Request, claims: dict = Depends(get_claims)):
             )
 
     return {"status": "logged_out", "sub": user_id}
+
+
+# Known OAuth provider identifiers that may appear in Descope amr claims
+_OAUTH_PROVIDERS = {"google", "github", "apple", "facebook", "microsoft", "gitlab", "discord", "linkedin", "slack"}
+
+
+def _detect_auth_method(claims: dict) -> dict:
+    """Derive authentication method and provider from JWT claims.
+
+    Descope includes an ``amr`` (Authentication Methods References) list in the
+    JWT.  Values include ``"pwd"`` for password, ``"otp"`` for one-time
+    password, ``"mfa"`` for multi-factor, and OAuth provider names like
+    ``"google"`` or ``"github"``.
+    """
+    amr = claims.get("amr", [])
+    if not isinstance(amr, list):
+        amr = []
+
+    # Detect provider from amr entries
+    provider = None
+    for entry in amr:
+        if isinstance(entry, str) and entry.lower() in _OAUTH_PROVIDERS:
+            provider = entry.lower()
+            break
+
+    # Determine method category
+    if provider:
+        method = "oauth"
+    elif "pwd" in amr:
+        method = "password"
+    elif "otp" in amr:
+        method = "otp"
+    elif "mfa" in amr:
+        method = "mfa"
+    elif "magiclink" in amr:
+        method = "magiclink"
+    else:
+        method = "unknown"
+
+    return {"method": method, "provider": provider, "amr": amr}
+
+
+@router.get("/auth/method")
+async def auth_method(claims: dict = Depends(get_claims)):
+    """Return the authentication method used for the current session.
+
+    Inspects the ``amr`` JWT claim to detect whether the user logged in
+    via social OAuth (Google, GitHub, etc.), password, OTP, or another method.
+    """
+    return _detect_auth_method(claims)
