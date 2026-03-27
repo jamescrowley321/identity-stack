@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_claims, get_tenant_id
+from app.services.audit import AuditEventType, audit_event
 from app.services.descope import get_descope_client
 
 router = APIRouter()
@@ -32,6 +33,7 @@ async def get_my_roles(
 
 @router.post("/roles/assign")
 async def assign_roles(
+    request: Request,
     body: RoleAssignmentRequest,
     current_tenant: str = Depends(get_tenant_id),
     admin_roles: list[str] = Depends(require_role("owner", "admin")),
@@ -42,12 +44,19 @@ async def assign_roles(
     if "owner" in body.role_names and "owner" not in admin_roles:
         raise HTTPException(status_code=403, detail="Only owners can assign the owner role")
     client = get_descope_client()
-    await client.assign_roles(body.user_id, body.tenant_id, body.role_names)
+    target = {"user_id": body.user_id, "role_names": body.role_names}
+    try:
+        await client.assign_roles(body.user_id, body.tenant_id, body.role_names)
+    except Exception:
+        audit_event(request, AuditEventType.ROLE_ASSIGNED, target, result="failure")
+        raise
+    audit_event(request, AuditEventType.ROLE_ASSIGNED, target)
     return {"status": "roles_assigned", "user_id": body.user_id, "role_names": body.role_names}
 
 
 @router.post("/roles/remove")
 async def remove_roles(
+    request: Request,
     body: RoleAssignmentRequest,
     current_tenant: str = Depends(get_tenant_id),
     admin_roles: list[str] = Depends(require_role("owner", "admin")),
@@ -58,5 +67,11 @@ async def remove_roles(
     if "owner" in body.role_names and "owner" not in admin_roles:
         raise HTTPException(status_code=403, detail="Only owners can remove the owner role")
     client = get_descope_client()
-    await client.remove_roles(body.user_id, body.tenant_id, body.role_names)
+    target = {"user_id": body.user_id, "role_names": body.role_names}
+    try:
+        await client.remove_roles(body.user_id, body.tenant_id, body.role_names)
+    except Exception:
+        audit_event(request, AuditEventType.ROLE_REMOVED, target, result="failure")
+        raise
+    audit_event(request, AuditEventType.ROLE_REMOVED, target)
     return {"status": "roles_removed", "user_id": body.user_id, "role_names": body.role_names}

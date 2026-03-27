@@ -244,8 +244,27 @@ All requests are assigned a unique correlation ID (`X-Correlation-ID` header) fo
 | Invalid/expired token | WARNING | path |
 | RBAC role denied | WARNING | sub, tenant, required vs actual roles |
 | RBAC permission denied | WARNING | sub, tenant, required permissions |
-| Access key created | INFO | name, tenant |
-| Access key deactivated/activated/deleted | INFO | key_id, tenant |
+
+### Audit Logging
+
+All security-sensitive operations emit structured audit events via a dedicated `audit` logger (`app/services/audit.py`). Each event captures who (actor), what (action), when (timestamp), where (IP address), and result (success/failure) — suitable for compliance (SOC 2, ISO 27001) and SIEM ingestion.
+
+**Audited operations:**
+
+| Action | Trigger |
+|--------|---------|
+| `user_logout` | POST `/api/auth/logout` |
+| `role_assigned` / `role_removed` | POST `/api/roles/assign` or `/api/roles/remove` |
+| `access_key_created` | POST `/api/keys` |
+| `access_key_deactivated` / `activated` / `deleted` | POST/DELETE `/api/keys/{id}/*` |
+| `user_invited` / `deactivated` / `activated` / `removed` | POST/DELETE `/api/members/*` |
+| `tenant_created` | POST `/api/tenants` |
+| `profile_updated` | PATCH `/api/profile` |
+| `tenant_settings_updated` | PATCH `/api/tenants/current/settings` |
+
+**Event fields:** `timestamp`, `action`, `actor_id`, `tenant_id`, `target`, `ip_address`, `result`, `correlation_id` (via log context).
+
+In production (JSON logging), audit events appear as structured JSON with an `audit_event` object. Filter on logger name `audit` to isolate audit entries.
 
 **Configuration:**
 
