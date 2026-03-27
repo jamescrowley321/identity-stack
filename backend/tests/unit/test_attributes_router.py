@@ -2,10 +2,18 @@
 
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
+
+
+def _make_http_status_error(status_code: int = 500) -> httpx.HTTPStatusError:
+    """Create a mock HTTPStatusError for testing Descope API failures."""
+    request = httpx.Request("POST", "https://api.descope.com/v1/mgmt/test")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError(f"{status_code} Server Error", request=request, response=response)
 
 
 @pytest.fixture
@@ -80,13 +88,12 @@ async def test_get_profile(mock_validate, mock_factory, client):
 async def test_get_profile_handles_api_failure(mock_validate, mock_factory, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
-    mock_client.load_user.side_effect = Exception("API down")
+    mock_client.load_user.side_effect = _make_http_status_error(500)
     mock_factory.return_value = mock_client
 
     response = await client.get("/api/profile", headers={"Authorization": "Bearer valid.token"})
-    assert response.status_code == 200
-    data = response.json()
-    assert data["custom_attributes"] == {}
+    assert response.status_code == 502
+    assert "identity provider" in response.json()["detail"]
 
 
 @pytest.mark.anyio
@@ -178,12 +185,12 @@ async def test_update_profile_rejects_unauthenticated(client):
 async def test_get_tenant_settings_handles_api_failure(mock_validate, mock_factory, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
-    mock_client.load_tenant.side_effect = Exception("API down")
+    mock_client.load_tenant.side_effect = _make_http_status_error(500)
     mock_factory.return_value = mock_client
 
     response = await client.get("/api/tenants/current/settings", headers={"Authorization": "Bearer valid.token"})
-    assert response.status_code == 200
-    assert response.json()["custom_attributes"] == {}
+    assert response.status_code == 502
+    assert "identity provider" in response.json()["detail"]
 
 
 @pytest.mark.anyio
@@ -212,3 +219,65 @@ async def test_update_profile_rejects_missing_sub(mock_validate, client):
     )
     assert response.status_code == 400
     assert "sub" in response.json()["detail"]
+
+
+@pytest.mark.anyio
+@patch("app.routers.attributes.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_update_profile_handles_api_failure(mock_validate, mock_factory, client):
+    """M3: update_profile_attribute should return 502 on Descope API error."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.update_user_custom_attribute.side_effect = _make_http_status_error(500)
+    mock_factory.return_value = mock_client
+
+    response = await client.patch(
+        "/api/profile",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"key": "department", "value": "Eng"},
+    )
+    assert response.status_code == 502
+    assert "identity provider" in response.json()["detail"]
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_update_tenant_settings_rejects_disallowed_keys(mock_validate, client):
+    """M1: tenant settings should reject attribute keys not in the allowlist."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    response = await client.patch(
+        "/api/tenants/current/settings",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"custom_attributes": {"evil_key": "pwned"}},
+    )
+    assert response.status_code == 400
+    assert "not allowed" in response.json()["detail"]
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_get_profile_rejects_missing_sub(mock_validate, client):
+    """S1: get_profile should return 401 when sub claim is missing."""
+    mock_validate.return_value = {"email": "test@example.com", "dct": "tenant-abc", "tenants": {}}
+    response = await client.get("/api/profile", headers={"Authorization": "Bearer valid.token"})
+    assert response.status_code == 401
+    assert "sub" in response.json()["detail"]
+
+
+@pytest.mark.anyio
+@patch("app.routers.attributes.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_update_tenant_settings_handles_api_failure(mock_validate, mock_factory, client):
+    """Tenant settings update should return 502 on Descope API error."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.update_tenant_custom_attributes.side_effect = _make_http_status_error(500)
+    mock_factory.return_value = mock_client
+
+    response = await client.patch(
+        "/api/tenants/current/settings",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"custom_attributes": {"plan_tier": "pro"}},
+    )
+    assert response.status_code == 502
+    assert "identity provider" in response.json()["detail"]
