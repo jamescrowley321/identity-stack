@@ -110,6 +110,27 @@ docker compose up --build
 
 The frontend is available at http://localhost:3000 and the backend at http://localhost:8000.
 
+## API Endpoints
+
+### Authentication
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/auth/logout` | Revoke user sessions via Descope Management API |
+| POST | `/api/validate-id-token` | Validate an ID token server-side |
+| GET | `/api/me` | Return ClaimsPrincipal from py-identity-model |
+| GET | `/api/claims` | Return raw access token claims |
+
+### Tenant Management
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/tenants` | Create a new tenant (Descope Management API) |
+| GET | `/api/tenants` | List tenants the current user belongs to (from JWT) |
+| GET | `/api/tenants/current` | Get current tenant context (`dct` claim) |
+| GET | `/api/tenants/{id}/resources` | List tenant-scoped resources |
+| POST | `/api/tenants/{id}/resources` | Create a tenant-scoped resource |
+
+Tenant isolation is enforced via the `dct` (Descope current tenant) JWT claim. Users can only access resources belonging to their active tenant.
+
 ## Project Structure
 
 ```
@@ -133,6 +154,7 @@ descope-saas-starter/
 │   ├── main.tf
 │   ├── project.tf
 │   ├── access_key.tf
+│   ├── tenants.tf     # Default tenant definitions
 │   └── environments/
 └── docker-compose.yml
 ```

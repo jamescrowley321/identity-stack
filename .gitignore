@@ -10,6 +10,9 @@ dist/
 build/
 *.egg-info/
 
+# Database
+*.db
+
 # Environment
 .env
 .env.local

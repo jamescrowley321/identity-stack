@@ -1,12 +1,27 @@
 import os
+from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.middleware.auth import TokenValidationMiddleware
-from app.routers import auth, health, protected
+from app.models.database import create_db_and_tables
+from app.routers import auth, health, protected, tenants
+from app.services.descope import init_descope_client, shutdown_descope_client
 
-app = FastAPI(title="Descope SaaS Starter API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    create_db_and_tables()
+    http_client = httpx.AsyncClient(timeout=30.0)
+    init_descope_client(http_client=http_client)
+    yield
+    await http_client.aclose()
+    shutdown_descope_client()
+
+
+app = FastAPI(title="Descope SaaS Starter API", lifespan=lifespan)
 
 # CORS for frontend dev server
 app.add_middleware(
@@ -27,3 +42,4 @@ app.add_middleware(
 app.include_router(health.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(protected.router, prefix="/api")
+app.include_router(tenants.router, prefix="/api")
