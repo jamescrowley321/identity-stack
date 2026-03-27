@@ -1,6 +1,13 @@
 import { useEffect, useState, useCallback } from "react";
-import { useApiClient } from "../hooks/useApiClient";
-import { PageHeader } from "../components/layout/PageHeader";
+import { toast } from "sonner";
+import { useApiClient } from "@/hooks/useApiClient";
+import { PageHeader } from "@/components/layout/PageHeader";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 const AVAILABLE_ROLES = ["owner", "admin", "member", "viewer"];
 
@@ -17,7 +24,6 @@ export default function MemberManagement() {
   const [members, setMembers] = useState<Member[]>([]);
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState("member");
-  const [status, setStatus] = useState<string | null>(null);
 
   const loadMembers = useCallback(() => {
     apiFetch("/api/members")
@@ -34,7 +40,6 @@ export default function MemberManagement() {
 
   const handleInvite = useCallback(async () => {
     if (!inviteEmail.trim()) return;
-    setStatus(null);
     try {
       const res = await apiFetch("/api/members/invite", {
         method: "POST",
@@ -42,31 +47,41 @@ export default function MemberManagement() {
         body: JSON.stringify({ email: inviteEmail.trim(), role_names: [inviteRole] }),
       });
       if (res.ok) {
-        setStatus(`Invited ${inviteEmail.trim()}`);
+        toast.success(`Invited ${inviteEmail.trim()}`);
         setInviteEmail("");
         loadMembers();
       } else {
         const err = await res.json();
-        setStatus(`Error: ${err.detail || res.statusText}`);
+        toast.error(err.detail || res.statusText);
       }
     } catch {
-      setStatus("Failed to invite");
+      toast.error("Failed to invite");
     }
   }, [inviteEmail, inviteRole, apiFetch, loadMembers]);
 
   const handleToggleStatus = useCallback(
     async (userId: string, currentStatus: string) => {
       const action = currentStatus === "enabled" ? "deactivate" : "activate";
-      await apiFetch(`/api/members/${userId}/${action}`, { method: "POST" });
-      loadMembers();
+      try {
+        await apiFetch(`/api/members/${userId}/${action}`, { method: "POST" });
+        toast.success(`Member ${action}d`);
+        loadMembers();
+      } catch {
+        toast.error(`Failed to ${action} member`);
+      }
     },
     [apiFetch, loadMembers],
   );
 
   const handleRemove = useCallback(
     async (userId: string) => {
-      await apiFetch(`/api/members/${userId}`, { method: "DELETE" });
-      loadMembers();
+      try {
+        await apiFetch(`/api/members/${userId}`, { method: "DELETE" });
+        toast.success("Member removed");
+        loadMembers();
+      } catch {
+        toast.error("Failed to remove member");
+      }
     },
     [apiFetch, loadMembers],
   );
@@ -75,83 +90,99 @@ export default function MemberManagement() {
     <>
       <PageHeader title="Members" description="Invite and manage team members" />
       <div className="p-6 space-y-6">
-      <section>
-        <h2>Invite Member</h2>
-        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-          <input
-            type="email"
-            placeholder="Email address"
-            value={inviteEmail}
-            onChange={(e) => setInviteEmail(e.target.value)}
-            style={{ padding: "0.25rem 0.5rem", minWidth: "250px" }}
-          />
-          <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value)} style={{ padding: "0.25rem 0.5rem" }}>
-            {AVAILABLE_ROLES.map((r) => (
-              <option key={r} value={r}>{r}</option>
-            ))}
-          </select>
-          <button onClick={handleInvite} disabled={!inviteEmail.trim()}>Invite</button>
-        </div>
-        {status && <p style={{ marginTop: "0.5rem", fontStyle: "italic" }}>{status}</p>}
-      </section>
+        <Card>
+          <CardHeader>
+            <CardTitle>Invite Member</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex gap-2 flex-wrap">
+              <Input
+                type="email"
+                placeholder="Email address"
+                value={inviteEmail}
+                onChange={(e) => setInviteEmail(e.target.value)}
+                className="max-w-xs"
+              />
+              <Select value={inviteRole} onValueChange={setInviteRole}>
+                <SelectTrigger className="w-32">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {AVAILABLE_ROLES.map((r) => (
+                    <SelectItem key={r} value={r}>{r}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button onClick={handleInvite} disabled={!inviteEmail.trim()}>Invite</Button>
+            </div>
+          </CardContent>
+        </Card>
 
-      <section>
-        <h2>Team ({members.length})</h2>
-        {members.length === 0 ? (
-          <p style={{ color: "#666" }}>No members found.</p>
-        ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid #ddd" }}>Name / Email</th>
-                <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid #ddd" }}>Roles</th>
-                <th style={{ textAlign: "left", padding: "0.5rem", borderBottom: "2px solid #ddd" }}>Status</th>
-                <th style={{ padding: "0.5rem", borderBottom: "2px solid #ddd" }}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {members.map((m) => (
-                <tr key={m.userId}>
-                  <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>
-                    <strong>{m.name || m.email || m.userId}</strong>
-                    {m.email && m.name && <div style={{ fontSize: "0.8rem", color: "#666" }}>{m.email}</div>}
-                  </td>
-                  <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>
-                    {(m.roleNames || []).map((r) => (
-                      <span
-                        key={r}
-                        style={{
-                          display: "inline-block",
-                          padding: "0.1rem 0.4rem",
-                          margin: "0.1rem",
-                          borderRadius: "8px",
-                          background: r === "owner" ? "#e8f5e9" : r === "admin" ? "#e3f2fd" : "#f5f5f5",
-                          fontSize: "0.8rem",
-                        }}
-                      >
-                        {r}
-                      </span>
-                    ))}
-                  </td>
-                  <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee" }}>
-                    <span style={{ color: m.status === "enabled" ? "green" : "red" }}>
-                      {m.status || "unknown"}
-                    </span>
-                  </td>
-                  <td style={{ padding: "0.5rem", borderBottom: "1px solid #eee", textAlign: "right" }}>
-                    <button onClick={() => handleToggleStatus(m.userId, m.status || "enabled")}>
-                      {m.status === "enabled" ? "Deactivate" : "Activate"}
-                    </button>{" "}
-                    <button onClick={() => handleRemove(m.userId)} style={{ color: "red" }}>
-                      Remove
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </section>
+        <Card>
+          <CardHeader>
+            <CardTitle>Team</CardTitle>
+            <CardDescription>{members.length} member{members.length !== 1 ? "s" : ""}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {members.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No members found.</p>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Name / Email</TableHead>
+                    <TableHead>Roles</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {members.map((m) => (
+                    <TableRow key={m.userId}>
+                      <TableCell>
+                        <div className="font-medium">{m.name || m.email || m.userId}</div>
+                        {m.email && m.name && (
+                          <div className="text-xs text-muted-foreground">{m.email}</div>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex gap-1 flex-wrap">
+                          {(m.roleNames || []).map((r) => (
+                            <Badge key={r} variant="outline">{r}</Badge>
+                          ))}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant={m.status === "enabled" ? "secondary" : "destructive"}>
+                          {m.status || "unknown"}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex gap-1 justify-end">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleToggleStatus(m.userId, m.status || "enabled")}
+                          >
+                            {m.status === "enabled" ? "Deactivate" : "Activate"}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-destructive"
+                            onClick={() => handleRemove(m.userId)}
+                          >
+                            Remove
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
       </div>
     </>
   );
