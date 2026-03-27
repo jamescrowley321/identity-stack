@@ -5,12 +5,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.middleware.security import SecurityHeadersMiddleware
 from app.models.database import create_db_and_tables
 from app.routers import accesskeys, attributes, auth, health, protected, roles, tenants, users
+
+TRUSTED_PROXY_HOSTS = os.getenv("TRUSTED_PROXY_HOSTS", "127.0.0.1").split(",")
 
 
 @asynccontextmanager
@@ -42,11 +45,18 @@ app.add_middleware(
     excluded_paths={"/api/health", "/api/validate-id-token", "/docs", "/openapi.json"},
 )
 
-# 3. Rate limiting — before auth so brute-force attempts are caught
+# 3. Rate limiting — SlowAPIMiddleware registers state on request.state;
+#    enforcement is via @limiter decorators on route handlers. For authenticated
+#    endpoints, auth fires first (by design — rate-limit key uses the sub claim).
+#    Unauthenticated endpoints (e.g. /validate-id-token) are rate-limited directly.
 app.add_middleware(SlowAPIMiddleware)
 
-# 4. Security headers — outermost so headers are set on all responses including 429s
+# 4. Security headers — set on all responses including 429s
 app.add_middleware(SecurityHeadersMiddleware, environment=os.getenv("ENVIRONMENT", "development"))
+
+# 5. Proxy headers — outermost, sets request.client from X-Forwarded-For
+#    so rate limiting keys on real client IP, not the load balancer's
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=TRUSTED_PROXY_HOSTS)
 
 app.include_router(health.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")

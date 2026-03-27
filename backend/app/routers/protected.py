@@ -1,6 +1,6 @@
 import os
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from py_identity_model import TokenValidationConfig
 from py_identity_model.aio import validate_token
 from py_identity_model.identity import ClaimsPrincipal
@@ -47,7 +47,7 @@ async def claims(claims: dict = Depends(get_claims)):
 async def validate_id_token(request: Request, authorization: str = Header()):
     """Validate an ID token server-side and return its claims."""
     if not authorization.startswith("Bearer "):
-        return {"error": "Invalid authorization header"}
+        raise HTTPException(status_code=400, detail="Invalid authorization header")
 
     id_token = authorization.removeprefix("Bearer ")
 
