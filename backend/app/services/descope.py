@@ -81,6 +81,41 @@ class DescopeManagementClient:
             {"loginId": user_id, "tenantId": tenant_id},
         )
 
+    async def assign_roles(self, user_id: str, tenant_id: str, role_names: list[str]) -> None:
+        """Assign roles to a user within a specific tenant."""
+        await self._request(
+            "/v1/mgmt/user/update/role/add",
+            {"loginId": user_id, "tenantId": tenant_id, "roleNames": role_names},
+        )
+
+    async def remove_roles(self, user_id: str, tenant_id: str, role_names: list[str]) -> None:
+        """Remove roles from a user within a specific tenant."""
+        await self._request(
+            "/v1/mgmt/user/update/role/remove",
+            {"loginId": user_id, "tenantId": tenant_id, "roleNames": role_names},
+        )
+
+    async def load_user(self, user_id: str) -> dict:
+        """Load a user by login ID. Returns user object including customAttributes."""
+        resp = await self._request("/v1/mgmt/user/load", {"loginId": user_id})
+        return resp.json().get("user", {})
+
+    async def update_user_custom_attribute(
+        self, user_id: str, attribute_key: str, attribute_value: str | int | bool | float | None
+    ) -> None:
+        """Set a single custom attribute on a user."""
+        await self._request(
+            "/v1/mgmt/user/update/customAttribute",
+            {"loginId": user_id, "attributeKey": attribute_key, "attributeValue": attribute_value},
+        )
+
+    async def update_tenant_custom_attributes(self, tenant_id: str, custom_attributes: dict) -> None:
+        """Update custom attributes on a tenant."""
+        await self._request(
+            "/v1/mgmt/tenant/update",
+            {"id": tenant_id, "customAttributes": custom_attributes},
+        )
+
     async def close(self) -> None:
         """Close the underlying HTTP client if we own it."""
         if self._http_client is not None and not self._owns_client:

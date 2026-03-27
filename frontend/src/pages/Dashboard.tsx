@@ -1,8 +1,11 @@
 import { useAuth } from "react-oidc-context";
 import { useEffect, useState, useCallback } from "react";
+import { Link } from "react-router-dom";
 import { useApiClient } from "../hooks/useApiClient";
 import { useTenants } from "../hooks/useTenants";
+import { useRBAC } from "../hooks/useRBAC";
 import TenantSwitcher from "../components/layout/TenantSwitcher";
+import { RequirePermission } from "../components/auth/RequirePermission";
 
 const preStyle = {
   background: "#f4f4f4",
@@ -27,6 +30,7 @@ export default function Dashboard() {
   const auth = useAuth();
   const { apiFetch } = useApiClient();
   const { currentTenantId, tenants } = useTenants();
+  const { roles, isAdmin } = useRBAC();
   const [health, setHealth] = useState<string>("checking...");
   const [accessTokenClaims, setAccessTokenClaims] = useState<Record<string, unknown> | null>(null);
   const [idTokenClaims, setIdTokenClaims] = useState<Record<string, unknown> | null>(null);
@@ -138,9 +142,15 @@ export default function Dashboard() {
         <h2>Welcome, {(identityName?.name as string) || auth.user?.profile?.email || "User"}</h2>
         <p>Backend status: <strong>{health}</strong></p>
         {currentTenantId && <p>Current tenant: <strong>{currentTenantId}</strong></p>}
+        {roles.length > 0 && <p>Roles: <strong>{roles.join(", ")}</strong></p>}
         {tenants.length > 0 && (
           <p>Tenant memberships: <strong>{tenants.map((t) => t.id).join(", ")}</strong></p>
         )}
+        <p>
+          <Link to="/profile">Profile</Link>
+          {currentTenantId && <>{" | "}<Link to="/settings">Tenant Settings</Link></>}
+          {isAdmin && <>{" | "}<Link to="/roles">Manage Roles</Link></>}
+        </p>
       </section>
 
       {error && (
@@ -152,19 +162,21 @@ export default function Dashboard() {
       {currentTenantId && (
         <section style={{ marginTop: "2rem" }}>
           <h3>Tenant Resources <span style={labelStyle}>(scoped to {currentTenantId})</span></h3>
-          <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
-            <input
-              type="text"
-              placeholder="Resource name"
-              value={newResourceName}
-              onChange={(e) => setNewResourceName(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleCreateResource()}
-              style={{ padding: "0.25rem 0.5rem", flex: 1 }}
-            />
-            <button onClick={handleCreateResource} disabled={!newResourceName.trim()}>
-              Create
-            </button>
-          </div>
+          <RequirePermission permission="documents.write">
+            <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
+              <input
+                type="text"
+                placeholder="Resource name"
+                value={newResourceName}
+                onChange={(e) => setNewResourceName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleCreateResource()}
+                style={{ padding: "0.25rem 0.5rem", flex: 1 }}
+              />
+              <button onClick={handleCreateResource} disabled={!newResourceName.trim()}>
+                Create
+              </button>
+            </div>
+          </RequirePermission>
           {resources.length === 0 ? (
             <p style={{ color: "#666", fontSize: "0.9rem" }}>No resources yet. Create one above.</p>
           ) : (
