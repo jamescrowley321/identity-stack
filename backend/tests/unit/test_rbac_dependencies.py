@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException
 
-from app.dependencies.rbac import require_permission, require_role
+from app.dependencies.rbac import require_all_permissions, require_any_permission, require_permission, require_role
 
 
 def _make_request(claims):
@@ -126,6 +126,51 @@ class TestRequirePermission:
     def test_handles_non_dict_tenant_info(self):
         claims = {"sub": "u1", "dct": "t1", "tenants": {"t1": None}}
         dep = require_permission("projects.read")
+        with pytest.raises(HTTPException) as exc_info:
+            dep(_make_request(claims))
+        assert exc_info.value.status_code == 403
+
+
+class TestRequireAnyPermissionAlias:
+    def test_alias_is_same_function(self):
+        assert require_any_permission is require_permission
+
+
+class TestRequireAllPermissions:
+    def test_allows_when_user_has_all(self):
+        dep = require_all_permissions("projects.create", "projects.read")
+        result = dep(_make_request(CLAIMS_ADMIN))
+        assert "projects.create" in result
+        assert "projects.read" in result
+
+    def test_rejects_when_missing_one(self):
+        dep = require_all_permissions("projects.read", "billing.manage")
+        with pytest.raises(HTTPException) as exc_info:
+            dep(_make_request(CLAIMS_ADMIN))
+        assert exc_info.value.status_code == 403
+
+    def test_allows_single_permission(self):
+        dep = require_all_permissions("projects.read")
+        result = dep(_make_request(CLAIMS_VIEWER))
+        assert "projects.read" in result
+
+    def test_rejects_without_tenant_context(self):
+        dep = require_all_permissions("projects.read")
+        with pytest.raises(HTTPException) as exc_info:
+            dep(_make_request(CLAIMS_NO_TENANT))
+        assert exc_info.value.status_code == 403
+
+    def test_rejects_without_claims(self):
+        dep = require_all_permissions("projects.read")
+        request = MagicMock(spec=[])
+        request.state = MagicMock(spec=[])
+        with pytest.raises(HTTPException) as exc_info:
+            dep(request)
+        assert exc_info.value.status_code == 401
+
+    def test_handles_non_dict_tenant_info(self):
+        claims = {"sub": "u1", "dct": "t1", "tenants": {"t1": None}}
+        dep = require_all_permissions("projects.read")
         with pytest.raises(HTTPException) as exc_info:
             dep(_make_request(claims))
         assert exc_info.value.status_code == 403
