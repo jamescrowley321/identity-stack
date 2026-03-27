@@ -8,6 +8,7 @@ A comprehensive reference project demonstrating Descope's identity platform feat
 ┌────────────────────────────────────┐
 │  React Frontend (Vite + TS)        │
 │  - Tailwind CSS v4 + shadcn/ui    │
+│  - Sidebar layout + dark mode     │
 │  - react-oidc-context (OIDC auth)  │
 │  - Tenant-aware routing            │
 │  - Role-based UI rendering         │
@@ -226,6 +227,7 @@ descope-saas-starter/
 │   ├── src/
 │   │   ├── pages/     # Route pages
 │   │   ├── components/# UI components
+│   │   │   ├── layout/# App shell, sidebar, header
 │   │   │   └── ui/   # shadcn/ui components
 │   │   ├── hooks/     # Custom React hooks
 │   │   └── api/       # Backend API client
