@@ -21,7 +21,7 @@ class TestDescopeManagementClient:
     async def test_create_tenant(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(
+        mock_http.request.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
             json=MagicMock(return_value={"id": "new-tenant-id"}),
@@ -29,7 +29,8 @@ class TestDescopeManagementClient:
 
         result = await client.create_tenant("Acme Corp", ["acme.com"])
         assert result == {"id": "new-tenant-id"}
-        mock_http.post.assert_called_once_with(
+        mock_http.request.assert_called_once_with(
+            "POST",
             "https://api.descope.com/v1/mgmt/tenant/create",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={"name": "Acme Corp", "selfProvisioningDomains": ["acme.com"]},
@@ -40,14 +41,14 @@ class TestDescopeManagementClient:
     async def test_create_tenant_without_domains(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(
+        mock_http.request.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
             json=MagicMock(return_value={"id": "t1"}),
         )
 
         await client.create_tenant("Simple Corp")
-        call_json = mock_http.post.call_args[1]["json"]
+        call_json = mock_http.request.call_args[1]["json"]
         assert "selfProvisioningDomains" not in call_json
 
     @pytest.mark.anyio
@@ -55,7 +56,7 @@ class TestDescopeManagementClient:
     async def test_list_tenants(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(
+        mock_http.request.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
             json=MagicMock(return_value={"tenants": [{"id": "t1", "name": "Acme"}]}),
@@ -69,7 +70,7 @@ class TestDescopeManagementClient:
     async def test_load_tenant(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(
+        mock_http.request.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
             json=MagicMock(return_value={"id": "t1", "name": "Acme"}),
@@ -83,13 +84,14 @@ class TestDescopeManagementClient:
     async def test_delete_tenant(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(
+        mock_http.request.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
         )
 
         await client.delete_tenant("t1")
-        mock_http.post.assert_called_once_with(
+        mock_http.request.assert_called_once_with(
+            "POST",
             "https://api.descope.com/v1/mgmt/tenant/delete",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={"id": "t1"},
@@ -100,13 +102,14 @@ class TestDescopeManagementClient:
     async def test_add_user_to_tenant(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(
+        mock_http.request.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
         )
 
         await client.add_user_to_tenant("user1", "t1")
-        mock_http.post.assert_called_once_with(
+        mock_http.request.assert_called_once_with(
+            "POST",
             "https://api.descope.com/v1/mgmt/user/update/tenant/add",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={"loginId": "user1", "tenantId": "t1"},
@@ -117,13 +120,14 @@ class TestDescopeManagementClient:
     async def test_assign_roles(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(
+        mock_http.request.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
         )
 
         await client.assign_roles("user1", "t1", ["admin", "member"])
-        mock_http.post.assert_called_once_with(
+        mock_http.request.assert_called_once_with(
+            "POST",
             "https://api.descope.com/v1/mgmt/user/update/role/add",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={"loginId": "user1", "tenantId": "t1", "roleNames": ["admin", "member"]},
@@ -134,13 +138,14 @@ class TestDescopeManagementClient:
     async def test_remove_roles(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(
+        mock_http.request.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
         )
 
         await client.remove_roles("user1", "t1", ["member"])
-        mock_http.post.assert_called_once_with(
+        mock_http.request.assert_called_once_with(
+            "POST",
             "https://api.descope.com/v1/mgmt/user/update/role/remove",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={"loginId": "user1", "tenantId": "t1", "roleNames": ["member"]},
@@ -151,7 +156,7 @@ class TestDescopeManagementClient:
     async def test_load_user(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(
+        mock_http.request.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
             json=MagicMock(return_value={"user": {"name": "Test", "customAttributes": {"dept": "Eng"}}}),
@@ -166,10 +171,11 @@ class TestDescopeManagementClient:
     async def test_update_user_custom_attribute(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+        mock_http.request.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
 
         await client.update_user_custom_attribute("user1", "department", "Product")
-        mock_http.post.assert_called_once_with(
+        mock_http.request.assert_called_once_with(
+            "POST",
             "https://api.descope.com/v1/mgmt/user/update/customAttribute",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={"loginId": "user1", "attributeKey": "department", "attributeValue": "Product"},
@@ -180,10 +186,11 @@ class TestDescopeManagementClient:
     async def test_update_tenant_custom_attributes(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+        mock_http.request.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
 
         await client.update_tenant_custom_attributes("t1", {"plan_tier": "pro"})
-        mock_http.post.assert_called_once_with(
+        mock_http.request.assert_called_once_with(
+            "POST",
             "https://api.descope.com/v1/mgmt/tenant/update",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={"id": "t1", "customAttributes": {"plan_tier": "pro"}},
@@ -194,7 +201,7 @@ class TestDescopeManagementClient:
     async def test_create_access_key(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(
+        mock_http.request.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
             json=MagicMock(return_value={"key": {"id": "k1"}, "cleartext": "secret"}),
@@ -202,7 +209,8 @@ class TestDescopeManagementClient:
 
         result = await client.create_access_key("Test Key", "t1", role_names=["viewer"])
         assert result["cleartext"] == "secret"
-        mock_http.post.assert_called_once_with(
+        mock_http.request.assert_called_once_with(
+            "POST",
             "https://api.descope.com/v1/mgmt/accesskey/create",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={"name": "Test Key", "tenantId": "t1", "roleNames": ["viewer"]},
@@ -213,7 +221,7 @@ class TestDescopeManagementClient:
     async def test_search_access_keys(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(
+        mock_http.request.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
             json=MagicMock(return_value={"keys": [{"id": "k1"}]}),
@@ -227,10 +235,11 @@ class TestDescopeManagementClient:
     async def test_deactivate_access_key(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+        mock_http.request.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
 
         await client.deactivate_access_key("k1")
-        mock_http.post.assert_called_once_with(
+        mock_http.request.assert_called_once_with(
+            "POST",
             "https://api.descope.com/v1/mgmt/accesskey/deactivate",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={"id": "k1"},
@@ -241,10 +250,11 @@ class TestDescopeManagementClient:
     async def test_delete_access_key(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+        mock_http.request.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
 
         await client.delete_access_key("k1")
-        mock_http.post.assert_called_once_with(
+        mock_http.request.assert_called_once_with(
+            "POST",
             "https://api.descope.com/v1/mgmt/accesskey/delete",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={"id": "k1"},
@@ -255,7 +265,7 @@ class TestDescopeManagementClient:
     async def test_invite_user(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(
+        mock_http.request.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
             json=MagicMock(return_value={"user": {"userId": "u1", "email": "a@b.com"}}),
@@ -263,7 +273,8 @@ class TestDescopeManagementClient:
 
         result = await client.invite_user("a@b.com", "t1", ["member"])
         assert result["email"] == "a@b.com"
-        mock_http.post.assert_called_once_with(
+        mock_http.request.assert_called_once_with(
+            "POST",
             "https://api.descope.com/v1/mgmt/user/create",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={"loginId": "a@b.com", "email": "a@b.com", "tenants": [{"tenantId": "t1", "roleNames": ["member"]}]},
@@ -274,7 +285,7 @@ class TestDescopeManagementClient:
     async def test_search_tenant_users(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(
+        mock_http.request.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
             json=MagicMock(return_value={"users": [{"userId": "u1"}]}),
@@ -288,10 +299,11 @@ class TestDescopeManagementClient:
     async def test_update_user_status(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+        mock_http.request.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
 
         await client.update_user_status("u1", "disabled")
-        mock_http.post.assert_called_once_with(
+        mock_http.request.assert_called_once_with(
+            "POST",
             "https://api.descope.com/v1/mgmt/user/updateStatus",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={"loginId": "u1", "status": "disabled"},
@@ -302,10 +314,11 @@ class TestDescopeManagementClient:
     async def test_delete_user(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value.__aenter__.return_value = mock_http
-        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+        mock_http.request.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
 
         await client.delete_user("u1")
-        mock_http.post.assert_called_once_with(
+        mock_http.request.assert_called_once_with(
+            "POST",
             "https://api.descope.com/v1/mgmt/user/delete",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={"loginId": "u1"},
