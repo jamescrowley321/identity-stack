@@ -19,10 +19,11 @@ def anyio_backend():
     return "asyncio"
 
 
-def _mock_response(status_code=200, json_data=None):
+def _mock_response(status_code=200, json_data=None, headers=None):
     resp = MagicMock(spec=httpx.Response)
     resp.status_code = status_code
     resp.json.return_value = json_data or {}
+    resp.headers = headers or {}
     if status_code >= 400:
         resp.raise_for_status.side_effect = httpx.HTTPStatusError(f"{status_code}", request=MagicMock(), response=resp)
     else:
@@ -107,6 +108,38 @@ class TestRetryOnTransientErrors:
 
         result = await client.load_tenant("t1")
         assert result == {"id": "t1"}
+        assert mock_http.request.call_count == 2
+
+
+class TestNoRetryOnMutations:
+    @pytest.mark.anyio
+    @patch("app.services.descope.asyncio.sleep", new_callable=AsyncMock)
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_no_status_retry_on_create(self, mock_cls, mock_sleep, client):
+        """Mutations should NOT be retried on 503 to avoid duplicate side effects."""
+        mock_http = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_http.request.return_value = _mock_response(503)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.create_tenant(name="test")
+        assert mock_http.request.call_count == 1
+        mock_sleep.assert_not_called()
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.asyncio.sleep", new_callable=AsyncMock)
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_connect_error_retried_on_mutations(self, mock_cls, mock_sleep, client):
+        """Connection errors are safe to retry even for mutations (request never reached server)."""
+        mock_http = AsyncMock()
+        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_http.request.side_effect = [
+            httpx.ConnectError("connection refused"),
+            _mock_response(200, {"id": "t1", "name": "test"}),
+        ]
+
+        result = await client.create_tenant(name="test")
+        assert result == {"id": "t1", "name": "test"}
         assert mock_http.request.call_count == 2
 
 

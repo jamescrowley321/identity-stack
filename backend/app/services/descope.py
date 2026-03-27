@@ -9,14 +9,50 @@ from app.logging_config import get_logger
 logger = get_logger(__name__)
 
 RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
-MAX_RETRIES = int(os.getenv("DESCOPE_MAX_RETRIES", "3"))
-RETRY_BASE_DELAY = float(os.getenv("DESCOPE_RETRY_BASE_DELAY", "0.5"))
-RETRY_MAX_DELAY = float(os.getenv("DESCOPE_RETRY_MAX_DELAY", "30"))
+
+# Read-only Descope API paths that are safe to auto-retry.
+_IDEMPOTENT_PATHS = frozenset(
+    {
+        "/v1/mgmt/tenant/all",
+        "/v1/mgmt/tenant/load",
+        "/v1/mgmt/user/load",
+        "/v1/mgmt/user/search",
+        "/v1/mgmt/accesskey/search",
+        "/v1/mgmt/accesskey/load",
+    }
+)
 
 
-def _backoff_delay(attempt: int) -> float:
+def _parse_int_env(name: str, default: int, min_val: int = 0, max_val: int = 100) -> int:
+    """Parse an integer from an env var with clamping and fallback."""
+    raw = os.getenv(name, str(default))
+    try:
+        value = int(raw)
+    except (ValueError, TypeError):
+        logger.warning("descope.config invalid %s=%r, using default %d", name, raw, default)
+        return default
+    return max(min_val, min(value, max_val))
+
+
+def _parse_float_env(name: str, default: float, min_val: float = 0.0, max_val: float = 120.0) -> float:
+    """Parse a float from an env var with clamping and fallback."""
+    raw = os.getenv(name, str(default))
+    try:
+        value = float(raw)
+    except (ValueError, TypeError):
+        logger.warning("descope.config invalid %s=%r, using default %.1f", name, raw, default)
+        return default
+    return max(min_val, min(value, max_val))
+
+
+MAX_RETRIES = _parse_int_env("DESCOPE_MAX_RETRIES", 3, min_val=0, max_val=10)
+RETRY_BASE_DELAY = _parse_float_env("DESCOPE_RETRY_BASE_DELAY", 0.5, min_val=0.0, max_val=30.0)
+RETRY_MAX_DELAY = _parse_float_env("DESCOPE_RETRY_MAX_DELAY", 30.0, min_val=0.1, max_val=120.0)
+
+
+def _backoff_delay(attempt: int, base_delay: float = RETRY_BASE_DELAY, max_delay: float = RETRY_MAX_DELAY) -> float:
     """Calculate delay with full jitter: random(0, min(max_delay, base * 2^attempt))."""
-    ceiling = min(RETRY_MAX_DELAY, RETRY_BASE_DELAY * (2**attempt))
+    ceiling = min(max_delay, base_delay * (2**attempt))
     return random.uniform(0, ceiling)
 
 
@@ -25,6 +61,10 @@ class DescopeManagementClient:
 
     Retries on connection errors, timeouts, 429 (rate limit), and 502/503/504 (server errors).
     Non-retryable errors (400, 401, 403, 404) fail immediately.
+
+    Mutations (create, update, delete) are NOT retried on server errors to avoid
+    duplicate side effects. Only idempotent read operations are auto-retried.
+    Connection errors and timeouts are always retried since the request never reached the server.
     """
 
     def __init__(self, project_id: str, management_key: str, base_url: str = "https://api.descope.com"):
@@ -35,41 +75,49 @@ class DescopeManagementClient:
         return {"Authorization": self._auth_header}
 
     async def _request(self, method: str, path: str, *, json: dict | None = None) -> httpx.Response:
-        """Make an HTTP request with exponential backoff retry for transient errors."""
+        """Make an HTTP request with exponential backoff retry for transient errors.
+
+        Status-code retries (429, 502-504) only apply to idempotent paths.
+        Connection/timeout retries always apply (request never reached server).
+        """
         url = f"{self.base_url}{path}"
+        is_idempotent = path in _IDEMPOTENT_PATHS
         last_exc: Exception | None = None
-        for attempt in range(MAX_RETRIES + 1):
-            try:
-                async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for attempt in range(MAX_RETRIES + 1):
+                try:
                     resp = await client.request(method, url, headers=self._headers(), json=json)
-                if resp.status_code in RETRYABLE_STATUS_CODES and attempt < MAX_RETRIES:
-                    delay = _backoff_delay(attempt)
-                    logger.warning(
-                        "descope.retry attempt=%d status=%d delay=%.2fs path=%s",
-                        attempt + 1,
-                        resp.status_code,
-                        delay,
-                        path,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                resp.raise_for_status()
-                return resp
-            except (httpx.ConnectError, httpx.TimeoutException) as exc:
-                last_exc = exc
-                if attempt < MAX_RETRIES:
-                    delay = _backoff_delay(attempt)
-                    logger.warning(
-                        "descope.retry attempt=%d error=%s delay=%.2fs path=%s",
-                        attempt + 1,
-                        type(exc).__name__,
-                        delay,
-                        path,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                raise
-        raise last_exc  # type: ignore[misc]
+                    if resp.status_code in RETRYABLE_STATUS_CODES and attempt < MAX_RETRIES and is_idempotent:
+                        retry_after = resp.headers.get("Retry-After")
+                        delay = float(retry_after) if retry_after and retry_after.isdigit() else _backoff_delay(attempt)
+                        logger.warning(
+                            "descope.retry attempt=%d status=%d delay=%.2fs path=%s",
+                            attempt + 1,
+                            resp.status_code,
+                            delay,
+                            path,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    resp.raise_for_status()
+                    return resp
+                except (httpx.ConnectError, httpx.TimeoutException) as exc:
+                    last_exc = exc
+                    if attempt < MAX_RETRIES:
+                        delay = _backoff_delay(attempt)
+                        logger.warning(
+                            "descope.retry attempt=%d error=%s delay=%.2fs path=%s",
+                            attempt + 1,
+                            type(exc).__name__,
+                            delay,
+                            path,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    raise
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("Retry loop exited without result")  # pragma: no cover
 
     async def create_tenant(
         self,
