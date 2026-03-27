@@ -12,7 +12,7 @@ from app.middleware.correlation import CorrelationIdMiddleware
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.middleware.security import SecurityHeadersMiddleware
 from app.models.database import create_db_and_tables
-from app.routers import accesskeys, attributes, auth, documents, health, protected, roles, tenants, users
+from app.routers import accesskeys, attributes, auth, documents, health, protected, rbac_demo, roles, tenants, users
 
 logger = get_logger(__name__)
 
@@ -49,6 +49,7 @@ app.add_middleware(
         "/api/health",
         "/api/health/live",
         "/api/health/ready",
+        "/api/rbac/hierarchy",
         "/api/validate-id-token",
         "/docs",
         "/openapi.json",
@@ -73,3 +74,4 @@ app.include_router(attributes.router, prefix="/api")
 app.include_router(accesskeys.router, prefix="/api")
 app.include_router(users.router, prefix="/api")
 app.include_router(documents.router, prefix="/api")
+app.include_router(rbac_demo.router, prefix="/api")
