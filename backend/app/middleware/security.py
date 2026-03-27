@@ -14,10 +14,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, environment: str = "development"):
         super().__init__(app)
         self.is_production = environment == "production"
-        self.csp = os.getenv(
+        csp_value = os.getenv(
             "CSP_POLICY",
             "default-src 'self'" if self.is_production else "default-src 'self' http://localhost:*",
         )
+        self.csp = csp_value.replace("\n", " ").replace("\r", " ")
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)

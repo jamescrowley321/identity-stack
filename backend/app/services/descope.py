@@ -1,4 +1,5 @@
 import os
+from typing import Literal
 
 import httpx
 
@@ -225,8 +226,8 @@ class DescopeManagementClient:
             resp.raise_for_status()
             return resp.json().get("users", [])
 
-    async def update_user_status(self, user_id: str, status: str) -> None:
-        """Update user status. status must be 'enabled' or 'disabled'."""
+    async def update_user_status(self, user_id: str, status: Literal["enabled", "disabled"]) -> None:
+        """Update user status."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"{self.base_url}/v1/mgmt/user/updateStatus",
@@ -235,13 +236,13 @@ class DescopeManagementClient:
             )
             resp.raise_for_status()
 
-    async def delete_user(self, user_id: str) -> None:
-        """Delete a user permanently."""
+    async def remove_user_from_tenant(self, user_id: str, tenant_id: str) -> None:
+        """Remove a user from a specific tenant (does not delete the user globally)."""
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self.base_url}/v1/mgmt/user/delete",
+                f"{self.base_url}/v1/mgmt/user/update/tenant/remove",
                 headers=self._headers(),
-                json={"loginId": user_id},
+                json={"loginId": user_id, "tenantId": tenant_id},
             )
             resp.raise_for_status()
 
