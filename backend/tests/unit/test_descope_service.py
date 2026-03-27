@@ -116,7 +116,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_assign_roles(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
@@ -133,7 +133,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_remove_roles(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
@@ -150,7 +150,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_load_user(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
@@ -165,7 +165,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_update_user_custom_attribute(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
 
         await client.update_user_custom_attribute("user1", "department", "Product")
@@ -179,7 +179,7 @@ class TestDescopeManagementClient:
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_update_tenant_custom_attributes(self, mock_cls, client):
         mock_http = AsyncMock()
-        mock_cls.return_value.__aenter__.return_value = mock_http
+        mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
 
         await client.update_tenant_custom_attributes("t1", {"plan_tier": "pro"})
