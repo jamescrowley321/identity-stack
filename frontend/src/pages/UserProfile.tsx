@@ -20,6 +20,7 @@ interface AuthMethodData {
 const METHOD_LABELS: Record<string, string> = {
   oauth: "OAuth",
   password: "Password",
+  passkey: "Passkey (WebAuthn)",
   otp: "One-Time Password",
   mfa: "Multi-Factor",
   magiclink: "Magic Link",
