@@ -55,8 +55,13 @@ async def update_profile_attribute(
     if body.key not in ALLOWED_USER_ATTRIBUTES:
         raise HTTPException(status_code=400, detail=f"Attribute '{body.key}' is not allowed")
     client = get_descope_client()
-    await client.update_user_custom_attribute(user_id, body.key, body.value)
-    audit_event(request, AuditEventType.PROFILE_UPDATED, {"key": body.key})
+    target = {"key": body.key}
+    try:
+        await client.update_user_custom_attribute(user_id, body.key, body.value)
+    except Exception:
+        audit_event(request, AuditEventType.PROFILE_UPDATED, target, result="failure")
+        raise
+    audit_event(request, AuditEventType.PROFILE_UPDATED, target)
     return {"status": "updated", "key": body.key, "value": body.value}
 
 
@@ -84,6 +89,11 @@ async def update_tenant_settings(
 ):
     """Update custom attributes on the current tenant. Requires owner or admin role."""
     client = get_descope_client()
-    await client.update_tenant_custom_attributes(tenant_id, body.custom_attributes)
-    audit_event(request, AuditEventType.TENANT_SETTINGS_UPDATED, {"tenant_id": tenant_id})
+    target = {"tenant_id": tenant_id}
+    try:
+        await client.update_tenant_custom_attributes(tenant_id, body.custom_attributes)
+    except Exception:
+        audit_event(request, AuditEventType.TENANT_SETTINGS_UPDATED, target, result="failure")
+        raise
+    audit_event(request, AuditEventType.TENANT_SETTINGS_UPDATED, target)
     return {"status": "updated", "tenant_id": tenant_id, "custom_attributes": body.custom_attributes}

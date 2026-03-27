@@ -36,13 +36,18 @@ async def create_access_key(
 ):
     """Create an access key scoped to the current tenant. Returns cleartext (shown once)."""
     client = get_descope_client()
-    result = await client.create_access_key(
-        name=body.name,
-        tenant_id=tenant_id,
-        expire_time=body.expire_time,
-        role_names=body.role_names,
-    )
-    audit_event(request, AuditEventType.ACCESS_KEY_CREATED, {"key_name": body.name})
+    target = {"key_name": body.name}
+    try:
+        result = await client.create_access_key(
+            name=body.name,
+            tenant_id=tenant_id,
+            expire_time=body.expire_time,
+            role_names=body.role_names,
+        )
+    except Exception:
+        audit_event(request, AuditEventType.ACCESS_KEY_CREATED, target, result="failure")
+        raise
+    audit_event(request, AuditEventType.ACCESS_KEY_CREATED, target)
     return result
 
 
@@ -78,8 +83,13 @@ async def deactivate_access_key(
     """Deactivate (revoke) an access key. Verifies key belongs to current tenant."""
     await _verify_key_tenant(key_id, tenant_id)
     client = get_descope_client()
-    await client.deactivate_access_key(key_id)
-    audit_event(request, AuditEventType.ACCESS_KEY_DEACTIVATED, {"key_id": key_id})
+    target = {"key_id": key_id}
+    try:
+        await client.deactivate_access_key(key_id)
+    except Exception:
+        audit_event(request, AuditEventType.ACCESS_KEY_DEACTIVATED, target, result="failure")
+        raise
+    audit_event(request, AuditEventType.ACCESS_KEY_DEACTIVATED, target)
     return {"status": "deactivated", "key_id": key_id}
 
 
@@ -93,8 +103,13 @@ async def activate_access_key(
     """Reactivate a previously deactivated access key. Verifies key belongs to current tenant."""
     await _verify_key_tenant(key_id, tenant_id)
     client = get_descope_client()
-    await client.activate_access_key(key_id)
-    audit_event(request, AuditEventType.ACCESS_KEY_ACTIVATED, {"key_id": key_id})
+    target = {"key_id": key_id}
+    try:
+        await client.activate_access_key(key_id)
+    except Exception:
+        audit_event(request, AuditEventType.ACCESS_KEY_ACTIVATED, target, result="failure")
+        raise
+    audit_event(request, AuditEventType.ACCESS_KEY_ACTIVATED, target)
     return {"status": "activated", "key_id": key_id}
 
 
@@ -108,6 +123,11 @@ async def delete_access_key(
     """Permanently delete an access key. Verifies key belongs to current tenant."""
     await _verify_key_tenant(key_id, tenant_id)
     client = get_descope_client()
-    await client.delete_access_key(key_id)
-    audit_event(request, AuditEventType.ACCESS_KEY_DELETED, {"key_id": key_id})
+    target = {"key_id": key_id}
+    try:
+        await client.delete_access_key(key_id)
+    except Exception:
+        audit_event(request, AuditEventType.ACCESS_KEY_DELETED, target, result="failure")
+        raise
+    audit_event(request, AuditEventType.ACCESS_KEY_DELETED, target)
     return {"status": "deleted", "key_id": key_id}

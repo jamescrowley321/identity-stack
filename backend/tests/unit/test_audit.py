@@ -13,6 +13,7 @@ from app.services.audit import (
     _get_client_ip,
     audit_event,
     emit_audit_event,
+    mask_email,
 )
 
 
@@ -95,13 +96,14 @@ class TestEmitAuditEvent:
 
 
 class TestGetClientIp:
-    def test_uses_x_forwarded_for(self):
+    def test_ignores_x_forwarded_for(self):
+        """X-Forwarded-For is client-controlled; use request.client.host instead."""
         request = MagicMock()
         request.headers = {"X-Forwarded-For": "203.0.113.1, 10.0.0.1"}
         request.client.host = "10.0.0.1"
-        assert _get_client_ip(request) == "203.0.113.1"
+        assert _get_client_ip(request) == "10.0.0.1"
 
-    def test_falls_back_to_client_host(self):
+    def test_uses_client_host(self):
         request = MagicMock()
         request.headers = {}
         request.client.host = "192.168.1.1"
@@ -112,6 +114,20 @@ class TestGetClientIp:
         request.headers = {}
         request.client = None
         assert _get_client_ip(request) is None
+
+
+class TestMaskEmail:
+    def test_masks_normal_email(self):
+        assert mask_email("alice@example.com") == "a***e@example.com"
+
+    def test_masks_short_local(self):
+        assert mask_email("a@example.com") == "***@***"
+
+    def test_masks_no_at(self):
+        assert mask_email("notanemail") == "***@***"
+
+    def test_masks_two_char_local(self):
+        assert mask_email("ab@example.com") == "a***b@example.com"
 
 
 # --- audit_event convenience function tests ---

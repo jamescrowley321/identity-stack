@@ -44,8 +44,13 @@ async def assign_roles(
     if "owner" in body.role_names and "owner" not in admin_roles:
         raise HTTPException(status_code=403, detail="Only owners can assign the owner role")
     client = get_descope_client()
-    await client.assign_roles(body.user_id, body.tenant_id, body.role_names)
-    audit_event(request, AuditEventType.ROLE_ASSIGNED, {"user_id": body.user_id, "role_names": body.role_names})
+    target = {"user_id": body.user_id, "role_names": body.role_names}
+    try:
+        await client.assign_roles(body.user_id, body.tenant_id, body.role_names)
+    except Exception:
+        audit_event(request, AuditEventType.ROLE_ASSIGNED, target, result="failure")
+        raise
+    audit_event(request, AuditEventType.ROLE_ASSIGNED, target)
     return {"status": "roles_assigned", "user_id": body.user_id, "role_names": body.role_names}
 
 
@@ -62,6 +67,11 @@ async def remove_roles(
     if "owner" in body.role_names and "owner" not in admin_roles:
         raise HTTPException(status_code=403, detail="Only owners can remove the owner role")
     client = get_descope_client()
-    await client.remove_roles(body.user_id, body.tenant_id, body.role_names)
-    audit_event(request, AuditEventType.ROLE_REMOVED, {"user_id": body.user_id, "role_names": body.role_names})
+    target = {"user_id": body.user_id, "role_names": body.role_names}
+    try:
+        await client.remove_roles(body.user_id, body.tenant_id, body.role_names)
+    except Exception:
+        audit_event(request, AuditEventType.ROLE_REMOVED, target, result="failure")
+        raise
+    audit_event(request, AuditEventType.ROLE_REMOVED, target)
     return {"status": "roles_removed", "user_id": body.user_id, "role_names": body.role_names}

@@ -26,11 +26,16 @@ class CreateResourceRequest(BaseModel):
 async def create_tenant(request: Request, body: CreateTenantRequest, claims: dict = Depends(get_claims)):
     """Create a new tenant via the Descope Management API."""
     client = get_descope_client()
-    result = await client.create_tenant(
-        name=body.name,
-        self_provisioning_domains=body.self_provisioning_domains,
-    )
-    audit_event(request, AuditEventType.TENANT_CREATED, {"tenant_name": body.name})
+    target = {"tenant_name": body.name}
+    try:
+        result = await client.create_tenant(
+            name=body.name,
+            self_provisioning_domains=body.self_provisioning_domains,
+        )
+    except Exception:
+        audit_event(request, AuditEventType.TENANT_CREATED, target, result="failure")
+        raise
+    audit_event(request, AuditEventType.TENANT_CREATED, target)
     return result
 
 

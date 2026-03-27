@@ -8,6 +8,8 @@ Phase 1 stores events in structured logs only. A future phase can persist to a
 database table or external audit service.
 """
 
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from enum import StrEnum
 
@@ -17,6 +19,7 @@ from starlette.requests import Request
 from app.logging_config import get_logger
 
 audit_logger = get_logger("audit")
+_logger = get_logger(__name__)
 
 
 class AuditEventType(StrEnum):
@@ -55,23 +58,44 @@ class AuditEvent(BaseModel):
 
 
 def _get_client_ip(request: Request) -> str | None:
-    """Extract the client IP, preferring X-Forwarded-For for proxied requests."""
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        # First entry is the original client
-        return forwarded.split(",")[0].strip()
+    """Extract the client IP from the ASGI connection.
+
+    Uses ``request.client.host`` which reflects the immediate TCP peer.
+    When running behind a trusted reverse proxy, configure the ASGI server
+    (e.g. uvicorn ``--proxy-headers``) to populate this correctly rather
+    than reading X-Forwarded-For directly — the header is client-controlled
+    and trivially spoofable.
+    """
     if request.client:
         return request.client.host
     return None
 
 
 def emit_audit_event(event: AuditEvent) -> None:
-    """Write an audit event to the audit logger as a structured log entry."""
-    audit_logger.info(
-        "audit.%s",
-        event.action,
-        extra={"audit_event": event.model_dump()},
-    )
+    """Write an audit event to the audit logger as a structured log entry.
+
+    Never raises — audit failures must not break the request that triggered them.
+    """
+    try:
+        audit_logger.info(
+            "audit.%s",
+            event.action,
+            extra={"audit_event": event.model_dump()},
+        )
+    except Exception:
+        _logger.exception("Failed to emit audit event %s", event.action)
+
+
+def mask_email(email: str) -> str:
+    """Mask an email address for audit logging to avoid PII in logs.
+
+    ``alice@example.com`` becomes ``a***e@example.com``.
+    """
+    parts = email.split("@", 1)
+    if len(parts) != 2 or len(parts[0]) < 2:
+        return "***@***"
+    local = parts[0]
+    return f"{local[0]}***{local[-1]}@{parts[1]}"
 
 
 def audit_event(
