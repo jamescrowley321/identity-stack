@@ -98,3 +98,65 @@ jobs:
           DESCOPE_CLIENT_ID: ${{ secrets.DESCOPE_CLIENT_ID }}
           DESCOPE_CLIENT_SECRET: ${{ secrets.DESCOPE_CLIENT_SECRET }}
           DESCOPE_EXPIRED_TOKEN: ${{ secrets.DESCOPE_EXPIRED_TOKEN }}
+
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install backend dependencies
+        run: |
+          cd backend
+          pip install -e ".[dev]"
+          pip install pytest-playwright
+
+      - name: Install Playwright browsers
+        run: playwright install --with-deps chromium
+
+      - name: Install frontend dependencies
+        run: cd frontend && npm ci
+
+      - name: Build frontend
+        run: cd frontend && npm run build
+        env:
+          VITE_DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
+
+      - name: Start backend
+        run: |
+          cd backend
+          uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+          sleep 3
+        env:
+          DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
+          DESCOPE_MANAGEMENT_KEY: ${{ secrets.DESCOPE_MANAGEMENT_KEY }}
+
+      - name: Start frontend (preview)
+        run: |
+          cd frontend
+          npx vite preview --port 3000 &
+          sleep 2
+
+      - name: Run E2E tests
+        if: env.DESCOPE_PROJECT_ID != ''
+        run: cd backend && python -m pytest tests/e2e/ -v
+        env:
+          DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
+          DESCOPE_MANAGEMENT_KEY: ${{ secrets.DESCOPE_MANAGEMENT_KEY }}
+          DESCOPE_CLIENT_ID: ${{ secrets.DESCOPE_CLIENT_ID }}
+          DESCOPE_CLIENT_SECRET: ${{ secrets.DESCOPE_CLIENT_SECRET }}
+          E2E_TEST_EMAIL: ${{ secrets.E2E_TEST_EMAIL }}
+          E2E_TEST_TENANT_ID: ${{ secrets.E2E_TEST_TENANT_ID }}
+          E2E_FRONTEND_URL: "http://localhost:3000"
+          E2E_BACKEND_URL: "http://localhost:8000"
