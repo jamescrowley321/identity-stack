@@ -8,6 +8,7 @@ import UserProfile from "./pages/UserProfile";
 import TenantSettings from "./pages/TenantSettings";
 import AccessKeys from "./pages/AccessKeys";
 import MemberManagement from "./pages/MemberManagement";
+import FGAManagement from "./pages/FGAManagement";
 import { Button } from "./components/ui/button";
 import { Alert, AlertTitle, AlertDescription } from "./components/ui/alert";
 
@@ -106,6 +107,7 @@ export default function App() {
         <Route path="settings" element={<TenantSettings />} />
         <Route path="keys" element={<AccessKeys />} />
         <Route path="members" element={<MemberManagement />} />
+        <Route path="fga" element={<FGAManagement />} />
       </Route>
     </Routes>
   );
