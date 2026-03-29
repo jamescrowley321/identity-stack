@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.dependencies.rbac import require_role
+from app.dependencies.tenant import get_tenant_id
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.descope import get_descope_client
 
@@ -26,11 +27,41 @@ class RelationRequest(BaseModel):
     target: str = Field(min_length=1, max_length=200)
 
 
+def _prefix_resource_id(tenant_id: str, resource_id: str) -> str:
+    """Prefix a resource ID with the tenant ID for FGA tenant isolation."""
+    return f"{tenant_id}:{resource_id}"
+
+
+def _strip_tenant_prefix(tenant_id: str, resource_id: str) -> str:
+    """Strip the tenant prefix from a resource ID before returning to client."""
+    prefix = f"{tenant_id}:"
+    return resource_id[len(prefix) :] if resource_id.startswith(prefix) else resource_id
+
+
+def _sanitize_error_detail(response_text: str) -> str:
+    """Extract a safe error message from Descope API error responses."""
+    try:
+        import json
+
+        data = json.loads(response_text)
+        if isinstance(data, dict) and "message" in data:
+            return f"Validation error: {data['message'][:200]}"
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return f"Validation error: {response_text[:200]}"
+
+
+# --- Schema endpoints (project-global, no tenant prefixing) ---
+
+
 @router.get("/fga/schema")
 async def get_fga_schema(
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
-    """Get the current FGA schema. Requires owner or admin role."""
+    """Get the current FGA schema. Requires owner or admin role.
+
+    Note: FGA schema is project-global and affects all tenants.
+    """
     try:
         client = get_descope_client()
         result = await client.get_fga_schema() or {}
@@ -38,7 +69,7 @@ async def get_fga_schema(
     except httpx.HTTPStatusError as exc:
         logger.warning("Descope API error loading FGA schema: %s %s", exc.response.status_code, exc.response.text[:500])
         if exc.response.status_code == 400:
-            raise HTTPException(status_code=400, detail=exc.response.text[:500]) from exc
+            raise HTTPException(status_code=400, detail=_sanitize_error_detail(exc.response.text)) from exc
         raise HTTPException(status_code=502, detail="Failed to load FGA schema from Descope") from exc
     except httpx.RequestError as exc:
         logger.error("Network error loading FGA schema: %s", exc)
@@ -52,7 +83,10 @@ async def update_fga_schema(
     body: UpdateSchemaRequest,
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
-    """Update the FGA schema. Requires owner or admin role."""
+    """Update the FGA schema. Requires owner or admin role.
+
+    Note: FGA schema is project-global and affects all tenants.
+    """
     try:
         client = get_descope_client()
         await client.update_fga_schema(body.schema_)
@@ -60,7 +94,7 @@ async def update_fga_schema(
         resp_body = exc.response.text[:500]
         logger.warning("Descope API error updating FGA schema: %s %s", exc.response.status_code, resp_body)
         if exc.response.status_code == 400:
-            raise HTTPException(status_code=400, detail=exc.response.text[:500]) from exc
+            raise HTTPException(status_code=400, detail=_sanitize_error_detail(exc.response.text)) from exc
         raise HTTPException(status_code=502, detail="Failed to update FGA schema in Descope") from exc
     except httpx.RequestError as exc:
         logger.error("Network error updating FGA schema: %s", exc)
@@ -75,17 +109,22 @@ async def update_fga_schema(
         return {"schema": body.schema_}
 
 
+# --- Relation endpoints (tenant-scoped via resource_id prefixing) ---
+
+
 @router.post("/fga/relations", status_code=201)
 @limiter.limit(RATE_LIMIT_AUTH)
 async def create_relation(
     request: Request,
     body: RelationRequest,
+    tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
     """Create an FGA relation tuple. Requires owner or admin role."""
+    prefixed_id = _prefix_resource_id(tenant_id, body.resource_id)
     try:
         client = get_descope_client()
-        await client.create_relation(body.resource_type, body.resource_id, body.relation, body.target)
+        await client.create_relation(body.resource_type, prefixed_id, body.relation, body.target)
         return {
             "resource_type": body.resource_type,
             "resource_id": body.resource_id,
@@ -95,7 +134,7 @@ async def create_relation(
     except httpx.HTTPStatusError as exc:
         logger.warning("Descope API error creating relation: %s %s", exc.response.status_code, exc.response.text[:500])
         if exc.response.status_code == 400:
-            raise HTTPException(status_code=400, detail=exc.response.text[:500]) from exc
+            raise HTTPException(status_code=400, detail=_sanitize_error_detail(exc.response.text)) from exc
         raise HTTPException(status_code=502, detail="Failed to create relation in Descope") from exc
     except httpx.RequestError as exc:
         logger.error("Network error creating relation: %s", exc)
@@ -107,17 +146,19 @@ async def create_relation(
 async def delete_relation(
     request: Request,
     body: RelationRequest,
+    tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
     """Delete an FGA relation tuple. Requires owner or admin role."""
+    prefixed_id = _prefix_resource_id(tenant_id, body.resource_id)
     try:
         client = get_descope_client()
-        await client.delete_relation(body.resource_type, body.resource_id, body.relation, body.target)
+        await client.delete_relation(body.resource_type, prefixed_id, body.relation, body.target)
         return {"status": "deleted"}
     except httpx.HTTPStatusError as exc:
         logger.warning("Descope API error deleting relation: %s %s", exc.response.status_code, exc.response.text[:500])
         if exc.response.status_code == 400:
-            raise HTTPException(status_code=400, detail=exc.response.text[:500]) from exc
+            raise HTTPException(status_code=400, detail=_sanitize_error_detail(exc.response.text)) from exc
         raise HTTPException(status_code=502, detail="Failed to delete relation in Descope") from exc
     except httpx.RequestError as exc:
         logger.error("Network error deleting relation: %s", exc)
@@ -126,19 +167,28 @@ async def delete_relation(
 
 @router.get("/fga/relations")
 async def list_relations(
+    request: Request,
     resource_type: str = Query(min_length=1, max_length=200),
     resource_id: str = Query(min_length=1, max_length=200),
+    tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
     """List FGA relation tuples for a resource. Requires owner or admin role."""
+    prefixed_id = _prefix_resource_id(tenant_id, resource_id)
     try:
         client = get_descope_client()
-        relations = await client.list_relations(resource_type, resource_id) or []
+        relations = await client.list_relations(resource_type, prefixed_id) or []
+        # Strip tenant prefix from resource_id in response items
+        for rel in relations:
+            if isinstance(rel, dict) and "resource" in rel:
+                rel["resource"] = _strip_tenant_prefix(tenant_id, rel["resource"])
+            if isinstance(rel, dict) and "resource_id" in rel:
+                rel["resource_id"] = _strip_tenant_prefix(tenant_id, rel["resource_id"])
         return {"relations": relations}
     except httpx.HTTPStatusError as exc:
         logger.warning("Descope API error listing relations: %s %s", exc.response.status_code, exc.response.text[:500])
         if exc.response.status_code == 400:
-            raise HTTPException(status_code=400, detail=exc.response.text[:500]) from exc
+            raise HTTPException(status_code=400, detail=_sanitize_error_detail(exc.response.text)) from exc
         raise HTTPException(status_code=502, detail="Failed to list relations from Descope") from exc
     except httpx.RequestError as exc:
         logger.error("Network error listing relations: %s", exc)
@@ -146,18 +196,24 @@ async def list_relations(
 
 
 @router.post("/fga/check")
+@limiter.limit(RATE_LIMIT_AUTH)
 async def check_permission(
+    request: Request,
     body: RelationRequest,
+    tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
     """Check an FGA permission. Requires owner or admin role. Fail-closed: errors deny access."""
+    prefixed_id = _prefix_resource_id(tenant_id, body.resource_id)
     try:
         client = get_descope_client()
-        allowed = bool(await client.check_permission(body.resource_type, body.resource_id, body.relation, body.target))
+        allowed = bool(await client.check_permission(body.resource_type, prefixed_id, body.relation, body.target))
         return {"allowed": allowed}
     except httpx.HTTPStatusError as exc:
         resp_body = exc.response.text[:500]
         logger.warning("Descope API error checking permission: %s %s", exc.response.status_code, resp_body)
+        if exc.response.status_code == 400:
+            raise HTTPException(status_code=400, detail=_sanitize_error_detail(exc.response.text)) from exc
         raise HTTPException(status_code=502, detail="Failed to check permission in Descope") from exc
     except httpx.RequestError as exc:
         logger.error("Network error checking permission: %s", exc)
