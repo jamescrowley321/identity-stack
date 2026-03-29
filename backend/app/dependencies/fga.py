@@ -23,6 +23,21 @@ def extract_user_id(request: Request) -> str:
     return user_id
 
 
+def _extract_tenant_id(request: Request) -> str:
+    """Extract tenant_id from JWT claims, mirroring get_tenant_id logic.
+
+    This avoids calling the FastAPI dependency directly (which requires
+    the dependency injection framework) while keeping the same validation.
+    """
+    claims = getattr(request.state, "claims", None)
+    if not isinstance(claims, dict):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    tenant_id = claims.get("dct")
+    if not tenant_id:
+        raise HTTPException(status_code=403, detail="No tenant context")
+    return tenant_id
+
+
 def require_fga(
     resource_type: str,
     relation: str,
@@ -31,9 +46,10 @@ def require_fga(
 ):
     """Dependency factory that enforces an FGA permission check.
 
-    Extracts user_id from JWT claims (sub) and resource_id from the
-    path parameter named by ``resource_id_param``, then calls
-    check_permission on the Descope Management API.
+    Extracts user_id from JWT claims (sub), tenant_id from JWT claims (dct),
+    and resource_id from the path parameter named by ``resource_id_param``,
+    then calls check_permission with a tenant-prefixed resource_id on the
+    Descope Management API.
 
     Returns the caller's user_id for downstream use.
     Fail-closed: any FGA API error results in HTTP 502 (deny).
@@ -41,12 +57,14 @@ def require_fga(
 
     async def dependency(request: Request) -> str:
         user_id = extract_user_id(request)
+        tenant_id = _extract_tenant_id(request)
         resource_id = request.path_params.get(resource_id_param, "")
         if not resource_id:
             raise HTTPException(status_code=400, detail="Missing resource identifier")
+        prefixed_id = f"{tenant_id}:{resource_id}"
         try:
             client = get_descope_client()
-            allowed = await client.check_permission(resource_type, resource_id, relation, user_id)
+            allowed = await client.check_permission(resource_type, prefixed_id, relation, user_id)
         except httpx.HTTPStatusError as exc:
             logger.error(
                 "FGA check failed (HTTP %s) user=%s resource=%s:%s relation=%s",
