@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.main import app
+from app.middleware.rate_limit import limiter
 from app.models.database import get_session
 from app.models.document import Document
 
@@ -85,6 +86,12 @@ def _make_http_error(status_code=500):
 def _make_network_error():
     req = httpx.Request("POST", "https://api.descope.com")
     return httpx.RequestError("Connection refused", request=req)
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    """Reset the rate limiter storage before each test to avoid cross-test 429s."""
+    limiter.reset()
 
 
 # ============================================================
@@ -523,7 +530,7 @@ async def test_update_document_fga_denied(mock_validate, mock_fga_factory, clien
     )
     assert resp.status_code == 403
     assert resp.json()["detail"] == "Access denied"
-    mock_client.check_permission.assert_called_once_with("document", "doc-1", "can_edit", "user-1")
+    mock_client.check_permission.assert_called_once_with("document", "tenant-abc:doc-1", "can_edit", "user-1")
 
 
 @pytest.mark.anyio
@@ -544,7 +551,7 @@ async def test_update_document_fga_error_fail_closed(mock_validate, mock_fga_fac
     )
     assert resp.status_code == 502
     assert resp.json()["detail"] == "Authorization check failed"
-    mock_client.check_permission.assert_called_once_with("document", "doc-1", "can_edit", "user-1")
+    mock_client.check_permission.assert_called_once_with("document", "tenant-abc:doc-1", "can_edit", "user-1")
 
 
 # ============================================================
@@ -977,14 +984,18 @@ async def test_revoke_share_does_not_delete_owner(
 ):
     """Revoking a share deletes viewer and editor relations but NOT owner."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id="doc-1")
+    _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
+    mock_client.load_user.return_value = {
+        "userId": "user-2",
+        "userTenants": [{"tenantId": "tenant-abc"}],
+    }
     mock_fga_factory.return_value = mock_client
     mock_router_factory.return_value = mock_client
 
-    resp = await client.delete("/api/documents/doc-1/share/user-2", headers=AUTH_HEADER)
+    resp = await client.delete(f"/api/documents/{DOC_UUID_1}/share/user-2", headers=AUTH_HEADER)
     assert resp.status_code == 200
 
     # Verify exactly which relations were deleted
@@ -1286,15 +1297,17 @@ async def test_delete_document_fga_relations_none(
 async def test_get_document_checks_can_view(mock_validate, mock_fga_factory, client, test_db):
     """AC5: GET /documents/{id} checks can_view relation (derived from owner/editor)."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id="doc-1")
+    _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
     mock_fga_factory.return_value = mock_client
 
-    resp = await client.get("/api/documents/doc-1", headers=AUTH_HEADER)
+    resp = await client.get(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
     assert resp.status_code == 200
-    mock_client.check_permission.assert_called_once_with("document", "doc-1", "can_view", AUTHED_CLAIMS["sub"])
+    mock_client.check_permission.assert_called_once_with(
+        "document", f"tenant-abc:{DOC_UUID_1}", "can_view", AUTHED_CLAIMS["sub"]
+    )
 
 
 @pytest.mark.anyio
@@ -1303,19 +1316,21 @@ async def test_get_document_checks_can_view(mock_validate, mock_fga_factory, cli
 async def test_update_document_checks_can_edit(mock_validate, mock_fga_factory, client, test_db):
     """AC5: PUT /documents/{id} checks can_edit relation (derived from owner)."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id="doc-1")
+    _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
     mock_fga_factory.return_value = mock_client
 
     resp = await client.put(
-        "/api/documents/doc-1",
+        f"/api/documents/{DOC_UUID_1}",
         headers=AUTH_HEADER,
         json={"title": "Updated"},
     )
     assert resp.status_code == 200
-    mock_client.check_permission.assert_called_once_with("document", "doc-1", "can_edit", AUTHED_CLAIMS["sub"])
+    mock_client.check_permission.assert_called_once_with(
+        "document", f"tenant-abc:{DOC_UUID_1}", "can_edit", AUTHED_CLAIMS["sub"]
+    )
 
 
 @pytest.mark.anyio
@@ -1324,7 +1339,7 @@ async def test_update_document_checks_can_edit(mock_validate, mock_fga_factory, 
 async def test_delete_document_checks_can_delete(mock_validate, mock_fga_factory, client, test_db):
     """AC5: DELETE /documents/{id} checks can_delete relation."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id="doc-1")
+    _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -1333,9 +1348,11 @@ async def test_delete_document_checks_can_delete(mock_validate, mock_fga_factory
 
     # Need to also mock router-level get_descope_client for delete endpoint
     with patch("app.routers.documents.get_descope_client", return_value=mock_client):
-        resp = await client.delete("/api/documents/doc-1", headers=AUTH_HEADER)
+        resp = await client.delete(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
     assert resp.status_code == 200
-    mock_client.check_permission.assert_called_once_with("document", "doc-1", "can_delete", AUTHED_CLAIMS["sub"])
+    mock_client.check_permission.assert_called_once_with(
+        "document", f"tenant-abc:{DOC_UUID_1}", "can_delete", AUTHED_CLAIMS["sub"]
+    )
 
 
 @pytest.mark.anyio
@@ -1344,7 +1361,7 @@ async def test_delete_document_checks_can_delete(mock_validate, mock_fga_factory
 async def test_share_document_checks_owner(mock_validate, mock_fga_factory, client, test_db):
     """AC5: POST /documents/{id}/share checks owner relation."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id="doc-1")
+    _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -1356,12 +1373,14 @@ async def test_share_document_checks_owner(mock_validate, mock_fga_factory, clie
 
     with patch("app.routers.documents.get_descope_client", return_value=mock_client):
         resp = await client.post(
-            "/api/documents/doc-1/share",
+            f"/api/documents/{DOC_UUID_1}/share",
             headers=AUTH_HEADER,
             json={"user_id": "user-2", "relation": "viewer"},
         )
     assert resp.status_code == 200
-    mock_client.check_permission.assert_called_once_with("document", "doc-1", "owner", AUTHED_CLAIMS["sub"])
+    mock_client.check_permission.assert_called_once_with(
+        "document", f"tenant-abc:{DOC_UUID_1}", "owner", AUTHED_CLAIMS["sub"]
+    )
 
 
 @pytest.mark.anyio

@@ -490,7 +490,7 @@ class TestDescopeManagementClient:
         )
 
         result = await client.get_fga_schema()
-        assert result == {"schema": {"name": "test-schema"}}
+        assert result == {"name": "test-schema"}
         mock_http.post.assert_called_once_with(
             "https://api.descope.com/v1/mgmt/authz/schema/load",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
