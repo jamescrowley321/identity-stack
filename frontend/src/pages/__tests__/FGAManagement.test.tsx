@@ -147,7 +147,7 @@ describe("FGAManagement", () => {
       });
     });
 
-    it("handles non-ok response gracefully", async () => {
+    it("shows error toast on non-ok schema response", async () => {
       mockApiFetch.mockImplementation((url: string) => {
         if (url === "/api/fga/schema") return jsonResponse(null, false, 502);
         return jsonResponse({});
@@ -155,7 +155,7 @@ describe("FGAManagement", () => {
       renderPage();
 
       await waitFor(() => {
-        expect(screen.getByText("No schema defined.")).toBeInTheDocument();
+        expect(toast.error).toHaveBeenCalledWith("Failed to load FGA schema");
       });
     });
   });
@@ -296,6 +296,7 @@ describe("FGAManagement", () => {
   describe("admin user - delete relation", () => {
     beforeEach(() => {
       mockUseRBAC.mockReturnValue(rbacAdmin());
+      vi.spyOn(window, "confirm").mockReturnValue(true);
     });
 
     it("deletes a relation and refreshes the list", async () => {
@@ -336,6 +337,43 @@ describe("FGAManagement", () => {
       await waitFor(() => {
         expect(toast.success).toHaveBeenCalledWith("Relation deleted");
       });
+    });
+
+    it("does not delete when confirm is cancelled", async () => {
+      vi.spyOn(window, "confirm").mockReturnValue(false);
+      const user = userEvent.setup();
+
+      mockApiFetch.mockImplementation((url: string, opts?: RequestInit) => {
+        if (url === "/api/fga/schema") return jsonResponse({ schema: "v1" });
+        if (typeof url === "string" && url.includes("/api/fga/relations") && (!opts || !opts.method || opts.method === "GET")) {
+          return jsonResponse({
+            relations: [{ relationDefinition: "owner", target: "user:u1" }],
+          });
+        }
+        return jsonResponse({});
+      });
+
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("Authorization Schema")).toBeInTheDocument();
+      });
+
+      await user.type(getInput("rel-resource-type"), "document");
+      await user.type(getInput("rel-resource-id"), "doc-1");
+      await user.click(screen.getByRole("button", { name: "Browse" }));
+
+      await waitFor(() => {
+        expect(screen.getByText("owner")).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole("button", { name: "Delete" }));
+
+      // No DELETE call should have been made
+      const deleteCalls = mockApiFetch.mock.calls.filter(
+        ([, opts]: [string, RequestInit | undefined]) => opts?.method === "DELETE",
+      );
+      expect(deleteCalls).toHaveLength(0);
     });
 
     it("shows error toast on delete failure", async () => {

@@ -15,6 +15,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 interface RelationInfo {
   target: string;
   relationDefinition: string;
+  resource_type: string;
+  resource_id: string;
 }
 
 async function parseErrorDetail(res: Response): Promise<string | undefined> {
@@ -54,21 +56,27 @@ export default function FGAManagement() {
   const [checkTarget, setCheckTarget] = useState("");
   const [checkResult, setCheckResult] = useState<boolean | null>(null);
 
-  // Mutation loading state
-  const [saving, setSaving] = useState(false);
+  // Per-operation loading states
+  const [deleting, setDeleting] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [checking, setChecking] = useState(false);
 
   // Load schema
-  const loadSchema = useCallback(() => {
+  const loadSchema = useCallback(async () => {
     setSchemaLoading(true);
-    apiFetch("/api/fga/schema")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data) setSchema(data.schema || "");
-      })
-      .catch(() => {
+    try {
+      const res = await apiFetch("/api/fga/schema");
+      if (!res.ok) {
         toast.error("Failed to load FGA schema");
-      })
-      .finally(() => setSchemaLoading(false));
+        return;
+      }
+      const data = await res.json();
+      setSchema(data.schema || "");
+    } catch {
+      toast.error("Failed to load FGA schema");
+    } finally {
+      setSchemaLoading(false);
+    }
   }, [apiFetch]);
 
   useEffect(() => {
@@ -79,18 +87,21 @@ export default function FGAManagement() {
 
   // Browse relations
   const handleBrowseRelations = useCallback(async () => {
-    if (!relResourceType.trim() || !relResourceId.trim()) return;
+    const rt = relResourceType.trim();
+    const rid = relResourceId.trim();
+    if (!rt || !rid || relationsLoading) return;
     setRelationsLoading(true);
     setRelationsQueried(true);
     try {
       const params = new URLSearchParams({
-        resource_type: relResourceType.trim(),
-        resource_id: relResourceId.trim(),
+        resource_type: rt,
+        resource_id: rid,
       });
       const res = await apiFetch(`/api/fga/relations?${params}`);
       if (res.ok) {
         const data = await res.json();
-        setRelations(data.relations || []);
+        const raw = Array.isArray(data.relations) ? data.relations : [];
+        setRelations(raw.map((r: { relationDefinition: string; target: string }) => ({ ...r, resource_type: rt, resource_id: rid })));
       } else {
         const detail = await parseErrorDetail(res);
         toast.error(detail || "Failed to load relations");
@@ -102,27 +113,28 @@ export default function FGAManagement() {
     } finally {
       setRelationsLoading(false);
     }
-  }, [relResourceType, relResourceId, apiFetch]);
+  }, [relResourceType, relResourceId, relationsLoading, apiFetch]);
 
   // Delete relation
   const handleDeleteRelation = useCallback(
     async (rel: RelationInfo) => {
-      if (saving) return;
-      setSaving(true);
+      if (deleting) return;
+      if (!window.confirm(`Delete relation "${rel.relationDefinition}" for target "${rel.target}"?`)) return;
+      setDeleting(true);
       try {
         const res = await apiFetch("/api/fga/relations", {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            resource_type: relResourceType.trim(),
-            resource_id: relResourceId.trim(),
+            resource_type: rel.resource_type,
+            resource_id: rel.resource_id,
             relation: rel.relationDefinition,
             target: rel.target,
           }),
         });
         if (res.ok) {
           toast.success("Relation deleted");
-          handleBrowseRelations();
+          await handleBrowseRelations();
         } else {
           const detail = await parseErrorDetail(res);
           toast.error(detail || "Failed to delete relation");
@@ -130,16 +142,16 @@ export default function FGAManagement() {
       } catch {
         toast.error("Failed to delete relation");
       } finally {
-        setSaving(false);
+        setDeleting(false);
       }
     },
-    [saving, relResourceType, relResourceId, apiFetch, handleBrowseRelations],
+    [deleting, apiFetch, handleBrowseRelations],
   );
 
   // Create relation
   const handleCreateRelation = useCallback(async () => {
-    if (!createResourceType.trim() || !createResourceId.trim() || !createRelation.trim() || !createTarget.trim() || saving) return;
-    setSaving(true);
+    if (!createResourceType.trim() || !createResourceId.trim() || !createRelation.trim() || !createTarget.trim() || creating) return;
+    setCreating(true);
     try {
       const res = await apiFetch("/api/fga/relations", {
         method: "POST",
@@ -157,6 +169,9 @@ export default function FGAManagement() {
         setCreateResourceId("");
         setCreateRelation("");
         setCreateTarget("");
+        if (relationsQueried) {
+          await handleBrowseRelations();
+        }
       } else {
         const detail = await parseErrorDetail(res);
         toast.error(detail || "Failed to create relation");
@@ -164,14 +179,14 @@ export default function FGAManagement() {
     } catch {
       toast.error("Failed to create relation");
     } finally {
-      setSaving(false);
+      setCreating(false);
     }
-  }, [createResourceType, createResourceId, createRelation, createTarget, saving, apiFetch]);
+  }, [createResourceType, createResourceId, createRelation, createTarget, creating, relationsQueried, handleBrowseRelations, apiFetch]);
 
   // Check permission
   const handleCheckPermission = useCallback(async () => {
-    if (!checkResourceType.trim() || !checkResourceId.trim() || !checkRelation.trim() || !checkTarget.trim() || saving) return;
-    setSaving(true);
+    if (!checkResourceType.trim() || !checkResourceId.trim() || !checkRelation.trim() || !checkTarget.trim() || checking) return;
+    setChecking(true);
     setCheckResult(null);
     try {
       const res = await apiFetch("/api/fga/check", {
@@ -186,7 +201,7 @@ export default function FGAManagement() {
       });
       if (res.ok) {
         const data = await res.json();
-        setCheckResult(data.allowed);
+        setCheckResult(data.allowed === true);
       } else {
         const detail = await parseErrorDetail(res);
         toast.error(detail || "Failed to check permission");
@@ -194,9 +209,9 @@ export default function FGAManagement() {
     } catch {
       toast.error("Failed to check permission");
     } finally {
-      setSaving(false);
+      setChecking(false);
     }
-  }, [checkResourceType, checkResourceId, checkRelation, checkTarget, saving, apiFetch]);
+  }, [checkResourceType, checkResourceId, checkRelation, checkTarget, checking, apiFetch]);
 
   return (
     <>
@@ -290,7 +305,7 @@ export default function FGAManagement() {
                                 size="sm"
                                 className="text-destructive"
                                 onClick={() => handleDeleteRelation(rel)}
-                                disabled={saving}
+                                disabled={deleting}
                               >
                                 Delete
                               </Button>
@@ -354,7 +369,7 @@ export default function FGAManagement() {
                   </div>
                   <Button
                     onClick={handleCreateRelation}
-                    disabled={!createResourceType.trim() || !createResourceId.trim() || !createRelation.trim() || !createTarget.trim() || saving}
+                    disabled={!createResourceType.trim() || !createResourceId.trim() || !createRelation.trim() || !createTarget.trim() || creating}
                   >
                     Create
                   </Button>
@@ -412,7 +427,7 @@ export default function FGAManagement() {
                   </div>
                   <Button
                     onClick={handleCheckPermission}
-                    disabled={!checkResourceType.trim() || !checkResourceId.trim() || !checkRelation.trim() || !checkTarget.trim() || saving}
+                    disabled={!checkResourceType.trim() || !checkResourceId.trim() || !checkRelation.trim() || !checkTarget.trim() || checking}
                   >
                     Check
                   </Button>
