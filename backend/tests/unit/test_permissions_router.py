@@ -289,6 +289,69 @@ async def test_delete_permission_network_error(mock_validate, mock_factory, clie
     assert response.status_code == 502
 
 
+@pytest.mark.anyio
+@patch("app.routers.permissions.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_update_permission_network_error(mock_validate, mock_factory, client):
+    """Network error on update → 502."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.update_permission.side_effect = httpx.RequestError("Connection refused")
+    mock_factory.return_value = mock_client
+
+    response = await client.put(
+        "/api/permissions/test.perm",
+        headers=AUTH_HEADER,
+        json={"new_name": "test.perm2"},
+    )
+    assert response.status_code == 502
+
+
+@pytest.mark.anyio
+@patch("app.routers.permissions.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_create_permission_descope_401_becomes_502(mock_validate, mock_factory, client):
+    """Descope 401 (e.g. expired mgmt key) should not be forwarded — returns 502."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.create_permission.side_effect = _make_http_status_error(401)
+    mock_factory.return_value = mock_client
+
+    response = await client.post(
+        "/api/permissions",
+        headers=AUTH_HEADER,
+        json={"name": "test.perm"},
+    )
+    assert response.status_code == 502
+
+
+# --- Input validation ---
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_create_permission_empty_name_rejected(mock_validate, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    response = await client.post(
+        "/api/permissions",
+        headers=AUTH_HEADER,
+        json={"name": ""},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_update_permission_empty_new_name_rejected(mock_validate, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    response = await client.put(
+        "/api/permissions/test.perm",
+        headers=AUTH_HEADER,
+        json={"new_name": ""},
+    )
+    assert response.status_code == 422
+
+
 # --- No tenant context ---
 
 

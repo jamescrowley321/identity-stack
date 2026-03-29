@@ -2,7 +2,7 @@ import logging
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.dependencies.rbac import require_role
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
@@ -14,12 +14,12 @@ router = APIRouter()
 
 
 class CreatePermissionRequest(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=200)
     description: str = ""
 
 
 class UpdatePermissionRequest(BaseModel):
-    new_name: str
+    new_name: str = Field(min_length=1, max_length=200)
     description: str = ""
 
 
@@ -54,9 +54,8 @@ async def create_permission(
         return {"name": body.name, "description": body.description}
     except httpx.HTTPStatusError as exc:
         logger.warning("Descope API error creating permission '%s': %s", body.name, exc.response.status_code)
-        if exc.response.status_code < 500:
-            detail = f"Failed to create permission: {exc.response.text}"
-            raise HTTPException(status_code=exc.response.status_code, detail=detail)
+        if exc.response.status_code in (400, 409):
+            raise HTTPException(status_code=exc.response.status_code, detail="Permission already exists or invalid")
         raise HTTPException(status_code=502, detail="Failed to create permission in Descope")
     except httpx.RequestError as exc:
         logger.error("Network error creating permission '%s': %s", body.name, exc)
@@ -78,9 +77,8 @@ async def update_permission(
         return {"name": body.new_name, "description": body.description}
     except httpx.HTTPStatusError as exc:
         logger.warning("Descope API error updating permission '%s': %s", name, exc.response.status_code)
-        if exc.response.status_code < 500:
-            detail = f"Failed to update permission: {exc.response.text}"
-            raise HTTPException(status_code=exc.response.status_code, detail=detail)
+        if exc.response.status_code in (400, 404, 409):
+            raise HTTPException(status_code=exc.response.status_code, detail="Permission not found or invalid")
         raise HTTPException(status_code=502, detail="Failed to update permission in Descope")
     except httpx.RequestError as exc:
         logger.error("Network error updating permission '%s': %s", name, exc)
@@ -101,9 +99,8 @@ async def delete_permission(
         return {"status": "deleted", "name": name}
     except httpx.HTTPStatusError as exc:
         logger.warning("Descope API error deleting permission '%s': %s", name, exc.response.status_code)
-        if exc.response.status_code < 500:
-            detail = f"Failed to delete permission: {exc.response.text}"
-            raise HTTPException(status_code=exc.response.status_code, detail=detail)
+        if exc.response.status_code in (400, 404):
+            raise HTTPException(status_code=exc.response.status_code, detail="Permission not found or invalid")
         raise HTTPException(status_code=502, detail="Failed to delete permission in Descope")
     except httpx.RequestError as exc:
         logger.error("Network error deleting permission '%s': %s", name, exc)
