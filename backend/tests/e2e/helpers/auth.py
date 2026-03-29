@@ -59,19 +59,22 @@ def ensure_test_user(
             # Ensure user is in the correct tenant with the right roles
             if tenant_id:
                 user_tenants = [t.get("tenantId") for t in user.get("userTenants", [])]
+                print(f"[E2E] Existing user tenants: {user_tenants}, need: {tenant_id}")
                 if tenant_id not in user_tenants:
                     # Add user to tenant with roles
-                    client.post(
+                    add_resp = client.post(
                         _mgmt_url("/v1/mgmt/user/update/tenant/add"),
                         headers=_auth_header(),
                         json={"loginId": email, "tenantId": tenant_id},
                     )
+                    print(f"[E2E] Add user to tenant: {add_resp.status_code} {add_resp.text[:200]}")
                     if roles:
-                        client.post(
+                        role_resp = client.post(
                             _mgmt_url("/v1/mgmt/user/update/role/add"),
                             headers=_auth_header(),
                             json={"loginId": email, "tenantId": tenant_id, "roleNames": roles},
                         )
+                        print(f"[E2E] Add roles: {role_resp.status_code} {role_resp.text[:200]}")
             return user
 
         tenants = [{"tenantId": tenant_id, "roleNames": roles}] if tenant_id else []
