@@ -14,9 +14,17 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, environment: str = "development"):
         super().__init__(app)
         self.is_production = environment == "production"
+        dev_csp = (
+            "default-src 'self' http://localhost:*;"
+            " style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com;"
+            " script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.redoc.ly;"
+            " font-src 'self' https://fonts.gstatic.com;"
+            " img-src 'self' https://fastapi.tiangolo.com https://cdn.redoc.ly data:;"
+            " worker-src blob:"
+        )
         csp_value = os.getenv(
             "CSP_POLICY",
-            "default-src 'self'" if self.is_production else "default-src 'self' http://localhost:*",
+            "default-src 'self'" if self.is_production else dev_csp,
         )
         self.csp = csp_value.replace("\n", " ").replace("\r", " ")
 

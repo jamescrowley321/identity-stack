@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI):
     shutdown_descope_client()
 
 
-app = FastAPI(title="Descope SaaS Starter API", lifespan=lifespan)
+app = FastAPI(title="Descope SaaS Starter API", redoc_url="/redoc", lifespan=lifespan)
 
 # Rate limiter state and exception handler
 app.state.limiter = limiter
@@ -51,7 +51,7 @@ app.add_middleware(
 app.add_middleware(
     TokenValidationMiddleware,
     descope_project_id=os.getenv("DESCOPE_PROJECT_ID", ""),
-    excluded_paths={"/api/health", "/api/validate-id-token", "/docs", "/openapi.json"},
+    excluded_paths={"/api/health", "/api/validate-id-token", "/docs", "/redoc", "/openapi.json"},
 )
 
 # 3. Rate limiting — SlowAPIMiddleware registers state on request.state;

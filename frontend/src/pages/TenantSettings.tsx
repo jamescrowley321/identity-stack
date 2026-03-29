@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useRBAC } from "@/hooks/useRBAC";
+import { Unauthorized } from "@/components/Unauthorized";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -24,12 +25,19 @@ export default function TenantSettings() {
   const { apiFetch } = useApiClient();
   const { isAdmin } = useRBAC();
   const [settings, setSettings] = useState<TenantSettingsData | null>(null);
+  const [unauthorized, setUnauthorized] = useState(false);
   const [planTier, setPlanTier] = useState("free");
   const [maxMembers, setMaxMembers] = useState("10");
 
   useEffect(() => {
     apiFetch("/api/tenants/current/settings")
-      .then((res) => (res.ok ? res.json() : null))
+      .then((res) => {
+        if (res.status === 403) {
+          setUnauthorized(true);
+          return null;
+        }
+        return res.ok ? res.json() : null;
+      })
       .then((data) => {
         if (data) {
           setSettings(data);
@@ -64,6 +72,8 @@ export default function TenantSettings() {
       toast.error("Failed to save");
     }
   }, [planTier, maxMembers, apiFetch]);
+
+  if (unauthorized) return <Unauthorized />;
 
   if (!settings) {
     return (

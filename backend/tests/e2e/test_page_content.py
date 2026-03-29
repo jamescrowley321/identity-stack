@@ -31,11 +31,13 @@ def test_profile_page_handles_load_failure(auth_page: Page, frontend_url: str):
 
 
 def test_tenant_settings_handles_no_tenant(auth_page: Page, frontend_url: str):
-    """Tenant settings shows heading when no tenant context (stays in loading skeleton)."""
+    """Tenant settings shows heading or access denied when no tenant context."""
     auth_page.goto(frontend_url + "/settings")
     auth_page.wait_for_load_state("networkidle")
-    # Without tenant context, API fails and page stays in skeleton state — heading still renders
-    expect(auth_page.get_by_role("heading", name="Tenant Settings")).to_be_visible()
+    # Without tenant context, page shows either the settings heading or access denied
+    heading = auth_page.get_by_role("heading", name="Tenant Settings")
+    access_denied = auth_page.get_by_text("Access Denied")
+    expect(heading.or_(access_denied)).to_be_visible()
 
 
 def test_members_page_loads(auth_page: Page, frontend_url: str):
@@ -74,3 +76,13 @@ def test_dashboard_claims_tab_has_three_cards(auth_page: Page):
     expect(auth_page.get_by_text("ClaimsIdentity")).to_be_visible()
     expect(auth_page.get_by_text("Access Token Claims")).to_be_visible()
     expect(auth_page.get_by_text("ID Token Claims")).to_be_visible()
+
+
+def test_no_5xx_errors_on_dashboard(auth_page: Page, frontend_url: str):
+    """Dashboard page should not trigger any 5xx API errors."""
+    errors = []
+    auth_page.on("response", lambda response: errors.append(response) if response.status >= 500 else None)
+    auth_page.goto(frontend_url)
+    auth_page.wait_for_load_state("networkidle")
+    failed = [f"{r.url} -> {r.status}" for r in errors]
+    assert not failed, f"5xx errors on dashboard: {failed}"

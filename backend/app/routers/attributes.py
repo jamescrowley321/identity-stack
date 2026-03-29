@@ -11,7 +11,7 @@ from app.services.descope import get_descope_client
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["Attributes"])
 
 AttributeValue = str | int | bool | float | None
 
@@ -45,6 +45,13 @@ async def get_profile(claims: dict = Depends(get_claims)):
             "custom_attributes": user.get("customAttributes", {}),
         }
     except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            return {
+                "user_id": user_id,
+                "name": "",
+                "email": "",
+                "custom_attributes": {},
+            }
         logger.warning("Descope API error loading profile for %s: %s", user_id, exc.response.status_code)
         raise HTTPException(status_code=502, detail="Failed to load user profile from identity provider")
 

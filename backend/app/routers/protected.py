@@ -8,7 +8,7 @@ from py_identity_model.identity import ClaimsPrincipal
 from app.dependencies.auth import get_claims, get_current_user
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 
-router = APIRouter()
+router = APIRouter(tags=["Protected"])
 
 DESCOPE_PROJECT_ID = os.getenv("DESCOPE_PROJECT_ID", "")
 DISCO_ADDRESS = f"https://api.descope.com/{DESCOPE_PROJECT_ID}/.well-known/openid-configuration"

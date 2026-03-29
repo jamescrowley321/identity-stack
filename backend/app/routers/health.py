@@ -2,7 +2,7 @@ from fastapi import APIRouter, Request
 
 from app.middleware.rate_limit import limiter
 
-router = APIRouter()
+router = APIRouter(tags=["Health"])
 
 
 @router.get("/health")

@@ -6,7 +6,7 @@ from app.dependencies.tenant import get_tenant_id
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.descope import get_descope_client
 
-router = APIRouter()
+router = APIRouter(tags=["Users"])
 
 
 class InviteUserRequest(BaseModel):
