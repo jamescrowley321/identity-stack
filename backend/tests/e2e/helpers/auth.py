@@ -151,12 +151,12 @@ def create_authenticated_context(browser, frontend_url: str, access_token: str) 
 
 
 def get_admin_session_token(email: str = "", tenant_id: str = "") -> str:
-    """Get an OIDC-compatible token with admin/owner roles for E2E testing.
+    """Get a Descope session token with admin/owner roles for E2E testing.
 
     Strategy: create a temporary tenant-scoped access key with admin/owner roles
-    via the Management API, then use it in the standard OIDC client credentials
-    flow. The resulting token:
-    1. Passes OIDC validation (correct issuer, audience, JWKS signature)
+    via the Management API, then exchange it via Descope's access key exchange
+    endpoint. The resulting session JWT:
+    1. Is signed by Descope's project keys (verifiable via OIDC JWKS)
     2. Contains dct and tenants claims needed by require_role()
     """
     import uuid
@@ -186,32 +186,21 @@ def get_admin_session_token(email: str = "", tenant_id: str = "") -> str:
         if not cleartext:
             raise RuntimeError(f"Access key creation returned no cleartext: {data}")
 
-    # Step 2: Use the access key in OIDC client credentials flow
-    from py_identity_model import (
-        ClientCredentialsTokenRequest,
-        DiscoveryDocumentRequest,
-        get_discovery_document,
-        request_client_credentials_token,
-    )
-
+    # Step 2: Exchange access key for a Descope session JWT via auth endpoint.
+    # Unlike the OIDC client credentials flow, the exchange endpoint returns a
+    # session JWT that includes Descope-specific claims (dct, tenants, roles).
     try:
-        disco_addr = f"{DESCOPE_BASE_URL}/{DESCOPE_PROJECT_ID}/.well-known/openid-configuration"
-        disco = get_discovery_document(DiscoveryDocumentRequest(address=disco_addr))
-        if not disco.is_successful:
-            raise RuntimeError(f"Discovery failed: {disco.error}")
-
-        response = request_client_credentials_token(
-            ClientCredentialsTokenRequest(
-                client_id=DESCOPE_PROJECT_ID,
-                client_secret=cleartext,
-                address=disco.token_endpoint,
-                scope="openid",
+        with httpx.Client(timeout=30) as client:
+            resp = client.post(
+                f"{DESCOPE_BASE_URL}/v1/auth/accesskey/exchange",
+                headers={"Authorization": f"Bearer {DESCOPE_PROJECT_ID}:{cleartext}"},
+                json={},
             )
-        )
-        if not response.is_successful:
-            raise RuntimeError(f"Token request failed: {response.error}")
-
-        token = response.token["access_token"]
+            resp.raise_for_status()
+            data = resp.json()
+            token = data.get("sessionJwt", "")
+            if not token:
+                raise RuntimeError(f"Access key exchange returned no sessionJwt: {data}")
     finally:
         # Step 3: Clean up the temporary access key (best-effort)
         with contextlib.suppress(Exception), httpx.Client(timeout=10) as client:
@@ -226,11 +215,12 @@ def get_admin_session_token(email: str = "", tenant_id: str = "") -> str:
         payload = _decode_jwt_payload(token)
         tenants_info = payload.get("tenants")
         if isinstance(tenants_info, dict):
-            tenants_info = list(tenants_info.keys())
+            tenants_info = {k: v.get("roles", []) for k, v in tenants_info.items()}
         print(
             f"[E2E] Admin token claims: dct={payload.get('dct')}, "
             f"tenants={tenants_info}, "
-            f"iss={payload.get('iss')}, aud={payload.get('aud')}"
+            f"iss={payload.get('iss')}, aud={payload.get('aud')}, "
+            f"sub={payload.get('sub')}"
         )
     except Exception as exc:  # noqa: BLE001
         print(f"[E2E] Could not decode admin token: {exc}")
