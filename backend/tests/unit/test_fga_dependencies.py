@@ -1,5 +1,6 @@
 """Unit tests for the require_fga dependency factory and extract_user_id helper."""
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -92,6 +93,21 @@ class TestRequireFga:
             await dep(_make_request(VALID_CLAIMS, {"document_id": "doc-123"}))
         assert exc_info.value.status_code == 403
         assert exc_info.value.detail == "Access denied"
+
+    @pytest.mark.anyio
+    @patch("app.dependencies.fga.get_descope_client")
+    async def test_denied_logs_warning(self, mock_factory, caplog):
+        """AC3: FGA denial is logged with warning level for audit trail."""
+        mock_client = AsyncMock()
+        mock_client.check_permission.return_value = False
+        mock_factory.return_value = mock_client
+
+        dep = require_fga("document", "can_edit")
+        with caplog.at_level(logging.WARNING, logger="app.dependencies.fga"):
+            with pytest.raises(HTTPException):
+                await dep(_make_request(VALID_CLAIMS, {"document_id": "doc-123"}))
+        assert any("FGA denied" in r.message for r in caplog.records)
+        assert any("user-abc" in r.message for r in caplog.records)
 
     @pytest.mark.anyio
     async def test_no_claims_attribute_raises_401(self):
