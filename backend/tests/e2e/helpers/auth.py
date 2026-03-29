@@ -9,6 +9,7 @@ The test user is created via Management API with `test: True`.
 """
 
 import base64
+import contextlib
 import json
 import os
 
@@ -152,43 +153,73 @@ def create_authenticated_context(browser, frontend_url: str, access_token: str) 
 def get_admin_session_token(email: str = "", tenant_id: str = "") -> str:
     """Get an OIDC-compatible token with admin/owner roles for E2E testing.
 
-    Strategy: get a standard OIDC client credentials token (passes OIDC validation),
-    then enrich it with tenant/role claims via the Descope Management API's
-    jwt/update endpoint. The result is a token that:
+    Strategy: create a temporary tenant-scoped access key with admin/owner roles
+    via the Management API, then use it in the standard OIDC client credentials
+    flow. The resulting token:
     1. Passes OIDC validation (correct issuer, audience, JWKS signature)
     2. Contains dct and tenants claims needed by require_role()
     """
+    import uuid
+
     tenant_id = tenant_id or E2E_TEST_TENANT_ID
     if not DESCOPE_MANAGEMENT_KEY:
         raise RuntimeError("DESCOPE_MANAGEMENT_KEY must be set")
     if not tenant_id:
         raise RuntimeError("E2E_TEST_TENANT_ID must be set")
 
-    # Step 1: Get a standard OIDC client credentials token
-    base_token = get_oidc_access_token()
-
-    # Step 2: Enrich the token with tenant/role claims via Management API
+    # Step 1: Create a temporary tenant-scoped access key with admin roles
+    key_name = f"e2e-admin-{uuid.uuid4().hex[:8]}"
     with httpx.Client(timeout=30) as client:
         resp = client.post(
-            _mgmt_url("/v1/mgmt/jwt/update"),
+            _mgmt_url("/v1/mgmt/accesskey/create"),
             headers=_auth_header(),
             json={
-                "jwt": base_token,
-                "customClaims": {
-                    "dct": tenant_id,
-                    "tenants": {
-                        tenant_id: {
-                            "roles": ["owner", "admin"],
-                        },
-                    },
-                },
+                "name": key_name,
+                "tenantId": tenant_id,
+                "roleNames": ["owner", "admin"],
             },
         )
         resp.raise_for_status()
         data = resp.json()
-        token = data.get("jwt", "")
-        if not token:
-            raise RuntimeError(f"JWT update returned no token: {data}")
+        key_id = data.get("key", {}).get("id", "")
+        cleartext = data.get("cleartext", "")
+        if not cleartext:
+            raise RuntimeError(f"Access key creation returned no cleartext: {data}")
+
+    # Step 2: Use the access key in OIDC client credentials flow
+    from py_identity_model import (
+        ClientCredentialsTokenRequest,
+        DiscoveryDocumentRequest,
+        get_discovery_document,
+        request_client_credentials_token,
+    )
+
+    try:
+        disco_addr = f"{DESCOPE_BASE_URL}/{DESCOPE_PROJECT_ID}/.well-known/openid-configuration"
+        disco = get_discovery_document(DiscoveryDocumentRequest(address=disco_addr))
+        if not disco.is_successful:
+            raise RuntimeError(f"Discovery failed: {disco.error}")
+
+        response = request_client_credentials_token(
+            ClientCredentialsTokenRequest(
+                client_id=key_id,
+                client_secret=cleartext,
+                address=disco.token_endpoint,
+                scope="openid",
+            )
+        )
+        if not response.is_successful:
+            raise RuntimeError(f"Token request failed: {response.error}")
+
+        token = response.token["access_token"]
+    finally:
+        # Step 3: Clean up the temporary access key (best-effort)
+        with contextlib.suppress(Exception), httpx.Client(timeout=10) as client:
+            client.post(
+                _mgmt_url("/v1/mgmt/accesskey/delete"),
+                headers=_auth_header(),
+                json={"id": key_id},
+            )
 
     # Debug: log decoded claims for CI diagnosis
     try:

@@ -72,10 +72,11 @@ def auth_api_context(playwright, auth_access_token):
 
 @pytest.fixture(scope="session")
 def admin_access_token():
-    """Descope session JWT for test user with admin/owner roles.
+    """OIDC token from a tenant-scoped access key with admin/owner roles.
 
-    Unlike auth_access_token (client credentials), this token includes
-    tenant and role claims (dct, tenants) needed for require_role() endpoints.
+    Creates a temporary access key with tenant/role associations, then uses it
+    in the OIDC client credentials flow. The resulting token passes OIDC
+    validation AND contains dct/tenants claims needed by require_role().
     """
     if not _has_mgmt_key:
         pytest.skip("DESCOPE_MANAGEMENT_KEY not set")
@@ -91,6 +92,24 @@ def admin_api_context(playwright, admin_access_token):
     )
     yield context
     context.dispose()
+
+
+@pytest.fixture(scope="session")
+def test_user_id(_ensure_test_user) -> str:
+    """The Descope user ID of the E2E test user."""
+    user_id = _ensure_test_user.get("userId", "")
+    if not user_id:
+        pytest.skip("Could not determine test user ID")
+    return user_id
+
+
+@pytest.fixture(scope="session")
+def test_tenant_id() -> str:
+    """The Descope tenant ID for E2E tests."""
+    tid = os.environ.get("E2E_TEST_TENANT_ID", "")
+    if not tid:
+        pytest.skip("E2E_TEST_TENANT_ID not set")
+    return tid
 
 
 @pytest.fixture
