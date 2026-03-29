@@ -700,6 +700,67 @@ class TestDescopeManagementClient:
         result = await client.check_permission("document", "doc-123", "editor", "user:u1")
         assert result is False
 
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_check_permission_null_allowed_field(self, mock_cls, client):
+        """Edge case: if 'allowed' is null, returns False (fail-closed, coerced to bool)."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(
+            status_code=200,
+            raise_for_status=MagicMock(),
+            json=MagicMock(return_value={"allowed": None}),
+        )
+
+        result = await client.check_permission("document", "doc-123", "editor", "user:u1")
+        assert result is False
+        assert isinstance(result, bool)
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_list_relations_null_value(self, mock_cls, client):
+        """Edge case: if 'relationInfo' is null, returns empty list."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(
+            status_code=200,
+            raise_for_status=MagicMock(),
+            json=MagicMock(return_value={"relationInfo": None}),
+        )
+
+        result = await client.list_relations("document", "doc-123")
+        assert result == []
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_list_user_resources_null_value(self, mock_cls, client):
+        """Edge case: if 'resources' is null, returns empty list."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(
+            status_code=200,
+            raise_for_status=MagicMock(),
+            json=MagicMock(return_value={"resources": None}),
+        )
+
+        result = await client.list_user_resources("document", "editor", "user:u1")
+        assert result == []
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_check_permission_propagates_http_error(self, mock_cls, client):
+        """Verify check_permission doesn't swallow HTTP errors despite returning bool."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_response = MagicMock(status_code=400, text="Bad Request")
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "400 Bad Request", request=MagicMock(), response=mock_response
+        )
+        mock_http.post.return_value = mock_response
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.check_permission("document", "doc-123", "editor", "user:u1")
+
 
 class TestGetDescopeClient:
     def test_creates_client_from_env(self, monkeypatch):

@@ -242,7 +242,7 @@ class DescopeManagementClient:
             "/v1/mgmt/authz/re/who",
             {"resourceType": resource_type, "resource": resource_id},
         )
-        return resp.json().get("relationInfo", [])
+        return resp.json().get("relationInfo") or []
 
     async def list_user_resources(self, resource_type: str, relation: str, target: str) -> list[dict]:
         """List resources a target has a specific relation to. Returns empty list if none."""
@@ -254,7 +254,7 @@ class DescopeManagementClient:
                 "target": target,
             },
         )
-        return resp.json().get("resources", [])
+        return resp.json().get("resources") or []
 
     async def check_permission(self, resource_type: str, resource_id: str, relation: str, target: str) -> bool:
         """Check if a target has a specific relation to a resource. Returns True/False."""
@@ -267,7 +267,7 @@ class DescopeManagementClient:
                 "target": target,
             },
         )
-        return resp.json().get("allowed", False)
+        return bool(resp.json().get("allowed", False))
 
     async def invite_user(self, email: str, tenant_id: str, role_names: list[str] | None = None) -> dict:
         """Create a user and assign them to a tenant with roles."""
