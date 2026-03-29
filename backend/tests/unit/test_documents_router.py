@@ -483,10 +483,9 @@ async def test_update_document_cross_tenant(mock_validate, mock_fga_factory, cli
 @pytest.mark.anyio
 @patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_document_fga_denied(mock_validate, mock_fga_factory, client, test_db):
-    """PUT: FGA denies can_edit → 403."""
+async def test_update_document_fga_denied(mock_validate, mock_fga_factory, client):
+    """PUT: FGA denies can_edit → 403. No DB seed needed — FGA dep short-circuits."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id="doc-1")
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = False
@@ -498,15 +497,16 @@ async def test_update_document_fga_denied(mock_validate, mock_fga_factory, clien
         json={"title": "Updated"},
     )
     assert resp.status_code == 403
+    assert resp.json()["detail"] == "Access denied"
+    mock_client.check_permission.assert_called_once()
 
 
 @pytest.mark.anyio
 @patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_document_fga_error_fail_closed(mock_validate, mock_fga_factory, client, test_db):
-    """PUT: FGA API error → 502, never fail-open."""
+async def test_update_document_fga_error_fail_closed(mock_validate, mock_fga_factory, client):
+    """PUT: FGA API error → 502, never fail-open. No DB seed — FGA dep short-circuits."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id="doc-1")
 
     mock_client = AsyncMock()
     mock_client.check_permission.side_effect = _make_http_error(500)
@@ -518,6 +518,8 @@ async def test_update_document_fga_error_fail_closed(mock_validate, mock_fga_fac
         json={"title": "Updated"},
     )
     assert resp.status_code == 502
+    assert resp.json()["detail"] == "Authorization check failed"
+    mock_client.check_permission.assert_called_once()
 
 
 # ============================================================
@@ -1049,7 +1051,7 @@ async def test_delete_document_fga_relations_none(
 
 
 # ============================================================
-# Permission derivation — verify correct FGA relations checked
+# FGA relation wiring — verify correct relation string per endpoint
 # ============================================================
 
 
@@ -1067,7 +1069,7 @@ async def test_get_document_checks_can_view(mock_validate, mock_fga_factory, cli
 
     resp = await client.get("/api/documents/doc-1", headers=AUTH_HEADER)
     assert resp.status_code == 200
-    mock_client.check_permission.assert_called_once_with("document", "doc-1", "can_view", "user-1")
+    mock_client.check_permission.assert_called_once_with("document", "doc-1", "can_view", AUTHED_CLAIMS["sub"])
 
 
 @pytest.mark.anyio
@@ -1088,7 +1090,7 @@ async def test_update_document_checks_can_edit(mock_validate, mock_fga_factory, 
         json={"title": "Updated"},
     )
     assert resp.status_code == 200
-    mock_client.check_permission.assert_called_once_with("document", "doc-1", "can_edit", "user-1")
+    mock_client.check_permission.assert_called_once_with("document", "doc-1", "can_edit", AUTHED_CLAIMS["sub"])
 
 
 @pytest.mark.anyio
@@ -1108,7 +1110,7 @@ async def test_delete_document_checks_can_delete(mock_validate, mock_fga_factory
     with patch("app.routers.documents.get_descope_client", return_value=mock_client):
         resp = await client.delete("/api/documents/doc-1", headers=AUTH_HEADER)
     assert resp.status_code == 200
-    mock_client.check_permission.assert_called_once_with("document", "doc-1", "can_delete", "user-1")
+    mock_client.check_permission.assert_called_once_with("document", "doc-1", "can_delete", AUTHED_CLAIMS["sub"])
 
 
 @pytest.mark.anyio
@@ -1134,21 +1136,24 @@ async def test_share_document_checks_owner(mock_validate, mock_fga_factory, clie
             json={"user_id": "user-2", "relation": "viewer"},
         )
     assert resp.status_code == 200
-    mock_client.check_permission.assert_called_once_with("document", "doc-1", "owner", "user-1")
+    mock_client.check_permission.assert_called_once_with("document", "doc-1", "owner", AUTHED_CLAIMS["sub"])
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_list_documents_checks_can_view_relation(mock_validate, mock_fga_factory, client):
-    """AC5: GET /documents uses can_view derived relation for list_user_resources."""
+async def test_list_documents_checks_can_view_relation(mock_validate, client):
+    """AC5: GET /documents uses can_view derived relation for list_user_resources.
+
+    Note: list endpoint calls get_descope_client directly in the route handler
+    (not via require_fga dependency), so we patch at the router level instead
+    of the dependency level.
+    """
     mock_validate.return_value = AUTHED_CLAIMS
 
     mock_client = AsyncMock()
     mock_client.list_user_resources.return_value = []
-    mock_fga_factory.return_value = mock_client
 
     with patch("app.routers.documents.get_descope_client", return_value=mock_client):
         resp = await client.get("/api/documents", headers=AUTH_HEADER)
     assert resp.status_code == 200
-    mock_client.list_user_resources.assert_called_once_with("document", "can_view", "user-1")
+    mock_client.list_user_resources.assert_called_once_with("document", "can_view", AUTHED_CLAIMS["sub"])
