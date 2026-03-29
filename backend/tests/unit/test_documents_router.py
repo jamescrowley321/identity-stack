@@ -853,3 +853,156 @@ async def test_revoke_share_cross_tenant(mock_validate, mock_fga_factory, mock_r
 
     resp = await client.delete("/api/documents/doc-1/share/user-2", headers=AUTH_HEADER)
     assert resp.status_code == 404
+
+
+# ============================================================
+# Additional edge case / review-fix tests
+# ============================================================
+
+
+@pytest.mark.anyio
+@patch("app.routers.documents.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_list_documents_fga_returns_none(mock_validate, mock_factory, client):
+    """list_user_resources returns None -> treated as empty list."""
+    mock_validate.return_value = AUTHED_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.list_user_resources.return_value = None
+    mock_factory.return_value = mock_client
+
+    resp = await client.get("/api/documents", headers=AUTH_HEADER)
+    assert resp.status_code == 200
+    assert resp.json()["documents"] == []
+
+
+@pytest.mark.anyio
+@patch("app.routers.documents.get_descope_client")
+@patch("app.dependencies.fga.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_delete_document_db_failure_after_fga_cleanup(
+    mock_validate, mock_fga_factory, mock_router_factory, client
+):
+    """DB delete fails after FGA cleanup -> 500."""
+    mock_validate.return_value = AUTHED_CLAIMS
+
+    mock_client = AsyncMock()
+    mock_client.check_permission.return_value = True
+    mock_client.list_relations.return_value = [
+        {"relationDefinition": "owner", "target": "user-1"},
+    ]
+    mock_fga_factory.return_value = mock_client
+    mock_router_factory.return_value = mock_client
+
+    def _failing_session():
+        mock_session = MagicMock()
+        mock_session.get.return_value = Document(
+            id="doc-1",
+            tenant_id="tenant-abc",
+            title="T",
+            content="",
+            created_by="user-1",
+        )
+        mock_session.commit.side_effect = Exception("DB commit failed")
+        yield mock_session
+
+    app.dependency_overrides[get_session] = _failing_session
+
+    resp = await client.delete("/api/documents/doc-1", headers=AUTH_HEADER)
+    assert resp.status_code == 500
+    # FGA cleanup happened before DB failure
+    assert mock_client.delete_relation.call_count == 1
+
+
+@pytest.mark.anyio
+@patch("app.routers.documents.get_descope_client")
+@patch("app.dependencies.fga.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_share_document_self_sharing_rejected(
+    mock_validate, mock_fga_factory, mock_router_factory, client, test_db
+):
+    """Owner cannot share document with themselves."""
+    mock_validate.return_value = AUTHED_CLAIMS
+    _seed_doc(test_db, doc_id="doc-1")
+
+    mock_client = AsyncMock()
+    mock_client.check_permission.return_value = True
+    mock_fga_factory.return_value = mock_client
+    mock_router_factory.return_value = mock_client
+
+    resp = await client.post(
+        "/api/documents/doc-1/share",
+        headers=AUTH_HEADER,
+        json={"user_id": "user-1", "relation": "viewer"},
+    )
+    assert resp.status_code == 400
+    assert "yourself" in resp.json()["detail"]
+
+
+@pytest.mark.anyio
+@patch("app.routers.documents.get_descope_client")
+@patch("app.dependencies.fga.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_share_document_load_user_returns_none(
+    mock_validate, mock_fga_factory, mock_router_factory, client, test_db
+):
+    """load_user returns None -> 404."""
+    mock_validate.return_value = AUTHED_CLAIMS
+    _seed_doc(test_db, doc_id="doc-1")
+
+    mock_client = AsyncMock()
+    mock_client.check_permission.return_value = True
+    mock_client.load_user.return_value = None
+    mock_fga_factory.return_value = mock_client
+    mock_router_factory.return_value = mock_client
+
+    resp = await client.post(
+        "/api/documents/doc-1/share",
+        headers=AUTH_HEADER,
+        json={"user_id": "user-2", "relation": "viewer"},
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.anyio
+@patch("app.dependencies.fga.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_update_document_no_changes(mock_validate, mock_fga_factory, client, test_db):
+    """PUT with no title or content -> returns doc unchanged."""
+    mock_validate.return_value = AUTHED_CLAIMS
+    _seed_doc(test_db, doc_id="doc-1")
+
+    mock_client = AsyncMock()
+    mock_client.check_permission.return_value = True
+    mock_fga_factory.return_value = mock_client
+
+    resp = await client.put(
+        "/api/documents/doc-1",
+        headers=AUTH_HEADER,
+        json={},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["title"] == "Test Doc"
+    assert resp.json()["content"] == "Hello"
+
+
+@pytest.mark.anyio
+@patch("app.routers.documents.get_descope_client")
+@patch("app.dependencies.fga.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_delete_document_fga_relations_none(
+    mock_validate, mock_fga_factory, mock_router_factory, client, test_db
+):
+    """list_relations returns None -> treated as empty, delete succeeds."""
+    mock_validate.return_value = AUTHED_CLAIMS
+    _seed_doc(test_db, doc_id="doc-1")
+
+    mock_client = AsyncMock()
+    mock_client.check_permission.return_value = True
+    mock_client.list_relations.return_value = None
+    mock_fga_factory.return_value = mock_client
+    mock_router_factory.return_value = mock_client
+
+    resp = await client.delete("/api/documents/doc-1", headers=AUTH_HEADER)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "deleted"
+    mock_client.delete_relation.assert_not_called()
