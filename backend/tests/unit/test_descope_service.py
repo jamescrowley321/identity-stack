@@ -311,6 +311,67 @@ class TestDescopeManagementClient:
             json={"loginId": "u1", "tenantId": "t1"},
         )
 
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_list_permissions(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(
+            status_code=200,
+            raise_for_status=MagicMock(),
+            json=MagicMock(return_value={"permissions": [{"name": "reports.read", "description": "View reports"}]}),
+        )
+
+        result = await client.list_permissions()
+        assert result == [{"name": "reports.read", "description": "View reports"}]
+        mock_http.post.assert_called_once_with(
+            "https://api.descope.com/v1/mgmt/permission/all",
+            headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
+            json={},
+        )
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_create_permission(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+
+        await client.create_permission("reports.read", "View reports")
+        mock_http.post.assert_called_once_with(
+            "https://api.descope.com/v1/mgmt/permission/create",
+            headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
+            json={"name": "reports.read", "description": "View reports"},
+        )
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_update_permission(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+
+        await client.update_permission("reports.read", "reports.view", "View reports")
+        mock_http.post.assert_called_once_with(
+            "https://api.descope.com/v1/mgmt/permission/update",
+            headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
+            json={"name": "reports.read", "newName": "reports.view", "description": "View reports"},
+        )
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_delete_permission(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+
+        await client.delete_permission("reports.read")
+        mock_http.post.assert_called_once_with(
+            "https://api.descope.com/v1/mgmt/permission/delete",
+            headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
+            json={"name": "reports.read"},
+        )
+
 
 class TestGetDescopeClient:
     def test_creates_client_from_env(self, monkeypatch):
