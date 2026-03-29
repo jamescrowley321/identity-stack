@@ -56,6 +56,14 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
             # expected value)
             if self.descope_project_id and "iss" in claims and claims["iss"] not in self._accepted_issuers:
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+            # For access key tokens: the exchange endpoint sets `tenants`
+            # but not `dct` (current tenant).  When there is exactly one
+            # tenant association, infer `dct` so downstream RBAC checks
+            # (require_role / require_permission) work.
+            if not claims.get("dct") and isinstance(claims.get("tenants"), dict):
+                tenants = claims["tenants"]
+                if len(tenants) == 1:
+                    claims["dct"] = next(iter(tenants))
             request.state.claims = claims
             request.state.principal = to_principal(claims, "Descope")
             request.state.tenant_id = claims.get("dct")
