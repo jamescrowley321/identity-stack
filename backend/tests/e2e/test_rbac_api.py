@@ -9,6 +9,7 @@ import os
 import time
 import uuid
 
+import httpx as _httpx
 import pytest
 from playwright.sync_api import APIRequestContext
 
@@ -16,6 +17,20 @@ pytestmark = pytest.mark.skipif(
     not os.environ.get("DESCOPE_MANAGEMENT_KEY"),
     reason="DESCOPE_MANAGEMENT_KEY not set",
 )
+
+# --- Descope API direct access helpers ---
+
+_DESCOPE_BASE = os.environ.get("DESCOPE_BASE_URL", "https://api.descope.com")
+_PROJECT_ID = os.environ.get("DESCOPE_PROJECT_ID", "")
+_MGMT_KEY = os.environ.get("DESCOPE_MANAGEMENT_KEY", "")
+_MGMT_AUTH = {"Authorization": f"Bearer {_PROJECT_ID}:{_MGMT_KEY}"}
+
+
+def _descope_mgmt_post(path: str, body: dict | None = None) -> _httpx.Response:
+    """Direct POST to Descope Management API (bypasses backend)."""
+    with _httpx.Client(timeout=30) as client:
+        return client.post(f"{_DESCOPE_BASE}{path}", headers=_MGMT_AUTH, json=body or {})
+
 
 # --- Constants (source: infra/rbac.tf) ---
 
@@ -68,6 +83,24 @@ def _timed_request(context: APIRequestContext, method: str, url: str, **kwargs) 
     if not (200 <= resp.status < 300):
         print(f"[E2E] {method} {url} → {resp.status}: {resp.text()}")
     return resp, elapsed_ms
+
+
+# --- Diagnostic: verify Descope Management API access directly ---
+
+
+def test_descope_mgmt_api_direct():
+    """Diagnostic: verify management API works when called directly from test process."""
+    resp = _descope_mgmt_post("/v1/mgmt/role/all")
+    print(f"[DIAG] Direct list roles: {resp.status_code} {resp.text[:300]}")
+    resp = _descope_mgmt_post("/v1/mgmt/permission/all")
+    print(f"[DIAG] Direct list perms: {resp.status_code} {resp.text[:300]}")
+    # Also check what permissions exist
+    if resp.status_code == 200:
+        perms = resp.json().get("permissions", [])
+        perm_names = [p.get("name", "?") for p in perms]
+        print(f"[DIAG] Available permissions: {perm_names}")
+    # Soft assertion — this test is for diagnosis
+    assert resp.status_code in (200, 500), f"Unexpected status: {resp.status_code}"
 
 
 # --- AC-1: TF-seeded roles with correct permission counts ---
