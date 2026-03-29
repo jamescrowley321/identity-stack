@@ -174,6 +174,33 @@ class DescopeManagementClient:
         """Delete a permission definition by name."""
         await self._request("/v1/mgmt/permission/delete", {"name": name})
 
+    async def list_roles(self) -> list[dict]:
+        """List all role definitions in the Descope project."""
+        resp = await self._request("/v1/mgmt/role/all", {})
+        return resp.json().get("roles") or []
+
+    async def create_role(self, name: str, description: str = "", permission_names: list[str] | None = None) -> None:
+        """Create a new role definition with optional permission mappings."""
+        body: dict = {"name": name, "description": description}
+        if permission_names is not None:
+            body["permissionNames"] = permission_names
+        await self._request("/v1/mgmt/role/create", body)
+
+    async def update_role(
+        self, name: str, new_name: str, description: str | None = None, permission_names: list[str] | None = None
+    ) -> None:
+        """Update an existing role definition."""
+        body: dict = {"name": name, "newName": new_name}
+        if description is not None:
+            body["description"] = description
+        if permission_names is not None:
+            body["permissionNames"] = permission_names
+        await self._request("/v1/mgmt/role/update", body)
+
+    async def delete_role(self, name: str) -> None:
+        """Delete a role definition by name."""
+        await self._request("/v1/mgmt/role/delete", {"name": name})
+
     async def invite_user(self, email: str, tenant_id: str, role_names: list[str] | None = None) -> dict:
         """Create a user and assign them to a tenant with roles."""
         tenants = [{"tenantId": tenant_id}]

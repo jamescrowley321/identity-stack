@@ -372,6 +372,109 @@ class TestDescopeManagementClient:
             json={"name": "reports.read"},
         )
 
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_list_roles(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(
+            status_code=200,
+            raise_for_status=MagicMock(),
+            json=MagicMock(return_value={"roles": [{"name": "admin", "description": "Admin role"}]}),
+        )
+
+        result = await client.list_roles()
+        assert result == [{"name": "admin", "description": "Admin role"}]
+        mock_http.post.assert_called_once_with(
+            "https://api.descope.com/v1/mgmt/role/all",
+            headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
+            json={},
+        )
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_create_role(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+
+        await client.create_role("editor", "Can edit", ["docs.write", "docs.read"])
+        mock_http.post.assert_called_once_with(
+            "https://api.descope.com/v1/mgmt/role/create",
+            headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
+            json={"name": "editor", "description": "Can edit", "permissionNames": ["docs.write", "docs.read"]},
+        )
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_create_role_without_permissions(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+
+        await client.create_role("viewer", "Read only")
+        call_json = mock_http.post.call_args[1]["json"]
+        assert "permissionNames" not in call_json
+        assert call_json["name"] == "viewer"
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_update_role(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+
+        await client.update_role("editor", "senior-editor", "Senior editor", ["docs.write"])
+        mock_http.post.assert_called_once_with(
+            "https://api.descope.com/v1/mgmt/role/update",
+            headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
+            json={
+                "name": "editor",
+                "newName": "senior-editor",
+                "description": "Senior editor",
+                "permissionNames": ["docs.write"],
+            },
+        )
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_update_role_without_description(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+
+        await client.update_role("editor", "senior-editor")
+        call_json = mock_http.post.call_args[1]["json"]
+        assert "description" not in call_json
+        assert "permissionNames" not in call_json
+        assert call_json["name"] == "editor"
+        assert call_json["newName"] == "senior-editor"
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_update_role_without_permissions(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+
+        await client.update_role("editor", "senior-editor", "Senior editor")
+        call_json = mock_http.post.call_args[1]["json"]
+        assert "permissionNames" not in call_json
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_delete_role(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+
+        await client.delete_role("editor")
+        mock_http.post.assert_called_once_with(
+            "https://api.descope.com/v1/mgmt/role/delete",
+            headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
+            json={"name": "editor"},
+        )
+
 
 class TestGetDescopeClient:
     def test_creates_client_from_env(self, monkeypatch):

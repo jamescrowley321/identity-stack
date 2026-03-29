@@ -68,6 +68,7 @@ MOCK_CLAIMS_NO_TENANT = {
     "sub": "user123",
     "tenants": {
         "tenant-abc": {"roles": ["admin"], "permissions": ["read"]},
+        "tenant-xyz": {"roles": ["viewer"], "permissions": ["read"]},
     },
 }
 
