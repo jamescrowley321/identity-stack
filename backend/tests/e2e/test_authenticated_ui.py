@@ -94,7 +94,7 @@ def test_logout_navigates_to_login(auth_page: Page):
     _open_user_menu_and_sign_out(auth_page)
 
     auth_page.wait_for_url("**/login**", timeout=10000)
-    expect(auth_page).to_have_url("**/login**")
+    assert "/login" in auth_page.url
 
     server_errors = [f"{r.status} {r.url}" for r in errors]
     assert not server_errors, f"Server errors during logout: {server_errors}"
