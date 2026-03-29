@@ -18,6 +18,10 @@ def anyio_backend():
 def _set_env(monkeypatch):
     monkeypatch.setenv("DESCOPE_PROJECT_ID", "test-project-id")
     monkeypatch.setenv("DESCOPE_MANAGEMENT_KEY", "test-management-key")
+    # Reset rate limiter storage between tests to avoid 429 interference
+    from app.middleware.rate_limit import limiter
+
+    limiter.reset()
 
 
 @pytest.fixture
@@ -56,6 +60,17 @@ VIEWER_CLAIMS = {
         "tenant-abc": {
             "roles": ["viewer"],
             "permissions": ["projects.read"],
+        },
+    },
+}
+
+OTHER_TENANT_CLAIMS = {
+    "sub": "user999",
+    "dct": "tenant-xyz",
+    "tenants": {
+        "tenant-xyz": {
+            "roles": ["admin"],
+            "permissions": ["projects.create"],
         },
     },
 }
@@ -159,6 +174,19 @@ async def test_get_schema_rejects_no_tenant(mock_validate, client):
     assert response.status_code == 403
 
 
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_create_relation_rejects_no_tenant(mock_validate, client):
+    """Relation endpoints require tenant context (dct claim)."""
+    mock_validate.return_value = NO_TENANT_CLAIMS
+    response = await client.post(
+        "/api/fga/relations",
+        headers=AUTH_HEADER,
+        json={"resource_type": "doc", "resource_id": "1", "relation": "owner", "target": "u1"},
+    )
+    assert response.status_code == 403
+
+
 # --- GET /api/fga/schema ---
 
 
@@ -195,7 +223,7 @@ async def test_get_schema_empty(mock_validate, mock_factory, client):
 @patch("app.routers.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_get_schema_none_result(mock_validate, mock_factory, client):
-    """get_fga_schema() returns None → empty schema, not crash."""
+    """get_fga_schema() returns None -> empty schema, not crash."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.get_fga_schema.return_value = None
@@ -210,7 +238,7 @@ async def test_get_schema_none_result(mock_validate, mock_factory, client):
 @patch("app.routers.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_get_schema_null_schema_value(mock_validate, mock_factory, client):
-    """Schema key exists but value is None → empty string."""
+    """Schema key exists but value is None -> empty string."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.get_fga_schema.return_value = {"schema": None}
@@ -252,7 +280,7 @@ async def test_get_schema_descope_http_error(mock_validate, mock_factory, client
 @patch("app.routers.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_get_schema_descope_400(mock_validate, mock_factory, client):
-    """GET schema: Descope 400 → HTTP 400 (not 502)."""
+    """GET schema: Descope 400 -> HTTP 400 (not 502)."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.get_fga_schema.side_effect = _make_http_status_error(400)
@@ -309,7 +337,7 @@ async def test_update_schema_empty_body_rejected(mock_validate, client):
 @patch("app.routers.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_update_schema_readback_failure_returns_submitted(mock_validate, mock_factory, client):
-    """Update succeeds but read-back fails → return the submitted schema."""
+    """Update succeeds but read-back fails -> return the submitted schema."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.get_fga_schema.side_effect = _make_http_status_error(500)
@@ -380,7 +408,42 @@ async def test_create_relation_success(mock_validate, mock_factory, client):
     assert data["resource_id"] == "doc-1"
     assert data["relation"] == "owner"
     assert data["target"] == "user:u1"
-    mock_client.create_relation.assert_called_once_with("document", "doc-1", "owner", "user:u1")
+    # Verify service call uses tenant-prefixed resource_id
+    mock_client.create_relation.assert_called_once_with("document", "tenant-abc:doc-1", "owner", "user:u1")
+
+
+@pytest.mark.anyio
+@patch("app.routers.fga.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_create_relation_prefixes_tenant_id(mock_validate, mock_factory, client):
+    """Verify resource_id is prefixed with tenant_id in the service call."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_factory.return_value = mock_client
+
+    body = {"resource_type": "project", "resource_id": "proj-42", "relation": "editor", "target": "user:u2"}
+    response = await client.post("/api/fga/relations", headers=AUTH_HEADER, json=body)
+    assert response.status_code == 201
+    # The service layer receives the tenant-prefixed ID
+    mock_client.create_relation.assert_called_once_with("project", "tenant-abc:proj-42", "editor", "user:u2")
+    # The response returns the original (unprefixed) resource_id
+    assert response.json()["resource_id"] == "proj-42"
+
+
+@pytest.mark.anyio
+@patch("app.routers.fga.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_create_relation_different_tenant_gets_different_prefix(mock_validate, mock_factory, client):
+    """Different tenants get different resource_id prefixes, preventing cross-tenant access."""
+    mock_validate.return_value = OTHER_TENANT_CLAIMS
+    mock_client = AsyncMock()
+    mock_factory.return_value = mock_client
+
+    body = {"resource_type": "doc", "resource_id": "doc-1", "relation": "owner", "target": "user:u1"}
+    response = await client.post("/api/fga/relations", headers=AUTH_HEADER, json=body)
+    assert response.status_code == 201
+    # tenant-xyz prefix, not tenant-abc
+    mock_client.create_relation.assert_called_once_with("doc", "tenant-xyz:doc-1", "owner", "user:u1")
 
 
 @pytest.mark.anyio
@@ -459,7 +522,23 @@ async def test_delete_relation_success(mock_validate, mock_factory, client):
     response = await client.request("DELETE", "/api/fga/relations", headers=AUTH_HEADER, json=body)
     assert response.status_code == 200
     assert response.json()["status"] == "deleted"
-    mock_client.delete_relation.assert_called_once_with("doc", "1", "owner", "u1")
+    # Verify tenant-prefixed resource_id in service call
+    mock_client.delete_relation.assert_called_once_with("doc", "tenant-abc:1", "owner", "u1")
+
+
+@pytest.mark.anyio
+@patch("app.routers.fga.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_delete_relation_prefixes_tenant_id(mock_validate, mock_factory, client):
+    """Verify delete uses tenant-prefixed resource_id."""
+    mock_validate.return_value = OTHER_TENANT_CLAIMS
+    mock_client = AsyncMock()
+    mock_factory.return_value = mock_client
+
+    body = {"resource_type": "doc", "resource_id": "doc-5", "relation": "owner", "target": "u1"}
+    response = await client.request("DELETE", "/api/fga/relations", headers=AUTH_HEADER, json=body)
+    assert response.status_code == 200
+    mock_client.delete_relation.assert_called_once_with("doc", "tenant-xyz:doc-5", "owner", "u1")
 
 
 @pytest.mark.anyio
@@ -480,7 +559,7 @@ async def test_delete_relation_descope_400(mock_validate, mock_factory, client):
 @patch("app.routers.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_delete_relation_descope_500(mock_validate, mock_factory, client):
-    """DELETE 500 → 502 with opaque message."""
+    """DELETE 500 -> 502 with opaque message."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.delete_relation.side_effect = _make_http_status_error(500)
@@ -527,7 +606,30 @@ async def test_list_relations_success(mock_validate, mock_factory, client):
     assert response.status_code == 200
     data = response.json()
     assert len(data["relations"]) == 2
-    mock_client.list_relations.assert_called_once_with("doc", "1")
+    # Verify service call uses tenant-prefixed resource_id
+    mock_client.list_relations.assert_called_once_with("doc", "tenant-abc:1")
+
+
+@pytest.mark.anyio
+@patch("app.routers.fga.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_list_relations_strips_tenant_prefix(mock_validate, mock_factory, client):
+    """Verify tenant prefix is stripped from resource_id in response."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.list_relations.return_value = [
+        {"relationDefinition": "owner", "target": "user:u1", "resource_id": "tenant-abc:doc-1"},
+        {"relationDefinition": "viewer", "target": "user:u2", "resource": "tenant-abc:doc-1"},
+    ]
+    mock_factory.return_value = mock_client
+
+    response = await client.get(
+        "/api/fga/relations", headers=AUTH_HEADER, params={"resource_type": "doc", "resource_id": "doc-1"}
+    )
+    assert response.status_code == 200
+    relations = response.json()["relations"]
+    assert relations[0]["resource_id"] == "doc-1"
+    assert relations[1]["resource"] == "doc-1"
 
 
 @pytest.mark.anyio
@@ -550,7 +652,7 @@ async def test_list_relations_empty(mock_validate, mock_factory, client):
 @patch("app.routers.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_list_relations_none_result(mock_validate, mock_factory, client):
-    """list_relations() returns None → empty list, not null."""
+    """list_relations() returns None -> empty list, not null."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.list_relations.return_value = None
@@ -591,7 +693,7 @@ async def test_list_relations_descope_error(mock_validate, mock_factory, client)
 @patch("app.routers.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_list_relations_descope_400(mock_validate, mock_factory, client):
-    """GET relations: Descope 400 → HTTP 400 (not 502)."""
+    """GET relations: Descope 400 -> HTTP 400 (not 502)."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.list_relations.side_effect = _make_http_status_error(400)
@@ -634,7 +736,8 @@ async def test_check_permission_allowed(mock_validate, mock_factory, client):
     response = await client.post("/api/fga/check", headers=AUTH_HEADER, json=body)
     assert response.status_code == 200
     assert response.json()["allowed"] is True
-    mock_client.check_permission.assert_called_once_with("doc", "1", "viewer", "user:u1")
+    # Verify service call uses tenant-prefixed resource_id
+    mock_client.check_permission.assert_called_once_with("doc", "tenant-abc:1", "viewer", "user:u1")
 
 
 @pytest.mark.anyio
@@ -656,7 +759,7 @@ async def test_check_permission_denied(mock_validate, mock_factory, client):
 @patch("app.routers.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_check_permission_none_returns_false(mock_validate, mock_factory, client):
-    """check_permission() returns None → allowed=False via bool()."""
+    """check_permission() returns None -> allowed=False via bool()."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = None
@@ -671,8 +774,40 @@ async def test_check_permission_none_returns_false(mock_validate, mock_factory, 
 @pytest.mark.anyio
 @patch("app.routers.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_check_permission_prefixes_tenant_id(mock_validate, mock_factory, client):
+    """Verify check_permission uses tenant-prefixed resource_id."""
+    mock_validate.return_value = OTHER_TENANT_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.check_permission.return_value = True
+    mock_factory.return_value = mock_client
+
+    body = {"resource_type": "doc", "resource_id": "doc-1", "relation": "viewer", "target": "user:u1"}
+    response = await client.post("/api/fga/check", headers=AUTH_HEADER, json=body)
+    assert response.status_code == 200
+    mock_client.check_permission.assert_called_once_with("doc", "tenant-xyz:doc-1", "viewer", "user:u1")
+
+
+@pytest.mark.anyio
+@patch("app.routers.fga.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_check_permission_descope_400(mock_validate, mock_factory, client):
+    """POST check: Descope 400 -> HTTP 400 (not 502)."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.check_permission.side_effect = _make_http_status_error(400)
+    mock_factory.return_value = mock_client
+
+    body = {"resource_type": "doc", "resource_id": "1", "relation": "viewer", "target": "user:u1"}
+    response = await client.post("/api/fga/check", headers=AUTH_HEADER, json=body)
+    assert response.status_code == 400
+    assert "Validation error" in response.json()["detail"]
+
+
+@pytest.mark.anyio
+@patch("app.routers.fga.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_check_permission_descope_error_returns_502(mock_validate, mock_factory, client):
-    """FGA check must fail-closed: Descope API error → 502, never fail-open."""
+    """FGA check must fail-closed: Descope API error -> 502, never fail-open."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.check_permission.side_effect = _make_http_status_error(500)
@@ -688,7 +823,7 @@ async def test_check_permission_descope_error_returns_502(mock_validate, mock_fa
 @patch("app.routers.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_check_permission_network_error_returns_502(mock_validate, mock_factory, client):
-    """FGA check must fail-closed: network error → 502, never fail-open."""
+    """FGA check must fail-closed: network error -> 502, never fail-open."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.check_permission.side_effect = _make_request_error()
@@ -735,3 +870,87 @@ async def test_delete_relation_owner_allowed(mock_validate, mock_factory, client
     body = {"resource_type": "doc", "resource_id": "1", "relation": "owner", "target": "u1"}
     response = await client.request("DELETE", "/api/fga/relations", headers=AUTH_HEADER, json=body)
     assert response.status_code == 200
+
+
+# --- Sanitized error detail tests ---
+
+
+@pytest.mark.anyio
+@patch("app.routers.fga.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_400_error_detail_is_sanitized(mock_validate, mock_factory, client):
+    """400 responses should wrap error text with 'Validation error:' prefix."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    request = httpx.Request("POST", "https://api.descope.com/v1/mgmt/authz")
+    response = httpx.Response(400, request=request, text='{"message": "invalid resource type"}')
+    mock_client.create_relation.side_effect = httpx.HTTPStatusError("400", request=request, response=response)
+    mock_factory.return_value = mock_client
+
+    body = {"resource_type": "doc", "resource_id": "1", "relation": "owner", "target": "u1"}
+    resp = await client.post("/api/fga/relations", headers=AUTH_HEADER, json=body)
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert detail.startswith("Validation error:")
+    assert "invalid resource type" in detail
+
+
+@pytest.mark.anyio
+@patch("app.routers.fga.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_400_error_detail_non_json_sanitized(mock_validate, mock_factory, client):
+    """400 responses with non-JSON body are still wrapped safely."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    request = httpx.Request("POST", "https://api.descope.com/v1/mgmt/authz")
+    response = httpx.Response(400, request=request, text="plain text error from descope")
+    mock_client.create_relation.side_effect = httpx.HTTPStatusError("400", request=request, response=response)
+    mock_factory.return_value = mock_client
+
+    body = {"resource_type": "doc", "resource_id": "1", "relation": "owner", "target": "u1"}
+    resp = await client.post("/api/fga/relations", headers=AUTH_HEADER, json=body)
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert detail.startswith("Validation error:")
+    assert "plain text error" in detail
+
+
+# --- Helper function unit tests ---
+
+
+def test_prefix_resource_id():
+    from app.routers.fga import _prefix_resource_id
+
+    assert _prefix_resource_id("tenant-abc", "doc-1") == "tenant-abc:doc-1"
+    assert _prefix_resource_id("t1", "x") == "t1:x"
+
+
+def test_strip_tenant_prefix():
+    from app.routers.fga import _strip_tenant_prefix
+
+    assert _strip_tenant_prefix("tenant-abc", "tenant-abc:doc-1") == "doc-1"
+    assert _strip_tenant_prefix("tenant-abc", "other-tenant:doc-1") == "other-tenant:doc-1"
+    assert _strip_tenant_prefix("tenant-abc", "doc-1") == "doc-1"
+
+
+def test_sanitize_error_detail_json():
+    from app.routers.fga import _sanitize_error_detail
+
+    assert _sanitize_error_detail('{"message": "bad input"}') == "Validation error: bad input"
+
+
+def test_sanitize_error_detail_plain_text():
+    from app.routers.fga import _sanitize_error_detail
+
+    result = _sanitize_error_detail("some raw error text")
+    assert result.startswith("Validation error:")
+    assert "some raw error text" in result
+
+
+def test_sanitize_error_detail_truncates():
+    from app.routers.fga import _sanitize_error_detail
+
+    long_text = "x" * 500
+    result = _sanitize_error_detail(long_text)
+    # Should be truncated to 200 chars + "Validation error: " prefix
+    assert len(result) <= 220
