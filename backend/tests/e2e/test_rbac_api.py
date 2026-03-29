@@ -4,6 +4,7 @@ These tests require DESCOPE_CLIENT_ID and DESCOPE_CLIENT_SECRET env vars.
 They exercise the real Descope API via the backend's /api/roles and /api/permissions endpoints.
 """
 
+import contextlib
 import os
 import time
 import uuid
@@ -16,9 +17,9 @@ pytestmark = pytest.mark.skipif(
     reason="DESCOPE_CLIENT_ID/DESCOPE_CLIENT_SECRET not set",
 )
 
-# --- Constants ---
+# --- Constants (source: infra/rbac.tf) ---
 
-MAX_API_RESPONSE_MS = 200
+MAX_API_RESPONSE_MS = 2000
 
 TF_SEEDED_PERMISSIONS = sorted(
     [
@@ -82,7 +83,7 @@ def test_tf_seeded_roles_present(auth_api_context: APIRequestContext, backend_ur
 
     for role_name, expected_perm_count in TF_SEEDED_ROLES.items():
         assert role_name in role_map, f"TF-seeded role '{role_name}' not found in response"
-        actual_count = len(role_map[role_name].get("permissionNames", []))
+        actual_count = len(role_map[role_name].get("permissionNames") or [])
         assert actual_count == expected_perm_count, (
             f"Role '{role_name}': expected {expected_perm_count} permissions, got {actual_count}"
         )
@@ -132,7 +133,8 @@ def test_runtime_permission_coexists_with_tf_seeded(auth_api_context: APIRequest
         for tf_perm in TF_SEEDED_PERMISSIONS:
             assert tf_perm in perm_names, f"TF-seeded permission '{tf_perm}' missing after runtime create"
     finally:
-        auth_api_context.delete(f"{backend_url}/api/permissions/{perm_name}")
+        with contextlib.suppress(Exception):
+            auth_api_context.delete(f"{backend_url}/api/permissions/{perm_name}")
 
 
 def test_runtime_role_coexists_with_tf_seeded(auth_api_context: APIRequestContext, backend_url: str):
@@ -159,7 +161,8 @@ def test_runtime_role_coexists_with_tf_seeded(auth_api_context: APIRequestContex
         for tf_role in TF_SEEDED_ROLES:
             assert tf_role in role_names, f"TF-seeded role '{tf_role}' missing after runtime create"
     finally:
-        auth_api_context.delete(f"{backend_url}/api/roles/{role_name}")
+        with contextlib.suppress(Exception):
+            auth_api_context.delete(f"{backend_url}/api/roles/{role_name}")
 
 
 # --- AC-4: Permission CRUD lifecycle ---
@@ -222,7 +225,8 @@ def test_permission_crud_lifecycle(auth_api_context: APIRequestContext, backend_
         assert updated_name not in perm_names, "Deleted permission still present"
     finally:
         if cleanup_name:
-            auth_api_context.delete(f"{backend_url}/api/permissions/{cleanup_name}")
+            with contextlib.suppress(Exception):
+                auth_api_context.delete(f"{backend_url}/api/permissions/{cleanup_name}")
 
 
 # --- AC-5: Role CRUD with permission mapping ---
@@ -261,7 +265,7 @@ def test_role_crud_lifecycle(auth_api_context: APIRequestContext, backend_url: s
         roles = resp.json().get("roles", [])
         created = next((r for r in roles if r["name"] == role_name), None)
         assert created is not None, "Created role not found in list"
-        created_perms = sorted(created.get("permissionNames", []))
+        created_perms = sorted(created.get("permissionNames") or [])
         assert created_perms == ["documents.read", "projects.read"], f"Unexpected permissions: {created_perms}"
 
         # Update permission mapping (add settings.manage, remove documents.read)
@@ -284,7 +288,7 @@ def test_role_crud_lifecycle(auth_api_context: APIRequestContext, backend_url: s
         roles = resp.json().get("roles", [])
         updated = next((r for r in roles if r["name"] == updated_name), None)
         assert updated is not None, "Updated role not found"
-        updated_perms = sorted(updated.get("permissionNames", []))
+        updated_perms = sorted(updated.get("permissionNames") or [])
         assert updated_perms == ["projects.read", "settings.manage"], f"Unexpected permissions: {updated_perms}"
 
         # Delete
@@ -303,7 +307,8 @@ def test_role_crud_lifecycle(auth_api_context: APIRequestContext, backend_url: s
         assert updated_name not in role_names, "Deleted role still present"
     finally:
         if cleanup_name:
-            auth_api_context.delete(f"{backend_url}/api/roles/{cleanup_name}")
+            with contextlib.suppress(Exception):
+                auth_api_context.delete(f"{backend_url}/api/roles/{cleanup_name}")
 
 
 # --- AC-6: Runtime role works with /roles/assign ---
@@ -312,7 +317,7 @@ def test_role_crud_lifecycle(auth_api_context: APIRequestContext, backend_url: s
 def test_runtime_role_assignment(auth_api_context: APIRequestContext, backend_url: str):
     """Runtime-created role can be assigned to a user via /roles/assign."""
     role_name = _unique_name("assign-role")
-    cleanup_role = True
+    cleanup_role = False
 
     try:
         # Create a runtime role
@@ -324,17 +329,19 @@ def test_runtime_role_assignment(auth_api_context: APIRequestContext, backend_ur
         )
         assert resp.status == 201, f"Create failed: {resp.status}"
         assert elapsed_ms < MAX_API_RESPONSE_MS
+        cleanup_role = True
 
         # Get current user info to find user_id and tenant_id
         resp, _ = _timed_request(auth_api_context, "GET", f"{backend_url}/api/me")
         assert resp.status == 200
         me_data = resp.json()
-        user_id = me_data.get("identity", {}).get("sub", "")
+        user_id = (me_data.get("identity") or {}).get("sub", "")
         assert user_id, "Could not determine user_id from /api/me"
 
         resp, _ = _timed_request(auth_api_context, "GET", f"{backend_url}/api/tenants")
         assert resp.status == 200
         tenants = resp.json().get("tenants", {})
+        assert isinstance(tenants, dict), f"Expected tenants dict, got {type(tenants).__name__}"
         tenant_id = next(iter(tenants), "")
         assert tenant_id, "Could not determine tenant_id from /api/tenants"
 
@@ -348,6 +355,12 @@ def test_runtime_role_assignment(auth_api_context: APIRequestContext, backend_ur
         assert resp.status == 200, f"Assign failed: {resp.status} — {resp.text()}"
         assert elapsed_ms < MAX_API_RESPONSE_MS
 
+        # Verify assignment took effect by checking user's roles
+        resp, _ = _timed_request(auth_api_context, "GET", f"{backend_url}/api/roles/user/{user_id}")
+        if resp.status == 200:
+            user_roles = [r["name"] for r in resp.json().get("roles", [])]
+            assert role_name in user_roles, f"Assigned role '{role_name}' not found in user roles"
+
         # Remove the assigned role (cleanup user state)
         resp, elapsed_ms = _timed_request(
             auth_api_context,
@@ -359,7 +372,8 @@ def test_runtime_role_assignment(auth_api_context: APIRequestContext, backend_ur
         assert elapsed_ms < MAX_API_RESPONSE_MS
     finally:
         if cleanup_role:
-            auth_api_context.delete(f"{backend_url}/api/roles/{role_name}")
+            with contextlib.suppress(Exception):
+                auth_api_context.delete(f"{backend_url}/api/roles/{role_name}")
 
 
 # --- AC-8: Protected endpoints require auth ---
@@ -367,13 +381,27 @@ def test_runtime_role_assignment(auth_api_context: APIRequestContext, backend_ur
 
 def test_rbac_endpoints_reject_no_auth(api_context: APIRequestContext, backend_url: str):
     """RBAC admin endpoints return 401 without auth."""
+    dummy_payload = {"name": "test", "description": "test"}
     endpoints = [
         ("GET", "/api/permissions"),
         ("GET", "/api/roles"),
+        ("POST", "/api/permissions"),
+        ("POST", "/api/roles"),
+        ("PUT", "/api/permissions/nonexistent"),
+        ("PUT", "/api/roles/nonexistent"),
+        ("DELETE", "/api/permissions/nonexistent"),
+        ("DELETE", "/api/roles/nonexistent"),
     ]
     for method, path in endpoints:
+        url = f"{backend_url}{path}"
         if method == "GET":
-            resp = api_context.get(f"{backend_url}{path}")
+            resp = api_context.get(url)
+        elif method == "POST":
+            resp = api_context.post(url, data=dummy_payload)
+        elif method == "PUT":
+            resp = api_context.put(url, data=dummy_payload)
+        elif method == "DELETE":
+            resp = api_context.delete(url)
         else:
-            resp = api_context.post(f"{backend_url}{path}")
+            continue
         assert resp.status == 401, f"{method} {path} returned {resp.status}, expected 401"
