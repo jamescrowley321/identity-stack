@@ -7,7 +7,7 @@ Requires DESCOPE_CLIENT_ID, DESCOPE_CLIENT_SECRET, and DESCOPE_MANAGEMENT_KEY.
 import os
 
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, Response, expect
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DESCOPE_MANAGEMENT_KEY") or not os.environ.get("DESCOPE_CLIENT_ID"),
@@ -69,3 +69,56 @@ def test_dashboard_claims_tab(auth_page: Page):
     auth_page.get_by_role("tab", name="Claims").click()
     expect(auth_page.get_by_text("ClaimsIdentity")).to_be_visible()
     expect(auth_page.get_by_text("Access Token Claims")).to_be_visible()
+
+
+def _open_user_menu_and_sign_out(page: Page) -> None:
+    """Open the user dropdown menu and click 'Sign out'."""
+    # The UserMenu trigger is a ghost icon button inside a DropdownMenu.
+    # It contains an Avatar with the user's initials. Find it via the
+    # header area and click to open the dropdown.
+    header = page.locator("header")
+    avatar_button = header.locator("button").filter(has=page.locator("[data-slot='avatar']"))
+    avatar_button.click()
+
+    # Wait for the dropdown menu to appear and click "Sign out"
+    sign_out = page.get_by_role("menuitem", name="Sign out")
+    expect(sign_out).to_be_visible()
+    sign_out.click()
+
+
+def test_logout_navigates_to_login(auth_page: Page):
+    """Clicking 'Sign out' navigates to /login without server errors."""
+    errors: list[Response] = []
+    auth_page.on("response", lambda resp: errors.append(resp) if resp.status >= 500 else None)
+
+    _open_user_menu_and_sign_out(auth_page)
+
+    auth_page.wait_for_url("**/login**", timeout=10000)
+    expect(auth_page).to_have_url("**/login**")
+
+    server_errors = [f"{r.status} {r.url}" for r in errors]
+    assert not server_errors, f"Server errors during logout: {server_errors}"
+
+
+def test_logout_no_descope_401(auth_page: Page):
+    """Logout must not trigger RP-Initiated Logout (401 from Descope).
+
+    Before the fix, react-oidc-context's signoutRedirect() called Descope's
+    /oidc/v1/end_session endpoint with the access-key-based token, which
+    Descope rejected with 401. The fix uses removeUser() + navigate() instead.
+    """
+    network_errors: list[Response] = []
+
+    def _capture_descope_errors(resp: Response) -> None:
+        # Capture any 4xx/5xx response to Descope OIDC logout endpoints
+        if "descope.com" in resp.url and resp.status >= 400:
+            network_errors.append(resp)
+
+    auth_page.on("response", _capture_descope_errors)
+
+    _open_user_menu_and_sign_out(auth_page)
+
+    auth_page.wait_for_url("**/login**", timeout=10000)
+
+    descope_errors = [f"{r.status} {r.url}" for r in network_errors]
+    assert not descope_errors, f"Descope endpoint errors during logout (RP-Initiated Logout bug): {descope_errors}"
