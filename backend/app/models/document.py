@@ -14,4 +14,4 @@ class Document(SQLModel, table=True):
     title: str
     content: str = ""
     created_by: str
-    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
