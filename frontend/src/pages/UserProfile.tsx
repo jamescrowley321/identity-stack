@@ -7,6 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 
 const USER_ATTRIBUTES = ["department", "job_title", "avatar_url"];
 
@@ -23,11 +24,19 @@ export default function UserProfile() {
   const [editKey, setEditKey] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
 
+  const [loadError, setLoadError] = useState(false);
+
   useEffect(() => {
     apiFetch("/api/profile")
       .then((res) => (res.ok ? res.json() : null))
-      .then(setProfile)
-      .catch(() => {});
+      .then((data) => {
+        if (data) {
+          setProfile(data);
+        } else {
+          setLoadError(true);
+        }
+      })
+      .catch(() => setLoadError(true));
   }, [apiFetch]);
 
   const handleSave = useCallback(async () => {
@@ -52,6 +61,21 @@ export default function UserProfile() {
       toast.error("Failed to save");
     }
   }, [editKey, editValue, apiFetch]);
+
+  if (loadError) {
+    return (
+      <>
+        <PageHeader title="User Profile" />
+        <div className="p-6">
+          <Alert>
+            <AlertDescription>
+              Unable to load profile. The identity provider may be unavailable.
+            </AlertDescription>
+          </Alert>
+        </div>
+      </>
+    );
+  }
 
   if (!profile) {
     return (

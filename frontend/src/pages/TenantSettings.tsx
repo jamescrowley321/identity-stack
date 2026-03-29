@@ -22,12 +22,17 @@ const PLAN_TIERS = ["free", "pro", "enterprise"];
 
 export default function TenantSettings() {
   const { apiFetch } = useApiClient();
-  const { isAdmin } = useRBAC();
+  const { isAdmin, currentTenantId } = useRBAC();
   const [settings, setSettings] = useState<TenantSettingsData | null>(null);
   const [planTier, setPlanTier] = useState("free");
   const [maxMembers, setMaxMembers] = useState("10");
+  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
+    if (!currentTenantId) {
+      setLoadError(true);
+      return;
+    }
     apiFetch("/api/tenants/current/settings")
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
@@ -35,10 +40,12 @@ export default function TenantSettings() {
           setSettings(data);
           setPlanTier(String(data.custom_attributes?.plan_tier ?? "free"));
           setMaxMembers(String(data.custom_attributes?.max_members ?? "10"));
+        } else {
+          setLoadError(true);
         }
       })
-      .catch(() => {});
-  }, [apiFetch]);
+      .catch(() => setLoadError(true));
+  }, [apiFetch, currentTenantId]);
 
   const handleSave = useCallback(async () => {
     try {
@@ -64,6 +71,21 @@ export default function TenantSettings() {
       toast.error("Failed to save");
     }
   }, [planTier, maxMembers, apiFetch]);
+
+  if (loadError || !currentTenantId) {
+    return (
+      <>
+        <PageHeader title="Tenant Settings" />
+        <div className="p-6">
+          <Alert>
+            <AlertDescription>
+              No tenant context available. Please select a tenant using the tenant switcher in the header.
+            </AlertDescription>
+          </Alert>
+        </div>
+      </>
+    );
+  }
 
   if (!settings) {
     return (
