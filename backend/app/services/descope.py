@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Literal
 
 import httpx
@@ -13,6 +14,8 @@ class DescopeManagementClient:
     Accepts an httpx.AsyncClient for connection reuse. The caller is responsible
     for closing the client (typically via FastAPI lifespan).
     """
+
+    _FGA_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z0-9_:.\-]+$")
 
     def __init__(
         self,
@@ -33,6 +36,15 @@ class DescopeManagementClient:
         if self._http_client is not None:
             return self._http_client
         return httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT)
+
+    def _validate_fga_param(self, value: str, name: str) -> None:
+        """Validate FGA identifier: non-empty, max 200 chars, safe characters only."""
+        if not value or not value.strip():
+            raise ValueError(f"{name} must be a non-empty string")
+        if len(value) > 200:
+            raise ValueError(f"{name} must not exceed 200 characters")
+        if not self._FGA_IDENTIFIER_PATTERN.match(value):
+            raise ValueError(f"{name} contains invalid characters (allowed: alphanumeric, _, :, ., -)")
 
     async def _request(self, path: str, body: dict) -> httpx.Response:
         """Send a POST request to the Descope Management API."""
@@ -200,6 +212,106 @@ class DescopeManagementClient:
     async def delete_role(self, name: str) -> None:
         """Delete a role definition by name."""
         await self._request("/v1/mgmt/role/delete", {"name": name})
+
+    # --- FGA (Fine-Grained Authorization) methods ---
+
+    async def get_fga_schema(self) -> dict:
+        """Load the current FGA schema definition."""
+        resp = await self._request("/v1/mgmt/authz/schema/load", {})
+        return resp.json().get("schema", {})
+
+    async def update_fga_schema(self, schema: str) -> None:
+        """Save/update the FGA schema definition."""
+        if not schema or not schema.strip():
+            raise ValueError("schema must be a non-empty string")
+        await self._request("/v1/mgmt/authz/schema/save", {"schema": schema})
+
+    async def create_relation(self, resource_type: str, resource_id: str, relation: str, target: str) -> None:
+        """Create an FGA relation tuple."""
+        self._validate_fga_param(resource_type, "resource_type")
+        self._validate_fga_param(resource_id, "resource_id")
+        self._validate_fga_param(relation, "relation")
+        self._validate_fga_param(target, "target")
+        await self._request(
+            "/v1/mgmt/authz/re/save",
+            {
+                "resourceType": resource_type,
+                "resource": resource_id,
+                "relationDefinition": relation,
+                "target": target,
+            },
+        )
+
+    async def delete_relation(self, resource_type: str, resource_id: str, relation: str, target: str) -> None:
+        """Delete an FGA relation tuple."""
+        self._validate_fga_param(resource_type, "resource_type")
+        self._validate_fga_param(resource_id, "resource_id")
+        self._validate_fga_param(relation, "relation")
+        self._validate_fga_param(target, "target")
+        await self._request(
+            "/v1/mgmt/authz/re/delete",
+            {
+                "resourceType": resource_type,
+                "resource": resource_id,
+                "relationDefinition": relation,
+                "target": target,
+            },
+        )
+
+    async def list_relations(
+        self, resource_type: str, resource_id: str, relation: str | None = None, target: str | None = None
+    ) -> list[dict]:
+        """List all relation tuples for a specific resource. Returns empty list if none."""
+        self._validate_fga_param(resource_type, "resource_type")
+        self._validate_fga_param(resource_id, "resource_id")
+        if relation is not None:
+            self._validate_fga_param(relation, "relation")
+        if target is not None:
+            self._validate_fga_param(target, "target")
+        body: dict = {"resourceType": resource_type, "resource": resource_id}
+        if relation is not None:
+            body["relationDefinition"] = relation
+        if target is not None:
+            body["target"] = target
+        resp = await self._request("/v1/mgmt/authz/re/who", body)
+        return resp.json().get("relationInfo") or []
+
+    async def list_user_resources(self, resource_type: str, relation: str, target: str) -> list[dict]:
+        """List resources a target has a specific relation to. Returns empty list if none."""
+        self._validate_fga_param(resource_type, "resource_type")
+        self._validate_fga_param(relation, "relation")
+        self._validate_fga_param(target, "target")
+        resp = await self._request(
+            "/v1/mgmt/authz/re/resource",
+            {
+                "resourceType": resource_type,
+                "relationDefinition": relation,
+                "target": target,
+            },
+        )
+        return resp.json().get("resources") or []
+
+    async def check_permission(self, resource_type: str, resource_id: str, relation: str, target: str) -> bool:
+        """Check if a subject has a relation to a resource. Returns True/False.
+
+        Raises httpx.HTTPStatusError on API errors (4xx/5xx).
+        Raises httpx.RequestError on network/transport errors.
+        Callers should handle these for fail-closed behavior.
+        """
+        self._validate_fga_param(resource_type, "resource_type")
+        self._validate_fga_param(resource_id, "resource_id")
+        self._validate_fga_param(relation, "relation")
+        self._validate_fga_param(target, "target")
+        resp = await self._request(
+            "/v1/mgmt/authz/re/has",
+            {
+                "resourceType": resource_type,
+                "resource": resource_id,
+                "relationDefinition": relation,
+                "target": target,
+            },
+        )
+        return bool(resp.json().get("allowed", False))
 
     async def invite_user(self, email: str, tenant_id: str, role_names: list[str] | None = None) -> dict:
         """Create a user and assign them to a tenant with roles."""
