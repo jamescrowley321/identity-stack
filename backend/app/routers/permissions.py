@@ -33,11 +33,12 @@ async def list_permissions(
         permissions = await client.list_permissions()
         return {"permissions": permissions}
     except httpx.HTTPStatusError as exc:
-        logger.warning("Descope API error listing permissions: %s", exc.response.status_code)
-        raise HTTPException(status_code=502, detail="Failed to list permissions from Descope")
+        body = exc.response.text[:500]
+        logger.warning("Descope API error listing permissions: %s %s", exc.response.status_code, body)
+        raise HTTPException(status_code=502, detail=f"Descope API {exc.response.status_code}: {body}")
     except httpx.RequestError as exc:
         logger.error("Network error listing permissions: %s", exc)
-        raise HTTPException(status_code=502, detail="Failed to reach Descope API")
+        raise HTTPException(status_code=502, detail=f"Network error: {exc}")
 
 
 @router.post("/permissions", status_code=201)

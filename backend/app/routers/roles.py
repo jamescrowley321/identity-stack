@@ -65,9 +65,17 @@ async def assign_roles(
         raise HTTPException(status_code=403, detail="Cannot manage roles for a different tenant")
     if "owner" in body.role_names and "owner" not in admin_roles:
         raise HTTPException(status_code=403, detail="Only owners can assign the owner role")
-    client = get_descope_client()
-    await client.assign_roles(body.user_id, body.tenant_id, body.role_names)
-    return {"status": "roles_assigned", "user_id": body.user_id, "role_names": body.role_names}
+    try:
+        client = get_descope_client()
+        await client.assign_roles(body.user_id, body.tenant_id, body.role_names)
+        return {"status": "roles_assigned", "user_id": body.user_id, "role_names": body.role_names}
+    except httpx.HTTPStatusError as exc:
+        body = exc.response.text[:500]
+        logger.warning("Descope API error assigning roles: %s %s", exc.response.status_code, body)
+        raise HTTPException(status_code=502, detail=f"Descope API {exc.response.status_code}: {body}") from exc
+    except httpx.RequestError as exc:
+        logger.error("Network error assigning roles: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Network error: {exc}") from exc
 
 
 @router.post("/roles/remove")
@@ -83,9 +91,17 @@ async def remove_roles(
         raise HTTPException(status_code=403, detail="Cannot manage roles for a different tenant")
     if "owner" in body.role_names and "owner" not in admin_roles:
         raise HTTPException(status_code=403, detail="Only owners can remove the owner role")
-    client = get_descope_client()
-    await client.remove_roles(body.user_id, body.tenant_id, body.role_names)
-    return {"status": "roles_removed", "user_id": body.user_id, "role_names": body.role_names}
+    try:
+        client = get_descope_client()
+        await client.remove_roles(body.user_id, body.tenant_id, body.role_names)
+        return {"status": "roles_removed", "user_id": body.user_id, "role_names": body.role_names}
+    except httpx.HTTPStatusError as exc:
+        body = exc.response.text[:500]
+        logger.warning("Descope API error removing roles: %s %s", exc.response.status_code, body)
+        raise HTTPException(status_code=502, detail=f"Descope API {exc.response.status_code}: {body}") from exc
+    except httpx.RequestError as exc:
+        logger.error("Network error removing roles: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Network error: {exc}") from exc
 
 
 # --- Role definition CRUD (admin-only) ---
@@ -101,11 +117,12 @@ async def list_roles(
         roles = await client.list_roles()
         return {"roles": roles}
     except httpx.HTTPStatusError as exc:
-        logger.warning("Descope API error listing roles: %s", exc.response.status_code)
-        raise HTTPException(status_code=502, detail="Failed to list roles from Descope") from exc
+        body = exc.response.text[:500]
+        logger.warning("Descope API error listing roles: %s %s", exc.response.status_code, body)
+        raise HTTPException(status_code=502, detail=f"Descope API {exc.response.status_code}: {body}") from exc
     except httpx.RequestError as exc:
         logger.error("Network error listing roles: %s", exc)
-        raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
+        raise HTTPException(status_code=502, detail=f"Network error: {exc}") from exc
 
 
 @router.post("/roles", status_code=201)
@@ -121,15 +138,16 @@ async def create_role(
         await client.create_role(body.name, body.description, body.permission_names or None)
         return {"name": body.name, "description": body.description, "permission_names": body.permission_names}
     except httpx.HTTPStatusError as exc:
-        logger.warning("Descope API error creating role '%s': %s", body.name, exc.response.status_code)
+        resp_body = exc.response.text[:500]
+        logger.warning("Descope API error creating role '%s': %s %s", body.name, exc.response.status_code, resp_body)
         if exc.response.status_code == 400:
-            raise HTTPException(status_code=400, detail="Invalid role data") from exc
+            raise HTTPException(status_code=400, detail=f"Invalid role data: {resp_body}") from exc
         if exc.response.status_code == 409:
             raise HTTPException(status_code=409, detail="Role already exists") from exc
-        raise HTTPException(status_code=502, detail="Failed to create role in Descope") from exc
+        raise HTTPException(status_code=502, detail=f"Descope API {exc.response.status_code}: {resp_body}") from exc
     except httpx.RequestError as exc:
         logger.error("Network error creating role '%s': %s", body.name, exc)
-        raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
+        raise HTTPException(status_code=502, detail=f"Network error: {exc}") from exc
 
 
 @router.put("/roles/{name}")

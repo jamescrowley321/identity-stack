@@ -65,6 +65,8 @@ def _timed_request(context: APIRequestContext, method: str, url: str, **kwargs) 
     else:
         raise ValueError(f"Unsupported method: {method}")
     elapsed_ms = (time.monotonic() - start) * 1000
+    if not (200 <= resp.status < 300):
+        print(f"[E2E] {method} {url} → {resp.status}: {resp.text()}")
     return resp, elapsed_ms
 
 
