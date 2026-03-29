@@ -351,40 +351,41 @@ def test_role_crud_lifecycle(admin_api_context: APIRequestContext, backend_url: 
 # --- AC-6: Runtime role works with /roles/assign ---
 
 
-def test_runtime_role_assignment(
-    admin_api_context: APIRequestContext, backend_url: str, test_user_id: str, test_tenant_id: str
-):
-    """Runtime-created role can be assigned to a user via /roles/assign."""
+def test_runtime_role_assignment(admin_api_context: APIRequestContext, backend_url: str, test_tenant_id: str):
+    """Runtime-created role can be assigned to a user via /roles/assign.
+
+    Creates a fresh test user to avoid issues with Descope project's read
+    operations returning 500 (can't verify existing user tenant associations).
+    """
     import httpx as _httpx
 
     role_name = _unique_name("assign-role")
+    test_email = f"e2e-assign-{uuid.uuid4().hex[:8]}@test.example.com"
     cleanup_role = False
+    cleanup_user = False
 
-    # Ensure user is in the test tenant (direct Descope API call)
     _project_id = os.environ.get("DESCOPE_PROJECT_ID", "")
     _mgmt_key = os.environ.get("DESCOPE_MANAGEMENT_KEY", "")
     _mgmt_auth = {"Authorization": f"Bearer {_project_id}:{_mgmt_key}"}
     _base = os.environ.get("DESCOPE_BASE_URL", "https://api.descope.com")
+
+    # Create a fresh test user with tenant association
     with _httpx.Client(timeout=30) as hc:
-        # Load user to check tenant association
-        load_resp = hc.post(
-            f"{_base}/v1/mgmt/user",
+        create_resp = hc.post(
+            f"{_base}/v1/mgmt/user/create",
             headers=_mgmt_auth,
-            json={"loginId": test_user_id},
+            json={
+                "loginId": test_email,
+                "email": test_email,
+                "name": "E2E Assign Test",
+                "tenants": [{"tenantId": test_tenant_id}],
+                "verifiedEmail": True,
+                "test": True,
+            },
         )
-        if load_resp.status_code == 200:
-            user_data = load_resp.json().get("user", {})
-            user_tenants = [t.get("tenantId") for t in user_data.get("userTenants", [])]
-            print(f"[E2E] User {test_user_id} tenants: {user_tenants}, need: {test_tenant_id}")
-            if test_tenant_id not in user_tenants:
-                add_resp = hc.post(
-                    f"{_base}/v1/mgmt/user/update/tenant/add",
-                    headers=_mgmt_auth,
-                    json={"loginId": test_user_id, "tenantId": test_tenant_id},
-                )
-                print(f"[E2E] Add to tenant: {add_resp.status_code} {add_resp.text[:200]}")
-        else:
-            print(f"[E2E] User load failed: {load_resp.status_code} {load_resp.text[:200]}")
+        print(f"[E2E] Create test user: {create_resp.status_code} {create_resp.text[:200]}")
+        assert create_resp.status_code == 200, f"Create user failed: {create_resp.status_code}"
+        cleanup_user = True
 
     try:
         # Create a runtime role
@@ -403,7 +404,7 @@ def test_runtime_role_assignment(
             admin_api_context,
             "POST",
             f"{backend_url}/api/roles/assign",
-            data={"user_id": test_user_id, "tenant_id": test_tenant_id, "role_names": [role_name]},
+            data={"user_id": test_email, "tenant_id": test_tenant_id, "role_names": [role_name]},
         )
         assert resp.status == 200, f"Assign failed: {resp.status} — {resp.text()}"
         assert elapsed_ms < MAX_API_RESPONSE_MS
@@ -413,7 +414,7 @@ def test_runtime_role_assignment(
             admin_api_context,
             "POST",
             f"{backend_url}/api/roles/remove",
-            data={"user_id": test_user_id, "tenant_id": test_tenant_id, "role_names": [role_name]},
+            data={"user_id": test_email, "tenant_id": test_tenant_id, "role_names": [role_name]},
         )
         assert resp.status == 200, f"Remove failed: {resp.status}"
         assert elapsed_ms < MAX_API_RESPONSE_MS
@@ -421,6 +422,13 @@ def test_runtime_role_assignment(
         if cleanup_role:
             with contextlib.suppress(Exception):
                 admin_api_context.delete(f"{backend_url}/api/roles/{role_name}")
+        if cleanup_user:
+            with contextlib.suppress(Exception), _httpx.Client(timeout=10) as hc:
+                hc.post(
+                    f"{_base}/v1/mgmt/user/delete",
+                    headers=_mgmt_auth,
+                    json={"loginId": test_email},
+                )
 
 
 # --- AC-8: Protected endpoints require auth ---
