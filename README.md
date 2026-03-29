@@ -45,7 +45,6 @@ A comprehensive reference project demonstrating Descope's identity platform feat
 
 - Node.js 22+
 - Python 3.12+
-- Go 1.22+ (for building the Terraform provider)
 - Terraform 1.5+
 - A Descope account with a management key
 
@@ -58,14 +57,7 @@ git clone git@github.com:jamescrowley321/descope-saas-starter.git
 cd descope-saas-starter
 ```
 
-### 2. Build the Terraform provider (fork)
-
-```bash
-cd ~/repos/terraform-provider-descope
-make dev  # installs binary + creates ~/.terraformrc with dev_overrides
-```
-
-### 3. Provision Descope project
+### 2. Provision Descope project
 
 ```bash
 cd infra
@@ -81,7 +73,7 @@ terraform output integration_test_access_key_id         # → DESCOPE_CLIENT_ID
 terraform output integration_test_access_key_cleartext   # → DESCOPE_CLIENT_SECRET
 ```
 
-### 4. Run the backend
+### 3. Run the backend
 
 ```bash
 cd backend
@@ -92,7 +84,7 @@ pip install -e ".[dev]"
 uvicorn app.main:app --reload
 ```
 
-### 5. Run the frontend
+### 4. Run the frontend
 
 ```bash
 cd frontend
