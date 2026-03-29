@@ -410,6 +410,77 @@ async def test_delete_role(mock_validate, mock_factory, client):
     mock_client.delete_role.assert_called_once_with("editor")
 
 
+# --- Partial update ---
+
+
+@pytest.mark.anyio
+@patch("app.routers.roles.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_update_role_partial_description_only(mock_validate, mock_factory, client):
+    """Omitting new_name and permission_names should not wipe them."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_factory.return_value = mock_client
+
+    response = await client.put(
+        "/api/roles/editor",
+        headers=AUTH_HEADER,
+        json={"description": "Updated desc"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["name"] == "editor"  # defaults to path param
+    assert data["description"] == "Updated desc"
+    assert data["permission_names"] is None  # not sent → unchanged
+    mock_client.update_role.assert_called_once_with("editor", "editor", "Updated desc", None)
+
+
+@pytest.mark.anyio
+@patch("app.routers.roles.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_update_role_empty_body(mock_validate, mock_factory, client):
+    """Empty body is a no-op: name defaults to path param, others are None."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_factory.return_value = mock_client
+
+    response = await client.put(
+        "/api/roles/editor",
+        headers=AUTH_HEADER,
+        json={},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["name"] == "editor"
+    mock_client.update_role.assert_called_once_with("editor", "editor", None, None)
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_create_role_empty_permission_name_rejected(mock_validate, client):
+    """Empty strings in permission_names list should be rejected."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    response = await client.post(
+        "/api/roles",
+        headers=AUTH_HEADER,
+        json={"name": "test-role", "permission_names": ["", "docs.read"]},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_update_role_empty_permission_name_rejected(mock_validate, client):
+    """Empty strings in permission_names list should be rejected on update."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    response = await client.put(
+        "/api/roles/editor",
+        headers=AUTH_HEADER,
+        json={"permission_names": ["", "docs.read"]},
+    )
+    assert response.status_code == 422
+
+
 # --- Error handling ---
 
 

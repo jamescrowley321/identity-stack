@@ -438,6 +438,20 @@ class TestDescopeManagementClient:
 
     @pytest.mark.anyio
     @patch("app.services.descope.httpx.AsyncClient")
+    async def test_update_role_without_description(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+
+        await client.update_role("editor", "senior-editor")
+        call_json = mock_http.post.call_args[1]["json"]
+        assert "description" not in call_json
+        assert "permissionNames" not in call_json
+        assert call_json["name"] == "editor"
+        assert call_json["newName"] == "senior-editor"
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
     async def test_update_role_without_permissions(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http

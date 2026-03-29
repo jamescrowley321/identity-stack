@@ -1,4 +1,5 @@
 import logging
+from typing import Annotated
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -22,14 +23,14 @@ class RoleAssignmentRequest(BaseModel):
 
 class CreateRoleRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
-    description: str = ""
-    permission_names: list[str] = Field(default_factory=list)
+    description: str = Field(default="", max_length=1000)
+    permission_names: list[Annotated[str, Field(min_length=1)]] = Field(default_factory=list, max_length=100)
 
 
 class UpdateRoleRequest(BaseModel):
-    new_name: str = Field(min_length=1, max_length=200)
-    description: str = ""
-    permission_names: list[str] = Field(default_factory=list)
+    new_name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=1000)
+    permission_names: list[Annotated[str, Field(min_length=1)]] | None = Field(default=None, max_length=100)
 
 
 # --- Existing user-facing endpoints (must stay before /roles/{name}) ---
@@ -101,10 +102,10 @@ async def list_roles(
         return {"roles": roles}
     except httpx.HTTPStatusError as exc:
         logger.warning("Descope API error listing roles: %s", exc.response.status_code)
-        raise HTTPException(status_code=502, detail="Failed to list roles from Descope")
+        raise HTTPException(status_code=502, detail="Failed to list roles from Descope") from exc
     except httpx.RequestError as exc:
         logger.error("Network error listing roles: %s", exc)
-        raise HTTPException(status_code=502, detail="Failed to reach Descope API")
+        raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
 
 
 @router.post("/roles", status_code=201)
@@ -121,12 +122,14 @@ async def create_role(
         return {"name": body.name, "description": body.description, "permission_names": body.permission_names}
     except httpx.HTTPStatusError as exc:
         logger.warning("Descope API error creating role '%s': %s", body.name, exc.response.status_code)
-        if exc.response.status_code in (400, 409):
-            raise HTTPException(status_code=exc.response.status_code, detail="Role already exists or invalid")
-        raise HTTPException(status_code=502, detail="Failed to create role in Descope")
+        if exc.response.status_code == 400:
+            raise HTTPException(status_code=400, detail="Invalid role data") from exc
+        if exc.response.status_code == 409:
+            raise HTTPException(status_code=409, detail="Role already exists") from exc
+        raise HTTPException(status_code=502, detail="Failed to create role in Descope") from exc
     except httpx.RequestError as exc:
         logger.error("Network error creating role '%s': %s", body.name, exc)
-        raise HTTPException(status_code=502, detail="Failed to reach Descope API")
+        raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
 
 
 @router.put("/roles/{name}")
@@ -140,16 +143,21 @@ async def update_role(
     """Update a role definition. Requires owner or admin role."""
     try:
         client = get_descope_client()
-        await client.update_role(name, body.new_name, body.description, body.permission_names)
-        return {"name": body.new_name, "description": body.description, "permission_names": body.permission_names}
+        effective_name = body.new_name if body.new_name is not None else name
+        await client.update_role(name, effective_name, body.description, body.permission_names)
+        return {"name": effective_name, "description": body.description, "permission_names": body.permission_names}
     except httpx.HTTPStatusError as exc:
         logger.warning("Descope API error updating role '%s': %s", name, exc.response.status_code)
-        if exc.response.status_code in (400, 404, 409):
-            raise HTTPException(status_code=exc.response.status_code, detail="Role not found or invalid")
-        raise HTTPException(status_code=502, detail="Failed to update role in Descope")
+        if exc.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Role not found") from exc
+        if exc.response.status_code == 409:
+            raise HTTPException(status_code=409, detail="Role name conflict") from exc
+        if exc.response.status_code == 400:
+            raise HTTPException(status_code=400, detail="Invalid role data") from exc
+        raise HTTPException(status_code=502, detail="Failed to update role in Descope") from exc
     except httpx.RequestError as exc:
         logger.error("Network error updating role '%s': %s", name, exc)
-        raise HTTPException(status_code=502, detail="Failed to reach Descope API")
+        raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
 
 
 @router.delete("/roles/{name}")
@@ -166,9 +174,11 @@ async def delete_role(
         return {"status": "deleted", "name": name}
     except httpx.HTTPStatusError as exc:
         logger.warning("Descope API error deleting role '%s': %s", name, exc.response.status_code)
-        if exc.response.status_code in (400, 404):
-            raise HTTPException(status_code=exc.response.status_code, detail="Role not found or invalid")
-        raise HTTPException(status_code=502, detail="Failed to delete role in Descope")
+        if exc.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Role not found") from exc
+        if exc.response.status_code == 400:
+            raise HTTPException(status_code=400, detail="Invalid role data") from exc
+        raise HTTPException(status_code=502, detail="Failed to delete role in Descope") from exc
     except httpx.RequestError as exc:
         logger.error("Network error deleting role '%s': %s", name, exc)
-        raise HTTPException(status_code=502, detail="Failed to reach Descope API")
+        raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
