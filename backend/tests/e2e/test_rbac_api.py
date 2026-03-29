@@ -90,17 +90,20 @@ def _timed_request(context: APIRequestContext, method: str, url: str, **kwargs) 
 
 def test_descope_mgmt_api_direct():
     """Diagnostic: verify management API works when called directly from test process."""
-    resp = _descope_mgmt_post("/v1/mgmt/role/all")
-    print(f"[DIAG] Direct list roles: {resp.status_code} {resp.text[:300]}")
-    resp = _descope_mgmt_post("/v1/mgmt/permission/all")
-    print(f"[DIAG] Direct list perms: {resp.status_code} {resp.text[:300]}")
-    # Also check what permissions exist
-    if resp.status_code == 200:
-        perms = resp.json().get("permissions", [])
-        perm_names = [p.get("name", "?") for p in perms]
-        print(f"[DIAG] Available permissions: {perm_names}")
-    # Soft assertion — this test is for diagnosis
-    assert resp.status_code in (200, 500), f"Unexpected status: {resp.status_code}"
+    roles_resp = _descope_mgmt_post("/v1/mgmt/role/all")
+    perms_resp = _descope_mgmt_post("/v1/mgmt/permission/all")
+    diag_parts = [
+        f"roles: {roles_resp.status_code} {roles_resp.text[:300]}",
+        f"perms: {perms_resp.status_code} {perms_resp.text[:300]}",
+    ]
+    if perms_resp.status_code == 200:
+        perm_names = [p.get("name", "?") for p in perms_resp.json().get("permissions", [])]
+        diag_parts.append(f"perm_names: {perm_names}")
+    if roles_resp.status_code == 200:
+        role_names = [r.get("name", "?") for r in roles_resp.json().get("roles", [])]
+        diag_parts.append(f"role_names: {role_names}")
+    # Force failure to show diagnostic output in CI
+    pytest.fail("[DIAG] Direct Descope API: " + " | ".join(diag_parts))
 
 
 # --- AC-1: TF-seeded roles with correct permission counts ---
