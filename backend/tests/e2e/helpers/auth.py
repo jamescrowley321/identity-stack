@@ -167,7 +167,9 @@ def get_admin_session_token(email: str = "", tenant_id: str = "") -> str:
     if not tenant_id:
         raise RuntimeError("E2E_TEST_TENANT_ID must be set")
 
-    # Step 1: Create a temporary tenant-scoped access key with admin roles
+    # Step 1: Create a temporary tenant-scoped access key with admin roles.
+    # Must use keyTenants array format (not top-level tenantId) so the
+    # exchanged session JWT includes dct and tenants claims.
     key_name = f"e2e-admin-{uuid.uuid4().hex[:8]}"
     with httpx.Client(timeout=30) as client:
         resp = client.post(
@@ -175,8 +177,9 @@ def get_admin_session_token(email: str = "", tenant_id: str = "") -> str:
             headers=_auth_header(),
             json={
                 "name": key_name,
-                "tenantId": tenant_id,
-                "roleNames": ["owner", "admin"],
+                "keyTenants": [
+                    {"tenantId": tenant_id, "roleNames": ["owner", "admin"]},
+                ],
             },
         )
         resp.raise_for_status()
@@ -210,14 +213,15 @@ def get_admin_session_token(email: str = "", tenant_id: str = "") -> str:
                 json={"id": key_id},
             )
 
-    # Debug: log decoded claims for CI diagnosis
+    # Debug: log all decoded claims for CI diagnosis
     try:
         payload = _decode_jwt_payload(token)
+        print(f"[E2E] Admin token ALL claims: {list(payload.keys())}")
         tenants_info = payload.get("tenants")
         if isinstance(tenants_info, dict):
-            tenants_info = {k: v.get("roles", []) for k, v in tenants_info.items()}
+            tenants_info = {k: v.get("roles", []) if isinstance(v, dict) else v for k, v in tenants_info.items()}
         print(
-            f"[E2E] Admin token claims: dct={payload.get('dct')}, "
+            f"[E2E] Admin token key claims: dct={payload.get('dct')}, "
             f"tenants={tenants_info}, "
             f"iss={payload.get('iss')}, aud={payload.get('aud')}, "
             f"sub={payload.get('sub')}"
