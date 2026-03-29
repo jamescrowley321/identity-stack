@@ -11,8 +11,6 @@ The test user is created via Management API with `test: True`.
 import base64
 import json
 import os
-import time
-import uuid
 
 import httpx
 from playwright.sync_api import BrowserContext
@@ -154,61 +152,43 @@ def create_authenticated_context(browser, frontend_url: str, access_token: str) 
 def get_admin_session_token(email: str = "", tenant_id: str = "") -> str:
     """Get an OIDC-compatible token with admin/owner roles for E2E testing.
 
-    Creates a tenant-scoped Descope access key via Management API, then
-    exchanges it for an OIDC access token via client credentials flow.
-    This produces a token that:
+    Strategy: get a standard OIDC client credentials token (passes OIDC validation),
+    then enrich it with tenant/role claims via the Descope Management API's
+    jwt/update endpoint. The result is a token that:
     1. Passes OIDC validation (correct issuer, audience, JWKS signature)
-    2. Includes tenant/role claims from the access key's scope
+    2. Contains dct and tenants claims needed by require_role()
     """
-    from py_identity_model import (
-        ClientCredentialsTokenRequest,
-        DiscoveryDocumentRequest,
-        get_discovery_document,
-        request_client_credentials_token,
-    )
-
     tenant_id = tenant_id or E2E_TEST_TENANT_ID
     if not DESCOPE_MANAGEMENT_KEY:
         raise RuntimeError("DESCOPE_MANAGEMENT_KEY must be set")
     if not tenant_id:
         raise RuntimeError("E2E_TEST_TENANT_ID must be set")
 
-    # Step 1: Create a tenant-scoped access key with admin/owner roles
-    key_name = f"e2e-admin-{uuid.uuid4().hex[:8]}"
+    # Step 1: Get a standard OIDC client credentials token
+    base_token = get_oidc_access_token()
+
+    # Step 2: Enrich the token with tenant/role claims via Management API
     with httpx.Client(timeout=30) as client:
         resp = client.post(
-            _mgmt_url("/v1/mgmt/accesskey/create"),
+            _mgmt_url("/v1/mgmt/jwt/update"),
             headers=_auth_header(),
             json={
-                "name": key_name,
-                "expireTime": int(time.time()) + 3600,
-                "tenants": [{"tenantId": tenant_id, "roleNames": ["owner", "admin"]}],
+                "jwt": base_token,
+                "customClaims": {
+                    "dct": tenant_id,
+                    "tenants": {
+                        tenant_id: {
+                            "roles": ["owner", "admin"],
+                        },
+                    },
+                },
             },
         )
         resp.raise_for_status()
         data = resp.json()
-        cleartext = data.get("cleartext", "")
-        if not cleartext:
-            raise RuntimeError(f"Access key creation returned no cleartext: {data}")
-
-    # Step 2: Exchange access key for OIDC token via client credentials
-    disco_addr = f"{DESCOPE_BASE_URL}/{DESCOPE_PROJECT_ID}/.well-known/openid-configuration"
-    disco = get_discovery_document(DiscoveryDocumentRequest(address=disco_addr))
-    if not disco.is_successful:
-        raise RuntimeError(f"Discovery failed: {disco.error}")
-
-    response = request_client_credentials_token(
-        ClientCredentialsTokenRequest(
-            client_id=DESCOPE_PROJECT_ID,
-            client_secret=cleartext,
-            address=disco.token_endpoint,
-            scope="openid",
-        )
-    )
-    if not response.is_successful:
-        raise RuntimeError(f"Token request failed: {response.error}")
-
-    token = response.token["access_token"]
+        token = data.get("jwt", "")
+        if not token:
+            raise RuntimeError(f"JWT update returned no token: {data}")
 
     # Debug: log decoded claims for CI diagnosis
     try:
