@@ -14,7 +14,7 @@ from app.middleware.correlation import CorrelationIdMiddleware
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.middleware.security import SecurityHeadersMiddleware
 from app.models.database import create_db_and_tables
-from app.routers import accesskeys, attributes, auth, health, permissions, protected, roles, tenants, users
+from app.routers import accesskeys, attributes, auth, fga, health, permissions, protected, roles, tenants, users
 from app.services.descope import init_descope_client, shutdown_descope_client
 
 TRUSTED_PROXY_HOSTS = os.getenv("TRUSTED_PROXY_HOSTS", "127.0.0.1").split(",")
@@ -79,3 +79,4 @@ app.include_router(attributes.router, prefix="/api")
 app.include_router(accesskeys.router, prefix="/api")
 app.include_router(permissions.router, prefix="/api")
 app.include_router(users.router, prefix="/api")
+app.include_router(fga.router, prefix="/api")
