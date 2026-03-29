@@ -370,8 +370,8 @@ describe("FGAManagement", () => {
       await user.click(screen.getByRole("button", { name: "Delete" }));
 
       // No DELETE call should have been made
-      const deleteCalls = mockApiFetch.mock.calls.filter(
-        ([, opts]: [string, RequestInit | undefined]) => opts?.method === "DELETE",
+      const deleteCalls = (mockApiFetch.mock.calls as [string, RequestInit | undefined][]).filter(
+        ([, opts]) => opts?.method === "DELETE",
       );
       expect(deleteCalls).toHaveLength(0);
     });
