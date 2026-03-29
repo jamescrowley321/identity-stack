@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from scalar_fastapi import get_scalar_api_reference
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
@@ -31,7 +32,7 @@ async def lifespan(app: FastAPI):
     shutdown_descope_client()
 
 
-app = FastAPI(title="Descope SaaS Starter API", redoc_url="/redoc", lifespan=lifespan)
+app = FastAPI(title="Descope SaaS Starter API", docs_url=None, redoc_url="/redoc", lifespan=lifespan)
 
 # Rate limiter state and exception handler
 app.state.limiter = limiter
@@ -79,3 +80,11 @@ app.include_router(attributes.router, prefix="/api")
 app.include_router(accesskeys.router, prefix="/api")
 app.include_router(permissions.router, prefix="/api")
 app.include_router(users.router, prefix="/api")
+
+
+@app.get("/docs", include_in_schema=False)
+async def scalar_docs():
+    return get_scalar_api_reference(
+        openapi_url=app.openapi_url,
+        title=app.title,
+    )
