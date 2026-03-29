@@ -106,7 +106,7 @@ class TestRequireFga:
         with caplog.at_level(logging.WARNING, logger="app.dependencies.fga"):
             with pytest.raises(HTTPException):
                 await dep(_make_request(VALID_CLAIMS, {"document_id": "doc-123"}))
-        assert any("FGA denied" in r.message for r in caplog.records)
+        assert any(r.levelno == logging.WARNING and "FGA denied" in r.message for r in caplog.records)
         assert any("user-abc" in r.message for r in caplog.records)
 
     @pytest.mark.anyio

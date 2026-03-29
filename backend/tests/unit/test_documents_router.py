@@ -523,7 +523,7 @@ async def test_update_document_fga_denied(mock_validate, mock_fga_factory, clien
     )
     assert resp.status_code == 403
     assert resp.json()["detail"] == "Access denied"
-    mock_client.check_permission.assert_called_once()
+    mock_client.check_permission.assert_called_once_with("document", "doc-1", "can_edit", "user-1")
 
 
 @pytest.mark.anyio
@@ -544,7 +544,7 @@ async def test_update_document_fga_error_fail_closed(mock_validate, mock_fga_fac
     )
     assert resp.status_code == 502
     assert resp.json()["detail"] == "Authorization check failed"
-    mock_client.check_permission.assert_called_once()
+    mock_client.check_permission.assert_called_once_with("document", "doc-1", "can_edit", "user-1")
 
 
 # ============================================================
@@ -966,6 +966,32 @@ async def test_revoke_share_success(mock_validate, mock_fga_factory, mock_router
     assert mock_client.delete_relation.call_count == 2
     for call in mock_client.delete_relation.call_args_list:
         assert call.args[1] == f"tenant-abc:{DOC_UUID_1}"
+
+
+@pytest.mark.anyio
+@patch("app.routers.documents.get_descope_client")
+@patch("app.dependencies.fga.get_descope_client")
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_revoke_share_does_not_delete_owner(
+    mock_validate, mock_fga_factory, mock_router_factory, client, test_db
+):
+    """Revoking a share deletes viewer and editor relations but NOT owner."""
+    mock_validate.return_value = AUTHED_CLAIMS
+    _seed_doc(test_db, doc_id="doc-1")
+
+    mock_client = AsyncMock()
+    mock_client.check_permission.return_value = True
+    mock_fga_factory.return_value = mock_client
+    mock_router_factory.return_value = mock_client
+
+    resp = await client.delete("/api/documents/doc-1/share/user-2", headers=AUTH_HEADER)
+    assert resp.status_code == 200
+
+    # Verify exactly which relations were deleted
+    deleted_relations = [call.args[2] for call in mock_client.delete_relation.call_args_list]
+    assert "viewer" in deleted_relations
+    assert "editor" in deleted_relations
+    assert "owner" not in deleted_relations
 
 
 @pytest.mark.anyio
