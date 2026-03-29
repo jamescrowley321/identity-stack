@@ -201,6 +201,74 @@ class DescopeManagementClient:
         """Delete a role definition by name."""
         await self._request("/v1/mgmt/role/delete", {"name": name})
 
+    # --- FGA (Fine-Grained Authorization) methods ---
+
+    async def get_fga_schema(self) -> dict:
+        """Load the current FGA schema definition."""
+        resp = await self._request("/v1/mgmt/authz/schema/load", {})
+        return resp.json()
+
+    async def update_fga_schema(self, schema: str) -> None:
+        """Save/update the FGA schema definition."""
+        await self._request("/v1/mgmt/authz/schema/save", {"schema": schema})
+
+    async def create_relation(self, resource_type: str, resource_id: str, relation: str, target: str) -> None:
+        """Create an FGA relation tuple."""
+        await self._request(
+            "/v1/mgmt/authz/re/save",
+            {
+                "resourceType": resource_type,
+                "resource": resource_id,
+                "relationDefinition": relation,
+                "target": target,
+            },
+        )
+
+    async def delete_relation(self, resource_type: str, resource_id: str, relation: str, target: str) -> None:
+        """Delete an FGA relation tuple."""
+        await self._request(
+            "/v1/mgmt/authz/re/delete",
+            {
+                "resourceType": resource_type,
+                "resource": resource_id,
+                "relationDefinition": relation,
+                "target": target,
+            },
+        )
+
+    async def list_relations(self, resource_type: str, resource_id: str) -> list[dict]:
+        """List all relation tuples for a specific resource. Returns empty list if none."""
+        resp = await self._request(
+            "/v1/mgmt/authz/re/who",
+            {"resourceType": resource_type, "resource": resource_id},
+        )
+        return resp.json().get("relationInfo", [])
+
+    async def list_user_resources(self, resource_type: str, relation: str, target: str) -> list[dict]:
+        """List resources a target has a specific relation to. Returns empty list if none."""
+        resp = await self._request(
+            "/v1/mgmt/authz/re/resource",
+            {
+                "resourceType": resource_type,
+                "relationDefinition": relation,
+                "target": target,
+            },
+        )
+        return resp.json().get("resources", [])
+
+    async def check_permission(self, resource_type: str, resource_id: str, relation: str, target: str) -> bool:
+        """Check if a target has a specific relation to a resource. Returns True/False."""
+        resp = await self._request(
+            "/v1/mgmt/authz/re/has",
+            {
+                "resourceType": resource_type,
+                "resource": resource_id,
+                "relationDefinition": relation,
+                "target": target,
+            },
+        )
+        return resp.json().get("allowed", False)
+
     async def invite_user(self, email: str, tenant_id: str, role_names: list[str] | None = None) -> dict:
         """Create a user and assign them to a tenant with roles."""
         tenants = [{"tenantId": tenant_id}]
