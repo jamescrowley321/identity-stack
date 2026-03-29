@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from scripts.seed_demo import (
@@ -66,7 +67,8 @@ class TestGetOrCreateDocuments:
 
         assert len(docs) == 3
         assert mock_session.add.call_count == 3
-        assert mock_session.commit.call_count == 3
+        # Single transaction commit for all new documents
+        assert mock_session.commit.call_count == 1
         mock_create_tables.assert_called_once()
 
     @patch("scripts.seed_demo.create_db_and_tables")
@@ -119,7 +121,8 @@ class TestGetOrCreateDocuments:
 
         assert len(docs) == 3
         assert mock_session.add.call_count == 2
-        assert mock_session.commit.call_count == 2
+        # Single transaction commit for new documents
+        assert mock_session.commit.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -141,8 +144,11 @@ class TestEnsureRelation:
     @pytest.mark.anyio
     async def test_tolerates_duplicate_400(self):
         """Silently skips when Descope returns 400 (duplicate relation)."""
+        response = MagicMock()
+        response.status_code = 400
+        error = httpx.HTTPStatusError("Bad Request", request=MagicMock(), response=response)
         client = AsyncMock()
-        client.create_relation = AsyncMock(side_effect=Exception("HTTP 400: relation already exists"))
+        client.create_relation = AsyncMock(side_effect=error)
 
         # Should not raise
         await _ensure_relation(client, "doc-1", "viewer", "user-1")
@@ -150,10 +156,13 @@ class TestEnsureRelation:
     @pytest.mark.anyio
     async def test_propagates_non_400_errors(self):
         """Raises non-400 errors (e.g., 500 server error)."""
+        response = MagicMock()
+        response.status_code = 500
+        error = httpx.HTTPStatusError("Server Error", request=MagicMock(), response=response)
         client = AsyncMock()
-        client.create_relation = AsyncMock(side_effect=Exception("HTTP 500: internal server error"))
+        client.create_relation = AsyncMock(side_effect=error)
 
-        with pytest.raises(Exception, match="500"):
+        with pytest.raises(httpx.HTTPStatusError):
             await _ensure_relation(client, "doc-1", "viewer", "user-1")
 
 
@@ -376,6 +385,68 @@ class TestMain:
 
         # Owner user should be selected as the creator, not the viewer
         mock_get_docs.assert_called_once_with("t1", "owner-1")
+
+    @pytest.mark.anyio
+    @patch("scripts.seed_demo._seed_fga_relations", new_callable=AsyncMock)
+    @patch("scripts.seed_demo._get_or_create_documents")
+    @patch("scripts.seed_demo.DescopeManagementClient")
+    @patch("scripts.seed_demo._require_env")
+    async def test_main_selects_admin_as_creator(self, mock_require_env, mock_client_cls, mock_get_docs, mock_seed_fga):
+        """main() selects admin-role user as creator when no owner exists."""
+        mock_require_env.side_effect = lambda k: {
+            "DESCOPE_PROJECT_ID": "proj-1",
+            "DESCOPE_MANAGEMENT_KEY": "key-1",
+            "DEMO_TENANT_ID": "t1",
+        }[k]
+
+        mock_client = AsyncMock()
+        mock_client_cls.return_value = mock_client
+        mock_client.search_tenant_users.return_value = [
+            {"userId": "viewer-1", "userTenants": [{"tenantId": "t1", "roleNames": ["viewer"]}]},
+            {"userId": "admin-1", "userTenants": [{"tenantId": "t1", "roleNames": ["admin"]}]},
+        ]
+
+        mock_get_docs.return_value = [MagicMock()]
+
+        await main()
+
+        mock_get_docs.assert_called_once_with("t1", "admin-1")
+
+    @pytest.mark.anyio
+    @patch("scripts.seed_demo.DescopeManagementClient")
+    @patch("scripts.seed_demo._require_env")
+    async def test_main_exits_on_client_init_failure(self, mock_require_env, mock_client_cls):
+        """main() exits with code 1 when client initialization fails."""
+        mock_require_env.side_effect = lambda k: {
+            "DESCOPE_PROJECT_ID": "proj-1",
+            "DESCOPE_MANAGEMENT_KEY": "key-1",
+            "DEMO_TENANT_ID": "t1",
+        }[k]
+
+        mock_client_cls.side_effect = RuntimeError("init failed")
+
+        with pytest.raises(SystemExit) as exc_info:
+            await main()
+        assert exc_info.value.code == 1
+
+    @pytest.mark.anyio
+    @patch("scripts.seed_demo.DescopeManagementClient")
+    @patch("scripts.seed_demo._require_env")
+    async def test_main_exits_on_search_users_failure(self, mock_require_env, mock_client_cls):
+        """main() exits with code 1 when search_tenant_users fails."""
+        mock_require_env.side_effect = lambda k: {
+            "DESCOPE_PROJECT_ID": "proj-1",
+            "DESCOPE_MANAGEMENT_KEY": "key-1",
+            "DEMO_TENANT_ID": "t1",
+        }[k]
+
+        mock_client = AsyncMock()
+        mock_client_cls.return_value = mock_client
+        mock_client.search_tenant_users.side_effect = httpx.RequestError("connection failed", request=MagicMock())
+
+        with pytest.raises(SystemExit) as exc_info:
+            await main()
+        assert exc_info.value.code == 1
 
     @pytest.mark.anyio
     @patch("scripts.seed_demo._seed_fga_relations", new_callable=AsyncMock)
