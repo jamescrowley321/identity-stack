@@ -11,6 +11,8 @@ The test user is created via Management API with `test: True`.
 import base64
 import json
 import os
+import time
+import uuid
 
 import httpx
 from playwright.sync_api import BrowserContext
@@ -150,45 +152,79 @@ def create_authenticated_context(browser, frontend_url: str, access_token: str) 
 
 
 def get_admin_session_token(email: str = "", tenant_id: str = "") -> str:
-    """Get a Descope session JWT for the test user (with admin/owner roles).
+    """Get an OIDC-compatible token with admin/owner roles for E2E testing.
 
-    Uses the Management API to generate a test OTP and verify it, producing
-    a session JWT that includes tenant and role claims (dct, tenants).
-    This is needed for endpoints protected by require_role().
+    Creates a tenant-scoped Descope access key via Management API, then
+    exchanges it for an OIDC access token via client credentials flow.
+    This produces a token that:
+    1. Passes OIDC validation (correct issuer, audience, JWKS signature)
+    2. Includes tenant/role claims from the access key's scope
     """
-    email = email or E2E_TEST_EMAIL
+    from py_identity_model import (
+        ClientCredentialsTokenRequest,
+        DiscoveryDocumentRequest,
+        get_discovery_document,
+        request_client_credentials_token,
+    )
+
     tenant_id = tenant_id or E2E_TEST_TENANT_ID
-    if not email:
-        raise RuntimeError("E2E_TEST_EMAIL must be set")
     if not DESCOPE_MANAGEMENT_KEY:
         raise RuntimeError("DESCOPE_MANAGEMENT_KEY must be set")
+    if not tenant_id:
+        raise RuntimeError("E2E_TEST_TENANT_ID must be set")
 
-    ensure_test_user(email=email, tenant_id=tenant_id)
-
+    # Step 1: Create a tenant-scoped access key with admin/owner roles
+    key_name = f"e2e-admin-{uuid.uuid4().hex[:8]}"
     with httpx.Client(timeout=30) as client:
-        # Generate test OTP via Management API
         resp = client.post(
-            _mgmt_url("/v1/mgmt/tests/generate/otp"),
+            _mgmt_url("/v1/mgmt/accesskey/create"),
             headers=_auth_header(),
-            json={"loginId": email, "deliveryMethod": "email"},
+            json={
+                "name": key_name,
+                "expireTime": int(time.time()) + 3600,
+                "tenants": [{"tenantId": tenant_id, "roleNames": ["owner", "admin"]}],
+            },
         )
         resp.raise_for_status()
-        code = resp.json().get("code")
-        if not code:
-            raise RuntimeError(f"OTP generation returned no code: {resp.json()}")
+        data = resp.json()
+        cleartext = data.get("cleartext", "")
+        if not cleartext:
+            raise RuntimeError(f"Access key creation returned no cleartext: {data}")
 
-        # Verify OTP to get session JWT with tenant/role claims
-        resp = client.post(
-            _mgmt_url("/v1/auth/otp/verify/email"),
-            headers={"Authorization": f"Bearer {DESCOPE_PROJECT_ID}"},
-            json={"loginId": email, "code": code},
+    # Step 2: Exchange access key for OIDC token via client credentials
+    disco_addr = f"{DESCOPE_BASE_URL}/{DESCOPE_PROJECT_ID}/.well-known/openid-configuration"
+    disco = get_discovery_document(DiscoveryDocumentRequest(address=disco_addr))
+    if not disco.is_successful:
+        raise RuntimeError(f"Discovery failed: {disco.error}")
+
+    response = request_client_credentials_token(
+        ClientCredentialsTokenRequest(
+            client_id=DESCOPE_PROJECT_ID,
+            client_secret=cleartext,
+            address=disco.token_endpoint,
+            scope="openid",
         )
-        resp.raise_for_status()
-        session_jwt = resp.json().get("sessionJwt")
-        if not session_jwt:
-            raise RuntimeError(f"OTP verification returned no sessionJwt: {resp.json()}")
+    )
+    if not response.is_successful:
+        raise RuntimeError(f"Token request failed: {response.error}")
 
-        return session_jwt
+    token = response.token["access_token"]
+
+    # Debug: log decoded claims for CI diagnosis
+    try:
+        payload = _decode_jwt_payload(token)
+        tenants_info = payload.get("tenants")
+        if isinstance(tenants_info, dict):
+            tenants_info = list(tenants_info.keys())
+        print(
+            f"[E2E] Admin token claims: dct={payload.get('dct')}, "
+            f"tenants={tenants_info}, "
+            f"iss={payload.get('iss')}, aud={payload.get('aud')}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[E2E] Could not decode admin token: {exc}")
+
+    return token
 
 
 def cleanup_test_user(email: str = "") -> None:

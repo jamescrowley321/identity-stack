@@ -1,6 +1,6 @@
 """E2E tests for RBAC administration: TF seed verification and CRUD lifecycle.
 
-These tests require DESCOPE_MANAGEMENT_KEY env var (for admin session token via test user OTP).
+These tests require DESCOPE_MANAGEMENT_KEY env var (for admin token via tenant-scoped access key).
 They exercise the real Descope API via the backend's /api/roles and /api/permissions endpoints.
 """
 
