@@ -74,3 +74,13 @@ def test_dashboard_claims_tab_has_three_cards(auth_page: Page):
     expect(auth_page.get_by_text("ClaimsIdentity")).to_be_visible()
     expect(auth_page.get_by_text("Access Token Claims")).to_be_visible()
     expect(auth_page.get_by_text("ID Token Claims")).to_be_visible()
+
+
+def test_no_5xx_errors_on_dashboard(auth_page: Page, frontend_url: str):
+    """Dashboard page should not trigger any 5xx API errors."""
+    errors = []
+    auth_page.on("response", lambda response: errors.append(response) if response.status >= 500 else None)
+    auth_page.goto(frontend_url)
+    auth_page.wait_for_load_state("networkidle")
+    failed = [f"{r.url} -> {r.status}" for r in errors]
+    assert not failed, f"5xx errors on dashboard: {failed}"

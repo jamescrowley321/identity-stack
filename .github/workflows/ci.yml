@@ -160,3 +160,14 @@ jobs:
           E2E_TEST_TENANT_ID: ${{ secrets.E2E_TEST_TENANT_ID }}
           E2E_FRONTEND_URL: "http://localhost:3000"
           E2E_BACKEND_URL: "http://localhost:8000"
+
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build Docker images
+        run: docker compose build
+        env:
+          DESCOPE_PROJECT_ID: "test-project-id"

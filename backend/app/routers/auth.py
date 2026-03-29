@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Request
 from app.dependencies.auth import get_claims
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 
-router = APIRouter()
+router = APIRouter(tags=["Auth"])
 
 DESCOPE_BASE_URL = os.getenv("DESCOPE_BASE_URL", "https://api.descope.com")
 

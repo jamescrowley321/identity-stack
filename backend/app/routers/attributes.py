@@ -11,7 +11,7 @@ from app.services.descope import get_descope_client
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["Attributes"])
 
 AttributeValue = str | int | bool | float | None
 

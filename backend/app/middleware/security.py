@@ -16,9 +16,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         self.is_production = environment == "production"
         dev_csp = (
             "default-src 'self' http://localhost:*;"
-            " style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;"
-            " script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;"
-            " img-src 'self' https://fastapi.tiangolo.com data:"
+            " style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com;"
+            " script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.redoc.ly;"
+            " font-src 'self' https://fonts.gstatic.com;"
+            " img-src 'self' https://fastapi.tiangolo.com https://cdn.redoc.ly data:;"
+            " worker-src blob:"
         )
         csp_value = os.getenv(
             "CSP_POLICY",

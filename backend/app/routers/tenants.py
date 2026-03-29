@@ -13,7 +13,7 @@ from app.services.descope import get_descope_client
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(tags=["Tenants"])
 
 
 def require_admin_role(claims: dict = Depends(get_claims)) -> dict:
