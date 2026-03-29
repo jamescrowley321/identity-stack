@@ -7,7 +7,7 @@ Requires DESCOPE_CLIENT_ID, DESCOPE_CLIENT_SECRET, and DESCOPE_MANAGEMENT_KEY.
 import os
 
 import pytest
-from playwright.sync_api import Page, Response, expect
+from playwright.sync_api import Page, Request, Response, expect
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DESCOPE_MANAGEMENT_KEY") or not os.environ.get("DESCOPE_CLIENT_ID"),
@@ -108,13 +108,20 @@ def test_logout_no_descope_401(auth_page: Page):
     Descope rejected with 401. The fix uses removeUser() + navigate() instead.
     """
     network_errors: list[Response] = []
+    failed_requests: list[Request] = []
 
     def _capture_descope_errors(resp: Response) -> None:
         # Capture any 4xx/5xx response to Descope OIDC logout endpoints
         if "descope.com" in resp.url and resp.status >= 400:
             network_errors.append(resp)
 
+    def _capture_descope_failures(req: Request) -> None:
+        # Capture connection-level failures (DNS, refused, timeout) to Descope
+        if "descope.com" in req.url:
+            failed_requests.append(req)
+
     auth_page.on("response", _capture_descope_errors)
+    auth_page.on("requestfailed", _capture_descope_failures)
 
     _open_user_menu_and_sign_out(auth_page)
 
@@ -122,3 +129,6 @@ def test_logout_no_descope_401(auth_page: Page):
 
     descope_errors = [f"{r.status} {r.url}" for r in network_errors]
     assert not descope_errors, f"Descope endpoint errors during logout (RP-Initiated Logout bug): {descope_errors}"
+
+    connection_failures = [f"{r.url} ({r.failure})" for r in failed_requests]
+    assert not connection_failures, f"Descope connection failures during logout: {connection_failures}"

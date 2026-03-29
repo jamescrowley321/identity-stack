@@ -1,6 +1,6 @@
 import { useAuth } from "react-oidc-context"
 import { useNavigate } from "react-router-dom"
-import { useCallback } from "react"
+import { useCallback, useState } from "react"
 import { LogOut, User } from "lucide-react"
 import { useApiClient } from "@/hooks/useApiClient"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
@@ -26,15 +26,23 @@ export function UserMenu() {
     .map((s) => s[0].toUpperCase())
     .join("")
 
+  const [isLoggingOut, setIsLoggingOut] = useState(false)
+
   const handleLogout = useCallback(async () => {
+    if (isLoggingOut) return
+    setIsLoggingOut(true)
     try {
       await apiFetch("/api/auth/logout", { method: "POST" })
     } catch {
       // Best-effort
     }
-    await auth.removeUser()
+    try {
+      await auth.removeUser()
+    } catch {
+      // removeUser failed — still navigate away
+    }
     navigate("/login")
-  }, [apiFetch, auth, navigate])
+  }, [apiFetch, auth, navigate, isLoggingOut])
 
   return (
     <DropdownMenu>
