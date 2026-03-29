@@ -761,6 +761,160 @@ class TestDescopeManagementClient:
         with pytest.raises(httpx.HTTPStatusError):
             await client.check_permission("document", "doc-123", "editor", "user:u1")
 
+    # --- FGA error propagation coverage for remaining methods ---
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_get_fga_schema_propagates_http_error(self, mock_cls, client):
+        """get_fga_schema propagates HTTPStatusError from Descope."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_response = MagicMock(status_code=500, text="Internal")
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "500", request=MagicMock(), response=mock_response
+        )
+        mock_http.post.return_value = mock_response
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.get_fga_schema()
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_get_fga_schema_propagates_network_error(self, mock_cls, client):
+        """get_fga_schema propagates RequestError on network failure."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.side_effect = httpx.RequestError("Connection refused", request=MagicMock())
+
+        with pytest.raises(httpx.RequestError):
+            await client.get_fga_schema()
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_update_fga_schema_propagates_http_error(self, mock_cls, client):
+        """update_fga_schema propagates HTTPStatusError from Descope."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_response = MagicMock(status_code=400, text="Bad schema")
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "400", request=MagicMock(), response=mock_response
+        )
+        mock_http.post.return_value = mock_response
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.update_fga_schema("invalid")
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_update_fga_schema_propagates_network_error(self, mock_cls, client):
+        """update_fga_schema propagates RequestError on network failure."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.side_effect = httpx.RequestError("Timeout", request=MagicMock())
+
+        with pytest.raises(httpx.RequestError):
+            await client.update_fga_schema("valid")
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_create_relation_propagates_network_error(self, mock_cls, client):
+        """create_relation propagates RequestError on network failure."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.side_effect = httpx.RequestError("Connection refused", request=MagicMock())
+
+        with pytest.raises(httpx.RequestError):
+            await client.create_relation("document", "doc-1", "owner", "user:u1")
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_delete_relation_propagates_http_error(self, mock_cls, client):
+        """delete_relation propagates HTTPStatusError from Descope."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_response = MagicMock(status_code=400, text="Not found")
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "400", request=MagicMock(), response=mock_response
+        )
+        mock_http.post.return_value = mock_response
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.delete_relation("document", "doc-1", "owner", "user:u1")
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_delete_relation_propagates_network_error(self, mock_cls, client):
+        """delete_relation propagates RequestError on network failure."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.side_effect = httpx.RequestError("Timeout", request=MagicMock())
+
+        with pytest.raises(httpx.RequestError):
+            await client.delete_relation("document", "doc-1", "owner", "user:u1")
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_list_relations_propagates_http_error(self, mock_cls, client):
+        """list_relations propagates HTTPStatusError from Descope."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_response = MagicMock(status_code=500, text="Internal")
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "500", request=MagicMock(), response=mock_response
+        )
+        mock_http.post.return_value = mock_response
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.list_relations("document", "doc-1")
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_list_relations_propagates_network_error(self, mock_cls, client):
+        """list_relations propagates RequestError on network failure."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.side_effect = httpx.RequestError("Connection refused", request=MagicMock())
+
+        with pytest.raises(httpx.RequestError):
+            await client.list_relations("document", "doc-1")
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_list_user_resources_propagates_http_error(self, mock_cls, client):
+        """list_user_resources propagates HTTPStatusError from Descope."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_response = MagicMock(status_code=500, text="Internal")
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "500", request=MagicMock(), response=mock_response
+        )
+        mock_http.post.return_value = mock_response
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.list_user_resources("document", "editor", "user:u1")
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_list_user_resources_propagates_network_error(self, mock_cls, client):
+        """list_user_resources propagates RequestError on network failure."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.side_effect = httpx.RequestError("Timeout", request=MagicMock())
+
+        with pytest.raises(httpx.RequestError):
+            await client.list_user_resources("document", "editor", "user:u1")
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_check_permission_propagates_network_error(self, mock_cls, client):
+        """check_permission propagates RequestError on network failure."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.side_effect = httpx.RequestError("Connection refused", request=MagicMock())
+
+        with pytest.raises(httpx.RequestError):
+            await client.check_permission("document", "doc-1", "viewer", "user:u1")
+
 
 class TestGetDescopeClient:
     def test_creates_client_from_env(self, monkeypatch):
