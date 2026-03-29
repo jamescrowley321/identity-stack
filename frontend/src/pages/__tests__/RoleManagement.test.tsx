@@ -680,5 +680,67 @@ describe("RoleManagement", () => {
         expect(toast.error).toHaveBeenCalledWith("Failed to create permission");
       });
     });
+
+    it("shows error toast when role loading fails", async () => {
+      mockApiFetch.mockImplementation((url: string) => {
+        if (url === "/api/roles/me") return jsonResponse({ roles: [], permissions: [] });
+        if (url === "/api/roles") return Promise.reject(new Error("Network error"));
+        if (url === "/api/permissions") return jsonResponse({ permissions: [] });
+        return jsonResponse({});
+      });
+      renderPage();
+
+      await waitFor(() => {
+        expect(toast.error).toHaveBeenCalledWith("Failed to load roles");
+      });
+    });
+
+    it("shows error toast when permission loading fails", async () => {
+      mockApiFetch.mockImplementation((url: string) => {
+        if (url === "/api/roles/me") return jsonResponse({ roles: [], permissions: [] });
+        if (url === "/api/roles") return jsonResponse({ roles: [] });
+        if (url === "/api/permissions") return Promise.reject(new Error("Network error"));
+        return jsonResponse({});
+      });
+      renderPage();
+
+      await waitFor(() => {
+        expect(toast.error).toHaveBeenCalledWith("Failed to load permissions");
+      });
+    });
+
+    it("handles non-JSON error response gracefully", async () => {
+      setupAdminAPIMocks();
+      const user = userEvent.setup();
+      renderPage();
+
+      await waitFor(() => {
+        expect(screen.getByText("admin")).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByText("Create Role"));
+      await user.type(screen.getByLabelText("Name"), "badrole");
+
+      // Return a non-JSON error response
+      mockApiFetch.mockImplementation((url: string, opts?: RequestInit) => {
+        if (opts?.method === "POST" && url === "/api/roles")
+          return Promise.resolve({
+            ok: false,
+            status: 502,
+            statusText: "Bad Gateway",
+            json: () => Promise.reject(new Error("not JSON")),
+          });
+        if (url === "/api/roles") return jsonResponse({ roles: [] });
+        if (url === "/api/permissions") return jsonResponse({ permissions: [] });
+        if (url === "/api/roles/me") return jsonResponse({ roles: [], permissions: [] });
+        return jsonResponse({});
+      });
+
+      await user.click(screen.getByRole("button", { name: "Create" }));
+
+      await waitFor(() => {
+        expect(toast.error).toHaveBeenCalledWith("Failed to create role");
+      });
+    });
   });
 });

@@ -32,6 +32,15 @@ interface PermissionDefinition {
   description?: string;
 }
 
+async function parseErrorDetail(res: Response): Promise<string | undefined> {
+  try {
+    const data = await res.json();
+    return data.detail;
+  } catch {
+    return undefined;
+  }
+}
+
 export default function RoleManagement() {
   const { apiFetch } = useApiClient();
   const { roles, permissions, isAdmin, currentTenantId } = useRBAC();
@@ -67,6 +76,9 @@ export default function RoleManagement() {
   // Delete confirmation state
   const [deleteTarget, setDeleteTarget] = useState<{ type: "role" | "permission"; name: string } | null>(null);
 
+  // Mutation loading state (prevents double-submit)
+  const [saving, setSaving] = useState(false);
+
   // Load roles and permissions
   useEffect(() => {
     apiFetch("/api/roles/me")
@@ -80,9 +92,11 @@ export default function RoleManagement() {
     apiFetch("/api/roles")
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (data?.roles) setRoleDefinitions(data.roles);
+        if (data?.roles && Array.isArray(data.roles)) setRoleDefinitions(data.roles);
       })
-      .catch(() => {})
+      .catch(() => {
+        toast.error("Failed to load roles");
+      })
       .finally(() => setRolesLoading(false));
   }, [apiFetch]);
 
@@ -91,9 +105,11 @@ export default function RoleManagement() {
     apiFetch("/api/permissions")
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (data?.permissions) setPermissionDefinitions(data.permissions);
+        if (data?.permissions && Array.isArray(data.permissions)) setPermissionDefinitions(data.permissions);
       })
-      .catch(() => {})
+      .catch(() => {
+        toast.error("Failed to load permissions");
+      })
       .finally(() => setPermissionsLoading(false));
   }, [apiFetch]);
 
@@ -104,10 +120,14 @@ export default function RoleManagement() {
     }
   }, [isAdmin, loadRoles, loadPermissions]);
 
-  // Set default selected role when role definitions load
+  // Set default selected role when role definitions load, or reset if selected role was deleted
   useEffect(() => {
-    if (roleDefinitions.length > 0 && !selectedRole) {
-      setSelectedRole(roleDefinitions[0].name);
+    if (roleDefinitions.length > 0) {
+      if (!selectedRole || !roleDefinitions.find((r) => r.name === selectedRole)) {
+        setSelectedRole(roleDefinitions[0].name);
+      }
+    } else {
+      setSelectedRole("");
     }
   }, [roleDefinitions, selectedRole]);
 
@@ -125,8 +145,8 @@ export default function RoleManagement() {
         toast.success(`Assigned "${selectedRole}" to ${userId.trim()}`);
         setUserId("");
       } else {
-        const err = await res.json();
-        toast.error(err.detail || res.statusText);
+        const detail = await parseErrorDetail(res);
+        toast.error(detail || "Failed to assign role");
       }
     } catch {
       toast.error("Failed to assign role");
@@ -145,8 +165,8 @@ export default function RoleManagement() {
         toast.success(`Removed "${selectedRole}" from ${userId.trim()}`);
         setUserId("");
       } else {
-        const err = await res.json();
-        toast.error(err.detail || res.statusText);
+        const detail = await parseErrorDetail(res);
+        toast.error(detail || "Failed to remove role");
       }
     } catch {
       toast.error("Failed to remove role");
@@ -172,7 +192,8 @@ export default function RoleManagement() {
   }, []);
 
   const handleSaveRole = useCallback(async () => {
-    if (!roleName.trim()) return;
+    if (!roleName.trim() || saving) return;
+    setSaving(true);
     try {
       if (editingRole) {
         const body: Record<string, unknown> = {};
@@ -189,8 +210,8 @@ export default function RoleManagement() {
           setRoleDialogOpen(false);
           loadRoles();
         } else {
-          const err = await res.json();
-          toast.error(err.detail || "Failed to update role");
+          const detail = await parseErrorDetail(res);
+          toast.error(detail || "Failed to update role");
         }
       } else {
         const res = await apiFetch("/api/roles", {
@@ -207,14 +228,16 @@ export default function RoleManagement() {
           setRoleDialogOpen(false);
           loadRoles();
         } else {
-          const err = await res.json();
-          toast.error(err.detail || "Failed to create role");
+          const detail = await parseErrorDetail(res);
+          toast.error(detail || "Failed to create role");
         }
       }
     } catch {
       toast.error(editingRole ? "Failed to update role" : "Failed to create role");
+    } finally {
+      setSaving(false);
     }
-  }, [editingRole, roleName, roleDescription, rolePermissions, apiFetch, loadRoles]);
+  }, [editingRole, roleName, roleDescription, rolePermissions, saving, apiFetch, loadRoles]);
 
   const handleDeleteRole = useCallback(
     async (name: string) => {
@@ -224,8 +247,8 @@ export default function RoleManagement() {
           toast.success(`Role "${name}" deleted`);
           loadRoles();
         } else {
-          const err = await res.json();
-          toast.error(err.detail || "Failed to delete role");
+          const detail = await parseErrorDetail(res);
+          toast.error(detail || "Failed to delete role");
         }
       } catch {
         toast.error("Failed to delete role");
@@ -251,13 +274,16 @@ export default function RoleManagement() {
   }, []);
 
   const handleSavePerm = useCallback(async () => {
-    if (!permName.trim()) return;
+    if (!permName.trim() || saving) return;
+    setSaving(true);
     try {
       if (editingPerm) {
+        const body: Record<string, unknown> = { description: permDescription };
+        if (permName.trim() !== editingPerm.name) body.new_name = permName.trim();
         const res = await apiFetch(`/api/permissions/${encodeURIComponent(editingPerm.name)}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ new_name: permName.trim(), description: permDescription }),
+          body: JSON.stringify(body),
         });
         if (res.ok) {
           toast.success(`Permission "${permName.trim()}" updated`);
@@ -265,8 +291,8 @@ export default function RoleManagement() {
           loadPermissions();
           loadRoles(); // Roles may reference this permission
         } else {
-          const err = await res.json();
-          toast.error(err.detail || "Failed to update permission");
+          const detail = await parseErrorDetail(res);
+          toast.error(detail || "Failed to update permission");
         }
       } else {
         const res = await apiFetch("/api/permissions", {
@@ -279,14 +305,16 @@ export default function RoleManagement() {
           setPermDialogOpen(false);
           loadPermissions();
         } else {
-          const err = await res.json();
-          toast.error(err.detail || "Failed to create permission");
+          const detail = await parseErrorDetail(res);
+          toast.error(detail || "Failed to create permission");
         }
       }
     } catch {
       toast.error(editingPerm ? "Failed to update permission" : "Failed to create permission");
+    } finally {
+      setSaving(false);
     }
-  }, [editingPerm, permName, permDescription, apiFetch, loadPermissions, loadRoles]);
+  }, [editingPerm, permName, permDescription, saving, apiFetch, loadPermissions, loadRoles]);
 
   const handleDeletePerm = useCallback(
     async (name: string) => {
@@ -297,8 +325,8 @@ export default function RoleManagement() {
           loadPermissions();
           loadRoles(); // Roles may reference this permission
         } else {
-          const err = await res.json();
-          toast.error(err.detail || "Failed to delete permission");
+          const detail = await parseErrorDetail(res);
+          toast.error(detail || "Failed to delete permission");
         }
       } catch {
         toast.error("Failed to delete permission");
@@ -310,14 +338,19 @@ export default function RoleManagement() {
   // --- Delete confirmation handler ---
 
   const handleConfirmDelete = useCallback(async () => {
-    if (!deleteTarget) return;
-    if (deleteTarget.type === "role") {
-      await handleDeleteRole(deleteTarget.name);
-    } else {
-      await handleDeletePerm(deleteTarget.name);
+    if (!deleteTarget || saving) return;
+    setSaving(true);
+    try {
+      if (deleteTarget.type === "role") {
+        await handleDeleteRole(deleteTarget.name);
+      } else {
+        await handleDeletePerm(deleteTarget.name);
+      }
+      setDeleteTarget(null);
+    } finally {
+      setSaving(false);
     }
-    setDeleteTarget(null);
-  }, [deleteTarget, handleDeleteRole, handleDeletePerm]);
+  }, [deleteTarget, saving, handleDeleteRole, handleDeletePerm]);
 
   // --- Permission checkbox toggle ---
 
@@ -551,6 +584,7 @@ export default function RoleManagement() {
                 placeholder="Role name"
                 value={roleName}
                 onChange={(e) => setRoleName(e.target.value)}
+                maxLength={100}
               />
             </div>
             <div className="space-y-2">
@@ -560,6 +594,7 @@ export default function RoleManagement() {
                 placeholder="Role description"
                 value={roleDescription}
                 onChange={(e) => setRoleDescription(e.target.value)}
+                maxLength={1000}
               />
             </div>
             {permissionDefinitions.length > 0 && (
@@ -582,7 +617,7 @@ export default function RoleManagement() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setRoleDialogOpen(false)}>Cancel</Button>
-            <Button onClick={handleSaveRole} disabled={!roleName.trim()}>
+            <Button onClick={handleSaveRole} disabled={!roleName.trim() || saving}>
               {editingRole ? "Save Changes" : "Create"}
             </Button>
           </DialogFooter>
@@ -606,6 +641,7 @@ export default function RoleManagement() {
                 placeholder="Permission name"
                 value={permName}
                 onChange={(e) => setPermName(e.target.value)}
+                maxLength={100}
               />
             </div>
             <div className="space-y-2">
@@ -615,12 +651,13 @@ export default function RoleManagement() {
                 placeholder="Permission description"
                 value={permDescription}
                 onChange={(e) => setPermDescription(e.target.value)}
+                maxLength={1000}
               />
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setPermDialogOpen(false)}>Cancel</Button>
-            <Button onClick={handleSavePerm} disabled={!permName.trim()}>
+            <Button onClick={handleSavePerm} disabled={!permName.trim() || saving}>
               {editingPerm ? "Save Changes" : "Create"}
             </Button>
           </DialogFooter>
@@ -638,7 +675,7 @@ export default function RoleManagement() {
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
-            <Button variant="destructive" onClick={handleConfirmDelete}>Delete</Button>
+            <Button variant="destructive" onClick={handleConfirmDelete} disabled={saving}>Delete</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
