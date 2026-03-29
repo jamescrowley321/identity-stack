@@ -32,8 +32,9 @@ export function UserMenu() {
     } catch {
       // Best-effort
     }
-    auth.signoutRedirect()
-  }, [apiFetch, auth])
+    await auth.removeUser()
+    navigate("/login")
+  }, [apiFetch, auth, navigate])
 
   return (
     <DropdownMenu>
