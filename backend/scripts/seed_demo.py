@@ -5,7 +5,8 @@ Creates three sample documents with different access patterns:
 - board-minutes: only owner-role users get access
 - team-project: specific users get editor, others get viewer
 
-Idempotent: safe to re-run — checks for existing documents before creating.
+Idempotent for DB documents (skips existing by title). FGA relations
+tolerate duplicates but do not remove stale relations from prior runs.
 
 Usage:
     DESCOPE_PROJECT_ID=... DESCOPE_MANAGEMENT_KEY=... DEMO_TENANT_ID=... \
@@ -16,6 +17,7 @@ import asyncio
 import os
 import sys
 
+import httpx
 from sqlmodel import Session, select
 
 # Ensure backend package is importable when run from backend/
@@ -55,6 +57,8 @@ def _get_or_create_documents(tenant_id: str, owner_user_id: str) -> list[Documen
     create_db_and_tables()
     documents = []
 
+    new_docs: list[Document] = []
+
     with Session(engine) as session:
         for doc_def in DEMO_DOCUMENTS:
             existing = session.exec(
@@ -75,7 +79,11 @@ def _get_or_create_documents(tenant_id: str, owner_user_id: str) -> list[Documen
                     created_by=owner_user_id,
                 )
                 session.add(doc)
-                session.commit()
+                new_docs.append(doc)
+
+        if new_docs:
+            session.commit()
+            for doc in new_docs:
                 session.refresh(doc)
                 print(f"  [created] '{doc.title}' (id={doc.id})")
                 documents.append(doc)
@@ -90,11 +98,17 @@ async def _seed_fga_relations(
     owner_user_id: str,
 ) -> None:
     """Create FGA relations for the demo scenario."""
+    if not documents:
+        print("  No documents to seed relations for.")
+        return
+
     # Find tenant users by role
     owners = []
     non_owners = []
     for user in tenant_users:
         user_id = user.get("userId", "")
+        if not user_id:
+            continue
         tenant_roles = []
         for t in user.get("userTenants", []):
             if t.get("tenantId") == documents[0].tenant_id:
@@ -139,13 +153,12 @@ async def _ensure_relation(
     relation: str,
     target: str,
 ) -> None:
-    """Create a relation, tolerating duplicates."""
+    """Create a relation, tolerating duplicates (Descope returns 400)."""
     try:
         await client.create_relation("document", document_id, relation, target)
         print(f"    [created] {relation} -> {target}")
-    except Exception as e:
-        # Descope returns 400 if relation already exists
-        if "400" in str(e):
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 400:
             print(f"    [skip] {relation} -> {target} (already exists)")
         else:
             raise
@@ -157,13 +170,21 @@ async def main() -> None:
     tenant_id = _require_env("DEMO_TENANT_ID")
     base_url = os.getenv("DESCOPE_BASE_URL", "https://api.descope.com")
 
-    client = DescopeManagementClient(project_id, management_key, base_url)
+    try:
+        client = DescopeManagementClient(project_id, management_key, base_url)
+    except Exception:
+        print("ERROR: Failed to initialize Descope client", file=sys.stderr)
+        sys.exit(1)
 
     print("=== FGA Demo Seed ===\n")
 
     # 1. Discover tenant users
     print("1. Loading tenant users...")
-    tenant_users = await client.search_tenant_users(tenant_id)
+    try:
+        tenant_users = await client.search_tenant_users(tenant_id)
+    except Exception:
+        print("ERROR: Failed to load tenant users", file=sys.stderr)
+        sys.exit(1)
     if not tenant_users:
         print("ERROR: No users found in tenant. Add users first.", file=sys.stderr)
         sys.exit(1)
@@ -171,11 +192,16 @@ async def main() -> None:
 
     # Use first owner/admin as document creator, fall back to first user
     owner_user_id = tenant_users[0].get("userId", "")
+    found_owner = False
     for user in tenant_users:
         for t in user.get("userTenants", []):
-            if t.get("tenantId") == tenant_id and "owner" in t.get("roleNames", []):
+            roles = t.get("roleNames", [])
+            if t.get("tenantId") == tenant_id and ("owner" in roles or "admin" in roles):
                 owner_user_id = user.get("userId", "")
+                found_owner = True
                 break
+        if found_owner:
+            break
 
     # 2. Create documents in DB
     print("\n2. Ensuring demo documents exist in DB...")
