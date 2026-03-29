@@ -1,8 +1,8 @@
 import logging
-from typing import Literal
+from typing import Annotated, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
@@ -21,6 +21,17 @@ router = APIRouter(tags=["documents"])
 _SQLITE_BATCH_SIZE = 500
 # Cap FGA relation cleanup to bound sequential deletes
 _MAX_FGA_CLEANUP = 100
+
+# UUID v4 pattern for document_id path parameter validation
+_UUID_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+
+# Type alias for validated document_id path parameter
+DocumentId = Annotated[str, Path(pattern=_UUID_PATTERN)]
+
+
+def _prefix_resource_id(tenant_id: str, resource_id: str) -> str:
+    """Prefix a resource ID with the tenant ID for FGA tenant isolation."""
+    return f"{tenant_id}:{resource_id}"
 
 
 class CreateDocumentRequest(BaseModel):
@@ -57,9 +68,10 @@ async def create_document(
     )
 
     # FGA relation FIRST — if this fails, no DB row is created
+    prefixed_id = _prefix_resource_id(tenant_id, document.id)
     try:
         client = get_descope_client()
-        await client.create_relation("document", document.id, "owner", user_id)
+        await client.create_relation("document", prefixed_id, "owner", user_id)
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error(
             "Failed to create FGA owner relation for doc %s: %s",
@@ -76,7 +88,7 @@ async def create_document(
     except Exception as exc:
         logger.warning("DB commit failed for doc %s, compensating FGA relation", document.id)
         try:
-            await client.delete_relation("document", document.id, "owner", user_id)
+            await client.delete_relation("document", prefixed_id, "owner", user_id)
         except Exception:
             logger.warning("FGA compensation failed for doc %s", document.id)
         raise HTTPException(status_code=500, detail="Failed to create document") from exc
@@ -105,7 +117,14 @@ async def list_documents(
         raise HTTPException(status_code=502, detail="Failed to check document permissions") from exc
 
     resources = resources or []
-    doc_ids = [r.get("resource") for r in resources if isinstance(r, dict) and r.get("resource")]
+    # Strip tenant prefix from resource IDs returned by FGA
+    tenant_prefix = f"{tenant_id}:"
+    doc_ids = []
+    for r in resources:
+        if isinstance(r, dict) and r.get("resource"):
+            rid = r["resource"]
+            if rid.startswith(tenant_prefix):
+                doc_ids.append(rid[len(tenant_prefix) :])
     if not doc_ids:
         return {"documents": []}
 
@@ -126,7 +145,7 @@ async def list_documents(
 
 @router.get("/documents/{document_id}")
 async def get_document(
-    document_id: str,
+    document_id: DocumentId,
     user_id: str = Depends(require_fga("document", "can_view")),
     tenant_id: str = Depends(get_tenant_id),
     session: Session = Depends(get_session),
@@ -142,7 +161,7 @@ async def get_document(
 @limiter.limit(RATE_LIMIT_AUTH)
 async def update_document(
     request: Request,
-    document_id: str,
+    document_id: DocumentId,
     body: UpdateDocumentRequest,
     user_id: str = Depends(require_fga("document", "can_edit")),
     tenant_id: str = Depends(get_tenant_id),
@@ -168,7 +187,7 @@ async def update_document(
 @limiter.limit(RATE_LIMIT_AUTH)
 async def delete_document(
     request: Request,
-    document_id: str,
+    document_id: DocumentId,
     user_id: str = Depends(require_fga("document", "can_delete")),
     tenant_id: str = Depends(get_tenant_id),
     session: Session = Depends(get_session),
@@ -178,28 +197,54 @@ async def delete_document(
     if not document or document.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # FGA cleanup first — abort if it fails (cap iterations to bound work)
+    prefixed_id = _prefix_resource_id(tenant_id, document_id)
+
+    # FGA cleanup first — abort if it fails or if too many relations
     try:
         client = get_descope_client()
-        relations = (await client.list_relations("document", document_id)) or []
-        for rel in relations[:_MAX_FGA_CLEANUP]:
-            rd = rel.get("relationDefinition", "") if isinstance(rel, dict) else ""
-            target = rel.get("target", "") if isinstance(rel, dict) else ""
-            if rd and target:
-                await client.delete_relation("document", document_id, rd, target)
+        relations = (await client.list_relations("document", prefixed_id)) or []
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error("FGA cleanup failed for doc %s: %s", document_id, type(exc).__name__)
         raise HTTPException(status_code=502, detail="Failed to clean up document permissions") from exc
 
-    # DB delete — if this fails after FGA cleanup, log the orphaned state
+    if len(relations) > _MAX_FGA_CLEANUP:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Document has {len(relations)} relations (max {_MAX_FGA_CLEANUP}). Remove shares before deleting.",
+        )
+
+    # Store relations for compensation before deleting them
+    deleted_relations: list[dict] = []
+    try:
+        for rel in relations:
+            rd = rel.get("relationDefinition", "") if isinstance(rel, dict) else ""
+            target = rel.get("target", "") if isinstance(rel, dict) else ""
+            if rd and target:
+                await client.delete_relation("document", prefixed_id, rd, target)
+                deleted_relations.append({"relation": rd, "target": target})
+    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+        logger.error("FGA cleanup failed for doc %s: %s", document_id, type(exc).__name__)
+        raise HTTPException(status_code=502, detail="Failed to clean up document permissions") from exc
+
+    # DB delete — compensate FGA on failure by re-creating deleted relations
     try:
         session.delete(document)
         session.commit()
     except Exception as exc:
         logger.error(
-            "DB delete failed for doc %s after FGA cleanup — orphaned FGA relations",
+            "DB delete failed for doc %s after FGA cleanup — attempting compensation",
             document_id,
         )
+        for dr in deleted_relations:
+            try:
+                await client.create_relation("document", prefixed_id, dr["relation"], dr["target"])
+            except Exception:
+                logger.warning(
+                    "FGA compensation failed for doc %s relation %s->%s",
+                    document_id,
+                    dr["relation"],
+                    dr["target"],
+                )
         raise HTTPException(status_code=500, detail="Failed to delete document") from exc
 
     return {"status": "deleted", "id": document_id}
@@ -209,7 +254,7 @@ async def delete_document(
 @limiter.limit(RATE_LIMIT_AUTH)
 async def share_document(
     request: Request,
-    document_id: str,
+    document_id: DocumentId,
     body: ShareDocumentRequest,
     user_id: str = Depends(require_fga("document", "owner")),
     tenant_id: str = Depends(get_tenant_id),
@@ -255,9 +300,10 @@ async def share_document(
             detail="Cannot share with users outside your tenant",
         )
 
-    # Create FGA relation
+    # Create FGA relation with tenant-prefixed resource ID
+    prefixed_id = _prefix_resource_id(tenant_id, document_id)
     try:
-        await client.create_relation("document", document_id, body.relation, body.user_id)
+        await client.create_relation("document", prefixed_id, body.relation, body.user_id)
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error(
             "Failed to create share relation for doc %s: %s",
@@ -277,7 +323,7 @@ async def share_document(
 @limiter.limit(RATE_LIMIT_AUTH)
 async def revoke_share(
     request: Request,
-    document_id: str,
+    document_id: DocumentId,
     target_user_id: str,
     user_id: str = Depends(require_fga("document", "owner")),
     tenant_id: str = Depends(get_tenant_id),
@@ -298,9 +344,40 @@ async def revoke_share(
         )
         raise HTTPException(status_code=502, detail="Failed to revoke document access") from exc
 
+    # Verify target user exists and is in the same tenant
+    try:
+        target_user = await client.load_user(target_user_id)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Target user not found") from exc
+        logger.error(
+            "Failed to verify target user %s: HTTP %s",
+            target_user_id,
+            exc.response.status_code,
+        )
+        raise HTTPException(status_code=502, detail="Failed to verify target user") from exc
+    except httpx.RequestError as exc:
+        logger.error(
+            "Network error verifying target user %s: %s",
+            target_user_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(status_code=502, detail="Failed to verify target user") from exc
+
+    if not target_user or not isinstance(target_user, dict):
+        raise HTTPException(status_code=404, detail="Target user not found")
+
+    target_tenants = [t.get("tenantId") for t in target_user.get("userTenants", []) if isinstance(t, dict)]
+    if tenant_id not in target_tenants:
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot revoke access for users outside your tenant",
+        )
+
+    prefixed_id = _prefix_resource_id(tenant_id, document_id)
     for relation in ("viewer", "editor"):
         try:
-            await client.delete_relation("document", document_id, relation, target_user_id)
+            await client.delete_relation("document", prefixed_id, relation, target_user_id)
         except httpx.HTTPStatusError as exc:
             # Relation may not exist — tolerate 400/404 from Descope
             if exc.response.status_code not in (400, 404):

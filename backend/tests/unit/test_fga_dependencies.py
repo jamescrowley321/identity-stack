@@ -77,7 +77,8 @@ class TestRequireFga:
         dep = require_fga("document", "can_view")
         result = await dep(_make_request(VALID_CLAIMS, {"document_id": "doc-123"}))
         assert result == "user-abc"
-        mock_client.check_permission.assert_called_once_with("document", "doc-123", "can_view", "user-abc")
+        # resource_id is tenant-prefixed
+        mock_client.check_permission.assert_called_once_with("document", "tenant-1:doc-123", "can_view", "user-abc")
 
     @pytest.mark.anyio
     @patch("app.dependencies.fga.get_descope_client")
@@ -174,7 +175,8 @@ class TestRequireFga:
 
         dep = require_fga("folder", "can_delete", resource_id_param="folder_id")
         await dep(_make_request(VALID_CLAIMS, {"folder_id": "folder-99"}))
-        mock_client.check_permission.assert_called_once_with("folder", "folder-99", "can_delete", "user-abc")
+        # resource_id is tenant-prefixed
+        mock_client.check_permission.assert_called_once_with("folder", "tenant-1:folder-99", "can_delete", "user-abc")
 
     @pytest.mark.anyio
     async def test_missing_resource_id_raises_400(self):
@@ -184,3 +186,12 @@ class TestRequireFga:
             await dep(_make_request(VALID_CLAIMS, {}))
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail == "Missing resource identifier"
+
+    @pytest.mark.anyio
+    async def test_missing_tenant_id_raises_403(self):
+        """Claims with sub but no dct -> 403 (no tenant context)."""
+        dep = require_fga("document", "can_view")
+        with pytest.raises(HTTPException) as exc_info:
+            await dep(_make_request({"sub": "user-abc"}, {"document_id": "doc-123"}))
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.detail == "No tenant context"
