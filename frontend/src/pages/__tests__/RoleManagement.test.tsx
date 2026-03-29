@@ -487,7 +487,7 @@ describe("RoleManagement", () => {
 
       // Confirm no DELETE call was made
       const deleteCalls = mockApiFetch.mock.calls.filter(
-        ([, opts]: [string, RequestInit?]) => opts?.method === "DELETE",
+        (call) => (call[1] as RequestInit | undefined)?.method === "DELETE",
       );
       expect(deleteCalls).toHaveLength(0);
     });
