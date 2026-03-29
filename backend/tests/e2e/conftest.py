@@ -7,6 +7,7 @@ import pytest
 from tests.e2e.helpers.auth import (
     create_authenticated_context,
     ensure_test_user,
+    get_admin_session_token,
     get_oidc_access_token,
 )
 
@@ -64,6 +65,29 @@ def auth_api_context(playwright, auth_access_token):
     context = playwright.request.new_context(
         base_url=BACKEND_URL,
         extra_http_headers={"Authorization": f"Bearer {auth_access_token}"},
+    )
+    yield context
+    context.dispose()
+
+
+@pytest.fixture(scope="session")
+def admin_access_token():
+    """Descope session JWT for test user with admin/owner roles.
+
+    Unlike auth_access_token (client credentials), this token includes
+    tenant and role claims (dct, tenants) needed for require_role() endpoints.
+    """
+    if not _has_mgmt_key:
+        pytest.skip("DESCOPE_MANAGEMENT_KEY not set")
+    return get_admin_session_token()
+
+
+@pytest.fixture
+def admin_api_context(playwright, admin_access_token):
+    """API request context with admin-level session token (has tenant/role claims)."""
+    context = playwright.request.new_context(
+        base_url=BACKEND_URL,
+        extra_http_headers={"Authorization": f"Bearer {admin_access_token}"},
     )
     yield context
     context.dispose()

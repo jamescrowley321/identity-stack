@@ -149,6 +149,48 @@ def create_authenticated_context(browser, frontend_url: str, access_token: str) 
     return context
 
 
+def get_admin_session_token(email: str = "", tenant_id: str = "") -> str:
+    """Get a Descope session JWT for the test user (with admin/owner roles).
+
+    Uses the Management API to generate a test OTP and verify it, producing
+    a session JWT that includes tenant and role claims (dct, tenants).
+    This is needed for endpoints protected by require_role().
+    """
+    email = email or E2E_TEST_EMAIL
+    tenant_id = tenant_id or E2E_TEST_TENANT_ID
+    if not email:
+        raise RuntimeError("E2E_TEST_EMAIL must be set")
+    if not DESCOPE_MANAGEMENT_KEY:
+        raise RuntimeError("DESCOPE_MANAGEMENT_KEY must be set")
+
+    ensure_test_user(email=email, tenant_id=tenant_id)
+
+    with httpx.Client(timeout=30) as client:
+        # Generate test OTP via Management API
+        resp = client.post(
+            _mgmt_url("/v1/mgmt/tests/generate/otp"),
+            headers=_auth_header(),
+            json={"loginId": email, "deliveryMethod": "email"},
+        )
+        resp.raise_for_status()
+        code = resp.json().get("code")
+        if not code:
+            raise RuntimeError(f"OTP generation returned no code: {resp.json()}")
+
+        # Verify OTP to get session JWT with tenant/role claims
+        resp = client.post(
+            _mgmt_url("/v1/auth/otp/verify/email"),
+            headers={"Authorization": f"Bearer {DESCOPE_PROJECT_ID}"},
+            json={"loginId": email, "code": code},
+        )
+        resp.raise_for_status()
+        session_jwt = resp.json().get("sessionJwt")
+        if not session_jwt:
+            raise RuntimeError(f"OTP verification returned no sessionJwt: {resp.json()}")
+
+        return session_jwt
+
+
 def cleanup_test_user(email: str = "") -> None:
     """Delete the test user."""
     email = email or E2E_TEST_EMAIL

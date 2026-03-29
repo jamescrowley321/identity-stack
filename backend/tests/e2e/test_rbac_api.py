@@ -1,6 +1,6 @@
 """E2E tests for RBAC administration: TF seed verification and CRUD lifecycle.
 
-These tests require DESCOPE_CLIENT_ID and DESCOPE_CLIENT_SECRET env vars.
+These tests require DESCOPE_MANAGEMENT_KEY env var (for admin session token via test user OTP).
 They exercise the real Descope API via the backend's /api/roles and /api/permissions endpoints.
 """
 
@@ -13,8 +13,8 @@ import pytest
 from playwright.sync_api import APIRequestContext
 
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("DESCOPE_CLIENT_ID") or not os.environ.get("DESCOPE_CLIENT_SECRET"),
-    reason="DESCOPE_CLIENT_ID/DESCOPE_CLIENT_SECRET not set",
+    not os.environ.get("DESCOPE_MANAGEMENT_KEY"),
+    reason="DESCOPE_MANAGEMENT_KEY not set",
 )
 
 # --- Constants (source: infra/rbac.tf) ---
@@ -71,9 +71,9 @@ def _timed_request(context: APIRequestContext, method: str, url: str, **kwargs) 
 # --- AC-1: TF-seeded roles with correct permission counts ---
 
 
-def test_tf_seeded_roles_present(auth_api_context: APIRequestContext, backend_url: str):
+def test_tf_seeded_roles_present(admin_api_context: APIRequestContext, backend_url: str):
     """GET /api/roles returns all 4 TF-seeded roles with correct permission counts."""
-    resp, elapsed_ms = _timed_request(auth_api_context, "GET", f"{backend_url}/api/roles")
+    resp, elapsed_ms = _timed_request(admin_api_context, "GET", f"{backend_url}/api/roles")
     assert resp.status == 200, f"Expected 200, got {resp.status}"
     assert elapsed_ms < MAX_API_RESPONSE_MS, f"Response took {elapsed_ms:.0f}ms, limit is {MAX_API_RESPONSE_MS}ms"
 
@@ -92,9 +92,9 @@ def test_tf_seeded_roles_present(auth_api_context: APIRequestContext, backend_ur
 # --- AC-2: TF-seeded permissions ---
 
 
-def test_tf_seeded_permissions_present(auth_api_context: APIRequestContext, backend_url: str):
+def test_tf_seeded_permissions_present(admin_api_context: APIRequestContext, backend_url: str):
     """GET /api/permissions returns all 12 TF-seeded permissions."""
-    resp, elapsed_ms = _timed_request(auth_api_context, "GET", f"{backend_url}/api/permissions")
+    resp, elapsed_ms = _timed_request(admin_api_context, "GET", f"{backend_url}/api/permissions")
     assert resp.status == 200, f"Expected 200, got {resp.status}"
     assert elapsed_ms < MAX_API_RESPONSE_MS, f"Response took {elapsed_ms:.0f}ms, limit is {MAX_API_RESPONSE_MS}ms"
 
@@ -109,13 +109,13 @@ def test_tf_seeded_permissions_present(auth_api_context: APIRequestContext, back
 # --- AC-3: Runtime-created coexist with TF-seeded ---
 
 
-def test_runtime_permission_coexists_with_tf_seeded(auth_api_context: APIRequestContext, backend_url: str):
+def test_runtime_permission_coexists_with_tf_seeded(admin_api_context: APIRequestContext, backend_url: str):
     """Runtime-created permission appears alongside TF-seeded permissions."""
     perm_name = _unique_name("test-perm")
     try:
         # Create runtime permission
         resp, elapsed_ms = _timed_request(
-            auth_api_context,
+            admin_api_context,
             "POST",
             f"{backend_url}/api/permissions",
             data={"name": perm_name, "description": "E2E test permission"},
@@ -124,7 +124,7 @@ def test_runtime_permission_coexists_with_tf_seeded(auth_api_context: APIRequest
         assert elapsed_ms < MAX_API_RESPONSE_MS
 
         # List and verify coexistence
-        resp, elapsed_ms = _timed_request(auth_api_context, "GET", f"{backend_url}/api/permissions")
+        resp, elapsed_ms = _timed_request(admin_api_context, "GET", f"{backend_url}/api/permissions")
         assert resp.status == 200
         assert elapsed_ms < MAX_API_RESPONSE_MS
 
@@ -134,16 +134,16 @@ def test_runtime_permission_coexists_with_tf_seeded(auth_api_context: APIRequest
             assert tf_perm in perm_names, f"TF-seeded permission '{tf_perm}' missing after runtime create"
     finally:
         with contextlib.suppress(Exception):
-            auth_api_context.delete(f"{backend_url}/api/permissions/{perm_name}")
+            admin_api_context.delete(f"{backend_url}/api/permissions/{perm_name}")
 
 
-def test_runtime_role_coexists_with_tf_seeded(auth_api_context: APIRequestContext, backend_url: str):
+def test_runtime_role_coexists_with_tf_seeded(admin_api_context: APIRequestContext, backend_url: str):
     """Runtime-created role appears alongside TF-seeded roles."""
     role_name = _unique_name("test-role")
     try:
         # Create runtime role
         resp, elapsed_ms = _timed_request(
-            auth_api_context,
+            admin_api_context,
             "POST",
             f"{backend_url}/api/roles",
             data={"name": role_name, "description": "E2E test role", "permission_names": ["projects.read"]},
@@ -152,7 +152,7 @@ def test_runtime_role_coexists_with_tf_seeded(auth_api_context: APIRequestContex
         assert elapsed_ms < MAX_API_RESPONSE_MS
 
         # List and verify coexistence
-        resp, elapsed_ms = _timed_request(auth_api_context, "GET", f"{backend_url}/api/roles")
+        resp, elapsed_ms = _timed_request(admin_api_context, "GET", f"{backend_url}/api/roles")
         assert resp.status == 200
         assert elapsed_ms < MAX_API_RESPONSE_MS
 
@@ -162,13 +162,13 @@ def test_runtime_role_coexists_with_tf_seeded(auth_api_context: APIRequestContex
             assert tf_role in role_names, f"TF-seeded role '{tf_role}' missing after runtime create"
     finally:
         with contextlib.suppress(Exception):
-            auth_api_context.delete(f"{backend_url}/api/roles/{role_name}")
+            admin_api_context.delete(f"{backend_url}/api/roles/{role_name}")
 
 
 # --- AC-4: Permission CRUD lifecycle ---
 
 
-def test_permission_crud_lifecycle(auth_api_context: APIRequestContext, backend_url: str):
+def test_permission_crud_lifecycle(admin_api_context: APIRequestContext, backend_url: str):
     """Full permission lifecycle: list -> create -> update -> delete -> verify removed."""
     perm_name = _unique_name("lifecycle-perm")
     updated_name = perm_name + "-updated"
@@ -176,7 +176,7 @@ def test_permission_crud_lifecycle(auth_api_context: APIRequestContext, backend_
 
     try:
         # List (baseline)
-        resp, elapsed_ms = _timed_request(auth_api_context, "GET", f"{backend_url}/api/permissions")
+        resp, elapsed_ms = _timed_request(admin_api_context, "GET", f"{backend_url}/api/permissions")
         assert resp.status == 200
         assert elapsed_ms < MAX_API_RESPONSE_MS
         baseline_names = [p["name"] for p in resp.json().get("permissions", [])]
@@ -184,7 +184,7 @@ def test_permission_crud_lifecycle(auth_api_context: APIRequestContext, backend_
 
         # Create
         resp, elapsed_ms = _timed_request(
-            auth_api_context,
+            admin_api_context,
             "POST",
             f"{backend_url}/api/permissions",
             data={"name": perm_name, "description": "E2E lifecycle test"},
@@ -194,7 +194,7 @@ def test_permission_crud_lifecycle(auth_api_context: APIRequestContext, backend_
 
         # Update
         resp, elapsed_ms = _timed_request(
-            auth_api_context,
+            admin_api_context,
             "PUT",
             f"{backend_url}/api/permissions/{perm_name}",
             data={"new_name": updated_name, "description": "Updated description"},
@@ -204,14 +204,14 @@ def test_permission_crud_lifecycle(auth_api_context: APIRequestContext, backend_
         cleanup_name = updated_name
 
         # Verify update in list
-        resp, _ = _timed_request(auth_api_context, "GET", f"{backend_url}/api/permissions")
+        resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/permissions")
         perm_names = [p["name"] for p in resp.json().get("permissions", [])]
         assert updated_name in perm_names, "Updated permission name not found"
         assert perm_name not in perm_names, "Old permission name still present"
 
         # Delete
         resp, elapsed_ms = _timed_request(
-            auth_api_context,
+            admin_api_context,
             "DELETE",
             f"{backend_url}/api/permissions/{updated_name}",
         )
@@ -220,19 +220,19 @@ def test_permission_crud_lifecycle(auth_api_context: APIRequestContext, backend_
         cleanup_name = None  # already deleted
 
         # Verify removed
-        resp, _ = _timed_request(auth_api_context, "GET", f"{backend_url}/api/permissions")
+        resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/permissions")
         perm_names = [p["name"] for p in resp.json().get("permissions", [])]
         assert updated_name not in perm_names, "Deleted permission still present"
     finally:
         if cleanup_name:
             with contextlib.suppress(Exception):
-                auth_api_context.delete(f"{backend_url}/api/permissions/{cleanup_name}")
+                admin_api_context.delete(f"{backend_url}/api/permissions/{cleanup_name}")
 
 
 # --- AC-5: Role CRUD with permission mapping ---
 
 
-def test_role_crud_lifecycle(auth_api_context: APIRequestContext, backend_url: str):
+def test_role_crud_lifecycle(admin_api_context: APIRequestContext, backend_url: str):
     """Full role lifecycle: list -> create (with permissions) -> update mapping -> delete -> verify removed."""
     role_name = _unique_name("lifecycle-role")
     updated_name = role_name + "-updated"
@@ -240,7 +240,7 @@ def test_role_crud_lifecycle(auth_api_context: APIRequestContext, backend_url: s
 
     try:
         # List (baseline)
-        resp, elapsed_ms = _timed_request(auth_api_context, "GET", f"{backend_url}/api/roles")
+        resp, elapsed_ms = _timed_request(admin_api_context, "GET", f"{backend_url}/api/roles")
         assert resp.status == 200
         assert elapsed_ms < MAX_API_RESPONSE_MS
         baseline_names = [r["name"] for r in resp.json().get("roles", [])]
@@ -248,7 +248,7 @@ def test_role_crud_lifecycle(auth_api_context: APIRequestContext, backend_url: s
 
         # Create with permissions
         resp, elapsed_ms = _timed_request(
-            auth_api_context,
+            admin_api_context,
             "POST",
             f"{backend_url}/api/roles",
             data={
@@ -261,7 +261,7 @@ def test_role_crud_lifecycle(auth_api_context: APIRequestContext, backend_url: s
         assert elapsed_ms < MAX_API_RESPONSE_MS
 
         # Verify in list with permissions
-        resp, _ = _timed_request(auth_api_context, "GET", f"{backend_url}/api/roles")
+        resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/roles")
         roles = resp.json().get("roles", [])
         created = next((r for r in roles if r["name"] == role_name), None)
         assert created is not None, "Created role not found in list"
@@ -270,7 +270,7 @@ def test_role_crud_lifecycle(auth_api_context: APIRequestContext, backend_url: s
 
         # Update permission mapping (add settings.manage, remove documents.read)
         resp, elapsed_ms = _timed_request(
-            auth_api_context,
+            admin_api_context,
             "PUT",
             f"{backend_url}/api/roles/{role_name}",
             data={
@@ -284,7 +284,7 @@ def test_role_crud_lifecycle(auth_api_context: APIRequestContext, backend_url: s
         cleanup_name = updated_name
 
         # Verify updated mapping
-        resp, _ = _timed_request(auth_api_context, "GET", f"{backend_url}/api/roles")
+        resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/roles")
         roles = resp.json().get("roles", [])
         updated = next((r for r in roles if r["name"] == updated_name), None)
         assert updated is not None, "Updated role not found"
@@ -293,7 +293,7 @@ def test_role_crud_lifecycle(auth_api_context: APIRequestContext, backend_url: s
 
         # Delete
         resp, elapsed_ms = _timed_request(
-            auth_api_context,
+            admin_api_context,
             "DELETE",
             f"{backend_url}/api/roles/{updated_name}",
         )
@@ -302,19 +302,19 @@ def test_role_crud_lifecycle(auth_api_context: APIRequestContext, backend_url: s
         cleanup_name = None
 
         # Verify removed
-        resp, _ = _timed_request(auth_api_context, "GET", f"{backend_url}/api/roles")
+        resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/roles")
         role_names = [r["name"] for r in resp.json().get("roles", [])]
         assert updated_name not in role_names, "Deleted role still present"
     finally:
         if cleanup_name:
             with contextlib.suppress(Exception):
-                auth_api_context.delete(f"{backend_url}/api/roles/{cleanup_name}")
+                admin_api_context.delete(f"{backend_url}/api/roles/{cleanup_name}")
 
 
 # --- AC-6: Runtime role works with /roles/assign ---
 
 
-def test_runtime_role_assignment(auth_api_context: APIRequestContext, backend_url: str):
+def test_runtime_role_assignment(admin_api_context: APIRequestContext, backend_url: str):
     """Runtime-created role can be assigned to a user via /roles/assign."""
     role_name = _unique_name("assign-role")
     cleanup_role = False
@@ -322,7 +322,7 @@ def test_runtime_role_assignment(auth_api_context: APIRequestContext, backend_ur
     try:
         # Create a runtime role
         resp, elapsed_ms = _timed_request(
-            auth_api_context,
+            admin_api_context,
             "POST",
             f"{backend_url}/api/roles",
             data={"name": role_name, "description": "E2E assignment test"},
@@ -332,13 +332,13 @@ def test_runtime_role_assignment(auth_api_context: APIRequestContext, backend_ur
         cleanup_role = True
 
         # Get current user info to find user_id and tenant_id
-        resp, _ = _timed_request(auth_api_context, "GET", f"{backend_url}/api/me")
+        resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/me")
         assert resp.status == 200
         me_data = resp.json()
         user_id = (me_data.get("identity") or {}).get("sub", "")
         assert user_id, "Could not determine user_id from /api/me"
 
-        resp, _ = _timed_request(auth_api_context, "GET", f"{backend_url}/api/tenants")
+        resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/tenants")
         assert resp.status == 200
         tenants = resp.json().get("tenants", {})
         assert isinstance(tenants, dict), f"Expected tenants dict, got {type(tenants).__name__}"
@@ -347,7 +347,7 @@ def test_runtime_role_assignment(auth_api_context: APIRequestContext, backend_ur
 
         # Assign the runtime role
         resp, elapsed_ms = _timed_request(
-            auth_api_context,
+            admin_api_context,
             "POST",
             f"{backend_url}/api/roles/assign",
             data={"user_id": user_id, "tenant_id": tenant_id, "role_names": [role_name]},
@@ -356,14 +356,14 @@ def test_runtime_role_assignment(auth_api_context: APIRequestContext, backend_ur
         assert elapsed_ms < MAX_API_RESPONSE_MS
 
         # Verify assignment took effect by checking user's roles
-        resp, _ = _timed_request(auth_api_context, "GET", f"{backend_url}/api/roles/user/{user_id}")
+        resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/roles/user/{user_id}")
         if resp.status == 200:
             user_roles = [r["name"] for r in resp.json().get("roles", [])]
             assert role_name in user_roles, f"Assigned role '{role_name}' not found in user roles"
 
         # Remove the assigned role (cleanup user state)
         resp, elapsed_ms = _timed_request(
-            auth_api_context,
+            admin_api_context,
             "POST",
             f"{backend_url}/api/roles/remove",
             data={"user_id": user_id, "tenant_id": tenant_id, "role_names": [role_name]},
@@ -373,7 +373,7 @@ def test_runtime_role_assignment(auth_api_context: APIRequestContext, backend_ur
     finally:
         if cleanup_role:
             with contextlib.suppress(Exception):
-                auth_api_context.delete(f"{backend_url}/api/roles/{role_name}")
+                admin_api_context.delete(f"{backend_url}/api/roles/{role_name}")
 
 
 # --- AC-8: Protected endpoints require auth ---
