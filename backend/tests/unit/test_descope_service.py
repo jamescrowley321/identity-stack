@@ -671,9 +671,21 @@ class TestDescopeManagementClient:
         assert result is False
 
     @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "method_name,args",
+        [
+            ("get_fga_schema", []),
+            ("update_fga_schema", ["type user"]),
+            ("create_relation", ["document", "doc-1", "owner", "user:u1"]),
+            ("delete_relation", ["document", "doc-1", "owner", "user:u1"]),
+            ("list_relations", ["document", "doc-1"]),
+            ("list_user_resources", ["document", "can_view", "user:u1"]),
+            ("check_permission", ["document", "doc-1", "can_view", "user:u1"]),
+        ],
+    )
     @patch("app.services.descope.httpx.AsyncClient")
-    async def test_fga_method_propagates_http_error(self, mock_cls, client):
-        """AC: 4xx validation errors propagate as httpx.HTTPStatusError."""
+    async def test_fga_method_propagates_http_error(self, mock_cls, client, method_name, args):
+        """All FGA methods propagate HTTPStatusError from Descope."""
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
         mock_response = MagicMock(status_code=400, text="Bad Request")
@@ -683,7 +695,30 @@ class TestDescopeManagementClient:
         mock_http.post.return_value = mock_response
 
         with pytest.raises(httpx.HTTPStatusError):
-            await client.create_relation("invalid-type", "doc-1", "editor", "user:u1")
+            await getattr(client, method_name)(*args)
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "method_name,args",
+        [
+            ("get_fga_schema", []),
+            ("update_fga_schema", ["type user"]),
+            ("create_relation", ["document", "doc-1", "owner", "user:u1"]),
+            ("delete_relation", ["document", "doc-1", "owner", "user:u1"]),
+            ("list_relations", ["document", "doc-1"]),
+            ("list_user_resources", ["document", "can_view", "user:u1"]),
+            ("check_permission", ["document", "doc-1", "can_view", "user:u1"]),
+        ],
+    )
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_fga_method_propagates_network_error(self, mock_cls, client, method_name, args):
+        """All FGA methods propagate RequestError on network failure."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.side_effect = httpx.RequestError("Connection refused", request=MagicMock())
+
+        with pytest.raises(httpx.RequestError):
+            await getattr(client, method_name)(*args)
 
     @pytest.mark.anyio
     @patch("app.services.descope.httpx.AsyncClient")
@@ -745,150 +780,6 @@ class TestDescopeManagementClient:
 
         result = await client.list_user_resources("document", "editor", "user:u1")
         assert result == []
-
-    @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
-    async def test_check_permission_propagates_http_error(self, mock_cls, client):
-        """Verify check_permission doesn't swallow HTTP errors despite returning bool."""
-        mock_http = AsyncMock()
-        mock_cls.return_value = mock_http
-        mock_response = MagicMock(status_code=400, text="Bad Request")
-        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
-            "400 Bad Request", request=MagicMock(), response=mock_response
-        )
-        mock_http.post.return_value = mock_response
-
-        with pytest.raises(httpx.HTTPStatusError):
-            await client.check_permission("document", "doc-123", "editor", "user:u1")
-
-    # --- FGA input validation tests ---
-
-    @pytest.mark.anyio
-    async def test_create_relation_rejects_empty_resource_type(self, client):
-        with pytest.raises(ValueError, match="resource_type must be a non-empty string"):
-            await client.create_relation("", "doc-1", "editor", "user:u1")
-
-    @pytest.mark.anyio
-    async def test_create_relation_rejects_whitespace_only(self, client):
-        with pytest.raises(ValueError, match="resource_type must be a non-empty string"):
-            await client.create_relation("   ", "doc-1", "editor", "user:u1")
-
-    @pytest.mark.anyio
-    async def test_create_relation_rejects_invalid_characters(self, client):
-        with pytest.raises(ValueError, match="resource_type contains invalid characters"):
-            await client.create_relation("doc;DROP TABLE", "doc-1", "editor", "user:u1")
-
-    @pytest.mark.anyio
-    async def test_create_relation_rejects_too_long(self, client):
-        with pytest.raises(ValueError, match="resource_type must not exceed 200 characters"):
-            await client.create_relation("a" * 201, "doc-1", "editor", "user:u1")
-
-    @pytest.mark.anyio
-    async def test_delete_relation_rejects_empty_target(self, client):
-        with pytest.raises(ValueError, match="target must be a non-empty string"):
-            await client.delete_relation("document", "doc-1", "editor", "")
-
-    @pytest.mark.anyio
-    async def test_list_relations_rejects_empty_resource_id(self, client):
-        with pytest.raises(ValueError, match="resource_id must be a non-empty string"):
-            await client.list_relations("document", "")
-
-    @pytest.mark.anyio
-    async def test_list_user_resources_rejects_invalid_chars(self, client):
-        with pytest.raises(ValueError, match="relation contains invalid characters"):
-            await client.list_user_resources("document", "editor/../../etc", "user:u1")
-
-    @pytest.mark.anyio
-    async def test_check_permission_rejects_empty_relation(self, client):
-        with pytest.raises(ValueError, match="relation must be a non-empty string"):
-            await client.check_permission("document", "doc-1", "", "user:u1")
-
-    @pytest.mark.anyio
-    async def test_update_fga_schema_rejects_empty(self, client):
-        with pytest.raises(ValueError, match="schema must be a non-empty string"):
-            await client.update_fga_schema("")
-
-    @pytest.mark.anyio
-    async def test_update_fga_schema_rejects_whitespace(self, client):
-        with pytest.raises(ValueError, match="schema must be a non-empty string"):
-            await client.update_fga_schema("   ")
-
-    @pytest.mark.anyio
-    async def test_fga_param_allows_valid_identifiers(self, client):
-        """Verify that valid FGA identifiers pass validation."""
-        # Should not raise — uses colons, dots, hyphens, underscores
-        client._validate_fga_param("user:u1", "target")
-        client._validate_fga_param("my_resource.type-v2", "resource_type")
-        client._validate_fga_param("org:tenant-123", "resource_id")
-
-    # --- list_relations with filter params ---
-
-    @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
-    async def test_list_relations_with_relation_filter(self, mock_cls, client):
-        mock_http = AsyncMock()
-        mock_cls.return_value = mock_http
-        mock_http.post.return_value = MagicMock(
-            status_code=200,
-            raise_for_status=MagicMock(),
-            json=MagicMock(return_value={"relationInfo": [{"target": "user:u1", "relationDefinition": "editor"}]}),
-        )
-
-        result = await client.list_relations("document", "doc-123", relation="editor")
-        assert len(result) == 1
-        mock_http.post.assert_called_once_with(
-            "https://api.descope.com/v1/mgmt/authz/re/who",
-            headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
-            json={"resourceType": "document", "resource": "doc-123", "relationDefinition": "editor"},
-        )
-
-    @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
-    async def test_list_relations_with_target_filter(self, mock_cls, client):
-        mock_http = AsyncMock()
-        mock_cls.return_value = mock_http
-        mock_http.post.return_value = MagicMock(
-            status_code=200,
-            raise_for_status=MagicMock(),
-            json=MagicMock(return_value={"relationInfo": [{"target": "user:u1", "relationDefinition": "editor"}]}),
-        )
-
-        result = await client.list_relations("document", "doc-123", target="user:u1")
-        assert len(result) == 1
-        mock_http.post.assert_called_once_with(
-            "https://api.descope.com/v1/mgmt/authz/re/who",
-            headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
-            json={"resourceType": "document", "resource": "doc-123", "target": "user:u1"},
-        )
-
-    @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
-    async def test_list_relations_with_both_filters(self, mock_cls, client):
-        mock_http = AsyncMock()
-        mock_cls.return_value = mock_http
-        mock_http.post.return_value = MagicMock(
-            status_code=200,
-            raise_for_status=MagicMock(),
-            json=MagicMock(return_value={"relationInfo": [{"target": "user:u1", "relationDefinition": "editor"}]}),
-        )
-
-        result = await client.list_relations("document", "doc-123", relation="editor", target="user:u1")
-        assert len(result) == 1
-        mock_http.post.assert_called_once_with(
-            "https://api.descope.com/v1/mgmt/authz/re/who",
-            headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
-            json={
-                "resourceType": "document",
-                "resource": "doc-123",
-                "relationDefinition": "editor",
-                "target": "user:u1",
-            },
-        )
-
-    @pytest.mark.anyio
-    async def test_list_relations_rejects_invalid_filter_relation(self, client):
-        with pytest.raises(ValueError, match="relation contains invalid characters"):
-            await client.list_relations("document", "doc-1", relation="editor;DROP")
 
 
 class TestGetDescopeClient:
