@@ -202,7 +202,7 @@ def get_admin_session_token(email: str = "", tenant_id: str = "") -> str:
 
         response = request_client_credentials_token(
             ClientCredentialsTokenRequest(
-                client_id=key_id,
+                client_id=DESCOPE_PROJECT_ID,
                 client_secret=cleartext,
                 address=disco.token_endpoint,
                 scope="openid",
