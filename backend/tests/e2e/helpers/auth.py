@@ -55,7 +55,24 @@ def ensure_test_user(
         )
         data = resp.json()
         if resp.status_code == 200 and data.get("user"):
-            return data["user"]
+            user = data["user"]
+            # Ensure user is in the correct tenant with the right roles
+            if tenant_id:
+                user_tenants = [t.get("tenantId") for t in user.get("userTenants", [])]
+                if tenant_id not in user_tenants:
+                    # Add user to tenant with roles
+                    client.post(
+                        _mgmt_url("/v1/mgmt/user/update/tenant/add"),
+                        headers=_auth_header(),
+                        json={"loginId": email, "tenantId": tenant_id},
+                    )
+                    if roles:
+                        client.post(
+                            _mgmt_url("/v1/mgmt/user/update/role/add"),
+                            headers=_auth_header(),
+                            json={"loginId": email, "tenantId": tenant_id, "roleNames": roles},
+                        )
+            return user
 
         tenants = [{"tenantId": tenant_id, "roleNames": roles}] if tenant_id else []
         resp = client.post(

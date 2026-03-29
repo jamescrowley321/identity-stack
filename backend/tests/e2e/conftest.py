@@ -96,7 +96,15 @@ def admin_api_context(playwright, admin_access_token):
 
 @pytest.fixture(scope="session")
 def test_user_id(_ensure_test_user) -> str:
-    """The Descope user ID of the E2E test user."""
+    """The Descope login ID (email) of the E2E test user.
+
+    Uses loginIds[0] (the user's email) because the Descope Management API's
+    /v1/mgmt/user/update/role/add expects loginId, not the internal userId.
+    """
+    login_ids = _ensure_test_user.get("loginIds", [])
+    if login_ids:
+        return login_ids[0]
+    # Fallback to userId if loginIds not present
     user_id = _ensure_test_user.get("userId", "")
     if not user_id:
         pytest.skip("Could not determine test user ID")
