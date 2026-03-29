@@ -155,6 +155,25 @@ class DescopeManagementClient:
         """Permanently delete an access key."""
         await self._request("/v1/mgmt/accesskey/delete", {"id": key_id})
 
+    async def list_permissions(self) -> list[dict]:
+        """List all permission definitions in the Descope project."""
+        resp = await self._request("/v1/mgmt/permission/all", {})
+        return resp.json().get("permissions", [])
+
+    async def create_permission(self, name: str, description: str = "") -> None:
+        """Create a new permission definition."""
+        await self._request("/v1/mgmt/permission/create", {"name": name, "description": description})
+
+    async def update_permission(self, name: str, new_name: str, description: str = "") -> None:
+        """Update an existing permission definition."""
+        await self._request(
+            "/v1/mgmt/permission/update", {"name": name, "newName": new_name, "description": description}
+        )
+
+    async def delete_permission(self, name: str) -> None:
+        """Delete a permission definition by name."""
+        await self._request("/v1/mgmt/permission/delete", {"name": name})
+
     async def invite_user(self, email: str, tenant_id: str, role_names: list[str] | None = None) -> dict:
         """Create a user and assign them to a tenant with roles."""
         tenants = [{"tenantId": tenant_id}]
