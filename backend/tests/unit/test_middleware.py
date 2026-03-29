@@ -1,11 +1,18 @@
 """Unit tests for the token validation middleware."""
 
+import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
+
+# Build a mock issuer matching the Descope format the middleware accepts.
+# When DESCOPE_PROJECT_ID is set (CI), the issuer must match; when unset,
+# the middleware skips issuer validation so any value works.
+_mock_project_id = os.getenv("DESCOPE_PROJECT_ID", "test-project-id")
+_mock_issuer = f"https://api.descope.com/{_mock_project_id}"
 
 
 @pytest.fixture
@@ -51,7 +58,7 @@ async def test_protected_route_accepts_valid_token(mock_validate, client):
         "sub": "user123",
         "email": "test@example.com",
         "name": "Test User",
-        "iss": "https://test.example.com",
+        "iss": _mock_issuer,
     }
     mock_validate.return_value = mock_claims
 
@@ -64,7 +71,7 @@ async def test_protected_route_accepts_valid_token(mock_validate, client):
     claim_types = {c["type"]: c for c in identity["claims"]}
     assert claim_types["sub"]["value"] == "user123"
     assert claim_types["email"]["value"] == "test@example.com"
-    assert claim_types["sub"]["issuer"] == "https://test.example.com"
+    assert claim_types["sub"]["issuer"] == _mock_issuer
 
 
 @pytest.mark.anyio
@@ -81,7 +88,7 @@ async def test_middleware_sets_tenant_id_from_dct_claim(mock_validate, client):
     mock_claims = {
         "sub": "user123",
         "dct": "tenant-abc",
-        "iss": "https://test.example.com",
+        "iss": _mock_issuer,
     }
     mock_validate.return_value = mock_claims
 

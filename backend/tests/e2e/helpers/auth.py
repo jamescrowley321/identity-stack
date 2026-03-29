@@ -9,6 +9,7 @@ The test user is created via Management API with `test: True`.
 """
 
 import base64
+import contextlib
 import json
 import os
 
@@ -54,7 +55,27 @@ def ensure_test_user(
         )
         data = resp.json()
         if resp.status_code == 200 and data.get("user"):
-            return data["user"]
+            user = data["user"]
+            # Ensure user is in the correct tenant with the right roles
+            if tenant_id:
+                user_tenants = [t.get("tenantId") for t in user.get("userTenants", [])]
+                print(f"[E2E] Existing user tenants: {user_tenants}, need: {tenant_id}")
+                if tenant_id not in user_tenants:
+                    # Add user to tenant with roles
+                    add_resp = client.post(
+                        _mgmt_url("/v1/mgmt/user/update/tenant/add"),
+                        headers=_auth_header(),
+                        json={"loginId": email, "tenantId": tenant_id},
+                    )
+                    print(f"[E2E] Add user to tenant: {add_resp.status_code} {add_resp.text[:200]}")
+                    if roles:
+                        role_resp = client.post(
+                            _mgmt_url("/v1/mgmt/user/update/role/add"),
+                            headers=_auth_header(),
+                            json={"loginId": email, "tenantId": tenant_id, "roleNames": roles},
+                        )
+                        print(f"[E2E] Add roles: {role_resp.status_code} {role_resp.text[:200]}")
+            return user
 
         tenants = [{"tenantId": tenant_id, "roleNames": roles}] if tenant_id else []
         resp = client.post(
@@ -147,6 +168,88 @@ def create_authenticated_context(browser, frontend_url: str, access_token: str) 
     context = browser.new_context(viewport={"width": 1280, "height": 720})
     context.add_init_script(init_script)
     return context
+
+
+def get_admin_session_token(email: str = "", tenant_id: str = "") -> str:
+    """Get a Descope session token with admin/owner roles for E2E testing.
+
+    Strategy: create a temporary tenant-scoped access key with admin/owner roles
+    via the Management API, then exchange it via Descope's access key exchange
+    endpoint. The resulting session JWT:
+    1. Is signed by Descope's project keys (verifiable via OIDC JWKS)
+    2. Contains dct and tenants claims needed by require_role()
+    """
+    import uuid
+
+    tenant_id = tenant_id or E2E_TEST_TENANT_ID
+    if not DESCOPE_MANAGEMENT_KEY:
+        raise RuntimeError("DESCOPE_MANAGEMENT_KEY must be set")
+    if not tenant_id:
+        raise RuntimeError("E2E_TEST_TENANT_ID must be set")
+
+    # Step 1: Create a temporary tenant-scoped access key with admin roles.
+    # Must use keyTenants array format (not top-level tenantId) so the
+    # exchanged session JWT includes dct and tenants claims.
+    key_name = f"e2e-admin-{uuid.uuid4().hex[:8]}"
+    with httpx.Client(timeout=30) as client:
+        resp = client.post(
+            _mgmt_url("/v1/mgmt/accesskey/create"),
+            headers=_auth_header(),
+            json={
+                "name": key_name,
+                "keyTenants": [
+                    {"tenantId": tenant_id, "roleNames": ["owner", "admin"]},
+                ],
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        key_id = data.get("key", {}).get("id", "")
+        cleartext = data.get("cleartext", "")
+        if not cleartext:
+            raise RuntimeError(f"Access key creation returned no cleartext: {data}")
+
+    # Step 2: Exchange access key for a Descope session JWT via auth endpoint.
+    # Unlike the OIDC client credentials flow, the exchange endpoint returns a
+    # session JWT that includes Descope-specific claims (dct, tenants, roles).
+    try:
+        with httpx.Client(timeout=30) as client:
+            resp = client.post(
+                f"{DESCOPE_BASE_URL}/v1/auth/accesskey/exchange",
+                headers={"Authorization": f"Bearer {DESCOPE_PROJECT_ID}:{cleartext}"},
+                json={},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            token = data.get("sessionJwt", "")
+            if not token:
+                raise RuntimeError(f"Access key exchange returned no sessionJwt: {data}")
+    finally:
+        # Step 3: Clean up the temporary access key (best-effort)
+        with contextlib.suppress(Exception), httpx.Client(timeout=10) as client:
+            client.post(
+                _mgmt_url("/v1/mgmt/accesskey/delete"),
+                headers=_auth_header(),
+                json={"id": key_id},
+            )
+
+    # Debug: log all decoded claims for CI diagnosis
+    try:
+        payload = _decode_jwt_payload(token)
+        print(f"[E2E] Admin token ALL claims: {list(payload.keys())}")
+        tenants_info = payload.get("tenants")
+        if isinstance(tenants_info, dict):
+            tenants_info = {k: v.get("roles", []) if isinstance(v, dict) else v for k, v in tenants_info.items()}
+        print(
+            f"[E2E] Admin token key claims: dct={payload.get('dct')}, "
+            f"tenants={tenants_info}, "
+            f"iss={payload.get('iss')}, aud={payload.get('aud')}, "
+            f"sub={payload.get('sub')}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[E2E] Could not decode admin token: {exc}")
+
+    return token
 
 
 def cleanup_test_user(email: str = "") -> None:

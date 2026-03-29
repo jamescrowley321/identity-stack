@@ -1,11 +1,15 @@
 """Unit tests for the auth router (logout endpoint)."""
 
+import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
+
+_mock_project_id = os.getenv("DESCOPE_PROJECT_ID", "test-project-id")
+_mock_issuer = f"https://api.descope.com/{_mock_project_id}"
 
 
 @pytest.fixture
@@ -52,7 +56,7 @@ async def test_logout_succeeds_with_valid_token(mock_validate, mock_httpx_cls, c
         "sub": "user123",
         "email": "test@example.com",
         "name": "Test User",
-        "iss": "https://test.example.com",
+        "iss": _mock_issuer,
     }
     mock_validate.return_value = mock_claims
 
@@ -81,7 +85,7 @@ async def test_logout_returns_null_sub_when_missing(mock_validate, client):
     """Logout should handle tokens without a sub claim."""
     mock_claims = {
         "email": "test@example.com",
-        "iss": "https://test.example.com",
+        "iss": _mock_issuer,
     }
     mock_validate.return_value = mock_claims
 
