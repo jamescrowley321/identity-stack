@@ -4,6 +4,8 @@ These tests require DESCOPE_MANAGEMENT_KEY env var (for admin token via tenant-s
 They exercise the real Descope FGA API via the backend's /api/fga/* endpoints.
 """
 
+import contextlib
+import json
 import os
 import time
 import uuid
@@ -26,6 +28,7 @@ def _unique_id(prefix: str) -> str:
 
 def _timed_request(context: APIRequestContext, method: str, url: str, **kwargs) -> tuple:
     """Execute a request and return (response, elapsed_ms)."""
+    method = method.upper()
     start = time.monotonic()
     if method == "GET":
         resp = context.get(url, **kwargs)
@@ -216,3 +219,86 @@ def test_check_permission_validation(admin_api_context: APIRequestContext, backe
         data={"resource_type": "doc", "resource_id": "1"},
     )
     assert resp.status == 422, f"Expected 422 for missing fields, got {resp.status}"
+
+
+# --- Relation lifecycle with authorization check ---
+
+
+def test_relation_lifecycle_with_permission_check(admin_api_context: APIRequestContext, backend_url: str):
+    """Create relation → verify allowed → delete → verify denied (full lifecycle)."""
+    resource_id = _unique_id("lifecycle")
+    target = f"user:{_unique_id('u')}"
+    relation_body = {
+        "resource_type": "document",
+        "resource_id": resource_id,
+        "relation": "viewer",
+        "target": target,
+    }
+
+    # Create
+    resp, _ = _timed_request(admin_api_context, "POST", f"{backend_url}/api/fga/relations", data=relation_body)
+    if resp.status in (400, 502):
+        pytest.skip(f"FGA not operational (status {resp.status})")
+    assert resp.status == 201
+
+    try:
+        # Check — should be allowed (viewer → can_view)
+        check_body = {
+            "resource_type": "document",
+            "resource_id": resource_id,
+            "relation": "can_view",
+            "target": target,
+        }
+        resp, elapsed_ms = _timed_request(admin_api_context, "POST", f"{backend_url}/api/fga/check", data=check_body)
+        if resp.status == 502:
+            pytest.skip("FGA check not operational")
+        assert resp.status == 200
+        assert elapsed_ms < MAX_API_RESPONSE_MS
+        body = resp.json()
+        assert "allowed" in body, f"FGA check response missing 'allowed' key: {body}"
+        assert body["allowed"] is True, "Viewer should have can_view"
+
+        # Delete
+        resp, _ = _timed_request(admin_api_context, "DELETE", f"{backend_url}/api/fga/relations", data=relation_body)
+        assert resp.status == 200
+
+        # Check again — should be denied
+        resp, _ = _timed_request(admin_api_context, "POST", f"{backend_url}/api/fga/check", data=check_body)
+        if resp.status == 502:
+            pytest.skip("FGA check not operational")
+        assert resp.status == 200
+        body = resp.json()
+        assert "allowed" in body, f"FGA check response missing 'allowed' key: {body}"
+        assert body["allowed"] is False, "Should be denied after relation deleted"
+    finally:
+        # Best-effort cleanup
+        with contextlib.suppress(Exception):
+            admin_api_context.delete(f"{backend_url}/api/fga/relations", data=relation_body)
+
+
+# --- Schema update (PUT) ---
+
+
+def test_update_fga_schema(admin_api_context: APIRequestContext, backend_url: str):
+    """PUT /api/fga/schema updates the schema and returns the result."""
+    # Read current schema first
+    resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/fga/schema")
+    assert resp.status == 200
+    original = resp.json().get("schema", "")
+
+    if not original:
+        pytest.skip("No FGA schema configured — cannot test update")
+
+    # Re-save the same schema (idempotent — safe for concurrent runs)
+    schema_str = original if isinstance(original, str) else json.dumps(original)
+    resp, elapsed_ms = _timed_request(
+        admin_api_context,
+        "PUT",
+        f"{backend_url}/api/fga/schema",
+        data={"schema": schema_str},
+    )
+    if resp.status in (400, 502):
+        pytest.skip(f"Schema update not supported (status {resp.status})")
+    assert resp.status == 200
+    assert elapsed_ms < MAX_API_RESPONSE_MS
+    assert "schema" in resp.json()
