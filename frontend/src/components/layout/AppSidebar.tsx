@@ -1,4 +1,4 @@
-import { Home, Users, Shield, Key, Settings, User } from "lucide-react"
+import { Home, Users, Shield, Key, Settings, User, Lock } from "lucide-react"
 import { useLocation, Link } from "react-router-dom"
 import { useRBAC } from "@/hooks/useRBAC"
 import {
@@ -17,6 +17,7 @@ const navItems = [
   { to: "/members", label: "Members", icon: Users, adminOnly: true },
   { to: "/roles", label: "Roles", icon: Shield, adminOnly: true },
   { to: "/keys", label: "Access Keys", icon: Key, adminOnly: true },
+  { to: "/fga", label: "FGA", icon: Lock, adminOnly: true },
   { to: "/settings", label: "Tenant Settings", icon: Settings },
   { to: "/profile", label: "Profile", icon: User },
 ]
