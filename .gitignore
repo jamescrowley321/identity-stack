@@ -33,6 +33,12 @@ infra/expired_token.txt
 *.swp
 *.swo
 
+# Claude
+.claude/task-state.md
+
+# Ralph
+.ralph/
+
 # OS
 .DS_Store
 Thumbs.db
