@@ -112,7 +112,11 @@ async def test_invite_member_rejected_for_viewer(mock_validate, client):
 async def test_deactivate_member(mock_validate, mock_factory, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
-    mock_client.load_user.return_value = {"userId": "user1", "userTenants": [{"tenantId": "tenant-abc"}]}
+    mock_client.load_user.return_value = {
+        "userId": "user1",
+        "loginIds": ["user1@example.com"],
+        "userTenants": [{"tenantId": "tenant-abc"}],
+    }
     mock_factory.return_value = mock_client
 
     response = await client.post(
@@ -122,7 +126,7 @@ async def test_deactivate_member(mock_validate, mock_factory, client):
     assert response.status_code == 200
     assert response.json()["status"] == "deactivated"
     mock_client.load_user.assert_called_once_with("user1")
-    mock_client.update_user_status.assert_called_once_with("user1", "disabled")
+    mock_client.update_user_status.assert_called_once_with("user1@example.com", "disabled")
 
 
 @pytest.mark.anyio
@@ -131,7 +135,11 @@ async def test_deactivate_member(mock_validate, mock_factory, client):
 async def test_activate_member(mock_validate, mock_factory, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
-    mock_client.load_user.return_value = {"userId": "user1", "userTenants": [{"tenantId": "tenant-abc"}]}
+    mock_client.load_user.return_value = {
+        "userId": "user1",
+        "loginIds": ["user1@example.com"],
+        "userTenants": [{"tenantId": "tenant-abc"}],
+    }
     mock_factory.return_value = mock_client
 
     response = await client.post(
@@ -141,7 +149,7 @@ async def test_activate_member(mock_validate, mock_factory, client):
     assert response.status_code == 200
     assert response.json()["status"] == "activated"
     mock_client.load_user.assert_called_once_with("user1")
-    mock_client.update_user_status.assert_called_once_with("user1", "enabled")
+    mock_client.update_user_status.assert_called_once_with("user1@example.com", "enabled")
 
 
 @pytest.mark.anyio
@@ -150,7 +158,11 @@ async def test_activate_member(mock_validate, mock_factory, client):
 async def test_remove_member(mock_validate, mock_factory, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
-    mock_client.load_user.return_value = {"userId": "user1", "userTenants": [{"tenantId": "tenant-abc"}]}
+    mock_client.load_user.return_value = {
+        "userId": "user1",
+        "loginIds": ["user1@example.com"],
+        "userTenants": [{"tenantId": "tenant-abc"}],
+    }
     mock_factory.return_value = mock_client
 
     response = await client.delete(
@@ -160,7 +172,7 @@ async def test_remove_member(mock_validate, mock_factory, client):
     assert response.status_code == 200
     assert response.json()["status"] == "removed"
     mock_client.load_user.assert_called_once_with("user1")
-    mock_client.remove_user_from_tenant.assert_called_once_with("user1", "tenant-abc")
+    mock_client.remove_user_from_tenant.assert_called_once_with("user1@example.com", "tenant-abc")
 
 
 OWNER_CLAIMS = {

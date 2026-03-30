@@ -98,6 +98,7 @@ async def test_roles_me_returns_403_without_tenant(mock_validate, client):
 async def test_assign_roles_as_admin(mock_validate, mock_factory, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
+    mock_client.resolve_login_id.return_value = "target-user@example.com"
     mock_factory.return_value = mock_client
 
     response = await client.post(
@@ -107,7 +108,8 @@ async def test_assign_roles_as_admin(mock_validate, mock_factory, client):
     )
     assert response.status_code == 200
     assert response.json()["status"] == "roles_assigned"
-    mock_client.assign_roles.assert_called_once_with("target-user", "tenant-abc", ["member"])
+    mock_client.resolve_login_id.assert_called_once_with("target-user")
+    mock_client.assign_roles.assert_called_once_with("target-user@example.com", "tenant-abc", ["member"])
 
 
 @pytest.mark.anyio
@@ -128,6 +130,7 @@ async def test_assign_roles_rejected_for_viewer(mock_validate, client):
 async def test_remove_roles_as_admin(mock_validate, mock_factory, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
+    mock_client.resolve_login_id.return_value = "target-user@example.com"
     mock_factory.return_value = mock_client
 
     response = await client.post(
@@ -137,7 +140,8 @@ async def test_remove_roles_as_admin(mock_validate, mock_factory, client):
     )
     assert response.status_code == 200
     assert response.json()["status"] == "roles_removed"
-    mock_client.remove_roles.assert_called_once_with("target-user", "tenant-abc", ["member"])
+    mock_client.resolve_login_id.assert_called_once_with("target-user")
+    mock_client.remove_roles.assert_called_once_with("target-user@example.com", "tenant-abc", ["member"])
 
 
 @pytest.mark.anyio
@@ -212,6 +216,7 @@ async def test_owner_can_assign_owner_role(mock_validate, mock_factory, client):
     """Owner should be able to assign the owner role."""
     mock_validate.return_value = OWNER_CLAIMS
     mock_client = AsyncMock()
+    mock_client.resolve_login_id.return_value = "target-user@example.com"
     mock_factory.return_value = mock_client
 
     response = await client.post(

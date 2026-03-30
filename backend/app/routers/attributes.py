@@ -31,7 +31,7 @@ class UpdateTenantSettingsRequest(BaseModel):
 @router.get("/profile")
 async def get_profile(claims: dict = Depends(get_claims)):
     """Load the current user's profile and custom attributes from Descope."""
-    # Descope's sub claim IS the loginId — verified via Descope JWT spec
+    # Descope's sub claim is the userId (not loginId)
     user_id = claims.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="Missing user identity (sub claim)")
@@ -62,7 +62,7 @@ async def update_profile_attribute(
     claims: dict = Depends(get_claims),
 ):
     """Update a single custom attribute on the current user's profile."""
-    # Descope's sub claim IS the loginId — verified via Descope JWT spec
+    # Descope's sub claim is the userId — mutation endpoints require loginId
     user_id = claims.get("sub")
     if not user_id:
         raise HTTPException(status_code=400, detail="Missing user identity (sub claim)")
@@ -70,7 +70,8 @@ async def update_profile_attribute(
         raise HTTPException(status_code=400, detail=f"Attribute '{body.key}' is not allowed")
     try:
         client = get_descope_client()
-        await client.update_user_custom_attribute(user_id, body.key, body.value)
+        login_id = await client.resolve_login_id(user_id)
+        await client.update_user_custom_attribute(login_id, body.key, body.value)
         return {"status": "updated", "key": body.key, "value": body.value}
     except httpx.HTTPStatusError as exc:
         logger.warning(
@@ -85,12 +86,24 @@ async def get_tenant_settings(tenant_id: str = Depends(get_tenant_id)):
     try:
         client = get_descope_client()
         tenant = await client.load_tenant(tenant_id)
+        if not tenant:
+            return {
+                "tenant_id": tenant_id,
+                "name": "",
+                "custom_attributes": {},
+            }
         return {
             "tenant_id": tenant_id,
             "name": tenant.get("name", ""),
             "custom_attributes": tenant.get("customAttributes", {}),
         }
     except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            return {
+                "tenant_id": tenant_id,
+                "name": "",
+                "custom_attributes": {},
+            }
         logger.warning("Descope API error loading tenant %s: %s", tenant_id, exc.response.status_code)
         raise HTTPException(status_code=502, detail="Failed to load tenant settings from identity provider")
 

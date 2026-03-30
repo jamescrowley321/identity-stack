@@ -102,6 +102,7 @@ async def test_get_profile_handles_api_failure(mock_validate, mock_factory, clie
 async def test_update_profile_attribute(mock_validate, mock_factory, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
+    mock_client.resolve_login_id.return_value = "user123@example.com"
     mock_factory.return_value = mock_client
 
     response = await client.patch(
@@ -111,7 +112,8 @@ async def test_update_profile_attribute(mock_validate, mock_factory, client):
     )
     assert response.status_code == 200
     assert response.json()["status"] == "updated"
-    mock_client.update_user_custom_attribute.assert_called_once_with("user123", "department", "Product")
+    mock_client.resolve_login_id.assert_called_once_with("user123")
+    mock_client.update_user_custom_attribute.assert_called_once_with("user123@example.com", "department", "Product")
 
 
 @pytest.mark.anyio
@@ -228,6 +230,7 @@ async def test_update_profile_handles_api_failure(mock_validate, mock_factory, c
     """M3: update_profile_attribute should return 502 on Descope API error."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
+    mock_client.resolve_login_id.return_value = "user123@example.com"
     mock_client.update_user_custom_attribute.side_effect = _make_http_status_error(500)
     mock_factory.return_value = mock_client
 
