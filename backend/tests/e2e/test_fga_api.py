@@ -5,6 +5,7 @@ They exercise the real Descope FGA API via the backend's /api/fga/* endpoints.
 """
 
 import contextlib
+import json
 import os
 import time
 import uuid
@@ -27,6 +28,7 @@ def _unique_id(prefix: str) -> str:
 
 def _timed_request(context: APIRequestContext, method: str, url: str, **kwargs) -> tuple:
     """Execute a request and return (response, elapsed_ms)."""
+    method = method.upper()
     start = time.monotonic()
     if method == "GET":
         resp = context.get(url, **kwargs)
@@ -252,7 +254,9 @@ def test_relation_lifecycle_with_permission_check(admin_api_context: APIRequestC
             pytest.skip("FGA check not operational")
         assert resp.status == 200
         assert elapsed_ms < MAX_API_RESPONSE_MS
-        assert resp.json()["allowed"] is True, "Viewer should have can_view"
+        body = resp.json()
+        assert "allowed" in body, f"FGA check response missing 'allowed' key: {body}"
+        assert body["allowed"] is True, "Viewer should have can_view"
 
         # Delete
         resp, _ = _timed_request(admin_api_context, "DELETE", f"{backend_url}/api/fga/relations", data=relation_body)
@@ -263,7 +267,9 @@ def test_relation_lifecycle_with_permission_check(admin_api_context: APIRequestC
         if resp.status == 502:
             pytest.skip("FGA check not operational")
         assert resp.status == 200
-        assert resp.json()["allowed"] is False, "Should be denied after relation deleted"
+        body = resp.json()
+        assert "allowed" in body, f"FGA check response missing 'allowed' key: {body}"
+        assert body["allowed"] is False, "Should be denied after relation deleted"
     finally:
         # Best-effort cleanup
         with contextlib.suppress(Exception):
@@ -284,7 +290,7 @@ def test_update_fga_schema(admin_api_context: APIRequestContext, backend_url: st
         pytest.skip("No FGA schema configured — cannot test update")
 
     # Re-save the same schema (idempotent — safe for concurrent runs)
-    schema_str = original if isinstance(original, str) else str(original)
+    schema_str = original if isinstance(original, str) else json.dumps(original)
     resp, elapsed_ms = _timed_request(
         admin_api_context,
         "PUT",

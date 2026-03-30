@@ -21,6 +21,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 MAX_API_RESPONSE_MS = 2000
+_DUMMY_UUID = "00000000-0000-0000-0000-000000000000"
 
 
 def _unique_id(prefix: str) -> str:
@@ -29,6 +30,7 @@ def _unique_id(prefix: str) -> str:
 
 def _timed_request(context: APIRequestContext, method: str, url: str, **kwargs) -> tuple:
     """Execute a request and return (response, elapsed_ms)."""
+    method = method.upper()
     start = time.monotonic()
     if method == "GET":
         resp = context.get(url, **kwargs)
@@ -54,13 +56,22 @@ def _create_doc(ctx: APIRequestContext, base: str, title: str = "") -> dict | No
         return None  # FGA not operational
     if resp.status != 201:
         return None
-    return resp.json()
+    data = resp.json()
+    assert "id" in data, f"Document creation response missing 'id' key: {data}"
+    return data
 
 
 def _cleanup_doc(ctx: APIRequestContext, base: str, doc_id: str) -> None:
     """Best-effort document deletion."""
     with contextlib.suppress(Exception):
         ctx.delete(f"{base}/api/documents/{doc_id}")
+
+
+def _assert_fga_allowed(resp, expected: bool, context_msg: str) -> None:
+    """Assert FGA check response has 'allowed' key with expected value."""
+    body = resp.json()
+    assert "allowed" in body, f"FGA check response missing 'allowed' key: {body}"
+    assert body["allowed"] is expected, context_msg
 
 
 # --- AC: Document creation creates FGA owner relation ---
@@ -85,7 +96,7 @@ def test_create_document_creates_fga_owner(admin_api_context: APIRequestContext,
         assert elapsed_ms < MAX_API_RESPONSE_MS
         relations = resp.json().get("relations", [])
         owner_rels = [r for r in relations if r.get("relationDefinition") == "owner"]
-        assert len(owner_rels) >= 1, f"Expected at least 1 owner relation, got {owner_rels}"
+        assert len(owner_rels) == 1, f"Expected exactly 1 owner relation, got {owner_rels}"
     finally:
         _cleanup_doc(admin_api_context, backend_url, doc_id)
 
@@ -121,7 +132,7 @@ def test_owner_has_all_permissions(admin_api_context: APIRequestContext, backend
                 pytest.skip("FGA check not operational")
             assert resp.status == 200, f"Check {relation} returned {resp.status}"
             assert elapsed_ms < MAX_API_RESPONSE_MS
-            assert resp.json()["allowed"] is True, f"Owner should have {relation}"
+            _assert_fga_allowed(resp, True, f"Owner should have {relation}")
     finally:
         with contextlib.suppress(Exception):
             admin_api_context.delete(
@@ -157,7 +168,7 @@ def test_editor_has_view_and_edit_not_delete(admin_api_context: APIRequestContex
             if resp.status == 502:
                 pytest.skip("FGA check not operational")
             assert resp.status == 200
-            assert resp.json()["allowed"] is True, f"Editor should have {relation}"
+            _assert_fga_allowed(resp, True, f"Editor should have {relation}")
 
         # Editor should NOT have can_delete
         resp, _ = _timed_request(
@@ -169,7 +180,7 @@ def test_editor_has_view_and_edit_not_delete(admin_api_context: APIRequestContex
         if resp.status == 502:
             pytest.skip("FGA check not operational")
         assert resp.status == 200
-        assert resp.json()["allowed"] is False, "Editor should NOT have can_delete"
+        _assert_fga_allowed(resp, False, "Editor should NOT have can_delete")
     finally:
         with contextlib.suppress(Exception):
             admin_api_context.delete(
@@ -204,7 +215,7 @@ def test_viewer_has_view_only(admin_api_context: APIRequestContext, backend_url:
         if resp.status == 502:
             pytest.skip("FGA check not operational")
         assert resp.status == 200
-        assert resp.json()["allowed"] is True, "Viewer should have can_view"
+        _assert_fga_allowed(resp, True, "Viewer should have can_view")
 
         # Viewer should NOT have can_edit or can_delete
         for relation in ("can_edit", "can_delete"):
@@ -222,7 +233,7 @@ def test_viewer_has_view_only(admin_api_context: APIRequestContext, backend_url:
             if resp.status == 502:
                 pytest.skip("FGA check not operational")
             assert resp.status == 200
-            assert resp.json()["allowed"] is False, f"Viewer should NOT have {relation}"
+            _assert_fga_allowed(resp, False, f"Viewer should NOT have {relation}")
     finally:
         with contextlib.suppress(Exception):
             admin_api_context.delete(
@@ -231,10 +242,10 @@ def test_viewer_has_view_only(admin_api_context: APIRequestContext, backend_url:
             )
 
 
-# --- AC: Document get/update/delete enforce FGA permissions ---
+# --- AC: Document endpoint FGA enforcement (allowed + denied) ---
 
 
-def test_document_get_enforces_fga(admin_api_context: APIRequestContext, backend_url: str):
+def test_document_get_allowed_for_owner(admin_api_context: APIRequestContext, backend_url: str):
     """GET /api/documents/{id} returns 200 for owner, verifying FGA can_view works end-to-end."""
     doc = _create_doc(admin_api_context, backend_url)
     if doc is None:
@@ -250,7 +261,7 @@ def test_document_get_enforces_fga(admin_api_context: APIRequestContext, backend
         _cleanup_doc(admin_api_context, backend_url, doc_id)
 
 
-def test_document_update_enforces_fga(admin_api_context: APIRequestContext, backend_url: str):
+def test_document_update_allowed_for_owner(admin_api_context: APIRequestContext, backend_url: str):
     """PUT /api/documents/{id} returns 200 for owner, verifying FGA can_edit works end-to-end."""
     doc = _create_doc(admin_api_context, backend_url)
     if doc is None:
@@ -268,6 +279,56 @@ def test_document_update_enforces_fga(admin_api_context: APIRequestContext, back
         assert elapsed_ms < MAX_API_RESPONSE_MS
         assert resp.json()["title"] == "Updated E2E Title"
     finally:
+        _cleanup_doc(admin_api_context, backend_url, doc_id)
+
+
+def test_document_fga_denies_without_relation(admin_api_context: APIRequestContext, backend_url: str):
+    """Removing FGA owner relation causes document GET to be denied (403)."""
+    doc = _create_doc(admin_api_context, backend_url)
+    if doc is None:
+        pytest.skip("FGA not operational — document creation failed")
+    doc_id = doc["id"]
+
+    # Find the owner relation target (the admin user's ID in FGA)
+    resp, _ = _timed_request(
+        admin_api_context,
+        "GET",
+        f"{backend_url}/api/fga/relations",
+        params={"resource_type": "document", "resource_id": doc_id},
+    )
+    assert resp.status == 200
+    relations = resp.json().get("relations", [])
+    owner_rels = [r for r in relations if r.get("relationDefinition") == "owner"]
+    assert len(owner_rels) >= 1, "No owner relation found for created document"
+    owner_target = owner_rels[0]["target"]
+
+    try:
+        # Remove owner relation
+        resp, _ = _timed_request(
+            admin_api_context,
+            "DELETE",
+            f"{backend_url}/api/fga/relations",
+            data={"resource_type": "document", "resource_id": doc_id, "relation": "owner", "target": owner_target},
+        )
+        assert resp.status == 200, f"Failed to delete owner relation: {resp.status}"
+
+        # Now GET should be denied (403 from require_fga)
+        resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/documents/{doc_id}")
+        assert resp.status == 403, f"Should be denied without FGA relation, got {resp.status}"
+    finally:
+        # Re-create owner relation so cleanup can delete the document
+        with contextlib.suppress(Exception):
+            _timed_request(
+                admin_api_context,
+                "POST",
+                f"{backend_url}/api/fga/relations",
+                data={
+                    "resource_type": "document",
+                    "resource_id": doc_id,
+                    "relation": "owner",
+                    "target": owner_target,
+                },
+            )
         _cleanup_doc(admin_api_context, backend_url, doc_id)
 
 
@@ -290,9 +351,9 @@ def test_document_delete_cleans_fga_relations(admin_api_context: APIRequestConte
         f"{backend_url}/api/fga/relations",
         params={"resource_type": "document", "resource_id": doc_id},
     )
-    if resp.status == 200:
-        relations = resp.json().get("relations", [])
-        assert len(relations) == 0, f"Expected 0 relations after delete, got {relations}"
+    assert resp.status == 200, f"FGA relation query failed after delete: {resp.status}"
+    relations = resp.json().get("relations", [])
+    assert len(relations) == 0, f"Expected 0 relations after delete, got {relations}"
 
 
 # --- AC: List documents returns only FGA-authorized documents ---
@@ -309,19 +370,163 @@ def test_list_documents_returns_authorized(admin_api_context: APIRequestContext,
         resp, elapsed_ms = _timed_request(admin_api_context, "GET", f"{backend_url}/api/documents")
         assert resp.status == 200
         assert elapsed_ms < MAX_API_RESPONSE_MS
-        documents = resp.json().get("documents", [])
+        body = resp.json()
+        assert isinstance(body, dict), f"Expected dict response, got {type(body)}"
+        documents = body.get("documents")
+        assert isinstance(documents, list), f"Expected 'documents' list, got {type(documents)}"
         doc_ids = [d["id"] for d in documents]
         assert doc_id in doc_ids, f"Created document {doc_id} should appear in list"
     finally:
         _cleanup_doc(admin_api_context, backend_url, doc_id)
 
 
-# --- AC: Concurrent relation create/delete with permission checks ---
+def test_list_documents_excludes_unauthorized(admin_api_context: APIRequestContext, backend_url: str):
+    """GET /api/documents excludes documents the caller has no FGA relation for."""
+    # Create a doc with a unique resource ID directly via FGA (no owner relation for the caller)
+    phantom_id = _unique_id("phantom-doc")
+    # Create a viewer relation for a DIFFERENT user (not the admin)
+    other_user = _unique_id("other-user")
+    resp, _ = _timed_request(
+        admin_api_context,
+        "POST",
+        f"{backend_url}/api/fga/relations",
+        data={"resource_type": "document", "resource_id": phantom_id, "relation": "viewer", "target": other_user},
+    )
+    if resp.status in (400, 502):
+        pytest.skip(f"FGA not operational (status {resp.status})")
+
+    try:
+        resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/documents")
+        assert resp.status == 200
+        documents = resp.json().get("documents", [])
+        doc_ids = [d["id"] for d in documents]
+        assert phantom_id not in doc_ids, f"Document {phantom_id} should NOT appear (no FGA relation for caller)"
+    finally:
+        with contextlib.suppress(Exception):
+            admin_api_context.delete(
+                f"{backend_url}/api/fga/relations",
+                data={
+                    "resource_type": "document",
+                    "resource_id": phantom_id,
+                    "relation": "viewer",
+                    "target": other_user,
+                },
+            )
 
 
-def test_concurrent_relations_no_false_positive(admin_api_context: APIRequestContext, backend_url: str):
-    """Rapid create/delete of relations should never produce false-positive authorizations."""
-    resource_id = _unique_id("concurrent-doc")
+# --- AC: Share a document and verify access, then revoke ---
+
+
+def test_share_document_grants_access(admin_api_context: APIRequestContext, backend_url: str, test_user_id: str):
+    """Sharing a document grants the target user FGA-level access."""
+    doc = _create_doc(admin_api_context, backend_url)
+    if doc is None:
+        pytest.skip("FGA not operational — document creation failed")
+    doc_id = doc["id"]
+
+    try:
+        # Share with test user as viewer
+        resp, _ = _timed_request(
+            admin_api_context,
+            "POST",
+            f"{backend_url}/api/documents/{doc_id}/share",
+            data={"user_id": test_user_id, "relation": "viewer"},
+        )
+        if resp.status == 404:
+            pytest.skip("Target user not found in Descope — share test requires E2E_TEST_EMAIL user")
+        if resp.status == 403:
+            pytest.skip("Cannot share — caller may not be recognized as owner by Descope")
+        assert resp.status == 200, f"Share failed: {resp.status}"
+
+        # Verify via FGA check that the target user now has can_view
+        resp, _ = _timed_request(
+            admin_api_context,
+            "POST",
+            f"{backend_url}/api/fga/check",
+            data={"resource_type": "document", "resource_id": doc_id, "relation": "can_view", "target": test_user_id},
+        )
+        if resp.status == 502:
+            pytest.skip("FGA check not operational")
+        assert resp.status == 200
+        _assert_fga_allowed(resp, True, f"Shared user {test_user_id} should have can_view")
+    finally:
+        # Cleanup: revoke share then delete doc
+        with contextlib.suppress(Exception):
+            admin_api_context.delete(
+                f"{backend_url}/api/fga/relations",
+                data={"resource_type": "document", "resource_id": doc_id, "relation": "viewer", "target": test_user_id},
+            )
+        _cleanup_doc(admin_api_context, backend_url, doc_id)
+
+
+def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backend_url: str, test_user_id: str):
+    """Revoking a share removes the user's FGA-level access."""
+    doc = _create_doc(admin_api_context, backend_url)
+    if doc is None:
+        pytest.skip("FGA not operational — document creation failed")
+    doc_id = doc["id"]
+
+    try:
+        # Share first
+        resp, _ = _timed_request(
+            admin_api_context,
+            "POST",
+            f"{backend_url}/api/documents/{doc_id}/share",
+            data={"user_id": test_user_id, "relation": "viewer"},
+        )
+        if resp.status in (403, 404):
+            pytest.skip(f"Share prerequisite failed (status {resp.status})")
+        assert resp.status == 200, f"Share failed: {resp.status}"
+
+        # Verify access granted
+        resp, _ = _timed_request(
+            admin_api_context,
+            "POST",
+            f"{backend_url}/api/fga/check",
+            data={"resource_type": "document", "resource_id": doc_id, "relation": "can_view", "target": test_user_id},
+        )
+        if resp.status == 502:
+            pytest.skip("FGA check not operational")
+        assert resp.status == 200
+        _assert_fga_allowed(resp, True, "User should have access after share")
+
+        # Revoke
+        resp, _ = _timed_request(
+            admin_api_context,
+            "DELETE",
+            f"{backend_url}/api/documents/{doc_id}/share/{test_user_id}",
+        )
+        if resp.status == 403:
+            pytest.skip("Cannot revoke — caller not recognized as owner")
+        assert resp.status == 200, f"Revoke failed: {resp.status}"
+
+        # Verify access denied
+        resp, _ = _timed_request(
+            admin_api_context,
+            "POST",
+            f"{backend_url}/api/fga/check",
+            data={"resource_type": "document", "resource_id": doc_id, "relation": "can_view", "target": test_user_id},
+        )
+        if resp.status == 502:
+            pytest.skip("FGA check not operational")
+        assert resp.status == 200
+        _assert_fga_allowed(resp, False, "User should be denied after revoke")
+    finally:
+        # Cleanup: best-effort relation delete then doc delete
+        with contextlib.suppress(Exception):
+            admin_api_context.delete(
+                f"{backend_url}/api/fga/relations",
+                data={"resource_type": "document", "resource_id": doc_id, "relation": "viewer", "target": test_user_id},
+            )
+        _cleanup_doc(admin_api_context, backend_url, doc_id)
+
+
+# --- AC: Sequential relation revocation (no stale grants) ---
+
+
+def test_sequential_relation_revocation_no_stale_grants(admin_api_context: APIRequestContext, backend_url: str):
+    """Delete→check→re-create cycles: permission check must never return true after delete."""
+    resource_id = _unique_id("revoke-doc")
     target = _unique_id("user")
     base_body = {"resource_type": "document", "resource_id": resource_id, "relation": "viewer", "target": target}
 
@@ -332,7 +537,7 @@ def test_concurrent_relations_no_false_positive(admin_api_context: APIRequestCon
     assert resp.status == 201
 
     try:
-        # Rapid cycles: delete then immediately check — should never get allowed=true after delete
+        # Cycles: delete then immediately check — should never get allowed=true after delete
         for _ in range(3):
             # Delete
             resp, _ = _timed_request(admin_api_context, "DELETE", f"{backend_url}/api/fga/relations", data=base_body)
@@ -353,7 +558,7 @@ def test_concurrent_relations_no_false_positive(admin_api_context: APIRequestCon
             if resp.status == 502:
                 pytest.skip("FGA check not operational")
             assert resp.status == 200
-            assert resp.json()["allowed"] is False, "Should be denied after relation deleted"
+            _assert_fga_allowed(resp, False, "Should be denied after relation deleted")
 
             # Re-create for next cycle
             resp, _ = _timed_request(admin_api_context, "POST", f"{backend_url}/api/fga/relations", data=base_body)
@@ -372,11 +577,11 @@ def test_document_endpoints_reject_no_auth(api_context: APIRequestContext, backe
     endpoints = [
         ("POST", "/api/documents", {"title": "test", "content": "test"}),
         ("GET", "/api/documents", None),
-        ("GET", "/api/documents/nonexistent", None),
-        ("PUT", "/api/documents/nonexistent", {"title": "test"}),
-        ("DELETE", "/api/documents/nonexistent", None),
-        ("POST", "/api/documents/nonexistent/share", {"user_id": "u1", "relation": "viewer"}),
-        ("DELETE", "/api/documents/nonexistent/share/user1", None),
+        ("GET", f"/api/documents/{_DUMMY_UUID}", None),
+        ("PUT", f"/api/documents/{_DUMMY_UUID}", {"title": "test"}),
+        ("DELETE", f"/api/documents/{_DUMMY_UUID}", None),
+        ("POST", f"/api/documents/{_DUMMY_UUID}/share", {"user_id": "u1", "relation": "viewer"}),
+        ("DELETE", f"/api/documents/{_DUMMY_UUID}/share/user1", None),
     ]
     for method, path, payload in endpoints:
         url = f"{backend_url}{path}"
@@ -391,41 +596,3 @@ def test_document_endpoints_reject_no_auth(api_context: APIRequestContext, backe
         else:
             continue
         assert resp.status == 401, f"{method} {path} returned {resp.status}, expected 401"
-
-
-# --- AC: Schema update impact ---
-
-
-def test_schema_update_reflects_in_checks(admin_api_context: APIRequestContext, backend_url: str):
-    """Updating the FGA schema affects subsequent permission checks.
-
-    This test saves the current schema, verifies it can be read back, and confirms
-    that the schema endpoint works end-to-end. Full schema mutation testing (removing
-    relation types) is deferred because modifying the live schema could break other
-    concurrent tests.
-    """
-    # Read current schema
-    resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/fga/schema")
-    assert resp.status == 200
-    original_schema = resp.json().get("schema", "")
-
-    if not original_schema:
-        pytest.skip("No FGA schema configured — cannot test update impact")
-
-    # Re-save the same schema (idempotent — safe for concurrent test runs)
-    schema_str = original_schema if isinstance(original_schema, str) else str(original_schema)
-    resp, elapsed_ms = _timed_request(
-        admin_api_context,
-        "PUT",
-        f"{backend_url}/api/fga/schema",
-        data={"schema": schema_str},
-    )
-    # Schema update may fail if the format isn't what Descope expects
-    if resp.status in (400, 502):
-        pytest.skip(f"Schema update not supported in this project (status {resp.status})")
-    assert resp.status == 200, f"Schema update failed: {resp.status}"
-    assert elapsed_ms < MAX_API_RESPONSE_MS
-
-    # Verify read-back
-    resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/fga/schema")
-    assert resp.status == 200
