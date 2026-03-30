@@ -71,7 +71,8 @@ export default function FGAManagement() {
         return;
       }
       const data = await res.json();
-      setSchema(data.schema || "");
+      const rawSchema = data.schema;
+      setSchema(typeof rawSchema === 'object' ? JSON.stringify(rawSchema, null, 2) : (rawSchema || ""));
     } catch {
       toast.error("Failed to load FGA schema");
     } finally {
@@ -205,9 +206,11 @@ export default function FGAManagement() {
       } else {
         const detail = await parseErrorDetail(res);
         toast.error(detail || "Failed to check permission");
+        setCheckResult(null);
       }
     } catch {
       toast.error("Failed to check permission");
+      setCheckResult(null);
     } finally {
       setChecking(false);
     }
@@ -257,6 +260,7 @@ export default function FGAManagement() {
                       placeholder="e.g. document"
                       value={relResourceType}
                       onChange={(e) => setRelResourceType(e.target.value)}
+                      maxLength={200}
                       className="w-48"
                     />
                   </div>
@@ -267,6 +271,7 @@ export default function FGAManagement() {
                       placeholder="e.g. doc-123"
                       value={relResourceId}
                       onChange={(e) => setRelResourceId(e.target.value)}
+                      maxLength={200}
                       className="w-48"
                     />
                   </div>
@@ -334,6 +339,7 @@ export default function FGAManagement() {
                       placeholder="e.g. document"
                       value={createResourceType}
                       onChange={(e) => setCreateResourceType(e.target.value)}
+                      maxLength={200}
                       className="w-40"
                     />
                   </div>
@@ -344,6 +350,7 @@ export default function FGAManagement() {
                       placeholder="e.g. doc-123"
                       value={createResourceId}
                       onChange={(e) => setCreateResourceId(e.target.value)}
+                      maxLength={200}
                       className="w-40"
                     />
                   </div>
@@ -354,6 +361,7 @@ export default function FGAManagement() {
                       placeholder="e.g. viewer"
                       value={createRelation}
                       onChange={(e) => setCreateRelation(e.target.value)}
+                      maxLength={200}
                       className="w-40"
                     />
                   </div>
@@ -364,6 +372,7 @@ export default function FGAManagement() {
                       placeholder="e.g. user:abc123"
                       value={createTarget}
                       onChange={(e) => setCreateTarget(e.target.value)}
+                      maxLength={200}
                       className="w-48"
                     />
                   </div>
@@ -392,6 +401,7 @@ export default function FGAManagement() {
                       placeholder="e.g. document"
                       value={checkResourceType}
                       onChange={(e) => setCheckResourceType(e.target.value)}
+                      maxLength={200}
                       className="w-40"
                     />
                   </div>
@@ -402,6 +412,7 @@ export default function FGAManagement() {
                       placeholder="e.g. doc-123"
                       value={checkResourceId}
                       onChange={(e) => setCheckResourceId(e.target.value)}
+                      maxLength={200}
                       className="w-40"
                     />
                   </div>
@@ -412,6 +423,7 @@ export default function FGAManagement() {
                       placeholder="e.g. can_view"
                       value={checkRelation}
                       onChange={(e) => setCheckRelation(e.target.value)}
+                      maxLength={200}
                       className="w-40"
                     />
                   </div>
@@ -422,6 +434,7 @@ export default function FGAManagement() {
                       placeholder="e.g. user:abc123"
                       value={checkTarget}
                       onChange={(e) => setCheckTarget(e.target.value)}
+                      maxLength={200}
                       className="w-48"
                     />
                   </div>
