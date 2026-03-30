@@ -5,6 +5,11 @@ together, verifying that FGA relations are correctly created, checked, and clean
 throughout the document lifecycle.
 
 Requires DESCOPE_MANAGEMENT_KEY env var (for admin token via tenant-scoped access key).
+
+Known gaps (tracked):
+- Cross-tenant isolation (AC-13/14): requires second tenant fixture
+- Concurrent relation updates (AC-15): requires async test infrastructure
+- FGA compensation on DB failure: requires DB failure injection
 """
 
 import contextlib
@@ -282,6 +287,104 @@ def test_document_update_allowed_for_owner(admin_api_context: APIRequestContext,
         _cleanup_doc(admin_api_context, backend_url, doc_id)
 
 
+def test_permission_derivation_through_endpoints(admin_api_context: APIRequestContext, backend_url: str):
+    """Verify FGA permission derivation works end-to-end through actual document endpoints.
+
+    Creates a document (admin is owner), then verifies:
+    - Owner can PUT (requires can_edit) and DELETE (requires can_delete)
+    - FGA check confirms editor role derives can_view + can_edit but not can_delete
+    This proves require_fga enforces permissions through the app, not just the FGA API.
+    """
+    doc = _create_doc(admin_api_context, backend_url)
+    if doc is None:
+        pytest.skip("FGA not operational — document creation failed")
+    doc_id = doc["id"]
+
+    try:
+        # Owner can edit via PUT (require_fga checks can_edit)
+        resp, elapsed_ms = _timed_request(
+            admin_api_context,
+            "PUT",
+            f"{backend_url}/api/documents/{doc_id}",
+            data={"title": "Derivation Test Updated"},
+        )
+        assert resp.status == 200, f"Owner PUT should succeed (can_edit derived from owner), got {resp.status}"
+        assert elapsed_ms < MAX_API_RESPONSE_MS
+        assert resp.json()["title"] == "Derivation Test Updated"
+
+        # Verify FGA check confirms editor permissions are a proper subset of owner
+        # An editor target should have can_view and can_edit but NOT can_delete
+        editor_target = _unique_id("editor-user")
+        resp, _ = _timed_request(
+            admin_api_context,
+            "POST",
+            f"{backend_url}/api/fga/relations",
+            data={"resource_type": "document", "resource_id": doc_id, "relation": "editor", "target": editor_target},
+        )
+        if resp.status in (400, 502):
+            pytest.skip(f"FGA not operational for editor relation (status {resp.status})")
+        assert resp.status == 201
+
+        try:
+            # Editor should derive can_view and can_edit
+            for relation in ("can_view", "can_edit"):
+                check_data = {
+                    "resource_type": "document",
+                    "resource_id": doc_id,
+                    "relation": relation,
+                    "target": editor_target,
+                }
+                resp, _ = _timed_request(
+                    admin_api_context,
+                    "POST",
+                    f"{backend_url}/api/fga/check",
+                    data=check_data,
+                )
+                if resp.status == 502:
+                    pytest.skip("FGA check not operational")
+                assert resp.status == 200
+                _assert_fga_allowed(resp, True, f"Editor should derive {relation}")
+
+            # Editor should NOT derive can_delete
+            check_data = {
+                "resource_type": "document",
+                "resource_id": doc_id,
+                "relation": "can_delete",
+                "target": editor_target,
+            }
+            resp, _ = _timed_request(
+                admin_api_context,
+                "POST",
+                f"{backend_url}/api/fga/check",
+                data=check_data,
+            )
+            if resp.status == 502:
+                pytest.skip("FGA check not operational")
+            assert resp.status == 200
+            _assert_fga_allowed(resp, False, "Editor should NOT derive can_delete")
+        finally:
+            with contextlib.suppress(Exception):
+                rel_data = {
+                    "resource_type": "document",
+                    "resource_id": doc_id,
+                    "relation": "editor",
+                    "target": editor_target,
+                }
+                admin_api_context.delete(
+                    f"{backend_url}/api/fga/relations",
+                    data=rel_data,
+                )
+
+        # Owner can delete via DELETE (require_fga checks can_delete)
+        resp, elapsed_ms = _timed_request(admin_api_context, "DELETE", f"{backend_url}/api/documents/{doc_id}")
+        assert resp.status == 200, f"Owner DELETE should succeed (can_delete derived from owner), got {resp.status}"
+        assert elapsed_ms < MAX_API_RESPONSE_MS
+        doc_id = None  # Mark as already deleted so finally block skips cleanup
+    finally:
+        if doc_id is not None:
+            _cleanup_doc(admin_api_context, backend_url, doc_id)
+
+
 def test_document_fga_denies_without_relation(admin_api_context: APIRequestContext, backend_url: str):
     """Removing FGA owner relation causes document GET to be denied (403)."""
     doc = _create_doc(admin_api_context, backend_url)
@@ -381,37 +484,65 @@ def test_list_documents_returns_authorized(admin_api_context: APIRequestContext,
 
 
 def test_list_documents_excludes_unauthorized(admin_api_context: APIRequestContext, backend_url: str):
-    """GET /api/documents excludes documents the caller has no FGA relation for."""
-    # Create a doc with a unique resource ID directly via FGA (no owner relation for the caller)
-    phantom_id = _unique_id("phantom-doc")
-    # Create a viewer relation for a DIFFERENT user (not the admin)
-    other_user = _unique_id("other-user")
+    """GET /api/documents excludes documents the caller has lost FGA access to."""
+    # Create two real documents via the API (both get owner relations for the admin)
+    doc_a = _create_doc(admin_api_context, backend_url, title=_unique_id("keep-doc"))
+    if doc_a is None:
+        pytest.skip("FGA not operational — document creation failed")
+    doc_b = _create_doc(admin_api_context, backend_url, title=_unique_id("revoke-doc"))
+    if doc_b is None:
+        _cleanup_doc(admin_api_context, backend_url, doc_a["id"])
+        pytest.skip("FGA not operational — second document creation failed")
+
+    doc_a_id = doc_a["id"]
+    doc_b_id = doc_b["id"]
+
+    # Find the owner relation target for doc_b so we can revoke it
     resp, _ = _timed_request(
         admin_api_context,
-        "POST",
+        "GET",
         f"{backend_url}/api/fga/relations",
-        data={"resource_type": "document", "resource_id": phantom_id, "relation": "viewer", "target": other_user},
+        params={"resource_type": "document", "resource_id": doc_b_id},
     )
-    if resp.status in (400, 502):
-        pytest.skip(f"FGA not operational (status {resp.status})")
+    assert resp.status == 200
+    relations = resp.json().get("relations", [])
+    owner_rels = [r for r in relations if r.get("relationDefinition") == "owner"]
+    assert len(owner_rels) >= 1, "No owner relation found for doc_b"
+    owner_target = owner_rels[0]["target"]
 
     try:
+        # Remove the owner relation for doc_b (admin loses FGA access)
+        resp, _ = _timed_request(
+            admin_api_context,
+            "DELETE",
+            f"{backend_url}/api/fga/relations",
+            data={"resource_type": "document", "resource_id": doc_b_id, "relation": "owner", "target": owner_target},
+        )
+        assert resp.status == 200, f"Failed to delete owner relation for doc_b: {resp.status}"
+
+        # List documents — doc_a should appear, doc_b should NOT
         resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/documents")
         assert resp.status == 200
         documents = resp.json().get("documents", [])
         doc_ids = [d["id"] for d in documents]
-        assert phantom_id not in doc_ids, f"Document {phantom_id} should NOT appear (no FGA relation for caller)"
+        assert doc_a_id in doc_ids, f"Document {doc_a_id} (with owner relation) should appear in list"
+        assert doc_b_id not in doc_ids, f"Document {doc_b_id} (owner revoked) should NOT appear in list"
     finally:
+        # Re-create owner relation for doc_b so cleanup can delete it
         with contextlib.suppress(Exception):
-            admin_api_context.delete(
+            _timed_request(
+                admin_api_context,
+                "POST",
                 f"{backend_url}/api/fga/relations",
                 data={
                     "resource_type": "document",
-                    "resource_id": phantom_id,
-                    "relation": "viewer",
-                    "target": other_user,
+                    "resource_id": doc_b_id,
+                    "relation": "owner",
+                    "target": owner_target,
                 },
             )
+        _cleanup_doc(admin_api_context, backend_url, doc_a_id)
+        _cleanup_doc(admin_api_context, backend_url, doc_b_id)
 
 
 # --- AC: Share a document and verify access, then revoke ---
