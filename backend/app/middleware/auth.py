@@ -10,9 +10,14 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
 
     Accepts both OIDC tokens (from client credentials flow) and Descope session
     JWTs (from access key exchange, OTP, etc.). These use different issuer formats:
-      - OIDC: https://api.descope.com/{project_id}
-      - Session: https://api.descope.com/v1/apps/{project_id}
+      - OIDC / ID tokens: https://api.descope.com/{project_id}
+      - Session / access tokens: https://api.descope.com/v1/apps/{project_id}
     Both are signed by the same project JWKS keys.
+
+    Note: The dual-issuer behavior is non-compliant with OIDC specs (OpenID Connect
+    Core 3.1.3.7, Discovery 1.0 §3) which require the token ``iss`` claim to exactly
+    match the discovery document ``issuer``. We work around this by disabling PyJWT's
+    issuer check and validating manually against both known formats.
     """
 
     def __init__(self, app, descope_project_id: str, excluded_paths: set[str] | None = None):
