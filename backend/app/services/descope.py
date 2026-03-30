@@ -79,9 +79,12 @@ class DescopeManagementClient:
         return resp.json().get("tenants", [])
 
     async def load_tenant(self, tenant_id: str) -> dict:
-        """Load a single tenant by ID."""
-        resp = await self._request("/v1/mgmt/tenant/load", {"id": tenant_id})
-        return resp.json()
+        """Load a single tenant by ID via search endpoint."""
+        resp = await self._request("/v1/mgmt/tenant/search", {"tenantIds": [tenant_id]})
+        tenants = resp.json().get("tenants", [])
+        if not tenants:
+            return {}
+        return tenants[0]
 
     async def delete_tenant(self, tenant_id: str) -> None:
         """Delete a tenant by ID."""
@@ -109,8 +112,8 @@ class DescopeManagementClient:
         )
 
     async def load_user(self, user_id: str) -> dict:
-        """Load a user by login ID. Returns user object including customAttributes."""
-        resp = await self._request("/v1/mgmt/user/load", {"loginId": user_id})
+        """Load a user by userId (from JWT sub claim). Returns user object including customAttributes."""
+        resp = await self._request("/v1/mgmt/user/load", {"userId": user_id})
         return resp.json().get("user", {})
 
     async def update_user_custom_attribute(

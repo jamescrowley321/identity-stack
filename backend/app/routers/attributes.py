@@ -85,12 +85,24 @@ async def get_tenant_settings(tenant_id: str = Depends(get_tenant_id)):
     try:
         client = get_descope_client()
         tenant = await client.load_tenant(tenant_id)
+        if not tenant:
+            return {
+                "tenant_id": tenant_id,
+                "name": "",
+                "custom_attributes": {},
+            }
         return {
             "tenant_id": tenant_id,
             "name": tenant.get("name", ""),
             "custom_attributes": tenant.get("customAttributes", {}),
         }
     except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            return {
+                "tenant_id": tenant_id,
+                "name": "",
+                "custom_attributes": {},
+            }
         logger.warning("Descope API error loading tenant %s: %s", tenant_id, exc.response.status_code)
         raise HTTPException(status_code=502, detail="Failed to load tenant settings from identity provider")
 
