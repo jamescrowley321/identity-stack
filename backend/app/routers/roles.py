@@ -67,7 +67,8 @@ async def assign_roles(
         raise HTTPException(status_code=403, detail="Only owners can assign the owner role")
     try:
         client = get_descope_client()
-        await client.assign_roles(body.user_id, body.tenant_id, body.role_names)
+        login_id = await client.resolve_login_id(body.user_id)
+        await client.assign_roles(login_id, body.tenant_id, body.role_names)
         return {"status": "roles_assigned", "user_id": body.user_id, "role_names": body.role_names}
     except httpx.HTTPStatusError as exc:
         body = exc.response.text[:500]
@@ -93,7 +94,8 @@ async def remove_roles(
         raise HTTPException(status_code=403, detail="Only owners can remove the owner role")
     try:
         client = get_descope_client()
-        await client.remove_roles(body.user_id, body.tenant_id, body.role_names)
+        login_id = await client.resolve_login_id(body.user_id)
+        await client.remove_roles(login_id, body.tenant_id, body.role_names)
         return {"status": "roles_removed", "user_id": body.user_id, "role_names": body.role_names}
     except httpx.HTTPStatusError as exc:
         body = exc.response.text[:500]

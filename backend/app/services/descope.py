@@ -116,6 +116,21 @@ class DescopeManagementClient:
         resp = await self._request("/v1/mgmt/user/load", {"userId": user_id})
         return resp.json().get("user", {})
 
+    async def resolve_login_id(self, user_id: str) -> str:
+        """Resolve a userId (JWT sub) to the primary loginId required by mutation endpoints.
+
+        Descope Management API mutation endpoints (role assignment, attribute updates,
+        status changes) require loginId, not userId. This method loads the user and
+        returns their primary loginId.
+
+        Raises ValueError if the user has no loginIds.
+        """
+        user = await self.load_user(user_id)
+        login_ids = user.get("loginIds", [])
+        if not login_ids:
+            raise ValueError(f"User {user_id} has no loginIds")
+        return login_ids[0]
+
     async def update_user_custom_attribute(
         self, user_id: str, attribute_key: str, attribute_value: str | int | bool | float | None
     ) -> None:

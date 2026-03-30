@@ -14,14 +14,21 @@ class InviteUserRequest(BaseModel):
     role_names: list[str] = Field(default_factory=lambda: ["member"])
 
 
-async def _verify_user_tenant(user_id: str, tenant_id: str) -> dict:
-    """Load a user and verify they belong to the caller's tenant."""
+async def _verify_user_tenant(user_id: str, tenant_id: str) -> tuple[dict, str]:
+    """Load a user, verify tenant membership, return (user, login_id).
+
+    Descope mutation endpoints require loginId, but the frontend sends userId.
+    This resolves the loginId from the user object.
+    """
     client = get_descope_client()
     user = await client.load_user(user_id)
     user_tenants = [t.get("tenantId", "") for t in user.get("userTenants", [])] if user.get("userTenants") else []
     if tenant_id not in user_tenants:
         raise HTTPException(status_code=403, detail="User does not belong to your tenant")
-    return user
+    login_ids = user.get("loginIds", [])
+    if not login_ids:
+        raise HTTPException(status_code=400, detail="User has no login identifiers")
+    return user, login_ids[0]
 
 
 @router.get("/members")
@@ -58,9 +65,9 @@ async def deactivate_member(
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
     """Deactivate a member. They will not be able to log in."""
-    await _verify_user_tenant(user_id, tenant_id)
+    _, login_id = await _verify_user_tenant(user_id, tenant_id)
     client = get_descope_client()
-    await client.update_user_status(user_id, "disabled")
+    await client.update_user_status(login_id, "disabled")
     return {"status": "deactivated", "user_id": user_id}
 
 
@@ -71,9 +78,9 @@ async def activate_member(
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
     """Reactivate a previously deactivated member."""
-    await _verify_user_tenant(user_id, tenant_id)
+    _, login_id = await _verify_user_tenant(user_id, tenant_id)
     client = get_descope_client()
-    await client.update_user_status(user_id, "enabled")
+    await client.update_user_status(login_id, "enabled")
     return {"status": "activated", "user_id": user_id}
 
 
@@ -84,7 +91,7 @@ async def remove_member(
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
     """Remove a member from the current tenant."""
-    await _verify_user_tenant(user_id, tenant_id)
+    _, login_id = await _verify_user_tenant(user_id, tenant_id)
     client = get_descope_client()
-    await client.remove_user_from_tenant(user_id, tenant_id)
+    await client.remove_user_from_tenant(login_id, tenant_id)
     return {"status": "removed", "user_id": user_id}
