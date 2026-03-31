@@ -7,6 +7,7 @@ import pytest
 
 # Repo root is three levels up from this test file
 REPO_ROOT = Path(__file__).resolve().parents[3]
+assert (REPO_ROOT / "Makefile").is_file(), f"REPO_ROOT resolved incorrectly: {REPO_ROOT}"
 TYK_DIR = REPO_ROOT / "tyk"
 
 
@@ -62,30 +63,39 @@ class TestNoHardcodedSecret:
     def test_secret_uses_env_var(self):
         raw = (TYK_DIR / "tyk.conf").read_text()
         conf = json.loads(raw)
-        # Must reference an env var, not a static secret
-        assert conf["secret"].startswith("$"), "secret must use env var substitution (e.g. ${TYK_GW_SECRET})"
+        # Tyk expands ${VAR} in config files via os.ExpandEnv at load time.
+        # Must be the exact expected env var reference.
+        assert conf["secret"] == "${TYK_GW_SECRET}", f"secret must be '${{TYK_GW_SECRET}}', got '{conf['secret']}'"
 
     def test_no_literal_secret_value(self):
         raw = (TYK_DIR / "tyk.conf").read_text()
         # Ensure no common hardcoded secret patterns
         lower = raw.lower()
-        for bad in ["password", "changeme", "admin", "default"]:
+        for bad in ["password", "changeme", "admin", "default", "secret1", "example", "test"]:
             assert bad not in lower, f"tyk.conf contains suspicious literal: {bad}"
 
 
 class TestPoliciesJson:
     """AC-4: policies.json is valid JSON with default skeleton."""
 
-    def test_valid_json(self):
+    @pytest.fixture
+    def policies(self):
         with open(TYK_DIR / "policies" / "policies.json") as f:
-            data = json.load(f)
-        assert isinstance(data, dict)
+            return json.load(f)
 
-    def test_has_data_key(self):
-        with open(TYK_DIR / "policies" / "policies.json") as f:
-            data = json.load(f)
-        assert "data" in data
-        assert isinstance(data["data"], list)
+    def test_valid_json(self, policies):
+        assert isinstance(policies, dict)
+
+    def test_has_data_key(self, policies):
+        assert "data" in policies
+        assert isinstance(policies["data"], list)
+
+
+class TestAppsGitkeep:
+    """AC-1: .gitkeep preserves empty apps directory for future API definitions."""
+
+    def test_gitkeep_exists(self):
+        assert (TYK_DIR / "apps" / ".gitkeep").is_file()
 
 
 class TestMiddlewareGitkeep:
@@ -101,8 +111,12 @@ class TestTykIsolation:
     def test_no_backend_imports_reference_tyk(self):
         """No Python file in backend/app/ imports or references the tyk/ directory."""
         app_dir = REPO_ROOT / "backend" / "app"
-        for py_file in app_dir.rglob("*.py"):
-            content = py_file.read_text()
+        if not app_dir.exists():
+            pytest.skip("backend/app not found")
+        py_files = list(app_dir.rglob("*.py"))
+        assert py_files, f"No .py files found in {app_dir} — vacuous pass"
+        for py_file in py_files:
+            content = py_file.read_text(encoding="utf-8", errors="replace")
             assert "tyk/" not in content and "tyk\\" not in content, f"{py_file.relative_to(REPO_ROOT)} references tyk/"
 
     def test_no_frontend_references_tyk(self):
@@ -112,7 +126,7 @@ class TestTykIsolation:
             pytest.skip("frontend/src not found")
         for src_file in frontend_src.rglob("*"):
             if src_file.is_file() and src_file.suffix in (".ts", ".tsx", ".js", ".jsx"):
-                content = src_file.read_text()
+                content = src_file.read_text(encoding="utf-8", errors="replace")
                 assert "tyk/" not in content and "tyk\\" not in content, (
                     f"{src_file.relative_to(REPO_ROOT)} references tyk/"
                 )
