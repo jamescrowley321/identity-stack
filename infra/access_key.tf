@@ -11,8 +11,8 @@ resource "descope_access_key" "acme_api" {
   name        = "Acme API Key"
   description = "Programmatic access for Acme Corp integrations"
 
-  key_tenants {
+  key_tenants = [{
     tenant_id = descope_tenant.acme.id
     roles     = [descope_role.viewer.name]
-  }
+  }]
 }

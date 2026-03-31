@@ -12,8 +12,8 @@ type user
 type document
   relation owner: user
   relation editor: user
-  relation viewer: user | editor | owner
-  permission can_view: viewer
+  relation viewer: user
+  permission can_view: viewer | editor | owner
   permission can_edit: editor | owner
   permission can_delete: owner
 EOT
