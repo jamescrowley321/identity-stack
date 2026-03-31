@@ -5,6 +5,12 @@ variable "descope_management_key" {
   default     = ""
 }
 
+variable "e2e_test_email" {
+  description = "Email address for E2E test user (must have admin role in Acme tenant)"
+  type        = string
+  default     = ""
+}
+
 # OAuth2 - Google
 variable "google_oauth_client_id" {
   description = "Google OAuth2 client ID (leave empty to disable)"

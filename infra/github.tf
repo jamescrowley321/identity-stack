@@ -51,3 +51,21 @@ resource "github_actions_secret" "descope_expired_token" {
   secret_name     = "DESCOPE_EXPIRED_TOKEN"
   plaintext_value = trimspace(data.local_file.expired_token.content)
 }
+
+resource "github_actions_secret" "descope_management_key" {
+  repository      = var.github_repository
+  secret_name     = "DESCOPE_MANAGEMENT_KEY"
+  plaintext_value = var.descope_management_key
+}
+
+resource "github_actions_secret" "e2e_test_email" {
+  repository      = var.github_repository
+  secret_name     = "E2E_TEST_EMAIL"
+  plaintext_value = var.e2e_test_email
+}
+
+resource "github_actions_secret" "e2e_test_tenant_id" {
+  repository      = var.github_repository
+  secret_name     = "E2E_TEST_TENANT_ID"
+  plaintext_value = descope_tenant.acme.id
+}
