@@ -46,9 +46,11 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
             config = TokenValidationConfig(
                 perform_disco=True,
                 audience=self.descope_project_id,
-                # Disable PyJWT's strict issuer check; we validate against both
-                # accepted Descope issuer formats manually below.
-                options={"verify_iss": False},
+                # Disable PyJWT's strict issuer and audience checks; we
+                # validate manually below. Descope session tokens (from
+                # access key exchange) use a different issuer format and
+                # omit the aud claim entirely.
+                options={"verify_iss": False, "verify_aud": False},
             )
             claims = await validate_token(
                 jwt=token,
@@ -61,6 +63,13 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
             # expected value)
             if self.descope_project_id and "iss" in claims and claims["iss"] not in self._accepted_issuers:
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+            # Validate audience when present — OIDC tokens include aud,
+            # but Descope session tokens (from access key exchange) do not.
+            if self.descope_project_id and "aud" in claims:
+                aud = claims["aud"]
+                valid_aud = aud == self.descope_project_id or (isinstance(aud, list) and self.descope_project_id in aud)
+                if not valid_aud:
+                    return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
             # For access key tokens: the exchange endpoint sets `tenants`
             # but not `dct` (current tenant).  When there is exactly one
             # tenant association, infer `dct` so downstream RBAC checks
