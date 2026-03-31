@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, UniqueConstraint
+from sqlalchemy import Column, DateTime, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -19,7 +19,10 @@ class User(SQLModel, table=True):
     family_name: str | None = None
     status: str = Field(default="active")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=True), nullable=False, onupdate=func.now()),
+    )
 
 
 class IdPLink(SQLModel, table=True):

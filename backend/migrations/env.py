@@ -28,7 +28,10 @@ target_metadata = SQLModel.metadata
 
 
 def get_url() -> str:
-    return os.getenv("DATABASE_URL", config.get_main_option("sqlalchemy.url"))
+    url = os.getenv("DATABASE_URL") or config.get_main_option("sqlalchemy.url")
+    if not url:
+        raise ValueError("DATABASE_URL env var or sqlalchemy.url in alembic.ini must be set")
+    return url
 
 
 def run_migrations_offline() -> None:

@@ -4,6 +4,8 @@ Revision ID: 0001
 Revises:
 Create Date: 2026-03-31
 
+NOTE: For databases that already have these tables (e.g. existing deployments),
+run `alembic stamp 0001` to mark this migration as applied without executing it.
 """
 
 from collections.abc import Sequence
