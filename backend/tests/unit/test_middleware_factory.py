@@ -116,9 +116,27 @@ class TestDeploymentModeImportTime:
             importlib.reload(factory_mod)
             assert factory_mod.DEPLOYMENT_MODE == "standalone"
 
-        # Change env without reloading — value should remain "standalone"
-        os.environ["DEPLOYMENT_MODE"] = "gateway"
-        assert factory_mod.DEPLOYMENT_MODE == "standalone"
+            # Change env without reloading — value should remain "standalone"
+            with patch.dict(os.environ, {"DEPLOYMENT_MODE": "gateway"}):
+                assert factory_mod.DEPLOYMENT_MODE == "standalone"
+
+
+class TestDeploymentModeWhitespace:
+    """Edge case: whitespace around DEPLOYMENT_MODE value is stripped."""
+
+    def test_strips_trailing_whitespace(self):
+        with patch.dict(os.environ, {"DEPLOYMENT_MODE": "standalone  "}):
+            import app.middleware.factory as factory_mod
+
+            importlib.reload(factory_mod)
+            assert factory_mod.DEPLOYMENT_MODE == "standalone"
+
+    def test_strips_leading_whitespace(self):
+        with patch.dict(os.environ, {"DEPLOYMENT_MODE": "  gateway"}):
+            import app.middleware.factory as factory_mod
+
+            importlib.reload(factory_mod)
+            assert factory_mod.DEPLOYMENT_MODE == "gateway"
 
 
 class TestConfigureMiddleware:
@@ -155,6 +173,23 @@ class TestConfigureMiddleware:
             assert len(test_app.user_middleware) == 6
 
 
+class TestDoubleCallProtection:
+    """configure_middleware() is idempotent — second call is a no-op."""
+
+    def test_double_call_does_not_duplicate_middleware(self):
+        with patch.dict(os.environ, {"DEPLOYMENT_MODE": "standalone"}):
+            import app.middleware.factory as factory_mod
+
+            importlib.reload(factory_mod)
+
+            test_app = FastAPI()
+            factory_mod.configure_middleware(test_app)
+            first_count = len(test_app.user_middleware)
+
+            factory_mod.configure_middleware(test_app)
+            assert len(test_app.user_middleware) == first_count
+
+
 class TestStartupLogging:
     """FR-20: INFO log at startup with mode and middleware list."""
 
@@ -171,7 +206,7 @@ class TestStartupLogging:
             assert any("mode=standalone" in record.message for record in caplog.records)
             assert any("ProxyHeaders" in record.message for record in caplog.records)
 
-    def test_logs_gateway_mode(self, caplog):
+    def test_logs_gateway_mode_with_exclusions(self, caplog):
         with patch.dict(os.environ, {"DEPLOYMENT_MODE": "gateway"}):
             import app.middleware.factory as factory_mod
 
@@ -182,6 +217,8 @@ class TestStartupLogging:
                 factory_mod.configure_middleware(test_app)
 
             assert any("mode=gateway" in record.message for record in caplog.records)
+            assert any("excluded_in_story_2.2" in record.message for record in caplog.records)
+            assert any("TokenValidationMiddleware" in record.message for record in caplog.records)
 
 
 class TestV2UpgradeComment:

@@ -24,10 +24,13 @@ logger = logging.getLogger(__name__)
 
 _VALID_MODES = ("standalone", "gateway")
 
-DEPLOYMENT_MODE: str = os.getenv("DEPLOYMENT_MODE", "standalone")
+DEPLOYMENT_MODE: str = os.getenv("DEPLOYMENT_MODE", "standalone").strip()
 
 if DEPLOYMENT_MODE not in _VALID_MODES:
     raise ValueError(f"Invalid DEPLOYMENT_MODE={DEPLOYMENT_MODE!r}. Valid values: {', '.join(_VALID_MODES)}")
+
+# Middleware that will be conditionally excluded in gateway mode (Story 2.2).
+_GATEWAY_EXCLUDED = {"TokenValidationMiddleware", "SlowAPIMiddleware"}
 
 
 def configure_middleware(app: FastAPI) -> None:
@@ -40,7 +43,12 @@ def configure_middleware(app: FastAPI) -> None:
     Conditional assembly (skip TokenValidation & SlowAPI in gateway mode)
     is deferred to Story 2.2.
     """
-    trusted_hosts = os.getenv("TRUSTED_PROXY_HOSTS", "127.0.0.1").split(",")
+    if getattr(app, "_middleware_configured", False):
+        return
+    app._middleware_configured = True
+
+    raw_hosts = os.getenv("TRUSTED_PROXY_HOSTS", "127.0.0.1")
+    trusted_hosts = [h.strip() for h in raw_hosts.split(",") if h.strip()] or ["127.0.0.1"]
 
     # 1. CORS — innermost
     app.add_middleware(
@@ -72,16 +80,19 @@ def configure_middleware(app: FastAPI) -> None:
     app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=trusted_hosts)
 
     # --- Startup log ---
-    middleware_names = [
-        "ProxyHeaders",
-        "CorrelationId",
-        "SecurityHeaders",
-        "SlowAPI",
-        "TokenValidation",
-        "CORS",
-    ]
-    logger.info(
-        "Middleware configured — mode=%s, stack=%s",
-        DEPLOYMENT_MODE,
-        middleware_names,
-    )
+    middleware_names = [m.cls.__name__ for m in reversed(app.user_middleware)]
+    if DEPLOYMENT_MODE == "gateway":
+        included = [n for n in middleware_names if n not in _GATEWAY_EXCLUDED]
+        excluded = [n for n in middleware_names if n in _GATEWAY_EXCLUDED]
+        logger.info(
+            "Middleware configured — mode=%s, included=%s, excluded_in_story_2.2=%s",
+            DEPLOYMENT_MODE,
+            included,
+            excluded,
+        )
+    else:
+        logger.info(
+            "Middleware configured — mode=%s, stack=%s",
+            DEPLOYMENT_MODE,
+            middleware_names,
+        )
