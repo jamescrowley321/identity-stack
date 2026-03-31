@@ -125,3 +125,85 @@ resource "descope_role" "viewer" {
     descope_permission.documents_read.name,
   ]
 }
+
+# Import pre-existing roles into state
+import {
+  to = descope_role.owner
+  id = "owner"
+}
+
+import {
+  to = descope_role.admin
+  id = "admin"
+}
+
+import {
+  to = descope_role.member
+  id = "member"
+}
+
+import {
+  to = descope_role.viewer
+  id = "viewer"
+}
+
+# Import pre-existing permissions into state
+import {
+  to = descope_permission.projects_create
+  id = "projects.create"
+}
+
+import {
+  to = descope_permission.projects_read
+  id = "projects.read"
+}
+
+import {
+  to = descope_permission.projects_update
+  id = "projects.update"
+}
+
+import {
+  to = descope_permission.projects_delete
+  id = "projects.delete"
+}
+
+import {
+  to = descope_permission.members_invite
+  id = "members.invite"
+}
+
+import {
+  to = descope_permission.members_remove
+  id = "members.remove"
+}
+
+import {
+  to = descope_permission.members_update_role
+  id = "members.update_role"
+}
+
+import {
+  to = descope_permission.documents_read
+  id = "documents.read"
+}
+
+import {
+  to = descope_permission.documents_write
+  id = "documents.write"
+}
+
+import {
+  to = descope_permission.documents_delete
+  id = "documents.delete"
+}
+
+import {
+  to = descope_permission.settings_manage
+  id = "settings.manage"
+}
+
+import {
+  to = descope_permission.billing_manage
+  id = "billing.manage"
+}

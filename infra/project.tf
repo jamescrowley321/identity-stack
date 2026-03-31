@@ -21,7 +21,7 @@ resource "descope_project" "main" {
     prevent_destroy = true
   }
 
-  project_settings {
+  project_settings = {
     refresh_token_rotation              = true
     session_token_expiration            = var.session_token_expiration
     refresh_token_expiration            = var.refresh_token_expiration
