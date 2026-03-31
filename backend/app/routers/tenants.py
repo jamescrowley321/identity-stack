@@ -3,7 +3,8 @@ import logging
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlmodel import Session, select
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies.auth import get_claims
 from app.dependencies.tenant import get_tenant_claims, get_tenant_id
@@ -88,14 +89,15 @@ async def get_current_tenant(
 async def list_tenant_resources(
     tenant_id: str,
     tenant_claims: dict = Depends(get_tenant_claims),
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_session),
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ):
     """List resources scoped to a tenant. Only accessible if user is a member."""
     _verify_tenant_membership(tenant_id, tenant_claims)
     statement = select(TenantResource).where(TenantResource.tenant_id == tenant_id).offset(offset).limit(limit)
-    resources = session.exec(statement).all()
+    result = await session.execute(statement)
+    resources = result.scalars().all()
     return {"resources": [r.model_dump() for r in resources]}
 
 
@@ -104,12 +106,12 @@ async def create_tenant_resource(
     tenant_id: str,
     body: CreateResourceRequest,
     tenant_claims: dict = Depends(get_tenant_claims),
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_session),
 ):
     """Create a resource scoped to a tenant. Only accessible if user is a member."""
     _verify_tenant_membership(tenant_id, tenant_claims)
     resource = TenantResource(tenant_id=tenant_id, name=body.name, description=body.description)
     session.add(resource)
-    session.commit()
-    session.refresh(resource)
+    await session.commit()
+    await session.refresh(resource)
     return resource.model_dump()

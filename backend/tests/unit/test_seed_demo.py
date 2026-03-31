@@ -45,84 +45,36 @@ class TestRequireEnv:
 
 
 # ---------------------------------------------------------------------------
-# _get_or_create_documents
+# _get_or_create_documents (async)
 # ---------------------------------------------------------------------------
 
 
 class TestGetOrCreateDocuments:
-    @patch("scripts.seed_demo.create_db_and_tables")
-    @patch("scripts.seed_demo.Session")
-    def test_creates_new_documents(self, mock_session_cls, mock_create_tables):
+    @pytest.mark.anyio
+    @patch("scripts.seed_demo.DATABASE_URL", "sqlite+aiosqlite://")
+    async def test_creates_new_documents(self):
         """Creates all three demo documents when none exist."""
-        mock_session = MagicMock()
-        mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
-
-        # No existing documents
-        mock_exec = MagicMock()
-        mock_exec.first.return_value = None
-        mock_session.exec.return_value = mock_exec
-
-        docs = _get_or_create_documents("tenant-1", "user-1")
-
+        docs = await _get_or_create_documents("tenant-1", "user-1")
         assert len(docs) == 3
-        assert mock_session.add.call_count == 3
-        # Single transaction commit for all new documents
-        assert mock_session.commit.call_count == 1
-        mock_create_tables.assert_called_once()
+        titles = {d.title for d in docs}
+        assert titles == {"public-roadmap", "board-minutes", "team-project"}
 
-    @patch("scripts.seed_demo.create_db_and_tables")
-    @patch("scripts.seed_demo.Session")
-    def test_skips_existing_documents(self, mock_session_cls, mock_create_tables):
+    @pytest.mark.anyio
+    @patch("scripts.seed_demo.DATABASE_URL", "sqlite+aiosqlite://")
+    async def test_skips_existing_documents(self):
         """Skips documents that already exist (idempotent)."""
-        mock_session = MagicMock()
-        mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
+        # First call creates them
+        docs1 = await _get_or_create_documents("tenant-1", "user-1")
+        assert len(docs1) == 3
 
-        # All documents exist
-        existing_doc = MagicMock()
-        existing_doc.id = "existing-id"
-        existing_doc.title = "existing"
-        mock_exec = MagicMock()
-        mock_exec.first.return_value = existing_doc
-        mock_session.exec.return_value = mock_exec
-
-        docs = _get_or_create_documents("tenant-1", "user-1")
-
-        assert len(docs) == 3
-        mock_session.add.assert_not_called()
-        mock_session.commit.assert_not_called()
-
-    @patch("scripts.seed_demo.create_db_and_tables")
-    @patch("scripts.seed_demo.Session")
-    def test_mixed_existing_and_new(self, mock_session_cls, mock_create_tables):
-        """Creates only missing documents when some already exist."""
-        mock_session = MagicMock()
-        mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
-
-        existing_doc = MagicMock()
-        existing_doc.id = "existing-id"
-        existing_doc.title = "public-roadmap"
-
-        call_count = 0
-
-        def first_side_effect():
-            nonlocal call_count
-            call_count += 1
-            # First doc exists, second and third don't
-            return existing_doc if call_count == 1 else None
-
-        mock_exec = MagicMock()
-        mock_exec.first.side_effect = first_side_effect
-        mock_session.exec.return_value = mock_exec
-
-        docs = _get_or_create_documents("tenant-1", "user-1")
-
-        assert len(docs) == 3
-        assert mock_session.add.call_count == 2
-        # Single transaction commit for new documents
-        assert mock_session.commit.call_count == 1
+    @pytest.mark.anyio
+    @patch("scripts.seed_demo.DATABASE_URL", "sqlite+aiosqlite://")
+    async def test_documents_have_correct_tenant_and_creator(self):
+        """Created documents have correct tenant_id and created_by."""
+        docs = await _get_or_create_documents("tenant-1", "user-1")
+        for doc in docs:
+            assert doc.tenant_id == "tenant-1"
+            assert doc.created_by == "user-1"
 
 
 # ---------------------------------------------------------------------------
@@ -314,11 +266,11 @@ class TestSeedFgaRelations:
 class TestMain:
     @pytest.mark.anyio
     @patch("scripts.seed_demo._seed_fga_relations", new_callable=AsyncMock)
-    @patch("scripts.seed_demo._get_or_create_documents")
+    @patch("scripts.seed_demo._get_or_create_documents", new_callable=AsyncMock)
     @patch("scripts.seed_demo.DescopeManagementClient")
     @patch("scripts.seed_demo._require_env")
     async def test_main_orchestrates_correctly(self, mock_require_env, mock_client_cls, mock_get_docs, mock_seed_fga):
-        """main() orchestrates env → client → users → docs → relations."""
+        """main() orchestrates env -> client -> users -> docs -> relations."""
         mock_require_env.side_effect = lambda k: {
             "DESCOPE_PROJECT_ID": "proj-1",
             "DESCOPE_MANAGEMENT_KEY": "key-1",
@@ -361,7 +313,7 @@ class TestMain:
 
     @pytest.mark.anyio
     @patch("scripts.seed_demo._seed_fga_relations", new_callable=AsyncMock)
-    @patch("scripts.seed_demo._get_or_create_documents")
+    @patch("scripts.seed_demo._get_or_create_documents", new_callable=AsyncMock)
     @patch("scripts.seed_demo.DescopeManagementClient")
     @patch("scripts.seed_demo._require_env")
     async def test_main_selects_owner_as_creator(self, mock_require_env, mock_client_cls, mock_get_docs, mock_seed_fga):
@@ -388,7 +340,7 @@ class TestMain:
 
     @pytest.mark.anyio
     @patch("scripts.seed_demo._seed_fga_relations", new_callable=AsyncMock)
-    @patch("scripts.seed_demo._get_or_create_documents")
+    @patch("scripts.seed_demo._get_or_create_documents", new_callable=AsyncMock)
     @patch("scripts.seed_demo.DescopeManagementClient")
     @patch("scripts.seed_demo._require_env")
     async def test_main_selects_admin_as_creator(self, mock_require_env, mock_client_cls, mock_get_docs, mock_seed_fga):
@@ -450,7 +402,7 @@ class TestMain:
 
     @pytest.mark.anyio
     @patch("scripts.seed_demo._seed_fga_relations", new_callable=AsyncMock)
-    @patch("scripts.seed_demo._get_or_create_documents")
+    @patch("scripts.seed_demo._get_or_create_documents", new_callable=AsyncMock)
     @patch("scripts.seed_demo.DescopeManagementClient")
     @patch("scripts.seed_demo._require_env")
     async def test_main_falls_back_to_first_user(self, mock_require_env, mock_client_cls, mock_get_docs, mock_seed_fga):

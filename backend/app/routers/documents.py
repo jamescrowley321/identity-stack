@@ -4,7 +4,8 @@ from typing import Annotated, Literal
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from pydantic import BaseModel, Field
-from sqlmodel import Session, select
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies.fga import extract_user_id, require_fga
 from app.dependencies.tenant import get_tenant_id
@@ -55,7 +56,7 @@ async def create_document(
     request: Request,
     body: CreateDocumentRequest,
     tenant_id: str = Depends(get_tenant_id),
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_session),
 ):
     """Create a document. FGA owner relation is created before DB commit (compensation on failure)."""
     user_id = extract_user_id(request)
@@ -83,8 +84,8 @@ async def create_document(
     # DB commit second — compensate FGA on failure
     try:
         session.add(document)
-        session.commit()
-        session.refresh(document)
+        await session.commit()
+        await session.refresh(document)
     except Exception as exc:
         logger.warning("DB commit failed for doc %s, compensating FGA relation", document.id)
         try:
@@ -100,7 +101,7 @@ async def create_document(
 async def list_documents(
     request: Request,
     tenant_id: str = Depends(get_tenant_id),
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_session),
 ):
     """List documents the caller can view, filtered by tenant."""
     user_id = extract_user_id(request)
@@ -128,17 +129,17 @@ async def list_documents(
     if not doc_ids:
         return {"documents": []}
 
-    # Batch queries to stay within SQLite variable limit
+    # Batch queries to stay within DB variable limit
     documents = []
     for i in range(0, len(doc_ids), _SQLITE_BATCH_SIZE):
         batch = doc_ids[i : i + _SQLITE_BATCH_SIZE]
-        docs = session.exec(
+        result = await session.execute(
             select(Document).where(
                 Document.id.in_(batch),
                 Document.tenant_id == tenant_id,
             )
-        ).all()
-        documents.extend(docs)
+        )
+        documents.extend(result.scalars().all())
 
     return {"documents": [doc.model_dump() for doc in documents]}
 
@@ -148,10 +149,10 @@ async def get_document(
     document_id: DocumentId,
     user_id: str = Depends(require_fga("document", "can_view")),
     tenant_id: str = Depends(get_tenant_id),
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_session),
 ):
     """Get a single document. FGA can_view enforced via dependency."""
-    document = session.get(Document, document_id)
+    document = await session.get(Document, document_id)
     if not document or document.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Document not found")
     return document.model_dump()
@@ -165,10 +166,10 @@ async def update_document(
     body: UpdateDocumentRequest,
     user_id: str = Depends(require_fga("document", "can_edit")),
     tenant_id: str = Depends(get_tenant_id),
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_session),
 ):
     """Update a document. FGA can_edit enforced via dependency."""
-    document = session.get(Document, document_id)
+    document = await session.get(Document, document_id)
     if not document or document.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Document not found")
     if body.title is None and body.content is None:
@@ -178,8 +179,8 @@ async def update_document(
     if body.content is not None:
         document.content = body.content
     session.add(document)
-    session.commit()
-    session.refresh(document)
+    await session.commit()
+    await session.refresh(document)
     return document.model_dump()
 
 
@@ -190,10 +191,10 @@ async def delete_document(
     document_id: DocumentId,
     user_id: str = Depends(require_fga("document", "can_delete")),
     tenant_id: str = Depends(get_tenant_id),
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_session),
 ):
     """Delete a document. FGA relations cleaned up first; abort on FGA failure."""
-    document = session.get(Document, document_id)
+    document = await session.get(Document, document_id)
     if not document or document.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -228,8 +229,8 @@ async def delete_document(
 
     # DB delete — compensate FGA on failure by re-creating deleted relations
     try:
-        session.delete(document)
-        session.commit()
+        await session.delete(document)
+        await session.commit()
     except Exception as exc:
         logger.error(
             "DB delete failed for doc %s after FGA cleanup — attempting compensation",
@@ -258,10 +259,10 @@ async def share_document(
     body: ShareDocumentRequest,
     user_id: str = Depends(require_fga("document", "owner")),
     tenant_id: str = Depends(get_tenant_id),
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_session),
 ):
     """Share a document with another user. Only the owner can share."""
-    document = session.get(Document, document_id)
+    document = await session.get(Document, document_id)
     if not document or document.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -327,10 +328,10 @@ async def revoke_share(
     target_user_id: str,
     user_id: str = Depends(require_fga("document", "owner")),
     tenant_id: str = Depends(get_tenant_id),
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_session),
 ):
     """Revoke a user's access to a document. Deletes both viewer and editor relations."""
-    document = session.get(Document, document_id)
+    document = await session.get(Document, document_id)
     if not document or document.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Document not found")
 

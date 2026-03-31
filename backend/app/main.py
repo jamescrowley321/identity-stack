@@ -14,7 +14,7 @@ from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.correlation import CorrelationIdMiddleware
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.middleware.security import SecurityHeadersMiddleware
-from app.models.database import create_db_and_tables
+from app.models.database import engine as db_engine
 from app.routers import (
     accesskeys,
     attributes,
@@ -36,12 +36,12 @@ TRUSTED_PROXY_HOSTS = os.getenv("TRUSTED_PROXY_HOSTS", "127.0.0.1").split(",")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
-    create_db_and_tables()
     http_client = httpx.AsyncClient(timeout=30.0)
     init_descope_client(http_client=http_client)
     yield
     await http_client.aclose()
     shutdown_descope_client()
+    await db_engine.dispose()
 
 
 app = FastAPI(title="Descope SaaS Starter API", docs_url=None, redoc_url="/redoc", lifespan=lifespan)
