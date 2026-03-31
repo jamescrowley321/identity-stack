@@ -1,7 +1,7 @@
 [project]
-name = "descope-saas-starter-backend"
+name = "identity-stack-backend"
 version = "0.1.0"
-description = "FastAPI backend for Descope SaaS Starter Kit"
+description = "FastAPI backend for Identity Stack"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115.0,<1",

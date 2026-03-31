@@ -334,60 +334,6 @@ wheels = [
 ]
 
 [[package]]
-name = "descope-saas-starter-backend"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "fastapi" },
-    { name = "httpx" },
-    { name = "py-identity-model" },
-    { name = "pydantic", extra = ["email"] },
-    { name = "python-json-logger" },
-    { name = "slowapi" },
-    { name = "sqlmodel" },
-    { name = "uvicorn", extra = ["standard"] },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "anyio", extra = ["trio"] },
-    { name = "httpx" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pip-audit" },
-    { name = "pytest-playwright" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "anyio", extras = ["trio"], marker = "extra == 'dev'", specifier = ">=4.0" },
-    { name = "fastapi", specifier = ">=0.115.0,<1" },
-    { name = "httpx", specifier = ">=0.28,<1" },
-    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28" },
-    { name = "py-identity-model", specifier = ">=2.1.0,<3" },
-    { name = "pydantic", extras = ["email"], specifier = ">=2.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
-    { name = "python-json-logger", specifier = ">=3.0,<4" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
-    { name = "slowapi", specifier = ">=0.1.9,<1" },
-    { name = "sqlmodel", specifier = ">=0.0.22,<1" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0,<1" },
-]
-provides-extras = ["dev"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pip-audit", specifier = ">=2.9" },
-    { name = "pytest-playwright", specifier = ">=0.7.2" },
-]
-
-[[package]]
 name = "dnspython"
 version = "2.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -541,6 +487,62 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b1/df/48c586a5fe32a0f01324ee087459e112ebb7224f646c0b5023f5e79e9956/httpx-0.28.1.tar.gz", hash = "sha256:75e98c5f16b0f35b567856f597f06ff2270a374470a5c2392242528e3e3e42fc", size = 141406, upload-time = "2024-12-06T15:37:23.222Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2a/39/e50c7c3a983047577ee07d2a9e53faf5a69493943ec3f6a384bdc792deb2/httpx-0.28.1-py3-none-any.whl", hash = "sha256:d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad", size = 73517, upload-time = "2024-12-06T15:37:21.509Z" },
+]
+
+[[package]]
+name = "identity-stack-backend"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "py-identity-model" },
+    { name = "pydantic", extra = ["email"] },
+    { name = "python-json-logger" },
+    { name = "scalar-fastapi" },
+    { name = "slowapi" },
+    { name = "sqlmodel" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "anyio", extra = ["trio"] },
+    { name = "httpx" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pip-audit" },
+    { name = "pytest-playwright" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anyio", extras = ["trio"], marker = "extra == 'dev'", specifier = ">=4.0" },
+    { name = "fastapi", specifier = ">=0.115.0,<1" },
+    { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28" },
+    { name = "py-identity-model", specifier = ">=2.1.0,<3" },
+    { name = "pydantic", extras = ["email"], specifier = ">=2.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
+    { name = "python-json-logger", specifier = ">=3.0,<5" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
+    { name = "scalar-fastapi", specifier = ">=1.0.0" },
+    { name = "slowapi", specifier = ">=0.1.9,<1" },
+    { name = "sqlmodel", specifier = ">=0.0.22,<1" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0,<1" },
+]
+provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pip-audit", specifier = ">=2.9" },
+    { name = "pytest-playwright", specifier = ">=0.7.2" },
 ]
 
 [[package]]
@@ -1124,6 +1126,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/26/6b/8786ba5736562220d588a2f6653e6c17e90c59ced34a2d7b512ef8956103/ruff-0.15.7-py3-none-win32.whl", hash = "sha256:6d39e2d3505b082323352f733599f28169d12e891f7dd407f2d4f54b4c2886de", size = 10582538, upload-time = "2026-03-19T16:26:15.992Z" },
     { url = "https://files.pythonhosted.org/packages/2b/e9/346d4d3fffc6871125e877dae8d9a1966b254fbd92a50f8561078b88b099/ruff-0.15.7-py3-none-win_amd64.whl", hash = "sha256:4d53d712ddebcd7dace1bc395367aec12c057aacfe9adbb6d832302575f4d3a1", size = 11755839, upload-time = "2026-03-19T16:26:19.897Z" },
     { url = "https://files.pythonhosted.org/packages/8f/e8/726643a3ea68c727da31570bde48c7a10f1aa60eddd628d94078fec586ff/ruff-0.15.7-py3-none-win_arm64.whl", hash = "sha256:18e8d73f1c3fdf27931497972250340f92e8c861722161a9caeb89a58ead6ed2", size = 11023304, upload-time = "2026-03-19T16:26:51.669Z" },
+]
+
+[[package]]
+name = "scalar-fastapi"
+version = "1.8.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/af/95/bbbf63b38eafc93862827bda0fba415a486882642d9293f6b918145fd4f9/scalar_fastapi-1.8.1.tar.gz", hash = "sha256:eadb625d386fa94a79e5463af0aa6bcf5e02bc4d665454ed0795960987152531", size = 8258, upload-time = "2026-03-18T09:36:57.005Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/97/29/584cc791765b92a35362733875ff881df3b3d181670285eaf571a17170d7/scalar_fastapi-1.8.1-py3-none-any.whl", hash = "sha256:0ff296877d65082039eba8682fef6eafbe1cd77c5b55a3b3c0b96681eb15ca62", size = 7636, upload-time = "2026-03-18T09:36:56.224Z" },
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
-# Descope SaaS Starter Kit
+# Identity Stack
 
-A comprehensive reference project demonstrating Descope's identity platform features using vendor-agnostic libraries.
+A comprehensive reference project demonstrating identity platform features using vendor-agnostic libraries.
 
 ## Architecture
 
@@ -54,8 +54,8 @@ A comprehensive reference project demonstrating Descope's identity platform feat
 ### 1. Clone and setup
 
 ```bash
-git clone git@github.com:jamescrowley321/descope-saas-starter.git
-cd descope-saas-starter
+git clone git@github.com:jamescrowley321/identity-stack.git
+cd identity-stack
 ```
 
 ### 2. Build the Terraform provider (fork)
@@ -222,7 +222,7 @@ RATE_LIMIT_AUTH=10/minute      # Stricter limit for auth-sensitive endpoints
 ## Project Structure
 
 ```
-descope-saas-starter/
+identity-stack/
 ├── frontend/          # React + Vite + TypeScript
 │   ├── src/
 │   │   ├── pages/     # Route pages

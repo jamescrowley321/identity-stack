@@ -3,7 +3,7 @@ terraform {
     organization = "jamescrowley321"
 
     workspaces {
-      name = "descope-saas-starter-dev"
+      name = "identity-stack-dev"
     }
   }
 
