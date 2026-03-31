@@ -123,10 +123,8 @@ class TestGetSession:
             except StopAsyncIteration:
                 pass
 
-            # Session should be closed
-            assert session.is_active is False or session.get_bind() is not None
-            # Verify the session context manager cleaned up properly
-            # (no pending transaction)
+            # Session should not have a pending transaction after cleanup
+            assert not session.in_transaction()
 
     async def test_get_session_multiple_calls_independent(self, _test_engine):
         """Each call to get_session yields an independent session."""

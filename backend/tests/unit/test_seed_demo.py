@@ -60,12 +60,20 @@ class TestGetOrCreateDocuments:
         assert titles == {"public-roadmap", "board-minutes", "team-project"}
 
     @pytest.mark.anyio
-    @patch("scripts.seed_demo.DATABASE_URL", "sqlite+aiosqlite://")
-    async def test_skips_existing_documents(self):
-        """Skips documents that already exist (idempotent)."""
-        # First call creates them
-        docs1 = await _get_or_create_documents("tenant-1", "user-1")
-        assert len(docs1) == 3
+    async def test_skips_existing_documents(self, tmp_path):
+        """Second call skips documents created by the first (idempotent)."""
+        db_path = tmp_path / "seed_skip.db"
+        db_url = f"sqlite+aiosqlite:///{db_path}"
+        with patch("scripts.seed_demo.DATABASE_URL", db_url):
+            docs1 = await _get_or_create_documents("tenant-1", "user-1")
+            assert len(docs1) == 3
+            # Second call hits the same file-backed DB and should skip
+            docs2 = await _get_or_create_documents("tenant-1", "user-1")
+            assert len(docs2) == 3
+            # All documents should have the same IDs (skipped, not recreated)
+            ids1 = {d.id for d in docs1}
+            ids2 = {d.id for d in docs2}
+            assert ids1 == ids2
 
     @pytest.mark.anyio
     @patch("scripts.seed_demo.DATABASE_URL", "sqlite+aiosqlite://")

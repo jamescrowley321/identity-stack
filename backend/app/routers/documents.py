@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["documents"])
 
-# Conservative limit to avoid SQLite SQLITE_MAX_VARIABLE_NUMBER (999)
-_SQLITE_BATCH_SIZE = 500
+# Conservative batch size for IN-clause queries
+_QUERY_BATCH_SIZE = 500
 # Cap FGA relation cleanup to bound sequential deletes
 _MAX_FGA_CLEANUP = 100
 
@@ -131,8 +131,8 @@ async def list_documents(
 
     # Batch queries to stay within DB variable limit
     documents = []
-    for i in range(0, len(doc_ids), _SQLITE_BATCH_SIZE):
-        batch = doc_ids[i : i + _SQLITE_BATCH_SIZE]
+    for i in range(0, len(doc_ids), _QUERY_BATCH_SIZE):
+        batch = doc_ids[i : i + _QUERY_BATCH_SIZE]
         result = await session.execute(
             select(Document).where(
                 Document.id.in_(batch),

@@ -64,37 +64,39 @@ async def _get_or_create_documents(tenant_id: str, owner_user_id: str) -> list[D
     documents = []
     new_docs: list[Document] = []
 
-    async with session_factory() as session:
-        for doc_def in DEMO_DOCUMENTS:
-            result = await session.execute(
-                select(Document).where(
-                    Document.tenant_id == tenant_id,
-                    Document.title == doc_def["title"],
+    try:
+        async with session_factory() as session:
+            for doc_def in DEMO_DOCUMENTS:
+                result = await session.execute(
+                    select(Document).where(
+                        Document.tenant_id == tenant_id,
+                        Document.title == doc_def["title"],
+                    )
                 )
-            )
-            existing = result.scalars().first()
+                existing = result.scalars().first()
 
-            if existing:
-                print(f"  [skip] '{doc_def['title']}' already exists (id={existing.id})")
-                documents.append(existing)
-            else:
-                doc = Document(
-                    tenant_id=tenant_id,
-                    title=doc_def["title"],
-                    content=doc_def["content"],
-                    created_by=owner_user_id,
-                )
-                session.add(doc)
-                new_docs.append(doc)
+                if existing:
+                    print(f"  [skip] '{doc_def['title']}' already exists (id={existing.id})")
+                    documents.append(existing)
+                else:
+                    doc = Document(
+                        tenant_id=tenant_id,
+                        title=doc_def["title"],
+                        content=doc_def["content"],
+                        created_by=owner_user_id,
+                    )
+                    session.add(doc)
+                    new_docs.append(doc)
 
-        if new_docs:
-            await session.commit()
-            for doc in new_docs:
-                await session.refresh(doc)
-                print(f"  [created] '{doc.title}' (id={doc.id})")
-                documents.append(doc)
+            if new_docs:
+                await session.commit()
+                for doc in new_docs:
+                    await session.refresh(doc)
+                    print(f"  [created] '{doc.title}' (id={doc.id})")
+                    documents.append(doc)
+    finally:
+        await seed_engine.dispose()
 
-    await seed_engine.dispose()
     return documents
 
 
