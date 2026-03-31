@@ -37,14 +37,14 @@ variable "github_oauth_client_secret" {
 variable "github_repository" {
   description = "GitHub repository name (without owner) for CI secrets"
   type        = string
-  default     = "descope-saas-starter"
+  default     = "identity-stack"
 }
 
 # Session settings
 variable "descope_project_name" {
   description = "Display name for the Descope project"
   type        = string
-  default     = "descope-saas-starter"
+  default     = "identity-stack"
 }
 
 variable "session_token_expiration" {
