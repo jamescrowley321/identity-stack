@@ -10,6 +10,10 @@ from sqlmodel import SQLModel
 
 from app.main import app
 from app.models.database import get_session
+from app.models.tenant import TenantResource
+
+# Only create SQLite-compatible tables (excludes identity tables with PostgreSQL ARRAY/JSONB)
+_SQLITE_TABLES = [TenantResource.__table__]
 
 
 @pytest.fixture
@@ -28,7 +32,7 @@ async def _test_db():
     """Use an in-memory SQLite database for each test."""
     engine = create_async_engine("sqlite+aiosqlite://", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.create_all)
+        await conn.run_sync(SQLModel.metadata.create_all, tables=_SQLITE_TABLES)
 
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -40,7 +44,7 @@ async def _test_db():
     yield
     app.dependency_overrides.pop(get_session, None)
     async with engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.drop_all)
+        await conn.run_sync(SQLModel.metadata.drop_all, tables=_SQLITE_TABLES)
     await engine.dispose()
 
 

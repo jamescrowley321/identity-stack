@@ -16,15 +16,18 @@ class _TestModel(SQLModel, table=True):
     name: str
 
 
+_SQLITE_TABLES = [_TestModel.__table__]
+
+
 @pytest.fixture
 async def _test_engine():
     """Create an in-memory async SQLite engine for testing."""
     engine = create_async_engine("sqlite+aiosqlite://", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.create_all)
+        await conn.run_sync(SQLModel.metadata.create_all, tables=_SQLITE_TABLES)
     yield engine
     async with engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.drop_all)
+        await conn.run_sync(SQLModel.metadata.drop_all, tables=_SQLITE_TABLES)
     await engine.dispose()
 
 

@@ -13,6 +13,9 @@ from app.middleware.rate_limit import limiter
 from app.models.database import get_session
 from app.models.document import Document
 
+# Only create SQLite-compatible tables (excludes identity tables with PostgreSQL ARRAY/JSONB)
+_SQLITE_TABLES = [Document.__table__]
+
 # Fixed UUIDs for deterministic tests
 DOC_UUID_1 = "00000000-0000-4000-8000-000000000001"
 DOC_UUID_2 = "00000000-0000-4000-8000-000000000002"
@@ -36,7 +39,7 @@ async def test_db():
     """In-memory SQLite database, fresh per test."""
     engine = create_async_engine("sqlite+aiosqlite://", echo=False)
     async with engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.create_all)
+        await conn.run_sync(SQLModel.metadata.create_all, tables=_SQLITE_TABLES)
 
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -48,7 +51,7 @@ async def test_db():
     yield engine
     app.dependency_overrides.pop(get_session, None)
     async with engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.drop_all)
+        await conn.run_sync(SQLModel.metadata.drop_all, tables=_SQLITE_TABLES)
     await engine.dispose()
 
 

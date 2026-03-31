@@ -58,7 +58,7 @@ async def _get_or_create_documents(tenant_id: str, owner_user_id: str) -> list[D
     """Ensure demo documents exist in the DB. Returns all three (existing or new)."""
     seed_engine = create_async_engine(DATABASE_URL, echo=False)
     async with seed_engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.create_all)
+        await conn.run_sync(SQLModel.metadata.create_all, tables=[Document.__table__])
 
     session_factory = async_sessionmaker(seed_engine, class_=AsyncSession, expire_on_commit=False)
     documents = []
