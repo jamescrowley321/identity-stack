@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from expression import Error, Ok, Result
+from expression import Result
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -72,9 +72,9 @@ def result_to_response(
     Error(err) -> RFC 9457 Problem Detail response.
     """
     match result:
-        case Ok(value):
+        case Result(tag="ok", ok=value):
             return JSONResponse(content=value, status_code=status)
-        case Error(err):
+        case Result(tag="error", error=err):
             return _error_to_problem_detail(err, request)
 
 
