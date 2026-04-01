@@ -18,12 +18,12 @@ import os
 import sys
 
 import httpx
-from sqlmodel import Session, select
+from sqlmodel import select
 
 # Ensure backend package is importable when run from backend/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.models.database import create_db_and_tables, engine  # noqa: E402
+from app.models.database import async_engine, async_session_factory  # noqa: E402
 from app.models.document import Document  # noqa: E402
 from app.services.descope import DescopeManagementClient  # noqa: E402
 
@@ -52,21 +52,25 @@ def _require_env(key: str) -> str:
     return value
 
 
-def _get_or_create_documents(tenant_id: str, owner_user_id: str) -> list[Document]:
+async def _get_or_create_documents(tenant_id: str, owner_user_id: str) -> list[Document]:
     """Ensure demo documents exist in the DB. Returns all three (existing or new)."""
-    create_db_and_tables()
-    documents = []
+    from sqlmodel import SQLModel
 
+    async with async_engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+
+    documents = []
     new_docs: list[Document] = []
 
-    with Session(engine) as session:
+    async with async_session_factory() as session:
         for doc_def in DEMO_DOCUMENTS:
-            existing = session.exec(
+            result = await session.execute(
                 select(Document).where(
                     Document.tenant_id == tenant_id,
                     Document.title == doc_def["title"],
                 )
-            ).first()
+            )
+            existing = result.scalars().first()
 
             if existing:
                 print(f"  [skip] '{doc_def['title']}' already exists (id={existing.id})")
@@ -82,9 +86,9 @@ def _get_or_create_documents(tenant_id: str, owner_user_id: str) -> list[Documen
                 new_docs.append(doc)
 
         if new_docs:
-            session.commit()
+            await session.commit()
             for doc in new_docs:
-                session.refresh(doc)
+                await session.refresh(doc)
                 print(f"  [created] '{doc.title}' (id={doc.id})")
                 documents.append(doc)
 
@@ -205,7 +209,7 @@ async def main() -> None:
 
     # 2. Create documents in DB
     print("\n2. Ensuring demo documents exist in DB...")
-    documents = _get_or_create_documents(tenant_id, owner_user_id)
+    documents = await _get_or_create_documents(tenant_id, owner_user_id)
 
     # 3. Seed FGA relations
     print("\n3. Seeding FGA relations...")
