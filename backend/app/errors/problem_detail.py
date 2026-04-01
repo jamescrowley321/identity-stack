@@ -76,6 +76,19 @@ def result_to_response(
             return JSONResponse(content=value, status_code=status)
         case Result(tag="error", error=err):
             return _error_to_problem_detail(err, request)
+        case _:
+            return JSONResponse(
+                content=ProblemDetailResponse(
+                    type="/errors/unknown",
+                    title="Internal Error",
+                    status=500,
+                    detail="Unexpected result type",
+                    instance=str(request.url.path),
+                    traceId=_get_trace_id(),
+                ).model_dump(),
+                status_code=500,
+                media_type="application/problem+json",
+            )
 
 
 def _error_to_problem_detail(err: IdentityError, request: Request) -> JSONResponse:
