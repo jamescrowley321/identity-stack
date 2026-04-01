@@ -4,12 +4,25 @@ Revision ID: 002_canonical_identity
 Revises: 001_baseline
 Create Date: 2026-04-01
 
+This migration uses PostgreSQL-specific features (enum types, partial indexes).
+The identity-stack architecture mandates PostgreSQL (D2).
 """
 
 from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+
+
+def _assert_postgresql() -> None:
+    """Fail fast if running against a non-PostgreSQL database."""
+    bind = op.get_bind()
+    if bind.dialect.name != "postgresql":
+        raise RuntimeError(
+            f"This migration requires PostgreSQL, got dialect '{bind.dialect.name}'. "
+            "The identity-stack architecture mandates PostgreSQL (D2)."
+        )
+
 
 revision: str = "002_canonical_identity"
 down_revision: Union[str, None] = "001_baseline"
@@ -18,6 +31,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    _assert_postgresql()
     # --- Enum types (use raw SQL for offline-mode compatibility) ---
     op.execute("CREATE TYPE IF NOT EXISTS userstatus AS ENUM ('active', 'inactive', 'provisioned')")
     op.execute("CREATE TYPE IF NOT EXISTS tenantstatus AS ENUM ('active', 'suspended')")
@@ -190,6 +204,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    _assert_postgresql()
     # Drop tables in reverse dependency order
     op.drop_index("ix_idp_links_external_sub", table_name="idp_links")
     op.drop_table("idp_links")

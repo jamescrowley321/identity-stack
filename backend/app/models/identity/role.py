@@ -8,7 +8,12 @@ from sqlmodel import Field, SQLModel
 
 
 class Role(SQLModel, table=True):
-    """Role definition. tenant_id=NULL means global role."""
+    """Role definition. tenant_id=NULL means global role.
+
+    Note: The (name, tenant_id) constraint enforces per-tenant uniqueness but
+    SQL NULLs are not equal, so global roles need a partial unique index
+    (ix_roles_name_global) created in migration 002_canonical_identity_schema.
+    """
 
     __tablename__ = "roles"
     __table_args__ = (sa.UniqueConstraint("name", "tenant_id", name="uq_roles_name_tenant"),)
