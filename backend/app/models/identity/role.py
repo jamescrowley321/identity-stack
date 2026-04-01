@@ -56,7 +56,6 @@ class RolePermission(SQLModel, table=True):
     """Many-to-many mapping between roles and permissions."""
 
     __tablename__ = "role_permissions"
-    __table_args__ = (sa.UniqueConstraint("role_id", "permission_id", name="uq_role_permissions_role_permission"),)
 
     role_id: uuid_mod.UUID = Field(
         sa_column=sa.Column(sa.Uuid, sa.ForeignKey("roles.id", ondelete="CASCADE"), nullable=False, primary_key=True)

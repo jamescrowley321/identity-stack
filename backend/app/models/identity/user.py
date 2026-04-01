@@ -44,7 +44,10 @@ class IdPLink(SQLModel, table=True):
     """Links a canonical user to an external identity provider identity."""
 
     __tablename__ = "idp_links"
-    __table_args__ = (sa.UniqueConstraint("user_id", "provider_id", name="uq_idp_links_user_provider"),)
+    __table_args__ = (
+        sa.UniqueConstraint("user_id", "provider_id", name="uq_idp_links_user_provider"),
+        sa.UniqueConstraint("provider_id", "external_sub", name="uq_idp_links_provider_external_sub"),
+    )
 
     id: uuid_mod.UUID = Field(default_factory=uuid_mod.uuid4, primary_key=True, sa_type=sa.Uuid)
     user_id: uuid_mod.UUID = Field(

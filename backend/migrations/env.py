@@ -18,13 +18,17 @@ from app.models.tenant import TenantResource  # noqa: F401
 
 target_metadata = SQLModel.metadata
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://identity:dev@localhost:5432/identity")
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL environment variable is required but not set")
 
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode — emit SQL to stdout."""
+    # Strip +asyncpg for offline SQL generation (no driver needed)
+    offline_url = DATABASE_URL.replace("+asyncpg", "")
     context.configure(
-        url=DATABASE_URL,
+        url=offline_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},

@@ -148,6 +148,11 @@ class TestIdPLinkModel:
         constraints = {c.name for c in IdPLink.__table__.constraints if isinstance(c, sa.UniqueConstraint)}
         assert "uq_idp_links_user_provider" in constraints
 
+    def test_unique_constraint_provider_external_sub(self):
+        """One external identity maps to at most one canonical user."""
+        constraints = {c.name for c in IdPLink.__table__.constraints if isinstance(c, sa.UniqueConstraint)}
+        assert "uq_idp_links_provider_external_sub" in constraints
+
     def test_metadata_nullable(self):
         col = _col(IdPLink, "metadata")
         assert col.nullable
@@ -296,9 +301,10 @@ class TestUserTenantRoleModel:
         indexes = {idx.name for idx in UserTenantRole.__table__.indexes}
         assert "ix_user_tenant_roles_user_tenant" in indexes
 
-    def test_unique_constraint(self):
+    def test_no_redundant_unique_constraint(self):
+        """PK already enforces uniqueness — no separate UniqueConstraint needed."""
         constraints = {c.name for c in UserTenantRole.__table__.constraints if isinstance(c, sa.UniqueConstraint)}
-        assert "uq_user_tenant_roles_user_tenant_role" in constraints
+        assert "uq_user_tenant_roles_user_tenant_role" not in constraints
 
 
 # ---------------------------------------------------------------------------

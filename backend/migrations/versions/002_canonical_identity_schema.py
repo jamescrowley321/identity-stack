@@ -18,15 +18,14 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # --- Enum types ---
+    # --- Enum types (use raw SQL for offline-mode compatibility) ---
+    op.execute("CREATE TYPE IF NOT EXISTS userstatus AS ENUM ('active', 'inactive', 'provisioned')")
+    op.execute("CREATE TYPE IF NOT EXISTS tenantstatus AS ENUM ('active', 'suspended')")
+    op.execute("CREATE TYPE IF NOT EXISTS providertype AS ENUM ('descope', 'ory', 'entra', 'cognito', 'oidc')")
+
     userstatus = sa.Enum("active", "inactive", "provisioned", name="userstatus", create_type=False)
-    userstatus.create(op.get_bind(), checkfirst=True)
-
     tenantstatus = sa.Enum("active", "suspended", name="tenantstatus", create_type=False)
-    tenantstatus.create(op.get_bind(), checkfirst=True)
-
     providertype = sa.Enum("descope", "ory", "entra", "cognito", "oidc", name="providertype", create_type=False)
-    providertype.create(op.get_bind(), checkfirst=True)
 
     # --- 1. users ---
     op.create_table(
@@ -92,6 +91,8 @@ def upgrade() -> None:
         sa.UniqueConstraint("name", "tenant_id", name="uq_roles_name_tenant"),
     )
     op.create_index("ix_roles_tenant_id", "roles", ["tenant_id"])
+    # Partial unique index: enforce unique global role names where tenant_id IS NULL
+    op.execute("CREATE UNIQUE INDEX ix_roles_name_global ON roles (name) WHERE tenant_id IS NULL")
 
     # --- 5. permissions ---
     op.create_table(
@@ -123,7 +124,6 @@ def upgrade() -> None:
         ),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.PrimaryKeyConstraint("role_id", "permission_id"),
-        sa.UniqueConstraint("role_id", "permission_id", name="uq_role_permissions_role_permission"),
     )
 
     # --- 7. user_tenant_roles ---
@@ -157,7 +157,6 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.PrimaryKeyConstraint("user_id", "tenant_id", "role_id"),
-        sa.UniqueConstraint("user_id", "tenant_id", "role_id", name="uq_user_tenant_roles_user_tenant_role"),
     )
     op.create_index("ix_user_tenant_roles_user_tenant", "user_tenant_roles", ["user_id", "tenant_id"])
 
@@ -185,6 +184,7 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("user_id", "provider_id", name="uq_idp_links_user_provider"),
+        sa.UniqueConstraint("provider_id", "external_sub", name="uq_idp_links_provider_external_sub"),
     )
     op.create_index("ix_idp_links_external_sub", "idp_links", ["external_sub"])
 
@@ -202,6 +202,7 @@ def downgrade() -> None:
     op.drop_index("ix_permissions_name", table_name="permissions")
     op.drop_table("permissions")
 
+    op.execute("DROP INDEX IF EXISTS ix_roles_name_global")
     op.drop_index("ix_roles_tenant_id", table_name="roles")
     op.drop_table("roles")
 
@@ -213,7 +214,7 @@ def downgrade() -> None:
     op.drop_index("ix_users_email", table_name="users")
     op.drop_table("users")
 
-    # Drop enum types
-    sa.Enum(name="providertype").drop(op.get_bind(), checkfirst=True)
-    sa.Enum(name="tenantstatus").drop(op.get_bind(), checkfirst=True)
-    sa.Enum(name="userstatus").drop(op.get_bind(), checkfirst=True)
+    # Drop enum types (use raw SQL for offline-mode compatibility)
+    op.execute("DROP TYPE IF EXISTS providertype")
+    op.execute("DROP TYPE IF EXISTS tenantstatus")
+    op.execute("DROP TYPE IF EXISTS userstatus")

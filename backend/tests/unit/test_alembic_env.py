@@ -60,3 +60,13 @@ def test_env_imports_existing_models():
 def test_env_sets_target_metadata():
     """target_metadata should be set to SQLModel.metadata."""
     assert "target_metadata = SQLModel.metadata" in _ENV_SOURCE
+
+
+def test_env_no_hardcoded_credentials():
+    """env.py must not contain hardcoded database credentials."""
+    assert "identity:dev@" not in _ENV_SOURCE, "Found hardcoded dev credentials in env.py"
+
+
+def test_env_requires_database_url():
+    """env.py must fail loudly if DATABASE_URL is not set."""
+    assert "RuntimeError" in _ENV_SOURCE or "raise" in _ENV_SOURCE

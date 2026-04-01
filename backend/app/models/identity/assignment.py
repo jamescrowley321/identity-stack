@@ -11,10 +11,7 @@ class UserTenantRole(SQLModel, table=True):
     """Per-tenant role assignment with audit trail."""
 
     __tablename__ = "user_tenant_roles"
-    __table_args__ = (
-        sa.UniqueConstraint("user_id", "tenant_id", "role_id", name="uq_user_tenant_roles_user_tenant_role"),
-        sa.Index("ix_user_tenant_roles_user_tenant", "user_id", "tenant_id"),
-    )
+    __table_args__ = (sa.Index("ix_user_tenant_roles_user_tenant", "user_id", "tenant_id"),)
 
     user_id: uuid_mod.UUID = Field(
         sa_column=sa.Column(sa.Uuid, sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False, primary_key=True)
