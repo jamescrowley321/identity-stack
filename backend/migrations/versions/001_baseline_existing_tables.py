@@ -4,6 +4,10 @@ Revision ID: 001_baseline
 Revises: None
 Create Date: 2026-04-01
 
+Upgrade uses if_not_exists=True so it can run against both fresh and existing
+databases. Downgrade intentionally drops tables unconditionally — once Alembic
+adopts these tables (stamps the revision), it owns them. A downgrade past this
+revision means removing the tables from the schema entirely.
 """
 
 from typing import Sequence, Union

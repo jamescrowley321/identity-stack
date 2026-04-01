@@ -11,11 +11,16 @@ The identity-stack architecture mandates PostgreSQL (D2).
 from typing import Sequence, Union
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 
 
 def _assert_postgresql() -> None:
-    """Fail fast if running against a non-PostgreSQL database."""
+    """Fail fast if running against a non-PostgreSQL database.
+
+    Skips the check in offline mode (SQL output is PostgreSQL-targeted by URL).
+    """
+    if context.is_offline_mode():
+        return
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         raise RuntimeError(
