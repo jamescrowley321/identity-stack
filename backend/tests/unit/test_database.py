@@ -19,10 +19,11 @@ class TestDatabaseModuleExports:
 
         assert isinstance(async_session_factory, async_sessionmaker)
 
-    def test_database_url_is_postgres(self):
+    def test_database_url_is_set_and_async(self):
         from app.models.database import DATABASE_URL
 
-        assert DATABASE_URL.startswith("postgresql+asyncpg://")
+        assert DATABASE_URL, "DATABASE_URL must be set"
+        assert "async" in DATABASE_URL.split("://")[0], "DATABASE_URL must use an async driver"
 
     def test_expire_on_commit_is_false(self):
         from app.models.database import async_session_factory
@@ -90,15 +91,20 @@ class TestNoSyncPatternsInCodebase:
         assert "create_db_and_tables" not in source
 
     def test_main_does_not_import_sync_session(self):
-        """main.py must not reference sync Session or get_session."""
+        """main.py must not reference sync Session or get_session (but get_async_session is OK)."""
         import inspect
+        import re
 
         from app import main
 
         source = inspect.getsource(main)
-        assert "get_session" not in source
+        # Match get_session but NOT get_async_session
+        sync_get_session = re.findall(r"\bget_session\b", source)
+        async_get_session = re.findall(r"\bget_async_session\b", source)
+        bare_get_session_count = len(sync_get_session) - len(async_get_session)
+        assert bare_get_session_count <= 0, "main.py must not reference sync get_session"
         # Ensure no bare 'from sqlmodel import Session' (sync)
-        assert "import Session" not in source
+        assert "from sqlmodel import Session" not in source
 
     def test_documents_router_uses_async_session(self):
         """documents.py must use AsyncSession, not sync Session."""

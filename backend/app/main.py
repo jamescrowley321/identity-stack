@@ -8,6 +8,7 @@ from slowapi.errors import RateLimitExceeded
 from app.logging_config import setup_logging
 from app.middleware.factory import configure_middleware
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
+from app.models.database import async_engine
 from app.routers import (
     accesskeys,
     attributes,
@@ -30,6 +31,7 @@ async def lifespan(app: FastAPI):
     http_client = httpx.AsyncClient(timeout=30.0)
     init_descope_client(http_client=http_client)
     yield
+    await async_engine.dispose()
     await http_client.aclose()
     shutdown_descope_client()
 

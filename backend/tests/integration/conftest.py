@@ -6,6 +6,8 @@ Tests consume the credentials via environment variables.
 
 import os
 
+os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost:5432/testdb")
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 from py_identity_model import (
