@@ -1,7 +1,10 @@
 """Middleware factory — sole location for deployment-mode-conditional logic.
 
 Evaluates DEPLOYMENT_MODE once at import time (never per-request).
-In a future v2 with full gateway migration, the standalone branch can be removed entirely.
+
+v2 upgrade path: replace os.getenv("DEPLOYMENT_MODE") with
+OpenFeature client.get_string_value("deployment_mode", "standalone")
+for hot-toggle and per-feature flag support.
 """
 
 import logging
@@ -45,7 +48,10 @@ def configure_middleware(app: FastAPI) -> None:
     )
     logger.info("Middleware included: CORSMiddleware")
 
-    # 2. Token validation — standalone only (Tyk handles JWT in gateway mode)
+    # 2. Token validation — standalone only (Tyk handles JWT in gateway mode).
+    #    In gateway mode, all protected endpoints remain fail-closed: request.state.claims
+    #    is never populated, so require_role/require_permission return 401/403.
+    #    Network-level isolation (e.g., K8s NetworkPolicy) ensures only Tyk reaches the backend.
     if DEPLOYMENT_MODE == "standalone":
         app.add_middleware(
             TokenValidationMiddleware,
