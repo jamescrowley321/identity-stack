@@ -79,7 +79,7 @@ def result_to_response(
             try:
                 return JSONResponse(content=value, status_code=status)
             except (TypeError, ValueError) as exc:
-                logger.error("Failed to serialize Ok value: %s", exc)
+                logger.error("Failed to serialize Ok value (type=%s): %s", type(value).__name__, exc)
                 return _internal_error(request, "Response serialization failed")
         case Result(tag="error", error=err):
             return _error_to_problem_detail(err, request)
