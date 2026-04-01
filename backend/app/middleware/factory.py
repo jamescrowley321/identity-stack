@@ -35,6 +35,15 @@ def configure_middleware(app: FastAPI) -> None:
 
     In gateway mode, Tyk handles authentication (JWT) and rate limiting,
     so TokenValidationMiddleware and SlowAPIMiddleware are skipped.
+
+    Gateway mode prerequisites (implemented in separate stories):
+    - Tyk forwards the original Authorization header to the backend (ADR-GW-7)
+    - TokenValidationMiddleware is replaced by a lightweight claim-extraction
+      middleware that reads the pre-validated JWT for tenant/role claims
+    - Network-level isolation or a shared gateway secret ensures only Tyk
+      can reach the backend directly
+    Until those stories land, gateway mode is fail-closed: all protected
+    endpoints return 401 because request.state.claims is never populated.
     """
     trusted_proxy_hosts = os.getenv("TRUSTED_PROXY_HOSTS", "127.0.0.1").split(",")
 
@@ -49,9 +58,9 @@ def configure_middleware(app: FastAPI) -> None:
     logger.info("Middleware included: CORSMiddleware")
 
     # 2. Token validation — standalone only (Tyk handles JWT in gateway mode).
-    #    In gateway mode, all protected endpoints remain fail-closed: request.state.claims
-    #    is never populated, so require_role/require_permission return 401/403.
-    #    Network-level isolation (e.g., K8s NetworkPolicy) ensures only Tyk reaches the backend.
+    #    Gateway mode is fail-closed: request.state.claims is never populated,
+    #    so require_role/require_permission return 401/403 until the claim-extraction
+    #    middleware is added in a subsequent story (Epic 2: Middleware Migration).
     if DEPLOYMENT_MODE == "standalone":
         app.add_middleware(
             TokenValidationMiddleware,
