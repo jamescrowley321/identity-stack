@@ -141,6 +141,7 @@ jobs:
         env:
           DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
           DESCOPE_MANAGEMENT_KEY: ${{ secrets.DESCOPE_MANAGEMENT_KEY }}
+          DATABASE_URL: "sqlite+aiosqlite:///:memory:"
 
       - name: Start frontend (preview)
         run: |
