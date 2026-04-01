@@ -6,6 +6,7 @@ and HTTP responses. Routers call this instead of constructing responses manually
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from expression import Result
@@ -22,6 +23,8 @@ from app.errors.identity import (
     SyncFailed,
     ValidationError,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ProblemDetailResponse(BaseModel):
@@ -55,7 +58,7 @@ def _get_trace_id() -> str:
         ctx = span.get_span_context()
         if ctx and ctx.trace_id:
             return format(ctx.trace_id, "032x")
-    except (ImportError, AttributeError):
+    except Exception:  # noqa: BLE001, S110 — graceful degradation; trace ID is optional
         pass
     return ""
 
@@ -73,22 +76,32 @@ def result_to_response(
     """
     match result:
         case Result(tag="ok", ok=value):
-            return JSONResponse(content=value, status_code=status)
+            try:
+                return JSONResponse(content=value, status_code=status)
+            except (TypeError, ValueError) as exc:
+                logger.error("Failed to serialize Ok value: %s", exc)
+                return _internal_error(request, "Response serialization failed")
         case Result(tag="error", error=err):
             return _error_to_problem_detail(err, request)
         case _:
-            return JSONResponse(
-                content=ProblemDetailResponse(
-                    type="/errors/unknown",
-                    title="Internal Error",
-                    status=500,
-                    detail="Unexpected result type",
-                    instance=str(request.url.path),
-                    traceId=_get_trace_id(),
-                ).model_dump(),
-                status_code=500,
-                media_type="application/problem+json",
-            )
+            logger.error("Unexpected result type in result_to_response: %r", result)
+            return _internal_error(request, "Unexpected result type")
+
+
+def _internal_error(request: Request, detail: str) -> JSONResponse:
+    """Return a 500 Problem Detail response for unexpected failures."""
+    return JSONResponse(
+        content=ProblemDetailResponse(
+            type="/errors/unknown",
+            title="Internal Error",
+            status=500,
+            detail=detail,
+            instance=str(request.url.path),
+            traceId=_get_trace_id(),
+        ).model_dump(),
+        status_code=500,
+        media_type="application/problem+json",
+    )
 
 
 def _error_to_problem_detail(err: IdentityError, request: Request) -> JSONResponse:
