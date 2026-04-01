@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["documents"])
 
 # Conservative limit to avoid SQLite SQLITE_MAX_VARIABLE_NUMBER (999)
-_SQLITE_BATCH_SIZE = 500
+_QUERY_BATCH_SIZE = 500
 # Cap FGA relation cleanup to bound sequential deletes
 _MAX_FGA_CLEANUP = 100
 
@@ -129,10 +129,10 @@ async def list_documents(
     if not doc_ids:
         return {"documents": []}
 
-    # Batch queries to stay within SQLite variable limit
+    # Batch queries to avoid overly large IN clauses
     documents = []
-    for i in range(0, len(doc_ids), _SQLITE_BATCH_SIZE):
-        batch = doc_ids[i : i + _SQLITE_BATCH_SIZE]
+    for i in range(0, len(doc_ids), _QUERY_BATCH_SIZE):
+        batch = doc_ids[i : i + _QUERY_BATCH_SIZE]
         result = await session.execute(
             select(Document).where(
                 Document.id.in_(batch),
@@ -179,9 +179,13 @@ async def update_document(
         document.title = body.title
     if body.content is not None:
         document.content = body.content
-    session.add(document)
-    await session.commit()
-    await session.refresh(document)
+    try:
+        session.add(document)
+        await session.commit()
+        await session.refresh(document)
+    except Exception as exc:
+        logger.error("DB commit failed for doc %s update: %s", document_id, type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Failed to update document") from exc
     return document.model_dump()
 
 

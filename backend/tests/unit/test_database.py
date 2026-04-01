@@ -19,7 +19,7 @@ class TestDatabaseModuleExports:
 
         assert isinstance(async_session_factory, async_sessionmaker)
 
-    def test_default_database_url_is_postgres(self):
+    def test_database_url_is_postgres(self):
         from app.models.database import DATABASE_URL
 
         assert DATABASE_URL.startswith("postgresql+asyncpg://")
@@ -171,12 +171,17 @@ class TestDockerComposeConfiguration:
         assert svc["image"] == "redis:7-alpine"
         assert "6379:6379" in svc["ports"]
 
-    def test_backend_depends_on_postgres(self, compose_config):
-        deps = compose_config["services"]["backend"].get("depends_on", [])
-        if isinstance(deps, list):
-            assert "postgres" in deps
-        else:
-            assert "postgres" in deps
+    def test_backend_depends_on_postgres_healthy(self, compose_config):
+        deps = compose_config["services"]["backend"].get("depends_on", {})
+        assert "postgres" in deps
+        if isinstance(deps, dict):
+            assert deps["postgres"].get("condition") == "service_healthy"
+
+    def test_postgres_has_healthcheck(self, compose_config):
+        pg = compose_config["services"]["postgres"]
+        assert "healthcheck" in pg
+        hc = pg["healthcheck"]
+        assert "pg_isready" in str(hc.get("test", ""))
 
     def test_backend_database_url_env(self, compose_config):
         env = compose_config["services"]["backend"]["environment"]
@@ -208,6 +213,10 @@ class TestDependencies:
     def test_sqlalchemy_asyncio_in_deps(self, pyproject):
         deps = pyproject["project"]["dependencies"]
         assert any("sqlalchemy[asyncio]" in d for d in deps)
+
+    def test_expression_in_deps(self, pyproject):
+        deps = pyproject["project"]["dependencies"]
+        assert any("expression" in d for d in deps)
 
     def test_testcontainers_in_dev_deps(self, pyproject):
         dev_deps = pyproject["project"]["optional-dependencies"]["dev"]

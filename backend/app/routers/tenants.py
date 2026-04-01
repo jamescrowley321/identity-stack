@@ -111,7 +111,11 @@ async def create_tenant_resource(
     """Create a resource scoped to a tenant. Only accessible if user is a member."""
     _verify_tenant_membership(tenant_id, tenant_claims)
     resource = TenantResource(tenant_id=tenant_id, name=body.name, description=body.description)
-    session.add(resource)
-    await session.commit()
-    await session.refresh(resource)
+    try:
+        session.add(resource)
+        await session.commit()
+        await session.refresh(resource)
+    except Exception as exc:
+        logger.error("DB commit failed for tenant resource: %s", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Failed to create resource") from exc
     return resource.model_dump()
