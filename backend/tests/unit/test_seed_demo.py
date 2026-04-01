@@ -50,56 +50,73 @@ class TestRequireEnv:
 
 
 class TestGetOrCreateDocuments:
-    @patch("scripts.seed_demo.create_db_and_tables")
-    @patch("scripts.seed_demo.Session")
-    def test_creates_new_documents(self, mock_session_cls, mock_create_tables):
+    @pytest.mark.anyio
+    @patch("scripts.seed_demo.async_engine")
+    @patch("scripts.seed_demo.async_session_factory")
+    async def test_creates_new_documents(self, mock_session_factory, mock_engine):
         """Creates all three demo documents when none exist."""
         mock_session = MagicMock()
-        mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
+        mock_result = MagicMock()
+        mock_scalars = MagicMock()
+        mock_scalars.first.return_value = None
+        mock_result.scalars.return_value = mock_scalars
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.commit = AsyncMock()
+        mock_session.refresh = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_session_factory.return_value = mock_session
 
-        # No existing documents
-        mock_exec = MagicMock()
-        mock_exec.first.return_value = None
-        mock_session.exec.return_value = mock_exec
+        mock_conn = MagicMock()
+        mock_conn.run_sync = AsyncMock()
+        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.__aexit__ = AsyncMock(return_value=False)
+        mock_engine.begin.return_value = mock_conn
 
-        docs = _get_or_create_documents("tenant-1", "user-1")
+        docs = await _get_or_create_documents("tenant-1", "user-1")
 
         assert len(docs) == 3
         assert mock_session.add.call_count == 3
-        # Single transaction commit for all new documents
-        assert mock_session.commit.call_count == 1
-        mock_create_tables.assert_called_once()
+        mock_session.commit.assert_called_once()
 
-    @patch("scripts.seed_demo.create_db_and_tables")
-    @patch("scripts.seed_demo.Session")
-    def test_skips_existing_documents(self, mock_session_cls, mock_create_tables):
+    @pytest.mark.anyio
+    @patch("scripts.seed_demo.async_engine")
+    @patch("scripts.seed_demo.async_session_factory")
+    async def test_skips_existing_documents(self, mock_session_factory, mock_engine):
         """Skips documents that already exist (idempotent)."""
         mock_session = MagicMock()
-        mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
-
-        # All documents exist
         existing_doc = MagicMock()
         existing_doc.id = "existing-id"
         existing_doc.title = "existing"
-        mock_exec = MagicMock()
-        mock_exec.first.return_value = existing_doc
-        mock_session.exec.return_value = mock_exec
+        mock_result = MagicMock()
+        mock_scalars = MagicMock()
+        mock_scalars.first.return_value = existing_doc
+        mock_result.scalars.return_value = mock_scalars
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.commit = AsyncMock()
+        mock_session.refresh = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_session_factory.return_value = mock_session
 
-        docs = _get_or_create_documents("tenant-1", "user-1")
+        mock_conn = MagicMock()
+        mock_conn.run_sync = AsyncMock()
+        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.__aexit__ = AsyncMock(return_value=False)
+        mock_engine.begin.return_value = mock_conn
+
+        docs = await _get_or_create_documents("tenant-1", "user-1")
 
         assert len(docs) == 3
         mock_session.add.assert_not_called()
         mock_session.commit.assert_not_called()
 
-    @patch("scripts.seed_demo.create_db_and_tables")
-    @patch("scripts.seed_demo.Session")
-    def test_mixed_existing_and_new(self, mock_session_cls, mock_create_tables):
+    @pytest.mark.anyio
+    @patch("scripts.seed_demo.async_engine")
+    @patch("scripts.seed_demo.async_session_factory")
+    async def test_mixed_existing_and_new(self, mock_session_factory, mock_engine):
         """Creates only missing documents when some already exist."""
         mock_session = MagicMock()
-        mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
-        mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
 
         existing_doc = MagicMock()
         existing_doc.id = "existing-id"
@@ -110,19 +127,30 @@ class TestGetOrCreateDocuments:
         def first_side_effect():
             nonlocal call_count
             call_count += 1
-            # First doc exists, second and third don't
             return existing_doc if call_count == 1 else None
 
-        mock_exec = MagicMock()
-        mock_exec.first.side_effect = first_side_effect
-        mock_session.exec.return_value = mock_exec
+        mock_result = MagicMock()
+        mock_scalars = MagicMock()
+        mock_scalars.first.side_effect = first_side_effect
+        mock_result.scalars.return_value = mock_scalars
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.commit = AsyncMock()
+        mock_session.refresh = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_session_factory.return_value = mock_session
 
-        docs = _get_or_create_documents("tenant-1", "user-1")
+        mock_conn = MagicMock()
+        mock_conn.run_sync = AsyncMock()
+        mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_conn.__aexit__ = AsyncMock(return_value=False)
+        mock_engine.begin.return_value = mock_conn
+
+        docs = await _get_or_create_documents("tenant-1", "user-1")
 
         assert len(docs) == 3
         assert mock_session.add.call_count == 2
-        # Single transaction commit for new documents
-        assert mock_session.commit.call_count == 1
+        mock_session.commit.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

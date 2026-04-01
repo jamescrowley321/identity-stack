@@ -17,3 +17,42 @@ services:
       - .env
     environment:
       - FRONTEND_URL=http://localhost:3000
+      - DATABASE_URL=postgresql+asyncpg://identity:${POSTGRES_PASSWORD:-dev}@postgres:5432/identity
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://aspire-dashboard:18889
+      - OTEL_SERVICE_NAME=identity-stack-backend
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=identity
+      - POSTGRES_USER=identity
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-dev}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U identity -d identity"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  aspire-dashboard:
+    image: mcr.microsoft.com/dotnet/aspire-dashboard:9.0
+    ports:
+      - "18888:18888"
+      - "4317:18889"
+    environment:
+      - DASHBOARD__OTLP__AUTHMODE=Unsecured
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  pgdata:

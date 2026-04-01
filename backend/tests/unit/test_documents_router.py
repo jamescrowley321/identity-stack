@@ -5,11 +5,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlmodel import Session, SQLModel, create_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlmodel import SQLModel
 
 from app.main import app
 from app.middleware.rate_limit import limiter
-from app.models.database import get_session
+from app.models.database import get_async_session
 from app.models.document import Document
 
 # Fixed UUIDs for deterministic tests
@@ -31,19 +32,24 @@ def _set_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def test_db():
-    """In-memory SQLite database, fresh per test."""
-    engine = create_engine("sqlite://", echo=False, connect_args={"check_same_thread": False})
-    SQLModel.metadata.create_all(engine)
+async def test_db():
+    """In-memory async SQLite database, fresh per test."""
+    engine = create_async_engine("sqlite+aiosqlite://", echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
 
-    def override_get_session():
-        with Session(engine) as session:
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def override_get_async_session():
+        async with session_factory() as session:
             yield session
 
-    app.dependency_overrides[get_session] = override_get_session
+    app.dependency_overrides[get_async_session] = override_get_async_session
     yield engine
-    app.dependency_overrides.pop(get_session, None)
-    SQLModel.metadata.drop_all(engine)
+    app.dependency_overrides.pop(get_async_session, None)
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.drop_all)
+    await engine.dispose()
 
 
 @pytest.fixture
@@ -64,17 +70,17 @@ AUTHED_CLAIMS = {
 NO_TENANT_CLAIMS = {"sub": "user-1", "tenants": {}}
 
 
-def _seed_doc(engine, doc_id=DOC_UUID_1, tenant_id="tenant-abc", **kwargs):
+async def _seed_doc(engine, doc_id=DOC_UUID_1, tenant_id="tenant-abc", **kwargs):
     defaults = {
         "title": "Test Doc",
         "content": "Hello",
         "created_by": "user-1",
     }
     defaults.update(kwargs)
-    with Session(engine) as session:
+    async with AsyncSession(engine) as session:
         doc = Document(id=doc_id, tenant_id=tenant_id, **defaults)
         session.add(doc)
-        session.commit()
+        await session.commit()
 
 
 def _make_http_error(status_code=500):
@@ -222,12 +228,13 @@ async def test_create_document_db_failure_compensates_fga(mock_validate, mock_fa
     mock_client = AsyncMock()
     mock_factory.return_value = mock_client
 
-    def _failing_session():
+    async def _failing_session():
         mock_session = MagicMock()
-        mock_session.commit.side_effect = Exception("DB error")
+        mock_session.commit = AsyncMock(side_effect=Exception("DB error"))
+        mock_session.refresh = AsyncMock()
         yield mock_session
 
-    app.dependency_overrides[get_session] = _failing_session
+    app.dependency_overrides[get_async_session] = _failing_session
 
     resp = await client.post("/api/documents", headers=AUTH_HEADER, json={"title": "Doc"})
     assert resp.status_code == 500
@@ -245,12 +252,13 @@ async def test_create_document_db_failure_compensation_also_fails(mock_validate,
     mock_client.delete_relation.side_effect = Exception("Compensation failed")
     mock_factory.return_value = mock_client
 
-    def _failing_session():
+    async def _failing_session():
         mock_session = MagicMock()
-        mock_session.commit.side_effect = Exception("DB error")
+        mock_session.commit = AsyncMock(side_effect=Exception("DB error"))
+        mock_session.refresh = AsyncMock()
         yield mock_session
 
-    app.dependency_overrides[get_session] = _failing_session
+    app.dependency_overrides[get_async_session] = _failing_session
 
     resp = await client.post("/api/documents", headers=AUTH_HEADER, json={"title": "Doc"})
     assert resp.status_code == 500
@@ -266,8 +274,8 @@ async def test_create_document_db_failure_compensation_also_fails(mock_validate,
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_list_documents_success(mock_validate, mock_factory, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
-    _seed_doc(test_db, doc_id=DOC_UUID_2)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_2)
 
     mock_client = AsyncMock()
     # FGA returns tenant-prefixed resource IDs
@@ -317,8 +325,8 @@ async def test_list_documents_fga_error(mock_validate, mock_factory, client):
 async def test_list_documents_cross_tenant_filtered(mock_validate, mock_factory, client, test_db):
     """Docs from other tenants are filtered out — FGA resources with different tenant prefix are ignored."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1, tenant_id="tenant-abc")
-    _seed_doc(test_db, doc_id=DOC_UUID_OTHER, tenant_id="tenant-xyz")
+    await _seed_doc(test_db, doc_id=DOC_UUID_1, tenant_id="tenant-abc")
+    await _seed_doc(test_db, doc_id=DOC_UUID_OTHER, tenant_id="tenant-xyz")
 
     mock_client = AsyncMock()
     # FGA returns resources with different tenant prefixes
@@ -345,7 +353,7 @@ async def test_list_documents_cross_tenant_filtered(mock_validate, mock_factory,
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_get_document_success(mock_validate, mock_fga_factory, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -378,7 +386,7 @@ async def test_get_document_not_found(mock_validate, mock_fga_factory, client):
 async def test_get_document_cross_tenant(mock_validate, mock_fga_factory, client, test_db):
     """Doc exists but belongs to different tenant -> 404 (not 403, prevents IDOR)."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1, tenant_id="tenant-xyz")
+    await _seed_doc(test_db, doc_id=DOC_UUID_1, tenant_id="tenant-xyz")
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -439,7 +447,7 @@ async def test_get_document_invalid_uuid_rejected(mock_validate, mock_fga_factor
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_update_document_success(mock_validate, mock_fga_factory, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -460,7 +468,7 @@ async def test_update_document_success(mock_validate, mock_fga_factory, client, 
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_update_document_partial_title(mock_validate, mock_fga_factory, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1, content="Original")
+    await _seed_doc(test_db, doc_id=DOC_UUID_1, content="Original")
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -498,7 +506,7 @@ async def test_update_document_not_found(mock_validate, mock_fga_factory, client
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_update_document_cross_tenant(mock_validate, mock_fga_factory, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1, tenant_id="tenant-xyz")
+    await _seed_doc(test_db, doc_id=DOC_UUID_1, tenant_id="tenant-xyz")
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -565,7 +573,7 @@ async def test_update_document_fga_error_fail_closed(mock_validate, mock_fga_fac
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_delete_document_success(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -585,8 +593,8 @@ async def test_delete_document_success(mock_validate, mock_fga_factory, mock_rou
         assert call.args[1] == f"tenant-abc:{DOC_UUID_1}"
 
     # Verify doc is removed from DB
-    with Session(test_db) as session:
-        assert session.get(Document, DOC_UUID_1) is None
+    async with AsyncSession(test_db) as session:
+        assert await session.get(Document, DOC_UUID_1) is None
 
 
 @pytest.mark.anyio
@@ -609,7 +617,7 @@ async def test_delete_document_not_found(mock_validate, mock_fga_factory, client
 async def test_delete_document_fga_cleanup_fails(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
     """FGA cleanup failure -> 502, doc NOT deleted from DB."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -621,8 +629,8 @@ async def test_delete_document_fga_cleanup_fails(mock_validate, mock_fga_factory
     assert resp.status_code == 502
 
     # Verify doc still exists
-    with Session(test_db) as session:
-        assert session.get(Document, DOC_UUID_1) is not None
+    async with AsyncSession(test_db) as session:
+        assert await session.get(Document, DOC_UUID_1) is not None
 
 
 @pytest.mark.anyio
@@ -634,7 +642,7 @@ async def test_delete_document_too_many_relations_aborts(
 ):
     """Document with >100 relations -> 409, no deletion attempted."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -654,8 +662,8 @@ async def test_delete_document_too_many_relations_aborts(
     mock_client.delete_relation.assert_not_called()
 
     # Verify doc still exists
-    with Session(test_db) as session:
-        assert session.get(Document, DOC_UUID_1) is not None
+    async with AsyncSession(test_db) as session:
+        assert await session.get(Document, DOC_UUID_1) is not None
 
 
 @pytest.mark.anyio
@@ -675,19 +683,22 @@ async def test_delete_document_db_failure_compensates_fga(mock_validate, mock_fg
     mock_fga_factory.return_value = mock_client
     mock_router_factory.return_value = mock_client
 
-    def _failing_session():
+    async def _failing_session():
         mock_session = MagicMock()
-        mock_session.get.return_value = Document(
-            id=DOC_UUID_1,
-            tenant_id="tenant-abc",
-            title="T",
-            content="",
-            created_by="user-1",
+        mock_session.get = AsyncMock(
+            return_value=Document(
+                id=DOC_UUID_1,
+                tenant_id="tenant-abc",
+                title="T",
+                content="",
+                created_by="user-1",
+            )
         )
-        mock_session.commit.side_effect = Exception("DB commit failed")
+        mock_session.delete = AsyncMock()
+        mock_session.commit = AsyncMock(side_effect=Exception("DB commit failed"))
         yield mock_session
 
-    app.dependency_overrides[get_session] = _failing_session
+    app.dependency_overrides[get_async_session] = _failing_session
 
     resp = await client.delete(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
     assert resp.status_code == 500
@@ -728,19 +739,22 @@ async def test_delete_document_db_failure_compensation_also_fails(
     mock_fga_factory.return_value = mock_client
     mock_router_factory.return_value = mock_client
 
-    def _failing_session():
+    async def _failing_session():
         mock_session = MagicMock()
-        mock_session.get.return_value = Document(
-            id=DOC_UUID_1,
-            tenant_id="tenant-abc",
-            title="T",
-            content="",
-            created_by="user-1",
+        mock_session.get = AsyncMock(
+            return_value=Document(
+                id=DOC_UUID_1,
+                tenant_id="tenant-abc",
+                title="T",
+                content="",
+                created_by="user-1",
+            )
         )
-        mock_session.commit.side_effect = Exception("DB commit failed")
+        mock_session.delete = AsyncMock()
+        mock_session.commit = AsyncMock(side_effect=Exception("DB commit failed"))
         yield mock_session
 
-    app.dependency_overrides[get_session] = _failing_session
+    app.dependency_overrides[get_async_session] = _failing_session
 
     resp = await client.delete(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
     assert resp.status_code == 500
@@ -759,7 +773,7 @@ async def test_delete_document_db_failure_compensation_also_fails(
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_share_document_viewer_success(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -789,7 +803,7 @@ async def test_share_document_viewer_success(mock_validate, mock_fga_factory, mo
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_share_document_editor_success(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -815,7 +829,7 @@ async def test_share_document_editor_success(mock_validate, mock_fga_factory, mo
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_share_document_target_not_found(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -839,7 +853,7 @@ async def test_share_document_target_different_tenant(
     mock_validate, mock_fga_factory, mock_router_factory, client, test_db
 ):
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -865,7 +879,7 @@ async def test_share_document_target_different_tenant(
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_share_document_fga_create_fails(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -893,7 +907,7 @@ async def test_share_document_load_user_network_error(
     mock_validate, mock_fga_factory, mock_router_factory, client, test_db
 ):
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -955,7 +969,7 @@ async def test_share_document_invalid_relation(mock_validate, mock_fga_factory, 
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_revoke_share_success(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -984,7 +998,7 @@ async def test_revoke_share_does_not_delete_owner(
 ):
     """Revoking a share deletes viewer and editor relations but NOT owner."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -1012,7 +1026,7 @@ async def test_revoke_share_does_not_delete_owner(
 async def test_revoke_share_tolerates_400_404(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
     """400/404 from delete_relation is tolerated (relation may not exist)."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -1035,7 +1049,7 @@ async def test_revoke_share_tolerates_400_404(mock_validate, mock_fga_factory, m
 async def test_revoke_share_http_error_502(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
     """Non-400/404 HTTP error on revoke -> 502."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -1057,7 +1071,7 @@ async def test_revoke_share_http_error_502(mock_validate, mock_fga_factory, mock
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_revoke_share_network_error(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -1093,7 +1107,7 @@ async def test_revoke_share_doc_not_found(mock_validate, mock_fga_factory, clien
 async def test_revoke_share_cross_tenant(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
     """Doc belongs to different tenant -> 404."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1, tenant_id="tenant-xyz")
+    await _seed_doc(test_db, doc_id=DOC_UUID_1, tenant_id="tenant-xyz")
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -1113,7 +1127,7 @@ async def test_revoke_share_target_different_tenant(
 ):
     """Target user is in a different tenant -> 403."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -1138,7 +1152,7 @@ async def test_revoke_share_target_different_tenant(
 async def test_revoke_share_target_not_found(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
     """Target user does not exist -> 404."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -1159,7 +1173,7 @@ async def test_revoke_share_load_user_network_error(
 ):
     """Network error verifying target user -> 502."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -1200,7 +1214,7 @@ async def test_share_document_self_sharing_rejected(
 ):
     """Owner cannot share document with themselves."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -1225,7 +1239,7 @@ async def test_share_document_load_user_returns_none(
 ):
     """load_user returns None -> 404."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -1247,7 +1261,7 @@ async def test_share_document_load_user_returns_none(
 async def test_update_document_no_changes(mock_validate, mock_fga_factory, client, test_db):
     """PUT with no title or content -> returns doc unchanged."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -1272,7 +1286,7 @@ async def test_delete_document_fga_relations_none(
 ):
     """list_relations returns None -> treated as empty, delete succeeds."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -1297,7 +1311,7 @@ async def test_delete_document_fga_relations_none(
 async def test_get_document_checks_can_view(mock_validate, mock_fga_factory, client, test_db):
     """AC5: GET /documents/{id} checks can_view relation (derived from owner/editor)."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -1316,7 +1330,7 @@ async def test_get_document_checks_can_view(mock_validate, mock_fga_factory, cli
 async def test_update_document_checks_can_edit(mock_validate, mock_fga_factory, client, test_db):
     """AC5: PUT /documents/{id} checks can_edit relation (derived from owner)."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -1339,7 +1353,7 @@ async def test_update_document_checks_can_edit(mock_validate, mock_fga_factory, 
 async def test_delete_document_checks_can_delete(mock_validate, mock_fga_factory, client, test_db):
     """AC5: DELETE /documents/{id} checks can_delete relation."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
@@ -1361,7 +1375,7 @@ async def test_delete_document_checks_can_delete(mock_validate, mock_fga_factory
 async def test_share_document_checks_owner(mock_validate, mock_fga_factory, client, test_db):
     """AC5: POST /documents/{id}/share checks owner relation."""
     mock_validate.return_value = AUTHED_CLAIMS
-    _seed_doc(test_db, doc_id=DOC_UUID_1)
+    await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True

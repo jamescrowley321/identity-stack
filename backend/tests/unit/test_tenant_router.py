@@ -5,10 +5,11 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlmodel import Session, SQLModel, create_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlmodel import SQLModel
 
 from app.main import app
-from app.models.database import get_session
+from app.models.database import get_async_session
 
 
 @pytest.fixture
@@ -23,19 +24,24 @@ def _set_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _test_db():
-    """Use an in-memory SQLite database for each test."""
-    engine = create_engine("sqlite://", echo=False, connect_args={"check_same_thread": False})
-    SQLModel.metadata.create_all(engine)
+async def _test_db():
+    """Use an in-memory async SQLite database for each test."""
+    engine = create_async_engine("sqlite+aiosqlite://", echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
 
-    def override_get_session():
-        with Session(engine) as session:
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def override_get_async_session():
+        async with session_factory() as session:
             yield session
 
-    app.dependency_overrides[get_session] = override_get_session
+    app.dependency_overrides[get_async_session] = override_get_async_session
     yield
-    app.dependency_overrides.pop(get_session, None)
-    SQLModel.metadata.drop_all(engine)
+    app.dependency_overrides.pop(get_async_session, None)
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.drop_all)
+    await engine.dispose()
 
 
 @pytest.fixture

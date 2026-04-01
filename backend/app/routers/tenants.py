@@ -3,11 +3,12 @@ import logging
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlmodel import Session, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
 
 from app.dependencies.auth import get_claims
 from app.dependencies.tenant import get_tenant_claims, get_tenant_id
-from app.models.database import get_session
+from app.models.database import get_async_session
 from app.models.tenant import TenantResource
 from app.services.descope import get_descope_client
 
@@ -88,14 +89,15 @@ async def get_current_tenant(
 async def list_tenant_resources(
     tenant_id: str,
     tenant_claims: dict = Depends(get_tenant_claims),
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_async_session),
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ):
     """List resources scoped to a tenant. Only accessible if user is a member."""
     _verify_tenant_membership(tenant_id, tenant_claims)
     statement = select(TenantResource).where(TenantResource.tenant_id == tenant_id).offset(offset).limit(limit)
-    resources = session.exec(statement).all()
+    result = await session.execute(statement)
+    resources = result.scalars().all()
     return {"resources": [r.model_dump() for r in resources]}
 
 
@@ -104,12 +106,16 @@ async def create_tenant_resource(
     tenant_id: str,
     body: CreateResourceRequest,
     tenant_claims: dict = Depends(get_tenant_claims),
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_async_session),
 ):
     """Create a resource scoped to a tenant. Only accessible if user is a member."""
     _verify_tenant_membership(tenant_id, tenant_claims)
     resource = TenantResource(tenant_id=tenant_id, name=body.name, description=body.description)
-    session.add(resource)
-    session.commit()
-    session.refresh(resource)
+    try:
+        session.add(resource)
+        await session.commit()
+        await session.refresh(resource)
+    except Exception as exc:
+        logger.error("DB commit failed for tenant resource: %s", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Failed to create resource") from exc
     return resource.model_dump()

@@ -4,12 +4,13 @@ from typing import Annotated, Literal
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from pydantic import BaseModel, Field
-from sqlmodel import Session, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlmodel import select
 
 from app.dependencies.fga import extract_user_id, require_fga
 from app.dependencies.tenant import get_tenant_id
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
-from app.models.database import get_session
+from app.models.database import get_async_session
 from app.models.document import Document
 from app.services.descope import get_descope_client
 
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["documents"])
 
 # Conservative limit to avoid SQLite SQLITE_MAX_VARIABLE_NUMBER (999)
-_SQLITE_BATCH_SIZE = 500
+_QUERY_BATCH_SIZE = 500
 # Cap FGA relation cleanup to bound sequential deletes
 _MAX_FGA_CLEANUP = 100
 
@@ -55,7 +56,7 @@ async def create_document(
     request: Request,
     body: CreateDocumentRequest,
     tenant_id: str = Depends(get_tenant_id),
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_async_session),
 ):
     """Create a document. FGA owner relation is created before DB commit (compensation on failure)."""
     user_id = extract_user_id(request)
@@ -83,8 +84,8 @@ async def create_document(
     # DB commit second — compensate FGA on failure
     try:
         session.add(document)
-        session.commit()
-        session.refresh(document)
+        await session.commit()
+        await session.refresh(document)
     except Exception as exc:
         logger.warning("DB commit failed for doc %s, compensating FGA relation", document.id)
         try:
@@ -100,7 +101,7 @@ async def create_document(
 async def list_documents(
     request: Request,
     tenant_id: str = Depends(get_tenant_id),
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_async_session),
 ):
     """List documents the caller can view, filtered by tenant."""
     user_id = extract_user_id(request)
@@ -128,16 +129,17 @@ async def list_documents(
     if not doc_ids:
         return {"documents": []}
 
-    # Batch queries to stay within SQLite variable limit
+    # Batch queries to avoid overly large IN clauses
     documents = []
-    for i in range(0, len(doc_ids), _SQLITE_BATCH_SIZE):
-        batch = doc_ids[i : i + _SQLITE_BATCH_SIZE]
-        docs = session.exec(
+    for i in range(0, len(doc_ids), _QUERY_BATCH_SIZE):
+        batch = doc_ids[i : i + _QUERY_BATCH_SIZE]
+        result = await session.execute(
             select(Document).where(
                 Document.id.in_(batch),
                 Document.tenant_id == tenant_id,
             )
-        ).all()
+        )
+        docs = result.scalars().all()
         documents.extend(docs)
 
     return {"documents": [doc.model_dump() for doc in documents]}
@@ -148,10 +150,10 @@ async def get_document(
     document_id: DocumentId,
     user_id: str = Depends(require_fga("document", "can_view")),
     tenant_id: str = Depends(get_tenant_id),
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_async_session),
 ):
     """Get a single document. FGA can_view enforced via dependency."""
-    document = session.get(Document, document_id)
+    document = await session.get(Document, document_id)
     if not document or document.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Document not found")
     return document.model_dump()
@@ -165,10 +167,10 @@ async def update_document(
     body: UpdateDocumentRequest,
     user_id: str = Depends(require_fga("document", "can_edit")),
     tenant_id: str = Depends(get_tenant_id),
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_async_session),
 ):
     """Update a document. FGA can_edit enforced via dependency."""
-    document = session.get(Document, document_id)
+    document = await session.get(Document, document_id)
     if not document or document.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Document not found")
     if body.title is None and body.content is None:
@@ -177,9 +179,13 @@ async def update_document(
         document.title = body.title
     if body.content is not None:
         document.content = body.content
-    session.add(document)
-    session.commit()
-    session.refresh(document)
+    try:
+        session.add(document)
+        await session.commit()
+        await session.refresh(document)
+    except Exception as exc:
+        logger.error("DB commit failed for doc %s update: %s", document_id, type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Failed to update document") from exc
     return document.model_dump()
 
 
@@ -190,10 +196,10 @@ async def delete_document(
     document_id: DocumentId,
     user_id: str = Depends(require_fga("document", "can_delete")),
     tenant_id: str = Depends(get_tenant_id),
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_async_session),
 ):
     """Delete a document. FGA relations cleaned up first; abort on FGA failure."""
-    document = session.get(Document, document_id)
+    document = await session.get(Document, document_id)
     if not document or document.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -228,8 +234,8 @@ async def delete_document(
 
     # DB delete — compensate FGA on failure by re-creating deleted relations
     try:
-        session.delete(document)
-        session.commit()
+        await session.delete(document)
+        await session.commit()
     except Exception as exc:
         logger.error(
             "DB delete failed for doc %s after FGA cleanup — attempting compensation",
@@ -258,10 +264,10 @@ async def share_document(
     body: ShareDocumentRequest,
     user_id: str = Depends(require_fga("document", "owner")),
     tenant_id: str = Depends(get_tenant_id),
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_async_session),
 ):
     """Share a document with another user. Only the owner can share."""
-    document = session.get(Document, document_id)
+    document = await session.get(Document, document_id)
     if not document or document.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -327,10 +333,10 @@ async def revoke_share(
     target_user_id: str,
     user_id: str = Depends(require_fga("document", "owner")),
     tenant_id: str = Depends(get_tenant_id),
-    session: Session = Depends(get_session),
+    session: AsyncSession = Depends(get_async_session),
 ):
     """Revoke a user's access to a document. Deletes both viewer and editor relations."""
-    document = session.get(Document, document_id)
+    document = await session.get(Document, document_id)
     if not document or document.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Document not found")
 
