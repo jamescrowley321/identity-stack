@@ -88,12 +88,18 @@ async def import_tenants(descope_tenants: list[dict], *, dry_run: bool) -> dict[
     async with async_session_factory() as session:
         for dt in descope_tenants:
             descope_id = dt.get("id", "")
+            if not descope_id:
+                logger.warning("Skipping tenant with no id: %s", dt.get("name", "<unnamed>"))
+                continue
+
             name = dt.get("name", descope_id)
             domains = dt.get("selfProvisioningDomains") or []
 
             result = await session.execute(select(Tenant).where(Tenant.name == name))
             existing = result.scalars().first()
             if existing:
+                if descope_id in tenant_map:
+                    logger.warning("Duplicate tenant name '%s' — descope_id %s mapped to existing", name, descope_id)
                 tenant_map[descope_id] = existing.id
                 skipped += 1
                 continue
@@ -260,6 +266,8 @@ async def import_users(descope_users: list[dict], *, dry_run: bool) -> dict[str,
                 continue
 
             status_str = du.get("status", "enabled")
+            if status_str not in _STATUS_MAP:
+                logger.warning("Unknown Descope status '%s' for user %s, defaulting to active", status_str, email)
             user = User(
                 email=email,
                 user_name=du.get("name", email),
