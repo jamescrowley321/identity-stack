@@ -296,6 +296,56 @@ class TestDescopeManagementClient:
 
     @pytest.mark.anyio
     @patch("app.services.descope.httpx.AsyncClient")
+    async def test_search_all_users(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        # Return fewer than limit (100) users to stop pagination
+        mock_http.post.return_value = MagicMock(
+            status_code=200,
+            raise_for_status=MagicMock(),
+            json=MagicMock(return_value={"users": [{"userId": "u1"}, {"userId": "u2"}]}),
+        )
+
+        result = await client.search_all_users()
+        assert len(result) == 2
+        mock_http.post.assert_called_once_with(
+            "https://api.descope.com/v1/mgmt/user/search",
+            headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
+            json={"limit": 100, "page": 0},
+        )
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_search_all_users_paginates(self, mock_cls, client):
+        """Verifies pagination when first page is full."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+
+        page1_users = [{"userId": f"u{i}"} for i in range(100)]
+        page2_users = [{"userId": "u100"}, {"userId": "u101"}]
+
+        mock_http.post.side_effect = [
+            MagicMock(
+                status_code=200,
+                raise_for_status=MagicMock(),
+                json=MagicMock(return_value={"users": page1_users}),
+            ),
+            MagicMock(
+                status_code=200,
+                raise_for_status=MagicMock(),
+                json=MagicMock(return_value={"users": page2_users}),
+            ),
+        ]
+
+        result = await client.search_all_users()
+        assert len(result) == 102
+        assert mock_http.post.call_count == 2
+        # Verify second call uses page=1
+        second_call = mock_http.post.call_args_list[1]
+        assert second_call[1]["json"] == {"limit": 100, "page": 1}
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
     async def test_search_tenant_users(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
