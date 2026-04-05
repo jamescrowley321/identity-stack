@@ -6,19 +6,15 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import get_async_session
+from app.services.adapters.descope import DescopeSyncAdapter
+from app.services.descope import get_descope_client
 from app.services.identity import IdentityService
+from app.services.identity_impl import PostgresIdentityService
 
 
 async def get_identity_service(
     session: AsyncSession = Depends(get_async_session),
 ) -> IdentityService:
-    """Return a configured IdentityService implementation.
-
-    Currently raises NotImplementedError — the concrete PostgresIdentityService
-    will be wired in story 2.x. The NoOpSyncAdapter is ready for injection.
-    """
-    # Story 2.x: return PostgresIdentityService(session=session, adapter=NoOpSyncAdapter())
-    raise NotImplementedError(
-        "PostgresIdentityService is not yet implemented (story 2.x). "
-        "Use NoOpSyncAdapter in tests via dependency override."
-    )
+    """Return a configured IdentityService with Descope sync adapter."""
+    adapter = DescopeSyncAdapter(get_descope_client())
+    return PostgresIdentityService(session=session, adapter=adapter)
