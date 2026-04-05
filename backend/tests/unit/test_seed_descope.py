@@ -75,10 +75,10 @@ class TestRequireEnv:
 
 class TestEnsureDescopeProvider:
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_returns_existing_provider_id(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         existing = MagicMock()
         existing.id = uuid_mod.UUID("12345678-1234-1234-1234-123456789abc")
@@ -90,10 +90,10 @@ class TestEnsureDescopeProvider:
         session.commit.assert_not_called()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_creates_provider_when_not_exists(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -103,10 +103,10 @@ class TestEnsureDescopeProvider:
         session.refresh.assert_called_once()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_dry_run_returns_none_when_not_exists(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -123,10 +123,10 @@ class TestEnsureDescopeProvider:
 
 class TestImportTenants:
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_creates_new_tenants(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -142,10 +142,10 @@ class TestImportTenants:
         session.flush.assert_called()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_skips_existing_tenants(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         existing = MagicMock()
         existing.id = uuid_mod.uuid4()
@@ -158,10 +158,10 @@ class TestImportTenants:
         session.add.assert_not_called()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_dry_run_does_not_commit(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -175,20 +175,20 @@ class TestImportTenants:
         assert "T1" in tenant_map
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_empty_input(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         tenant_map = await import_tenants([], dry_run=False)
         assert tenant_map == {}
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_uses_id_as_name_fallback(self, mock_factory):
         """When name is missing, falls back to descope id."""
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -206,10 +206,10 @@ class TestImportTenants:
 
 class TestImportPermissions:
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_creates_new_permissions(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -224,10 +224,10 @@ class TestImportPermissions:
         session.commit.assert_called_once()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_skips_existing_permissions(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         existing = MagicMock()
         existing.id = uuid_mod.uuid4()
@@ -240,10 +240,10 @@ class TestImportPermissions:
         session.add.assert_not_called()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_skips_empty_name(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         descope_perms = [{"name": ""}, {"description": "no name"}]
         perm_map = await import_permissions(descope_perms, dry_run=False)
@@ -252,10 +252,10 @@ class TestImportPermissions:
         session.add.assert_not_called()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_dry_run_does_not_commit(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -275,10 +275,10 @@ class TestImportPermissions:
 
 class TestImportRoles:
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_creates_new_roles(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -293,10 +293,10 @@ class TestImportRoles:
         session.commit.assert_called_once()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_skips_existing_roles(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         existing = MagicMock()
         existing.id = uuid_mod.uuid4()
@@ -310,10 +310,10 @@ class TestImportRoles:
         assert role_map["admin"] == existing.id
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_creates_role_permission_mappings(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         # First call: role lookup (not found), second+: role_permission lookups (not found)
         session.execute.return_value = _make_execute_return(None)
@@ -329,10 +329,10 @@ class TestImportRoles:
         session.commit.assert_called_once()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_skips_missing_permission_in_perm_map(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -345,10 +345,10 @@ class TestImportRoles:
         assert session.add.call_count == 1
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_skips_empty_role_name(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         descope_roles = [{"name": ""}]
         perm_map: dict[str, uuid_mod.UUID] = {}
@@ -359,10 +359,10 @@ class TestImportRoles:
         session.add.assert_not_called()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_dry_run_does_not_commit(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -384,10 +384,10 @@ class TestImportRoles:
 
 class TestImportUsers:
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_creates_new_users(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -408,10 +408,10 @@ class TestImportUsers:
         session.commit.assert_called_once()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_skips_existing_users(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         existing = MagicMock()
         existing.id = uuid_mod.uuid4()
@@ -424,10 +424,10 @@ class TestImportUsers:
         session.add.assert_not_called()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_skips_users_without_email(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         descope_users = [{"userId": "U1", "email": ""}]
         user_map = await import_users(descope_users, dry_run=False)
@@ -436,10 +436,10 @@ class TestImportUsers:
         session.add.assert_not_called()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_maps_status_correctly(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -454,10 +454,10 @@ class TestImportUsers:
         assert added_user.status == UserStatus.inactive
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_unknown_status_defaults_to_active(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -472,10 +472,10 @@ class TestImportUsers:
         assert added_user.status == UserStatus.active
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_dry_run_does_not_commit(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -488,10 +488,10 @@ class TestImportUsers:
         assert "U1" in user_map
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_email_used_as_username_fallback(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -509,10 +509,10 @@ class TestImportUsers:
 
 class TestImportUserTenantRoles:
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_creates_assignments(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -536,10 +536,10 @@ class TestImportUserTenantRoles:
         session.commit.assert_called_once()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_skips_existing_assignments(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         existing = MagicMock()
         session.execute.return_value = _make_execute_return(existing)
@@ -559,10 +559,10 @@ class TestImportUserTenantRoles:
         session.add.assert_not_called()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_skips_unmapped_user(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         descope_users = [
             {
@@ -579,10 +579,10 @@ class TestImportUserTenantRoles:
         session.add.assert_not_called()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_skips_unmapped_tenant(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         descope_users = [
             {
@@ -599,10 +599,10 @@ class TestImportUserTenantRoles:
         session.add.assert_not_called()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_skips_unmapped_role(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         descope_users = [
             {
@@ -619,10 +619,10 @@ class TestImportUserTenantRoles:
         session.add.assert_not_called()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_multi_tenant_multi_role(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -645,10 +645,10 @@ class TestImportUserTenantRoles:
         assert session.add.call_count == 3
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_dry_run_does_not_commit(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -675,10 +675,10 @@ class TestImportUserTenantRoles:
 
 class TestImportIdpLinks:
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_creates_idp_links(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 
@@ -697,10 +697,10 @@ class TestImportIdpLinks:
         session.commit.assert_called_once()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_skips_existing_links(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         existing = MagicMock()
         session.execute.return_value = _make_execute_return(existing)
@@ -713,10 +713,10 @@ class TestImportIdpLinks:
         session.add.assert_not_called()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_skips_unmapped_user(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         descope_users = [{"userId": "UNKNOWN", "email": "a@a.com"}]
         user_map: dict[str, uuid_mod.UUID] = {}
@@ -726,11 +726,11 @@ class TestImportIdpLinks:
         session.add.assert_not_called()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_skips_when_no_provider_id(self, mock_factory):
         """When provider_id is None and not dry_run, skip entirely."""
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         descope_users = [{"userId": "U1", "email": "a@a.com"}]
         user_map = {"U1": uuid_mod.uuid4()}
@@ -741,11 +741,11 @@ class TestImportIdpLinks:
         session.add.assert_not_called()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_dry_run_with_none_provider(self, mock_factory):
         """Dry run with None provider_id should still count."""
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         descope_users = [{"userId": "U1", "email": "a@a.com"}]
         user_map = {"U1": uuid_mod.uuid4()}
@@ -756,10 +756,10 @@ class TestImportIdpLinks:
         session.commit.assert_not_called()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_descope.async_session_factory")
+    @patch("scripts.seed_descope.get_session_factory")
     async def test_dry_run_does_not_commit(self, mock_factory):
         factory, session = _mock_session_factory()
-        mock_factory.return_value = factory.return_value
+        mock_factory.return_value = factory
 
         session.execute.return_value = _make_execute_return(None)
 

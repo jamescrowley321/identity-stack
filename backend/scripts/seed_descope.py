@@ -27,7 +27,7 @@ _backend_dir = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__f
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
-from app.models.database import async_session_factory  # noqa: E402
+from app.models.database import get_session_factory  # noqa: E402
 from app.models.identity.assignment import UserTenantRole  # noqa: E402
 from app.models.identity.provider import Provider, ProviderType  # noqa: E402
 from app.models.identity.role import Permission, Role, RolePermission  # noqa: E402
@@ -55,7 +55,7 @@ def _require_env(key: str) -> str:
 
 async def ensure_descope_provider(*, dry_run: bool) -> uuid_mod.UUID | None:
     """Register the Descope provider if not already present. Returns provider UUID."""
-    async with async_session_factory() as session:
+    async with get_session_factory()() as session:
         result = await session.execute(select(Provider).where(Provider.name == "descope"))
         existing = result.scalars().first()
         if existing:
@@ -85,7 +85,7 @@ async def import_tenants(descope_tenants: list[dict], *, dry_run: bool) -> dict[
     created = 0
     skipped = 0
 
-    async with async_session_factory() as session:
+    async with get_session_factory()() as session:
         for dt in descope_tenants:
             descope_id = dt.get("id", "")
             if not descope_id:
@@ -129,7 +129,7 @@ async def import_permissions(descope_permissions: list[dict], *, dry_run: bool) 
     created = 0
     skipped = 0
 
-    async with async_session_factory() as session:
+    async with get_session_factory()() as session:
         for dp in descope_permissions:
             name = dp.get("name", "")
             if not name:
@@ -177,7 +177,7 @@ async def import_roles(
     created_rp = 0
     skipped_rp = 0
 
-    async with async_session_factory() as session:
+    async with get_session_factory()() as session:
         for dr in descope_roles:
             name = dr.get("name", "")
             if not name:
@@ -245,7 +245,7 @@ async def import_users(descope_users: list[dict], *, dry_run: bool) -> dict[str,
     created = 0
     skipped = 0
 
-    async with async_session_factory() as session:
+    async with get_session_factory()() as session:
         for du in descope_users:
             descope_user_id = du.get("userId", "")
             email = du.get("email", "")
@@ -300,7 +300,7 @@ async def import_user_tenant_roles(
     created = 0
     skipped = 0
 
-    async with async_session_factory() as session:
+    async with get_session_factory()() as session:
         for du in descope_users:
             descope_user_id = du.get("userId", "")
             canonical_user_id = user_map.get(descope_user_id)
@@ -369,7 +369,7 @@ async def import_idp_links(
     created = 0
     skipped = 0
 
-    async with async_session_factory() as session:
+    async with get_session_factory()() as session:
         for du in descope_users:
             descope_user_id = du.get("userId", "")
             canonical_user_id = user_map.get(descope_user_id)
