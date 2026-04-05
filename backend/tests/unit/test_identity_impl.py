@@ -241,6 +241,23 @@ class TestUpdateUser:
         result = await service.update_user(tenant_id=tenant_id, user_id=user.id, email="taken@example.com")
         assert result.is_error()
         assert isinstance(result.error, Conflict)
+        # Error message should show the actual email on the user model, not the param
+        assert "taken@example.com" in result.error.message
+
+    @pytest.mark.anyio
+    async def test_integrity_error_message_uses_model_email(self, service, mock_session, tenant_id):
+        """When only user_name is updated but IntegrityError occurs, message uses user.email not None."""
+        user = _make_user(email="real@example.com")
+        exec_result = MagicMock()
+        exec_result.scalar_one_or_none.return_value = user
+        mock_session.execute = AsyncMock(return_value=exec_result)
+        mock_session.flush = AsyncMock(side_effect=IntegrityError("dup", {}, None))
+        mock_session.rollback = AsyncMock()
+
+        result = await service.update_user(tenant_id=tenant_id, user_id=user.id, user_name="newname")
+        assert result.is_error()
+        assert isinstance(result.error, Conflict)
+        assert "real@example.com" in result.error.message
 
     @pytest.mark.anyio
     async def test_partial_update_only_changes_given_fields(self, service, mock_session, tenant_id):
@@ -416,6 +433,13 @@ class TestSearchUsers:
         assert result.is_ok()
         assert len(result.ok) == 1
         assert result.ok[0]["status"] == "inactive"
+
+    @pytest.mark.anyio
+    async def test_invalid_status_returns_empty(self, service, mock_session, tenant_id):
+        """Invalid status string returns empty list instead of crashing."""
+        result = await service.search_users(tenant_id=tenant_id, status="bogus")
+        assert result.is_ok()
+        assert result.ok == []
 
 
 # ---------------------------------------------------------------------------
