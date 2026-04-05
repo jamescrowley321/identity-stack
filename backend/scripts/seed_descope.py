@@ -22,8 +22,10 @@ import uuid as uuid_mod
 
 from sqlmodel import select
 
-# Ensure backend package is importable when run from backend/
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# Ensure backend package is importable when run directly (not via -m)
+_backend_dir = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
 
 from app.models.database import async_session_factory  # noqa: E402
 from app.models.identity.assignment import UserTenantRole  # noqa: E402
@@ -97,6 +99,7 @@ async def import_tenants(descope_tenants: list[dict], *, dry_run: bool) -> dict[
                 continue
 
             if dry_run:
+                tenant_map[descope_id] = uuid_mod.uuid4()
                 created += 1
                 continue
 
@@ -134,6 +137,7 @@ async def import_permissions(descope_permissions: list[dict], *, dry_run: bool) 
                 continue
 
             if dry_run:
+                perm_map[name] = uuid_mod.uuid4()
                 created += 1
                 continue
 
@@ -183,8 +187,9 @@ async def import_roles(
                 skipped_roles += 1
                 role_id = existing.id
             elif dry_run:
+                role_id = uuid_mod.uuid4()
+                role_map[name] = role_id
                 created_roles += 1
-                continue
             else:
                 role = Role(name=name, description=dr.get("description", ""))
                 session.add(role)
@@ -250,6 +255,7 @@ async def import_users(descope_users: list[dict], *, dry_run: bool) -> dict[str,
                 continue
 
             if dry_run:
+                user_map[descope_user_id] = uuid_mod.uuid4()
                 created += 1
                 continue
 
@@ -362,6 +368,8 @@ async def import_idp_links(
             if not canonical_user_id:
                 continue
 
+            # Check for existing links (skip in dry-run when provider is new —
+            # no links can exist yet for a not-yet-created provider)
             if provider_id is not None:
                 result = await session.execute(
                     select(IdPLink).where(

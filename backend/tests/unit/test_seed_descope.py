@@ -189,11 +189,13 @@ class TestImportTenants:
         session.execute.return_value = _make_execute_return(None)
 
         descope_tenants = [{"id": "T1", "name": "Acme"}]
-        await import_tenants(descope_tenants, dry_run=True)
+        tenant_map = await import_tenants(descope_tenants, dry_run=True)
 
         session.add.assert_not_called()
         session.commit.assert_not_called()
         session.flush.assert_not_called()
+        # Dry-run populates map with temp UUIDs for downstream accuracy
+        assert "T1" in tenant_map
 
     @pytest.mark.anyio
     @patch("scripts.seed_descope.async_session_factory")
@@ -281,10 +283,12 @@ class TestImportPermissions:
         session.execute.return_value = _make_execute_return(None)
 
         descope_perms = [{"name": "documents.write"}]
-        await import_permissions(descope_perms, dry_run=True)
+        perm_map = await import_permissions(descope_perms, dry_run=True)
 
         session.add.assert_not_called()
         session.commit.assert_not_called()
+        # Dry-run populates map with temp UUIDs for downstream accuracy
+        assert "documents.write" in perm_map
 
 
 # ---------------------------------------------------------------------------
@@ -388,10 +392,12 @@ class TestImportRoles:
         descope_roles = [{"name": "admin", "permissionNames": ["doc.write"]}]
         perm_map = {"doc.write": uuid_mod.uuid4()}
 
-        await import_roles(descope_roles, perm_map, dry_run=True)
+        role_map = await import_roles(descope_roles, perm_map, dry_run=True)
 
         session.add.assert_not_called()
         session.commit.assert_not_called()
+        # Dry-run populates map with temp UUIDs for downstream accuracy
+        assert "admin" in role_map
 
 
 # ---------------------------------------------------------------------------
@@ -497,10 +503,12 @@ class TestImportUsers:
         session.execute.return_value = _make_execute_return(None)
 
         descope_users = [{"userId": "U1", "email": "a@a.com"}]
-        await import_users(descope_users, dry_run=True)
+        user_map = await import_users(descope_users, dry_run=True)
 
         session.add.assert_not_called()
         session.commit.assert_not_called()
+        # Dry-run populates map with temp UUIDs for downstream accuracy
+        assert "U1" in user_map
 
     @pytest.mark.anyio
     @patch("scripts.seed_descope.async_session_factory")
