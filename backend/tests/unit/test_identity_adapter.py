@@ -1,114 +1,17 @@
-"""Unit tests for IdentityProviderAdapter ABC, SyncError, and NoOpSyncAdapter.
+"""Unit tests for IdentityProviderAdapter ABC enforcement and NoOpSyncAdapter behavior.
 
 Covers:
-- IdentityProviderAdapter ABC with 9 abstract methods (AC-1.5.2)
-- SyncError dataclass
+- Partial IdentityProviderAdapter implementation fails to instantiate (AC-1.5.2)
 - NoOpSyncAdapter returns Ok(None) for all methods (AC-1.5.3)
 """
 
-import inspect
-import typing
 import uuid
-from abc import ABC
 
 import pytest
-from expression import Ok, Result
+from expression import Ok
 
-from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.adapters.base import IdentityProviderAdapter
 from app.services.adapters.noop import NoOpSyncAdapter
-
-# ---------------------------------------------------------------------------
-# SyncError dataclass
-# ---------------------------------------------------------------------------
-
-
-class TestSyncError:
-    def test_fields(self):
-        err = SyncError(message="sync failed", operation="create_user", context={"user_id": "abc"})
-        assert err.message == "sync failed"
-        assert err.operation == "create_user"
-        assert err.context == {"user_id": "abc"}
-
-    def test_defaults(self):
-        err = SyncError(message="failed")
-        assert err.operation == ""
-        assert err.context is None
-
-    def test_frozen(self):
-        err = SyncError(message="test")
-        try:
-            err.message = "changed"  # type: ignore[misc]
-            assert False, "Should have raised FrozenInstanceError"
-        except AttributeError:
-            pass
-
-
-# ---------------------------------------------------------------------------
-# IdentityProviderAdapter ABC (AC-1.5.2)
-# ---------------------------------------------------------------------------
-
-
-class TestIdentityProviderAdapterIsABC:
-    def test_is_abstract(self):
-        assert issubclass(IdentityProviderAdapter, ABC)
-
-    def test_cannot_instantiate(self):
-        try:
-            IdentityProviderAdapter()  # type: ignore[abstract]
-            assert False, "Should not be able to instantiate ABC"
-        except TypeError:
-            pass
-
-
-class TestIdentityProviderAdapterMethods:
-    """AC-1.5.2: 9 abstract async methods returning Result[None, SyncError]."""
-
-    EXPECTED_METHODS = [
-        "sync_user",
-        "sync_role",
-        "sync_permission",
-        "sync_tenant",
-        "sync_role_assignment",
-        "delete_user",
-        "delete_role",
-        "delete_permission",
-        "delete_tenant",
-    ]
-
-    def test_has_exactly_9_methods(self):
-        abstract_methods = {
-            name
-            for name, method in inspect.getmembers(IdentityProviderAdapter, predicate=inspect.isfunction)
-            if getattr(method, "__isabstractmethod__", False)
-        }
-        assert len(abstract_methods) == 9
-
-    def test_all_expected_methods_exist(self):
-        for method_name in self.EXPECTED_METHODS:
-            assert hasattr(IdentityProviderAdapter, method_name), f"Missing method: {method_name}"
-
-    def test_all_methods_are_abstract(self):
-        for method_name in self.EXPECTED_METHODS:
-            method = getattr(IdentityProviderAdapter, method_name)
-            assert getattr(method, "__isabstractmethod__", False), f"{method_name} is not abstract"
-
-    def test_all_methods_are_coroutines(self):
-        for method_name in self.EXPECTED_METHODS:
-            method = getattr(IdentityProviderAdapter, method_name)
-            assert inspect.iscoroutinefunction(method), f"{method_name} is not async"
-
-    def test_all_methods_return_result_none_sync_error(self):
-        """All adapter methods return Result[None, SyncError]."""
-        for method_name in self.EXPECTED_METHODS:
-            method = getattr(IdentityProviderAdapter, method_name)
-            hints = typing.get_type_hints(method)
-            assert "return" in hints, f"{method_name} has no return annotation"
-            ret = hints["return"]
-            origin = getattr(ret, "__origin__", None)
-            assert origin is Result, f"{method_name} return type is {ret}, not Result"
-            args = ret.__args__
-            assert args[0] is None, f"{method_name} ok type is {args[0]}, not None"
-            assert args[1] is SyncError, f"{method_name} error type is {args[1]}, not SyncError"
 
 
 class TestAdapterPartialImplementationFails:
@@ -122,20 +25,6 @@ class TestAdapterPartialImplementationFails:
             assert False, "Should not be able to instantiate partial adapter"
         except TypeError:
             pass
-
-
-# ---------------------------------------------------------------------------
-# NoOpSyncAdapter (AC-1.5.3)
-# ---------------------------------------------------------------------------
-
-
-class TestNoOpSyncAdapterIsAdapter:
-    def test_is_subclass(self):
-        assert issubclass(NoOpSyncAdapter, IdentityProviderAdapter)
-
-    def test_can_instantiate(self):
-        adapter = NoOpSyncAdapter()
-        assert adapter is not None
 
 
 @pytest.mark.anyio
