@@ -31,7 +31,7 @@ class User(SQLModel, table=True):
     family_name: str = Field(default="", sa_column=sa.Column(sa.String, nullable=False, server_default=""))
     status: UserStatus = Field(
         default=UserStatus.active,
-        sa_column=sa.Column(sa.Enum(UserStatus, name="userstatus"), nullable=False, server_default="active"),
+        sa_column=sa.Column(sa.Enum(UserStatus, name="user_status"), nullable=False, server_default="active"),
     )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),

@@ -28,7 +28,7 @@ class Tenant(SQLModel, table=True):
     domains: list[str] = Field(default_factory=list, sa_column=sa.Column(sa.JSON, nullable=False, server_default="[]"))
     status: TenantStatus = Field(
         default=TenantStatus.active,
-        sa_column=sa.Column(sa.Enum(TenantStatus, name="tenantstatus"), nullable=False, server_default="active"),
+        sa_column=sa.Column(sa.Enum(TenantStatus, name="tenant_status"), nullable=False, server_default="active"),
     )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),

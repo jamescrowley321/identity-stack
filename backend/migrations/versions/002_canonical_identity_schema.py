@@ -37,14 +37,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     _assert_postgresql()
-    # --- Enum types (use raw SQL for offline-mode compatibility) ---
-    op.execute("CREATE TYPE IF NOT EXISTS userstatus AS ENUM ('active', 'inactive', 'provisioned')")
-    op.execute("CREATE TYPE IF NOT EXISTS tenantstatus AS ENUM ('active', 'suspended')")
-    op.execute("CREATE TYPE IF NOT EXISTS providertype AS ENUM ('descope', 'ory', 'entra', 'cognito', 'oidc')")
-
-    userstatus = sa.Enum("active", "inactive", "provisioned", name="userstatus", create_type=False)
-    tenantstatus = sa.Enum("active", "suspended", name="tenantstatus", create_type=False)
-    providertype = sa.Enum("descope", "ory", "entra", "cognito", "oidc", name="providertype", create_type=False)
+    # --- Enum types (created automatically by sa.Enum in create_table) ---
+    userstatus = sa.Enum("active", "inactive", "provisioned", name="user_status")
+    tenantstatus = sa.Enum("active", "suspended", name="tenant_status")
+    providertype = sa.Enum("descope", "ory", "entra", "cognito", "oidc", name="provider_type")
 
     # --- 1. users ---
     op.create_table(
@@ -236,6 +232,6 @@ def downgrade() -> None:
     op.drop_table("users")
 
     # Drop enum types (use raw SQL for offline-mode compatibility)
-    op.execute("DROP TYPE IF EXISTS providertype")
-    op.execute("DROP TYPE IF EXISTS tenantstatus")
-    op.execute("DROP TYPE IF EXISTS userstatus")
+    op.execute(sa.text("DROP TYPE IF EXISTS provider_type"))
+    op.execute(sa.text("DROP TYPE IF EXISTS tenant_status"))
+    op.execute(sa.text("DROP TYPE IF EXISTS user_status"))
