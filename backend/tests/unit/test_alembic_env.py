@@ -70,3 +70,11 @@ def test_env_no_hardcoded_credentials():
 def test_env_requires_database_url():
     """env.py must fail loudly if DATABASE_URL is not set."""
     assert "RuntimeError" in _ENV_SOURCE or "raise" in _ENV_SOURCE
+
+
+def test_env_has_robust_async_driver_strip():
+    """env.py must handle multiple async driver suffixes, not just +asyncpg."""
+    assert "_strip_async_driver" in _ENV_SOURCE
+    # Should handle asyncpg, aiosqlite, and any aio* pattern
+    assert "asyncpg" in _ENV_SOURCE
+    assert "aiosqlite" in _ENV_SOURCE

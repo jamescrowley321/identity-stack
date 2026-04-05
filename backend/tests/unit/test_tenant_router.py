@@ -1,10 +1,11 @@
 """Unit tests for the tenant router endpoints."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
@@ -349,3 +350,54 @@ async def test_list_resources_with_pagination(mock_validate, client):
         headers={"Authorization": "Bearer valid.token"},
     )
     assert response.status_code == 200
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_create_resource_integrity_error_returns_409(mock_validate, client):
+    """IntegrityError (e.g. duplicate name) returns 409 Conflict."""
+    mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
+
+    async def _integrity_error_session():
+        mock_session = MagicMock()
+        mock_session.add = MagicMock()
+        mock_session.commit = AsyncMock(
+            side_effect=IntegrityError("UNIQUE constraint failed", params=None, orig=Exception())
+        )
+        mock_session.rollback = AsyncMock()
+        mock_session.refresh = AsyncMock()
+        yield mock_session
+
+    app.dependency_overrides[get_async_session] = _integrity_error_session
+
+    response = await client.post(
+        "/api/tenants/tenant-abc/resources",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"name": "Duplicate Resource"},
+    )
+    assert response.status_code == 409
+    assert "already exists" in response.json()["detail"]
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_create_resource_db_error_returns_500(mock_validate, client):
+    """Generic DB error returns 500."""
+    mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
+
+    async def _db_error_session():
+        mock_session = MagicMock()
+        mock_session.add = MagicMock()
+        mock_session.commit = AsyncMock(side_effect=Exception("connection lost"))
+        mock_session.rollback = AsyncMock()
+        mock_session.refresh = AsyncMock()
+        yield mock_session
+
+    app.dependency_overrides[get_async_session] = _db_error_session
+
+    response = await client.post(
+        "/api/tenants/tenant-abc/resources",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"name": "Some Resource"},
+    )
+    assert response.status_code == 500

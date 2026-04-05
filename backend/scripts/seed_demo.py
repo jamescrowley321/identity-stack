@@ -23,7 +23,7 @@ from sqlmodel import select
 # Ensure backend package is importable when run from backend/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.models.database import async_engine, async_session_factory  # noqa: E402
+from app.models.database import get_engine, get_session_factory  # noqa: E402
 from app.models.document import Document  # noqa: E402
 from app.services.descope import DescopeManagementClient  # noqa: E402
 
@@ -56,13 +56,15 @@ async def _get_or_create_documents(tenant_id: str, owner_user_id: str) -> list[D
     """Ensure demo documents exist in the DB. Returns all three (existing or new)."""
     from sqlmodel import SQLModel
 
-    async with async_engine.begin() as conn:
+    engine = get_engine()
+    async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
     documents = []
     new_docs: list[Document] = []
 
-    async with async_session_factory() as session:
+    session_factory = get_session_factory()
+    async with session_factory() as session:
         for doc_def in DEMO_DOCUMENTS:
             result = await session.execute(
                 select(Document).where(

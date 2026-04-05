@@ -14,12 +14,17 @@ class TenantStatus(str, enum.Enum):
 
 
 class Tenant(SQLModel, table=True):
-    """Organization/workspace in the canonical identity model."""
+    """Organization/workspace in the canonical identity model.
+
+    Note: updated_at uses ORM-level onupdate=sa.func.now(), which only fires for
+    ORM updates (session.commit()). Raw SQL UPDATE statements bypass this — if raw
+    SQL updates are needed in the future, add a database-level trigger.
+    """
 
     __tablename__ = "tenants"
 
     id: uuid_mod.UUID = Field(default_factory=uuid_mod.uuid4, primary_key=True, sa_type=sa.Uuid)
-    name: str = Field(sa_column=sa.Column(sa.String, nullable=False))
+    name: str = Field(sa_column=sa.Column(sa.String, nullable=False, unique=True))
     domains: list[str] = Field(default_factory=list, sa_column=sa.Column(sa.JSON, nullable=False, server_default="[]"))
     status: TenantStatus = Field(
         default=TenantStatus.active,

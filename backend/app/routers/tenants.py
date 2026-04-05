@@ -3,6 +3,7 @@ import logging
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
@@ -114,8 +115,18 @@ async def create_tenant_resource(
     try:
         session.add(resource)
         await session.commit()
-        await session.refresh(resource)
+    except IntegrityError as exc:
+        await session.rollback()
+        logger.warning("Duplicate tenant resource name '%s' in tenant %s", body.name, tenant_id)
+        raise HTTPException(status_code=409, detail="A resource with that name already exists") from exc
     except Exception as exc:
+        await session.rollback()
         logger.error("DB commit failed for tenant resource: %s", type(exc).__name__)
         raise HTTPException(status_code=500, detail="Failed to create resource") from exc
+
+    try:
+        await session.refresh(resource)
+    except Exception:
+        logger.warning("DB refresh failed for tenant resource after successful commit")
+
     return resource.model_dump()

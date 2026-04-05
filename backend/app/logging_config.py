@@ -1,7 +1,25 @@
 import logging
 import os
+from typing import Any
 
 from pythonjsonlogger.json import JsonFormatter
+
+
+class _OTelAwareJsonFormatter(JsonFormatter):
+    """JSON formatter that suppresses zero-value OTel trace/span IDs.
+
+    When OTel is inactive, the logging instrumentor injects "0" as the trace
+    and span IDs. This filter removes those noise fields from the JSON output.
+    """
+
+    _ZERO_OTEL_VALUES = {"0", "00000000000000000000000000000000", "0000000000000000", ""}
+
+    def process_log_record(self, log_record: dict[str, Any]) -> dict[str, Any]:
+        """Remove otelTraceID/otelSpanID when they are zero or empty."""
+        for key in ("otelTraceID", "otelSpanID"):
+            if str(log_record.get(key, "")) in self._ZERO_OTEL_VALUES:
+                log_record.pop(key, None)
+        return super().process_log_record(log_record)
 
 
 def setup_logging() -> None:
@@ -20,7 +38,7 @@ def setup_logging() -> None:
     if environment == "production":
         # OTel logging instrumentor injects otelTraceID / otelSpanID automatically.
         # defaults={} provides fallback values when OTel is not active.
-        formatter = JsonFormatter(
+        formatter = _OTelAwareJsonFormatter(
             fmt="%(asctime)s %(levelname)s %(name)s %(message)s %(otelTraceID)s %(otelSpanID)s",
             rename_fields={"asctime": "timestamp", "levelname": "level"},
             defaults={"otelTraceID": "", "otelSpanID": ""},
