@@ -342,12 +342,11 @@ class DescopeManagementClient:
         )
         return resp.json().get("user", {})
 
-    async def search_all_users(self) -> list[dict]:
+    async def search_all_users(self, *, max_pages: int = 1000) -> list[dict]:
         """Search for all users in the Descope project, with pagination."""
         all_users: list[dict] = []
         limit = 100
-        page = 0
-        while True:
+        for page in range(max_pages):
             resp = await self._request(
                 "/v1/mgmt/user/search",
                 {"limit": limit, "page": page},
@@ -356,7 +355,6 @@ class DescopeManagementClient:
             all_users.extend(users)
             if len(users) < limit:
                 break
-            page += 1
         return all_users
 
     async def search_tenant_users(self, tenant_id: str) -> list[dict]:
