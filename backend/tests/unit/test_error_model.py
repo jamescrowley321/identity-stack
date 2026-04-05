@@ -121,14 +121,25 @@ class TestProblemDetailResponse:
             status=404,
             detail="User abc not found",
             instance="/api/users/abc",
-            traceId="abc123",
+            trace_id="abc123",
         )
         assert pd.type == "/errors/not-found"
         assert pd.title == "Not Found"
         assert pd.status == 404
         assert pd.detail == "User abc not found"
         assert pd.instance == "/api/users/abc"
-        assert pd.traceId == "abc123"
+        assert pd.trace_id == "abc123"
+
+    def test_accepts_camel_case_alias(self):
+        """traceId alias is accepted for input (Pydantic alias)."""
+        pd = ProblemDetailResponse(
+            type="/errors/test",
+            title="Test",
+            status=500,
+            detail="err",
+            traceId="abc123",
+        )
+        assert pd.trace_id == "abc123"
 
     def test_optional_fields_default_empty(self):
         pd = ProblemDetailResponse(
@@ -138,18 +149,18 @@ class TestProblemDetailResponse:
             detail="err",
         )
         assert pd.instance == ""
-        assert pd.traceId == ""
+        assert pd.trace_id == ""
 
     def test_model_dump_camel_case(self):
-        """traceId must be camelCase in JSON output."""
+        """traceId must be camelCase in JSON output (serialization alias)."""
         pd = ProblemDetailResponse(
             type="/errors/test",
             title="Test",
             status=500,
             detail="err",
-            traceId="trace-xyz",
+            trace_id="trace-xyz",
         )
-        dumped = pd.model_dump()
+        dumped = pd.model_dump(by_alias=True)
         assert "traceId" in dumped
         assert dumped["traceId"] == "trace-xyz"
 
@@ -272,6 +283,16 @@ class TestResultToResponseError:
         assert body["type"] == "/errors/sync-failed"
         assert body["title"] == "Sync Pending"
 
+    def test_sync_failed_uses_plain_json_not_problem_json(self):
+        """SyncFailed (202) must use application/json, not application/problem+json.
+
+        RFC 9457 problem+json is for error responses (4xx/5xx). SyncFailed maps
+        to 202 (accepted), so it should use plain JSON.
+        """
+        result: Result[dict, IdentityError] = Error(SyncFailed(message="sync pending"))
+        response = result_to_response(result, _make_request())
+        assert response.media_type == "application/json"
+
     def test_provider_error_produces_502(self):
         result: Result[dict, IdentityError] = Error(ProviderError(message="upstream down"))
         response = result_to_response(result, _make_request())
@@ -282,9 +303,9 @@ class TestResultToResponseError:
         response = result_to_response(result, _make_request())
         assert response.status_code == 403
 
-    def test_content_type_is_problem_json(self):
-        """Every error response must use application/problem+json."""
-        for error_cls in [NotFound, Conflict, ValidationError, SyncFailed, ProviderError, Forbidden]:
+    def test_content_type_is_problem_json_for_errors(self):
+        """4xx/5xx error responses must use application/problem+json."""
+        for error_cls in [NotFound, Conflict, ValidationError, ProviderError, Forbidden]:
             result: Result[dict, IdentityError] = Error(error_cls(message="test"))
             response = result_to_response(result, _make_request())
             assert response.media_type == "application/problem+json", f"{error_cls.__name__} wrong media type"
@@ -297,11 +318,12 @@ class TestResultToResponseError:
         assert body["instance"] == "/api/tenants/xyz/users/abc"
 
     def test_trace_id_empty_without_otel(self):
-        """traceId is empty string when OTel is not configured (pre-Story 1.4)."""
+        """traceId is empty string when OTel is not configured."""
         result: Result[dict, IdentityError] = Error(NotFound(message="test"))
         response = result_to_response(result, _make_request())
         body = json.loads(response.body)
-        assert body["traceId"] == ""
+        # traceId is serialized via alias
+        assert body.get("traceId", "") == ""
 
     def test_unknown_error_type_fallback(self):
         """Unregistered IdentityError subclass -> 500 /errors/unknown."""

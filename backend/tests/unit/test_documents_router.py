@@ -231,6 +231,7 @@ async def test_create_document_db_failure_compensates_fga(mock_validate, mock_fa
     async def _failing_session():
         mock_session = MagicMock()
         mock_session.commit = AsyncMock(side_effect=Exception("DB error"))
+        mock_session.rollback = AsyncMock()
         mock_session.refresh = AsyncMock()
         yield mock_session
 
@@ -255,6 +256,7 @@ async def test_create_document_db_failure_compensation_also_fails(mock_validate,
     async def _failing_session():
         mock_session = MagicMock()
         mock_session.commit = AsyncMock(side_effect=Exception("DB error"))
+        mock_session.rollback = AsyncMock()
         mock_session.refresh = AsyncMock()
         yield mock_session
 
@@ -696,6 +698,7 @@ async def test_delete_document_db_failure_compensates_fga(mock_validate, mock_fg
         )
         mock_session.delete = AsyncMock()
         mock_session.commit = AsyncMock(side_effect=Exception("DB commit failed"))
+        mock_session.rollback = AsyncMock()
         yield mock_session
 
     app.dependency_overrides[get_async_session] = _failing_session
@@ -752,6 +755,7 @@ async def test_delete_document_db_failure_compensation_also_fails(
         )
         mock_session.delete = AsyncMock()
         mock_session.commit = AsyncMock(side_effect=Exception("DB commit failed"))
+        mock_session.rollback = AsyncMock()
         yield mock_session
 
     app.dependency_overrides[get_async_session] = _failing_session

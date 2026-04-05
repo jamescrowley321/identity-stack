@@ -12,15 +12,17 @@ services:
   backend:
     build: ./backend
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
+    # Note: env_file loads .env first, then environment: block overrides specific
+    # values. If your .env contains DATABASE_URL, the value below takes precedence.
     env_file:
       - .env
     environment:
       - FRONTEND_URL=http://localhost:3000
-      - DATABASE_URL=postgresql+asyncpg://identity:${POSTGRES_PASSWORD:-dev}@postgres:5432/identity
+      - DATABASE_URL=postgresql+asyncpg://identity:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/identity
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://aspire-dashboard:18889
       - OTEL_SERVICE_NAME=identity-stack-backend
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-changeme}@redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy
@@ -28,11 +30,11 @@ services:
   postgres:
     image: postgres:16-alpine
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       - POSTGRES_DB=identity
       - POSTGRES_USER=identity
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-dev}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -47,12 +49,16 @@ services:
       - "127.0.0.1:18888:18888"
       - "127.0.0.1:4317:18889"
     environment:
+      # WARNING: Unsecured auth mode means any service on the Docker network can
+      # inject or read traces. Acceptable for local dev; for shared environments,
+      # switch to ApiKey mode. See: https://learn.microsoft.com/dotnet/aspire/fundamentals/dashboard/configuration
       - DASHBOARD__OTLP__AUTHMODE=Unsecured
 
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
+    command: redis-server --requirepass ${REDIS_PASSWORD:-changeme}
 
 volumes:
   pgdata:

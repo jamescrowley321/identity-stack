@@ -85,14 +85,20 @@ async def create_document(
     try:
         session.add(document)
         await session.commit()
-        await session.refresh(document)
     except Exception as exc:
+        await session.rollback()
         logger.warning("DB commit failed for doc %s, compensating FGA relation", document.id)
         try:
             await client.delete_relation("document", prefixed_id, "owner", user_id)
         except Exception:
             logger.warning("FGA compensation failed for doc %s", document.id)
         raise HTTPException(status_code=500, detail="Failed to create document") from exc
+
+    try:
+        await session.refresh(document)
+    except Exception:
+        logger.warning("DB refresh failed for doc %s after successful commit", document.id)
+        # commit succeeded, FGA relation exists — return the document as-is
 
     return document.model_dump()
 
@@ -182,10 +188,16 @@ async def update_document(
     try:
         session.add(document)
         await session.commit()
-        await session.refresh(document)
     except Exception as exc:
+        await session.rollback()
         logger.error("DB commit failed for doc %s update: %s", document_id, type(exc).__name__)
         raise HTTPException(status_code=500, detail="Failed to update document") from exc
+
+    try:
+        await session.refresh(document)
+    except Exception:
+        logger.warning("DB refresh failed for doc %s after successful update commit", document_id)
+
     return document.model_dump()
 
 
@@ -237,6 +249,7 @@ async def delete_document(
         await session.delete(document)
         await session.commit()
     except Exception as exc:
+        await session.rollback()
         logger.error(
             "DB delete failed for doc %s after FGA cleanup — attempting compensation",
             document_id,

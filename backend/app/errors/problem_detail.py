@@ -12,7 +12,7 @@ from typing import Any
 from expression import Result
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.errors.identity import (
     Conflict,
@@ -30,12 +30,14 @@ logger = logging.getLogger(__name__)
 class ProblemDetailResponse(BaseModel):
     """RFC 9457 Problem Details for HTTP APIs."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     type: str
     title: str
     status: int
     detail: str
     instance: str = ""
-    traceId: str = ""  # noqa: N815 — RFC 9457 camelCase extension field
+    trace_id: str = Field(default="", alias="traceId", serialization_alias="traceId")
 
 
 # Error type -> (URI path, HTTP status, title)
@@ -97,8 +99,8 @@ def _internal_error(request: Request, detail: str) -> JSONResponse:
             status=500,
             detail=detail,
             instance=str(request.url.path),
-            traceId=_get_trace_id(),
-        ).model_dump(),
+            trace_id=_get_trace_id(),
+        ).model_dump(by_alias=True),
         status_code=500,
         media_type="application/problem+json",
     )
@@ -118,11 +120,15 @@ def _error_to_problem_detail(err: IdentityError, request: Request) -> JSONRespon
         status=http_status,
         detail=err.message,
         instance=str(request.url.path),
-        traceId=_get_trace_id(),
+        trace_id=_get_trace_id(),
     )
 
+    # RFC 9457 problem+json is for error responses only (4xx/5xx).
+    # SyncFailed maps to 202 (accepted) — use plain JSON for 2xx statuses.
+    media_type = "application/json" if http_status < 400 else "application/problem+json"
+
     return JSONResponse(
-        content=problem.model_dump(),
+        content=problem.model_dump(by_alias=True),
         status_code=http_status,
-        media_type="application/problem+json",
+        media_type=media_type,
     )

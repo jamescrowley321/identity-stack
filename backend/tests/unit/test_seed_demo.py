@@ -51,9 +51,9 @@ class TestRequireEnv:
 
 class TestGetOrCreateDocuments:
     @pytest.mark.anyio
-    @patch("scripts.seed_demo.async_engine")
-    @patch("scripts.seed_demo.async_session_factory")
-    async def test_creates_new_documents(self, mock_session_factory, mock_engine):
+    @patch("scripts.seed_demo.get_engine")
+    @patch("scripts.seed_demo.get_session_factory")
+    async def test_creates_new_documents(self, mock_get_session_factory, mock_get_engine):
         """Creates all three demo documents when none exist."""
         mock_session = MagicMock()
         mock_result = MagicMock()
@@ -65,13 +65,17 @@ class TestGetOrCreateDocuments:
         mock_session.refresh = AsyncMock()
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
-        mock_session_factory.return_value = mock_session
+        mock_factory = MagicMock()
+        mock_factory.return_value = mock_session
+        mock_get_session_factory.return_value = mock_factory
 
+        mock_engine = MagicMock()
         mock_conn = MagicMock()
         mock_conn.run_sync = AsyncMock()
         mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
         mock_conn.__aexit__ = AsyncMock(return_value=False)
         mock_engine.begin.return_value = mock_conn
+        mock_get_engine.return_value = mock_engine
 
         docs = await _get_or_create_documents("tenant-1", "user-1")
 
@@ -80,9 +84,9 @@ class TestGetOrCreateDocuments:
         mock_session.commit.assert_called_once()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_demo.async_engine")
-    @patch("scripts.seed_demo.async_session_factory")
-    async def test_skips_existing_documents(self, mock_session_factory, mock_engine):
+    @patch("scripts.seed_demo.get_engine")
+    @patch("scripts.seed_demo.get_session_factory")
+    async def test_skips_existing_documents(self, mock_get_session_factory, mock_get_engine):
         """Skips documents that already exist (idempotent)."""
         mock_session = MagicMock()
         existing_doc = MagicMock()
@@ -97,13 +101,17 @@ class TestGetOrCreateDocuments:
         mock_session.refresh = AsyncMock()
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
-        mock_session_factory.return_value = mock_session
+        mock_factory = MagicMock()
+        mock_factory.return_value = mock_session
+        mock_get_session_factory.return_value = mock_factory
 
+        mock_engine = MagicMock()
         mock_conn = MagicMock()
         mock_conn.run_sync = AsyncMock()
         mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
         mock_conn.__aexit__ = AsyncMock(return_value=False)
         mock_engine.begin.return_value = mock_conn
+        mock_get_engine.return_value = mock_engine
 
         docs = await _get_or_create_documents("tenant-1", "user-1")
 
@@ -112,9 +120,9 @@ class TestGetOrCreateDocuments:
         mock_session.commit.assert_not_called()
 
     @pytest.mark.anyio
-    @patch("scripts.seed_demo.async_engine")
-    @patch("scripts.seed_demo.async_session_factory")
-    async def test_mixed_existing_and_new(self, mock_session_factory, mock_engine):
+    @patch("scripts.seed_demo.get_engine")
+    @patch("scripts.seed_demo.get_session_factory")
+    async def test_mixed_existing_and_new(self, mock_get_session_factory, mock_get_engine):
         """Creates only missing documents when some already exist."""
         mock_session = MagicMock()
 
@@ -138,13 +146,17 @@ class TestGetOrCreateDocuments:
         mock_session.refresh = AsyncMock()
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
-        mock_session_factory.return_value = mock_session
+        mock_factory = MagicMock()
+        mock_factory.return_value = mock_session
+        mock_get_session_factory.return_value = mock_factory
 
+        mock_engine = MagicMock()
         mock_conn = MagicMock()
         mock_conn.run_sync = AsyncMock()
         mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
         mock_conn.__aexit__ = AsyncMock(return_value=False)
         mock_engine.begin.return_value = mock_conn
+        mock_get_engine.return_value = mock_engine
 
         docs = await _get_or_create_documents("tenant-1", "user-1")
 
