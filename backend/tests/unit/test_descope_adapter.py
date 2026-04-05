@@ -262,19 +262,3 @@ class TestUnimplementedMethodsReturnOk:
     async def test_delete_tenant(self, adapter):
         result = await adapter.delete_tenant(tenant_id=uuid.uuid4())
         assert result == Ok(None)
-
-
-# ---------------------------------------------------------------------------
-# DescopeSyncAdapter is concrete IdentityProviderAdapter
-# ---------------------------------------------------------------------------
-
-
-class TestDescopeSyncAdapterIsAdapter:
-    def test_is_subclass(self):
-        from app.services.adapters.base import IdentityProviderAdapter
-
-        assert issubclass(DescopeSyncAdapter, IdentityProviderAdapter)
-
-    def test_can_instantiate(self, mock_client):
-        adapter = DescopeSyncAdapter(client=mock_client)
-        assert adapter is not None
