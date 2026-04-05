@@ -296,6 +296,25 @@ class TestDescopeManagementClient:
 
     @pytest.mark.anyio
     @patch("app.services.descope.httpx.AsyncClient")
+    async def test_search_all_users(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(
+            status_code=200,
+            raise_for_status=MagicMock(),
+            json=MagicMock(return_value={"users": [{"userId": "u1"}, {"userId": "u2"}]}),
+        )
+
+        result = await client.search_all_users()
+        assert len(result) == 2
+        mock_http.post.assert_called_once_with(
+            "https://api.descope.com/v1/mgmt/user/search",
+            headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
+            json={},
+        )
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
     async def test_search_tenant_users(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
