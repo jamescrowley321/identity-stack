@@ -58,34 +58,24 @@ class TestInitTelemetryImportFailure:
         assert "not installed" in caplog.text
 
 
+class TestInitTelemetrySdkFailure:
+    """Edge case: OTel SDK constructor throws (e.g., gRPC init error)."""
+
+    def test_handles_provider_init_failure(self, caplog):
+        with (
+            patch.dict("os.environ", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4317"}),
+            patch(
+                "opentelemetry.sdk.trace.TracerProvider",
+                side_effect=RuntimeError("gRPC init error"),
+            ),
+            caplog.at_level("WARNING", logger="app.telemetry"),
+        ):
+            init_telemetry()
+        assert "OTel SDK init failed" in caplog.text
+
+
 class TestInitTelemetryEnabled:
     """AC-1.4.1: OTel SDK configuration when endpoint is set."""
-
-    @patch("app.telemetry._instrument_logging")
-    @patch("app.telemetry._instrument_sqlalchemy")
-    @patch("app.telemetry._instrument_httpx")
-    @patch("app.telemetry._instrument_fastapi")
-    @patch("app.telemetry.BatchSpanProcessor", create=True)
-    @patch("app.telemetry.OTLPSpanExporter", create=True)
-    @patch("app.telemetry.TracerProvider", create=True)
-    @patch("app.telemetry.Resource", create=True)
-    @patch("app.telemetry.trace", create=True)
-    def test_configures_tracer_provider(
-        self,
-        mock_trace_mod,
-        mock_resource_cls,
-        mock_provider_cls,
-        mock_exporter_cls,
-        mock_processor_cls,
-        mock_fastapi,
-        mock_httpx,
-        mock_sqlalchemy,
-        mock_logging,
-    ):
-        """Full init path — patches all OTel SDK classes at the telemetry module level."""
-        # We need to patch at import level inside init_telemetry, which does
-        # lazy imports. Instead, let's test via the real imports.
-        pass
 
     @pytest.fixture(autouse=True)
     def _clean_tracer(self):
@@ -248,6 +238,36 @@ class TestInstrumentorGracefulDegradation:
             side_effect=RuntimeError("boom"),
         ):
             _instrument_logging()
+
+
+class TestGetTraceIdIntegration:
+    """AC-1.4.3: traceId populated with current OTel trace ID when span is active."""
+
+    def test_get_trace_id_returns_hex_trace_id_within_active_span(self):
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+
+        provider = TracerProvider()
+        trace.set_tracer_provider(provider)
+        try:
+            tracer = trace.get_tracer("test")
+            with tracer.start_as_current_span("test-span") as span:
+                from app.errors.problem_detail import _get_trace_id
+
+                trace_id = _get_trace_id()
+                expected = format(span.get_span_context().trace_id, "032x")
+                assert trace_id == expected
+                assert len(trace_id) == 32
+                assert trace_id != "0" * 32
+        finally:
+            trace._TRACER_PROVIDER = None
+            trace._TRACER_PROVIDER_SET_ONCE._done = False
+
+    def test_get_trace_id_returns_empty_without_active_span(self):
+        from app.errors.problem_detail import _get_trace_id
+
+        trace_id = _get_trace_id()
+        assert trace_id == ""
 
 
 def _block_otel_imports(name, *args, **kwargs):
