@@ -110,9 +110,13 @@ def postgres_container():
 @pytest.fixture(scope="session")
 def postgres_url(postgres_container):
     """Async-compatible connection URL for the testcontainers Postgres instance."""
-    # testcontainers gives psycopg2 URL — convert to asyncpg
+    from urllib.parse import urlparse, urlunparse
+
     sync_url = postgres_container.get_connection_url()
-    return sync_url.replace("psycopg2", "asyncpg")
+    parsed = urlparse(sync_url)
+    # Replace any sync scheme (postgresql+psycopg2, postgresql, etc.) with asyncpg
+    async_url = urlunparse(parsed._replace(scheme="postgresql+asyncpg"))
+    return async_url
 
 
 @pytest.fixture(scope="session")
@@ -121,13 +125,19 @@ def _run_migrations(postgres_url):
     from alembic import command
     from alembic.config import Config
 
-    # Alembic needs the sync URL for offline mode, but we run online with the async URL
-    # Set DATABASE_URL so migrations/env.py picks it up
+    # Set DATABASE_URL so migrations/env.py picks it up; restore original after
+    original_url = os.environ.get("DATABASE_URL")
     os.environ["DATABASE_URL"] = postgres_url
-
-    alembic_cfg = Config(os.path.join(os.path.dirname(__file__), "..", "..", "alembic.ini"))
-    alembic_cfg.set_main_option("script_location", os.path.join(os.path.dirname(__file__), "..", "..", "migrations"))
-    command.upgrade(alembic_cfg, "head")
+    try:
+        project_root = os.path.join(os.path.dirname(__file__), "..", "..")
+        alembic_cfg = Config(os.path.join(project_root, "alembic.ini"))
+        alembic_cfg.set_main_option("script_location", os.path.join(project_root, "migrations"))
+        command.upgrade(alembic_cfg, "head")
+    finally:
+        if original_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = original_url
 
 
 @pytest.fixture(scope="session")
@@ -142,13 +152,21 @@ async def db_session(async_engine):
     """Per-test async session with transactional rollback for clean state.
 
     Each test runs inside a transaction that is rolled back after the test,
-    ensuring complete isolation between tests.
+    ensuring complete isolation between tests. Uses SAVEPOINT (begin_nested)
+    so that session.commit() inside the test only commits the savepoint,
+    allowing the outer transaction to still roll back.
     """
     async with async_engine.connect() as conn:
         transaction = await conn.begin()
+        # Use SAVEPOINT so code under test can call session.commit()
+        # without committing the outer transaction
+        nested = await conn.begin_nested()
         session_factory = async_sessionmaker(bind=conn, class_=AsyncSession, expire_on_commit=False)
         async with session_factory() as session:
             yield session
+        # Roll back the savepoint if still active, then the outer transaction
+        if nested.is_active:
+            await nested.rollback()
         await transaction.rollback()
 
 
