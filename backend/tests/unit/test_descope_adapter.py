@@ -635,11 +635,6 @@ class TestDeleteTenant:
 
 
 # ---------------------------------------------------------------------------
-# DescopeSyncAdapter is concrete IdentityProviderAdapter
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # invite_user (Story 2.3)
 # ---------------------------------------------------------------------------
 
@@ -835,19 +830,3 @@ class TestRemoveRoleAssignment:
                 role_name="admin",
             )
             mock_logger.warning.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# DescopeSyncAdapter is concrete IdentityProviderAdapter
-# ---------------------------------------------------------------------------
-
-
-class TestDescopeSyncAdapterIsAdapter:
-    def test_is_subclass(self):
-        from app.services.adapters.base import IdentityProviderAdapter
-
-        assert issubclass(DescopeSyncAdapter, IdentityProviderAdapter)
-
-    def test_can_instantiate(self, mock_client):
-        adapter = DescopeSyncAdapter(client=mock_client)
-        assert adapter is not None

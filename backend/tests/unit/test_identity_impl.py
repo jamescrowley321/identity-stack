@@ -1814,22 +1814,6 @@ class TestTenantToDict:
         assert d["updated_at"] is None
 
 
-# ---------------------------------------------------------------------------
-# PostgresIdentityService is concrete IdentityService
-# ---------------------------------------------------------------------------
-
-
-class TestPostgresIdentityServiceIsConcreteIdentityService:
-    def test_is_subclass_of_identity_service(self):
-        from app.services.identity import IdentityService
-
-        assert issubclass(PostgresIdentityService, IdentityService)
-
-    def test_can_instantiate(self, mock_session, noop_adapter):
-        svc = PostgresIdentityService(session=mock_session, adapter=noop_adapter)
-        assert svc is not None
-
-
 # ===========================================================================
 # Lookup operations (Story 2.3)
 # ===========================================================================

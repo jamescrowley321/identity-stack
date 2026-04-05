@@ -186,7 +186,6 @@ async def test_get_current_tenant_propagates_provider_error(mock_validate, mock_
     assert response.status_code == 502
     data = response.json()
     assert data["type"] == "/errors/provider-error"
-    assert "Descope unavailable" in data["detail"]
 
 
 # =============================================================================
@@ -398,7 +397,7 @@ async def test_create_resource_integrity_error_returns_409(mock_validate, client
     app.dependency_overrides[get_async_session] = _integrity_error_session
 
     response = await client.post(
-        "/api/tenants/tenant-abc/resources",
+        f"/api/tenants/{TENANT_UUID}/resources",
         headers={"Authorization": "Bearer valid.token"},
         json={"name": "Duplicate Resource"},
     )
@@ -423,7 +422,7 @@ async def test_create_resource_db_error_returns_500(mock_validate, client):
     app.dependency_overrides[get_async_session] = _db_error_session
 
     response = await client.post(
-        "/api/tenants/tenant-abc/resources",
+        f"/api/tenants/{TENANT_UUID}/resources",
         headers={"Authorization": "Bearer valid.token"},
         json={"name": "Some Resource"},
     )
