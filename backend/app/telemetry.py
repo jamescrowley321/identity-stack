@@ -35,12 +35,17 @@ def init_telemetry(*, engine=None) -> None:
         logger.warning("OTel SDK packages not installed — telemetry disabled")
         return
 
-    service_name = os.getenv("OTEL_SERVICE_NAME", "identity-stack")
-    resource = Resource.create({"service.name": service_name})
-    provider = TracerProvider(resource=resource)
-    exporter = OTLPSpanExporter(endpoint=endpoint, insecure=True)
-    provider.add_span_processor(BatchSpanProcessor(exporter))
-    trace.set_tracer_provider(provider)
+    try:
+        service_name = os.getenv("OTEL_SERVICE_NAME", "identity-stack")
+        resource = Resource.create({"service.name": service_name})
+        provider = TracerProvider(resource=resource)
+        insecure = not endpoint.startswith("https://")
+        exporter = OTLPSpanExporter(endpoint=endpoint, insecure=insecure)
+        provider.add_span_processor(BatchSpanProcessor(exporter))
+        trace.set_tracer_provider(provider)
+    except Exception:
+        logger.warning("OTel SDK init failed — telemetry disabled", exc_info=True)
+        return
 
     _instrument_fastapi()
     _instrument_httpx()
@@ -72,11 +77,17 @@ def _instrument_fastapi() -> None:
         logger.warning("OTel: FastAPI instrumentor failed", exc_info=True)
 
 
+def _sanitize_httpx_request(span, request) -> None:
+    """Remove sensitive headers from httpx span attributes."""
+    if span.is_recording():
+        span.set_attribute("http.request.header.authorization", "[REDACTED]")
+
+
 def _instrument_httpx() -> None:
     try:
         from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
-        HTTPXClientInstrumentor().instrument()
+        HTTPXClientInstrumentor().instrument(request_hook=_sanitize_httpx_request)
         logger.debug("OTel: httpx instrumentor registered")
     except Exception:
         logger.warning("OTel: httpx instrumentor failed", exc_info=True)

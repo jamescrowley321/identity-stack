@@ -18,10 +18,12 @@ def setup_logging() -> None:
     handler = logging.StreamHandler()
 
     if environment == "production":
-        # OTel logging instrumentor injects otelTraceID / otelSpanID automatically
+        # OTel logging instrumentor injects otelTraceID / otelSpanID automatically.
+        # defaults={} provides fallback values when OTel is not active.
         formatter = JsonFormatter(
             fmt="%(asctime)s %(levelname)s %(name)s %(message)s %(otelTraceID)s %(otelSpanID)s",
             rename_fields={"asctime": "timestamp", "levelname": "level"},
+            defaults={"otelTraceID": "", "otelSpanID": ""},
         )
     else:
         formatter = logging.Formatter(

@@ -35,10 +35,10 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        shutdown_telemetry()
         shutdown_descope_client()
         await http_client.aclose()
         await async_engine.dispose()
-        shutdown_telemetry()
 
 
 app = FastAPI(title="Descope SaaS Starter API", docs_url=None, redoc_url="/redoc", lifespan=lifespan)
