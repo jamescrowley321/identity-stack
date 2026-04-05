@@ -17,6 +17,12 @@ from app.services.descope import DescopeManagementClient
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
 
+_STATUS_MAP: dict[str, str] = {
+    "active": "enabled",
+    "provisioned": "enabled",
+    "inactive": "disabled",
+}
+
 
 class DescopeSyncAdapter(IdentityProviderAdapter):
     """Adapter that syncs canonical identity state to Descope.
@@ -42,9 +48,24 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
             try:
                 email = data.get("email")
                 status = data.get("status")
-                if email and status:
-                    descope_status = "disabled" if status == "inactive" else "enabled"
-                    await self._client.update_user_status(email, descope_status)
+                if not email or not status:
+                    return Error(
+                        SyncError(
+                            message="Missing required sync data: email and status are required",
+                            operation="sync_user",
+                            context={"user_id": str(user_id)},
+                        )
+                    )
+                descope_status = _STATUS_MAP.get(status)
+                if descope_status is None:
+                    return Error(
+                        SyncError(
+                            message=f"Unknown status '{status}': expected one of {list(_STATUS_MAP)}",
+                            operation="sync_user",
+                            context={"user_id": str(user_id)},
+                        )
+                    )
+                await self._client.update_user_status(email, descope_status)
                 return Ok(None)
             except Exception as exc:
                 logger.debug("Descope sync_user failed for %s: %s", user_id, exc)
@@ -139,98 +160,37 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
     ) -> Result[None, SyncError]:
         """Sync role assignment to Descope.
 
-        Requires data dict on the role to resolve the role name for Descope API.
+        Placeholder — full implementation in Story 2.2.
         """
         with tracer.start_as_current_span("descope.sync_role_assignment") as span:
             span.set_attribute("user.id", str(user_id))
             span.set_attribute("tenant.id", str(tenant_id))
             span.set_attribute("role.id", str(role_id))
-            try:
-                # Role assignment sync requires resolving IDs to Descope identifiers.
-                # This is a placeholder — full implementation in Story 2.2.
-                return Ok(None)
-            except Exception as exc:
-                logger.debug(
-                    "Descope sync_role_assignment failed for user=%s tenant=%s role=%s: %s",
-                    user_id,
-                    tenant_id,
-                    role_id,
-                    exc,
-                )
-                return Error(
-                    SyncError(
-                        message=str(exc),
-                        operation="sync_role_assignment",
-                        context={
-                            "user_id": str(user_id),
-                            "tenant_id": str(tenant_id),
-                            "role_id": str(role_id),
-                        },
-                    )
-                )
+            return Ok(None)
 
     async def delete_user(self, *, user_id: uuid.UUID) -> Result[None, SyncError]:
-        """Disable user in Descope (canonical delete maps to Descope disable)."""
+        """Disable user in Descope (canonical delete maps to Descope disable).
+
+        Placeholder — full implementation in a future story.
+        """
         with tracer.start_as_current_span("descope.delete_user") as span:
             span.set_attribute("user.id", str(user_id))
-            try:
-                # Canonical user deletion disables in Descope rather than hard-deleting,
-                # since Descope manages the authentication lifecycle.
-                return Ok(None)
-            except Exception as exc:
-                logger.debug("Descope delete_user failed for %s: %s", user_id, exc)
-                return Error(
-                    SyncError(
-                        message=str(exc),
-                        operation="delete_user",
-                        context={"user_id": str(user_id)},
-                    )
-                )
+            return Ok(None)
 
     async def delete_role(self, *, role_id: uuid.UUID) -> Result[None, SyncError]:
-        """Delete role from Descope."""
+        """Delete role from Descope. Placeholder."""
         with tracer.start_as_current_span("descope.delete_role") as span:
             span.set_attribute("role.id", str(role_id))
-            try:
-                return Ok(None)
-            except Exception as exc:
-                logger.debug("Descope delete_role failed for %s: %s", role_id, exc)
-                return Error(
-                    SyncError(
-                        message=str(exc),
-                        operation="delete_role",
-                        context={"role_id": str(role_id)},
-                    )
-                )
+            return Ok(None)
 
     async def delete_permission(self, *, permission_id: uuid.UUID) -> Result[None, SyncError]:
-        """Delete permission from Descope."""
+        """Delete permission from Descope. Placeholder."""
         with tracer.start_as_current_span("descope.delete_permission") as span:
             span.set_attribute("permission.id", str(permission_id))
-            try:
-                return Ok(None)
-            except Exception as exc:
-                logger.debug("Descope delete_permission failed for %s: %s", permission_id, exc)
-                return Error(
-                    SyncError(
-                        message=str(exc),
-                        operation="delete_permission",
-                        context={"permission_id": str(permission_id)},
-                    )
-                )
+            return Ok(None)
 
     async def delete_tenant(self, *, tenant_id: uuid.UUID) -> Result[None, SyncError]:
-        """Delete tenant from Descope."""
+        """Delete tenant from Descope. Placeholder."""
         with tracer.start_as_current_span("descope.delete_tenant") as span:
             span.set_attribute("tenant.id", str(tenant_id))
-            try:
-                return Ok(None)
-            except Exception as exc:
-                logger.debug("Descope delete_tenant failed for %s: %s", tenant_id, exc)
-                return Error(
-                    SyncError(
-                        message=str(exc),
-                        operation="delete_tenant",
-                        context={"tenant_id": str(tenant_id)},
-                    )
-                )
+            return Ok(None)

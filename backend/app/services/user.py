@@ -15,7 +15,7 @@ from opentelemetry import trace
 
 from app.errors.identity import Conflict, IdentityError, NotFound
 from app.models.identity.user import User, UserStatus
-from app.repositories.user import UserRepository
+from app.repositories.user import RepositoryConflictError, UserRepository
 from app.services.adapters.base import IdentityProviderAdapter, SyncError
 
 logger = logging.getLogger(__name__)
@@ -64,23 +64,33 @@ class UserService:
                 given_name=given_name,
                 family_name=family_name,
             )
-            user = await self._repository.create(user)
+            try:
+                user = await self._repository.create(user)
+            except RepositoryConflictError:
+                return Error(Conflict(message=f"User with email '{email}' already exists"))
+
+            result_dict = user.model_dump()
+            sync_data = {"email": user.email, "status": user.status.value}
+            user_id = user.id
+            await self._repository.commit()
 
             self._log_sync_failure(
-                await self._adapter.sync_user(
-                    user_id=user.id,
-                    data={"email": user.email, "status": user.status.value},
-                ),
-                user.id,
+                await self._adapter.sync_user(user_id=user_id, data=sync_data),
+                user_id,
                 "create",
             )
 
-            await self._repository.commit()
-            return Ok(user.model_dump())
+            return Ok(result_dict)
 
-    async def get_user(self, *, user_id: uuid.UUID) -> Result[dict, IdentityError]:
+    async def get_user(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> Result[dict, IdentityError]:
         """Retrieve a user by ID."""
         with tracer.start_as_current_span("UserService.get_user") as span:
+            span.set_attribute("tenant.id", str(tenant_id))
             span.set_attribute("user.id", str(user_id))
 
             user = await self._repository.get(user_id)
@@ -91,6 +101,7 @@ class UserService:
     async def update_user(
         self,
         *,
+        tenant_id: uuid.UUID,
         user_id: uuid.UUID,
         email: str | None = None,
         user_name: str | None = None,
@@ -99,6 +110,7 @@ class UserService:
     ) -> Result[dict, IdentityError]:
         """Update user fields, then sync to IdP."""
         with tracer.start_as_current_span("UserService.update_user") as span:
+            span.set_attribute("tenant.id", str(tenant_id))
             span.set_attribute("user.id", str(user_id))
 
             user = await self._repository.get(user_id)
@@ -117,26 +129,35 @@ class UserService:
             if family_name is not None:
                 user.family_name = family_name
 
-            user = await self._repository.update(user)
+            try:
+                user = await self._repository.update(user)
+            except RepositoryConflictError:
+                return Error(Conflict(message=f"User with email '{email}' already exists"))
+
+            result_dict = user.model_dump()
+            sync_data = {"email": user.email, "status": user.status.value}
+            await self._repository.commit()
 
             self._log_sync_failure(
-                await self._adapter.sync_user(
-                    user_id=user.id,
-                    data={"email": user.email, "status": user.status.value},
-                ),
+                await self._adapter.sync_user(user_id=user.id, data=sync_data),
                 user.id,
                 "update",
             )
 
-            await self._repository.commit()
-            return Ok(user.model_dump())
+            return Ok(result_dict)
 
-    async def deactivate_user(self, *, user_id: uuid.UUID) -> Result[dict, IdentityError]:
+    async def deactivate_user(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> Result[dict, IdentityError]:
         """Set user status to inactive and sync to IdP.
 
         AC-2.1.4: repo sets status=inactive, adapter sync attempted.
         """
         with tracer.start_as_current_span("UserService.deactivate_user") as span:
+            span.set_attribute("tenant.id", str(tenant_id))
             span.set_attribute("user.id", str(user_id))
 
             user = await self._repository.get(user_id)
@@ -146,17 +167,17 @@ class UserService:
             user.status = UserStatus.inactive
             user = await self._repository.update(user)
 
+            result_dict = user.model_dump()
+            sync_data = {"email": user.email, "status": user.status.value}
+            await self._repository.commit()
+
             self._log_sync_failure(
-                await self._adapter.sync_user(
-                    user_id=user.id,
-                    data={"email": user.email, "status": user.status.value},
-                ),
+                await self._adapter.sync_user(user_id=user.id, data=sync_data),
                 user.id,
                 "deactivate",
             )
 
-            await self._repository.commit()
-            return Ok(user.model_dump())
+            return Ok(result_dict)
 
     async def search_users(
         self,
@@ -184,11 +205,10 @@ class UserService:
         operation: str,
     ) -> None:
         """Log adapter sync failures as warnings without propagating."""
-        match result:
-            case Result(tag="error", error=sync_error):
-                logger.warning(
-                    "IdP sync failed for user %s (%s): %s",
-                    entity_id,
-                    operation,
-                    sync_error.message,
-                )
+        if result.is_error():
+            logger.warning(
+                "IdP sync failed for user %s (%s): %s",
+                entity_id,
+                operation,
+                result.error.message,
+            )

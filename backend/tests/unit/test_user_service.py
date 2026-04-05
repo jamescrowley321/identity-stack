@@ -1,7 +1,7 @@
 """Unit tests for UserService domain orchestration (Story 2.1).
 
 Tests cover:
-- create_user: persist → sync → Ok(user); duplicate email → Conflict; sync failure → warning + Ok
+- create_user: persist → commit → sync → Ok(user); duplicate email → Conflict; sync failure → warning + Ok
 - get_user: found → Ok(dict); not found → NotFound
 - update_user: happy path, not found, email conflict with different user
 - deactivate_user: sets status=inactive, syncs, not found case
@@ -16,9 +16,11 @@ from expression import Error, Ok
 
 from app.errors.identity import Conflict, NotFound
 from app.models.identity.user import User, UserStatus
-from app.repositories.user import UserRepository
-from app.services.adapters.base import SyncError
+from app.repositories.user import RepositoryConflictError, UserRepository
+from app.services.adapters.base import IdentityProviderAdapter, SyncError
 from app.services.user import UserService
+
+TENANT_ID = uuid.uuid4()
 
 
 def _make_user(**overrides) -> User:
@@ -43,14 +45,14 @@ def _build_service(
     if repo is None:
         repo = AsyncMock(spec=UserRepository)
     if adapter is None:
-        adapter = AsyncMock()
+        adapter = AsyncMock(spec=IdentityProviderAdapter)
     service = UserService(repository=repo, adapter=adapter)
     return service, repo, adapter
 
 
 @pytest.mark.anyio
 class TestCreateUser:
-    """AC-2.1.2: create_user persists via repo, syncs to adapter, returns Ok(dict)."""
+    """AC-2.1.2: create_user persists via repo, commits, syncs to adapter, returns Ok(dict)."""
 
     async def test_create_user_success(self):
         service, repo, adapter = _build_service()
@@ -60,7 +62,7 @@ class TestCreateUser:
         adapter.sync_user.return_value = Ok(None)
 
         result = await service.create_user(
-            tenant_id=uuid.uuid4(),
+            tenant_id=TENANT_ID,
             email=user.email,
             user_name=user.user_name,
             given_name=user.given_name,
@@ -69,15 +71,35 @@ class TestCreateUser:
 
         assert result.is_ok()
         repo.create.assert_awaited_once()
-        adapter.sync_user.assert_awaited_once()
         repo.commit.assert_awaited_once()
+        adapter.sync_user.assert_awaited_once()
+
+    async def test_create_user_commit_before_sync(self):
+        """Commit must happen before sync to prevent ghost state in IdP."""
+        service, repo, adapter = _build_service()
+        repo.get_by_email.return_value = None
+        user = _make_user()
+        repo.create.return_value = user
+        adapter.sync_user.return_value = Ok(None)
+
+        call_order = []
+        repo.commit.side_effect = lambda: call_order.append("commit")
+        adapter.sync_user.side_effect = lambda **kw: (call_order.append("sync"), Ok(None))[1]
+
+        await service.create_user(
+            tenant_id=TENANT_ID,
+            email=user.email,
+            user_name=user.user_name,
+        )
+
+        assert call_order == ["commit", "sync"]
 
     async def test_create_user_duplicate_email_returns_conflict(self):
         service, repo, _adapter = _build_service()
         repo.get_by_email.return_value = _make_user()
 
         result = await service.create_user(
-            tenant_id=uuid.uuid4(),
+            tenant_id=TENANT_ID,
             email="alice@example.com",
             user_name="alice2",
         )
@@ -85,6 +107,21 @@ class TestCreateUser:
         assert result.is_error()
         assert isinstance(result.error, Conflict)
         repo.create.assert_not_awaited()
+
+    async def test_create_user_integrity_error_returns_conflict(self):
+        """TOCTOU race: get_by_email returns None but flush raises IntegrityError."""
+        service, repo, _adapter = _build_service()
+        repo.get_by_email.return_value = None
+        repo.create.side_effect = RepositoryConflictError("duplicate key")
+
+        result = await service.create_user(
+            tenant_id=TENANT_ID,
+            email="alice@example.com",
+            user_name="alice",
+        )
+
+        assert result.is_error()
+        assert isinstance(result.error, Conflict)
 
     async def test_create_user_sync_failure_still_returns_ok(self):
         """AC-2.1.2: sync failure → log warning, still return Ok(user)."""
@@ -96,7 +133,7 @@ class TestCreateUser:
 
         with patch("app.services.user.logger") as mock_logger:
             result = await service.create_user(
-                tenant_id=uuid.uuid4(),
+                tenant_id=TENANT_ID,
                 email=user.email,
                 user_name=user.user_name,
             )
@@ -113,7 +150,7 @@ class TestGetUser:
         user = _make_user()
         repo.get.return_value = user
 
-        result = await service.get_user(user_id=user.id)
+        result = await service.get_user(tenant_id=TENANT_ID, user_id=user.id)
 
         assert result.is_ok()
         assert result.ok["email"] == user.email
@@ -122,7 +159,7 @@ class TestGetUser:
         service, repo, _adapter = _build_service()
         repo.get.return_value = None
 
-        result = await service.get_user(user_id=uuid.uuid4())
+        result = await service.get_user(tenant_id=TENANT_ID, user_id=uuid.uuid4())
 
         assert result.is_error()
         assert isinstance(result.error, NotFound)
@@ -139,6 +176,7 @@ class TestUpdateUser:
         adapter.sync_user.return_value = Ok(None)
 
         result = await service.update_user(
+            tenant_id=TENANT_ID,
             user_id=user.id,
             email="newemail@example.com",
             given_name="Bob",
@@ -152,7 +190,7 @@ class TestUpdateUser:
         service, repo, _adapter = _build_service()
         repo.get.return_value = None
 
-        result = await service.update_user(user_id=uuid.uuid4(), email="x@y.com")
+        result = await service.update_user(tenant_id=TENANT_ID, user_id=uuid.uuid4(), email="x@y.com")
 
         assert result.is_error()
         assert isinstance(result.error, NotFound)
@@ -165,6 +203,7 @@ class TestUpdateUser:
         repo.get_by_email.return_value = existing
 
         result = await service.update_user(
+            tenant_id=TENANT_ID,
             user_id=target.id,
             email=existing.email,
         )
@@ -182,9 +221,26 @@ class TestUpdateUser:
         repo.update.return_value = user
         adapter.sync_user.return_value = Ok(None)
 
-        result = await service.update_user(user_id=user.id, email=user.email)
+        result = await service.update_user(tenant_id=TENANT_ID, user_id=user.id, email=user.email)
 
         assert result.is_ok()
+
+    async def test_update_user_integrity_error_returns_conflict(self):
+        """TOCTOU race: email check passes but flush raises IntegrityError."""
+        service, repo, _adapter = _build_service()
+        user = _make_user()
+        repo.get.return_value = user
+        repo.get_by_email.return_value = None
+        repo.update.side_effect = RepositoryConflictError("duplicate key")
+
+        result = await service.update_user(
+            tenant_id=TENANT_ID,
+            user_id=user.id,
+            email="new@example.com",
+        )
+
+        assert result.is_error()
+        assert isinstance(result.error, Conflict)
 
 
 @pytest.mark.anyio
@@ -198,7 +254,7 @@ class TestDeactivateUser:
         repo.update.return_value = user
         adapter.sync_user.return_value = Ok(None)
 
-        result = await service.deactivate_user(user_id=user.id)
+        result = await service.deactivate_user(tenant_id=TENANT_ID, user_id=user.id)
 
         assert result.is_ok()
         assert user.status == UserStatus.inactive
@@ -209,7 +265,7 @@ class TestDeactivateUser:
         service, repo, _adapter = _build_service()
         repo.get.return_value = None
 
-        result = await service.deactivate_user(user_id=uuid.uuid4())
+        result = await service.deactivate_user(tenant_id=TENANT_ID, user_id=uuid.uuid4())
 
         assert result.is_error()
         assert isinstance(result.error, NotFound)
@@ -222,7 +278,7 @@ class TestDeactivateUser:
         adapter.sync_user.return_value = Error(SyncError(message="timeout", operation="sync_user"))
 
         with patch("app.services.user.logger"):
-            result = await service.deactivate_user(user_id=user.id)
+            result = await service.deactivate_user(tenant_id=TENANT_ID, user_id=user.id)
 
         assert result.is_ok()
         repo.commit.assert_awaited_once()
