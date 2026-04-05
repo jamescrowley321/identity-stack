@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.dependencies.identity import get_identity_service
@@ -10,6 +10,14 @@ from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.identity import IdentityService
 
 router = APIRouter(tags=["Permissions"])
+
+
+def _parse_uuid(value: str, name: str) -> uuid.UUID:
+    """Parse a string to UUID at the router boundary."""
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid {name} format")
 
 
 class CreatePermissionRequest(BaseModel):
@@ -61,7 +69,7 @@ async def update_permission(
     perm_result = await service.get_permission_by_name(name=name)
     if perm_result.is_error():
         return result_to_response(perm_result, request)
-    perm_id = uuid.UUID(perm_result.ok["id"])
+    perm_id = _parse_uuid(perm_result.ok["id"], "permission_id")
 
     update_result = await service.update_permission(
         permission_id=perm_id,
@@ -83,7 +91,7 @@ async def delete_permission(
     perm_result = await service.get_permission_by_name(name=name)
     if perm_result.is_error():
         return result_to_response(perm_result, request)
-    perm_id = uuid.UUID(perm_result.ok["id"])
+    perm_id = _parse_uuid(perm_result.ok["id"], "permission_id")
 
     delete_result = await service.delete_permission(permission_id=perm_id)
     if delete_result.is_error():

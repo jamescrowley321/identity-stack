@@ -1,4 +1,3 @@
-import logging
 import uuid
 from typing import Annotated
 
@@ -11,8 +10,6 @@ from app.dependencies.tenant import get_tenant_claims, get_tenant_id
 from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.identity import IdentityService
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Roles"])
 
@@ -80,11 +77,15 @@ async def assign_roles(
     tid = _parse_uuid(body.tenant_id, "tenant_id")
     uid = _parse_uuid(body.user_id, "user_id")
 
+    # Pre-validate all role names before mutating state
+    resolved_roles: list[uuid.UUID] = []
     for role_name in body.role_names:
-        role_result = await service.get_role_by_name(name=role_name)
+        role_result = await service.get_role_by_name(name=role_name, tenant_id=tid)
         if role_result.is_error():
             return result_to_response(role_result, request)
-        role_id = uuid.UUID(role_result.ok["id"])
+        resolved_roles.append(_parse_uuid(role_result.ok["id"], "role_id"))
+
+    for role_id in resolved_roles:
         assign_result = await service.assign_role_to_user(tenant_id=tid, user_id=uid, role_id=role_id)
         if assign_result.is_error():
             return result_to_response(assign_result, request)
@@ -110,11 +111,15 @@ async def remove_roles(
     tid = _parse_uuid(body.tenant_id, "tenant_id")
     uid = _parse_uuid(body.user_id, "user_id")
 
+    # Pre-validate all role names before mutating state
+    resolved_roles: list[uuid.UUID] = []
     for role_name in body.role_names:
-        role_result = await service.get_role_by_name(name=role_name)
+        role_result = await service.get_role_by_name(name=role_name, tenant_id=tid)
         if role_result.is_error():
             return result_to_response(role_result, request)
-        role_id = uuid.UUID(role_result.ok["id"])
+        resolved_roles.append(_parse_uuid(role_result.ok["id"], "role_id"))
+
+    for role_id in resolved_roles:
         remove_result = await service.remove_role_from_user(tenant_id=tid, user_id=uid, role_id=role_id)
         if remove_result.is_error():
             return result_to_response(remove_result, request)
@@ -147,18 +152,22 @@ async def create_role(
     service: IdentityService = Depends(get_identity_service),
 ):
     """Create a new role definition. Requires owner or admin role."""
-    create_result = await service.create_role(name=body.name, description=body.description)
-    if create_result.is_error():
-        return result_to_response(create_result, request)
-    role_dict = create_result.ok
-    role_id = uuid.UUID(role_dict["id"])
-
-    # Map permissions to role if provided
+    # Pre-validate all permission names before mutating state
+    resolved_perms: list[uuid.UUID] = []
     for perm_name in body.permission_names:
         perm_result = await service.get_permission_by_name(name=perm_name)
         if perm_result.is_error():
             return result_to_response(perm_result, request)
-        perm_id = uuid.UUID(perm_result.ok["id"])
+        resolved_perms.append(_parse_uuid(perm_result.ok["id"], "permission_id"))
+
+    create_result = await service.create_role(name=body.name, description=body.description)
+    if create_result.is_error():
+        return result_to_response(create_result, request)
+    role_dict = create_result.ok
+    role_id = _parse_uuid(role_dict["id"], "role_id")
+
+    # Map pre-validated permissions to role
+    for perm_id in resolved_perms:
         map_result = await service.map_permission_to_role(role_id=role_id, permission_id=perm_id)
         if map_result.is_error():
             return result_to_response(map_result, request)
@@ -179,7 +188,7 @@ async def update_role(
     role_result = await service.get_role_by_name(name=name)
     if role_result.is_error():
         return result_to_response(role_result, request)
-    role_id = uuid.UUID(role_result.ok["id"])
+    role_id = _parse_uuid(role_result.ok["id"], "role_id")
 
     update_result = await service.update_role(
         role_id=role_id,
@@ -201,7 +210,7 @@ async def delete_role(
     role_result = await service.get_role_by_name(name=name)
     if role_result.is_error():
         return result_to_response(role_result, request)
-    role_id = uuid.UUID(role_result.ok["id"])
+    role_id = _parse_uuid(role_result.ok["id"], "role_id")
 
     delete_result = await service.delete_role(role_id=role_id)
     if delete_result.is_error():

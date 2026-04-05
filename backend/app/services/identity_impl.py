@@ -751,6 +751,10 @@ class PostgresIdentityService(IdentityService):
                     NotFound(message=f"Role '{role_id}' is not assigned to user '{user_id}' in tenant '{tenant_id}'")
                 )
 
+            # Fetch role name before deletion to avoid race with concurrent role delete
+            role_result = await self._session.execute(select(Role).where(Role.id == role_id))
+            role = role_result.scalar_one_or_none()
+
             await self._session.delete(assignment)
             try:
                 await self._session.flush()
@@ -761,8 +765,6 @@ class PostgresIdentityService(IdentityService):
                 )
 
             # Write-through: sync role removal to IdP (D7)
-            role_result = await self._session.execute(select(Role).where(Role.id == role_id))
-            role = role_result.scalar_one_or_none()
             if role:
                 sync_result = await self._adapter.remove_role_assignment(
                     user_id=user_id, tenant_id=tenant_id, role_id=role_id, role_name=role.name

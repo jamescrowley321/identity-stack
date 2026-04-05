@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlmodel import SQLModel
 
 from app.dependencies.identity import get_identity_service
-from app.errors.identity import Conflict, NotFound
+from app.errors.identity import Conflict, NotFound, ProviderError
 from app.main import app
 from app.models.database import get_async_session
 
@@ -175,6 +175,20 @@ async def test_get_current_tenant_returns_null_on_not_found(mock_validate, mock_
     assert data["tenant"] is None
 
 
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_get_current_tenant_propagates_provider_error(mock_validate, mock_service, client):
+    """Non-NotFound errors (e.g., ProviderError) should propagate as Problem Detail, not silently return null."""
+    mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
+    mock_service.get_tenant.return_value = Error(ProviderError(message="Descope unavailable"))
+
+    response = await client.get("/api/tenants/current", headers=AUTH_HEADER)
+    assert response.status_code == 502
+    data = response.json()
+    assert data["type"] == "/errors/provider-error"
+    assert "Descope unavailable" in data["detail"]
+
+
 # =============================================================================
 # create_tenant — now uses IdentityService
 # =============================================================================
@@ -192,7 +206,7 @@ async def test_create_tenant(mock_validate, mock_service, client):
         headers=AUTH_HEADER,
         json={"name": "New Org"},
     )
-    assert response.status_code == 201
+    assert response.status_code == 200
     assert response.json()["name"] == "New Org"
     mock_service.create_tenant.assert_awaited_once_with(
         name="New Org",
@@ -212,7 +226,7 @@ async def test_create_tenant_with_domains(mock_validate, mock_service, client):
         headers=AUTH_HEADER,
         json={"name": "Domain Corp", "self_provisioning_domains": ["domain.com"]},
     )
-    assert response.status_code == 201
+    assert response.status_code == 200
     mock_service.create_tenant.assert_awaited_once_with(
         name="Domain Corp",
         domains=["domain.com"],

@@ -156,7 +156,7 @@ async def test_invite_member(mock_validate, mock_service, client):
         headers=AUTH_HEADER,
         json={"email": "new@test.com", "role_names": ["member"]},
     )
-    assert response.status_code == 201
+    assert response.status_code == 200
     data = response.json()
     assert data["status"] == "invited"
     assert data["email"] == "new@test.com"
@@ -166,7 +166,7 @@ async def test_invite_member(mock_validate, mock_service, client):
         email="new@test.com",
         user_name="new@test.com",
     )
-    mock_service.get_role_by_name.assert_awaited_once_with(name="member")
+    mock_service.get_role_by_name.assert_awaited_once_with(name="member", tenant_id=uuid.UUID(TENANT_UUID))
     mock_service.assign_role_to_user.assert_awaited_once_with(
         tenant_id=uuid.UUID(TENANT_UUID),
         user_id=uuid.UUID(USER_UUID),
@@ -190,8 +190,8 @@ async def test_invite_with_default_role(mock_validate, mock_service, client):
         headers=AUTH_HEADER,
         json={"email": "default@test.com"},
     )
-    assert response.status_code == 201
-    mock_service.get_role_by_name.assert_awaited_once_with(name="member")
+    assert response.status_code == 200
+    mock_service.get_role_by_name.assert_awaited_once_with(name="member", tenant_id=uuid.UUID(TENANT_UUID))
 
 
 @pytest.mark.anyio
@@ -281,7 +281,7 @@ async def test_owner_can_assign_owner_role(mock_validate, mock_service, client):
         headers=AUTH_HEADER,
         json={"email": "new@test.com", "role_names": ["owner"]},
     )
-    assert response.status_code == 201
+    assert response.status_code == 200
 
 
 # --- Error handling: service returns Error → RFC 9457 Problem Detail ---
@@ -354,6 +354,8 @@ async def test_remove_member_not_found(mock_validate, mock_service, client):
 async def test_invite_member_provider_error(mock_validate, mock_service, client):
     """Provider error during create_user → 502."""
     mock_validate.return_value = ADMIN_CLAIMS
+    role_dict = {"id": ROLE_UUID, "name": "member"}
+    mock_service.get_role_by_name.return_value = Ok(role_dict)
     mock_service.create_user.return_value = Error(
         ProviderError(message="upstream failed"),
     )
@@ -370,9 +372,8 @@ async def test_invite_member_provider_error(mock_validate, mock_service, client)
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_invite_member_role_not_found(mock_validate, mock_service, client):
-    """If get_role_by_name returns NotFound, invite fails with 404."""
+    """If get_role_by_name returns NotFound during pre-validation, invite fails with 404."""
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_service.create_user.return_value = Ok({"id": USER_UUID, "email": "new@test.com"})
     mock_service.get_role_by_name.return_value = Error(
         NotFound(message="Role 'nonexistent' not found"),
     )

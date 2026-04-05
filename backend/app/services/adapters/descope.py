@@ -413,7 +413,7 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
     async def invite_user(self, *, email: str, tenant_id: uuid.UUID, role_names: list[str]) -> Result[None, SyncError]:
         with tracer.start_as_current_span(
             "descope.invite_user",
-            attributes={"user.email": email, "tenant.id": str(tenant_id)},
+            attributes={"tenant.id": str(tenant_id)},
         ):
             try:
                 await self._client.invite_user(email, str(tenant_id), role_names)

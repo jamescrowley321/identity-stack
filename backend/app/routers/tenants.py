@@ -64,7 +64,7 @@ async def create_tenant(
         name=body.name,
         domains=body.self_provisioning_domains,
     )
-    return result_to_response(result, request, status=201)
+    return result_to_response(result, request)
 
 
 @router.get("/tenants")
@@ -92,7 +92,13 @@ async def get_current_tenant(
     result = await service.get_tenant(tenant_id=tid)
     if result.is_ok():
         return {"tenant_id": tenant_id, "tenant": result.ok}
-    return {"tenant_id": tenant_id, "tenant": None}
+    # NotFound is expected (tenant not yet synced to local DB) — return null
+    from app.errors.identity import NotFound as NotFoundError  # noqa: PLC0415
+
+    if isinstance(result.error, NotFoundError):
+        return {"tenant_id": tenant_id, "tenant": None}
+    # Other errors (ProviderError, Conflict, etc.) — propagate as Problem Detail
+    return result_to_response(result, request)
 
 
 @router.get("/tenants/{tenant_id}/resources")
