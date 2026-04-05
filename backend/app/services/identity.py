@@ -168,3 +168,27 @@ class IdentityService(ABC):
 
     @abstractmethod
     async def get_tenant_users_with_roles(self, *, tenant_id: uuid.UUID) -> Result[list[dict], IdentityError]: ...
+
+    # --- Lookup operations (Story 2.3) ---
+
+    @abstractmethod
+    async def list_roles(self, *, tenant_id: uuid.UUID | None = None) -> Result[list[dict], IdentityError]: ...
+
+    @abstractmethod
+    async def list_permissions(self) -> Result[list[dict], IdentityError]: ...
+
+    @abstractmethod
+    async def get_role_by_name(
+        self, *, name: str, tenant_id: uuid.UUID | None = None
+    ) -> Result[dict, IdentityError]: ...
+
+    @abstractmethod
+    async def get_permission_by_name(self, *, name: str) -> Result[dict, IdentityError]: ...
+
+    @abstractmethod
+    async def activate_user(self, *, tenant_id: uuid.UUID, user_id: uuid.UUID) -> Result[dict, IdentityError]: ...
+
+    @abstractmethod
+    async def remove_user_from_tenant(
+        self, *, tenant_id: uuid.UUID, user_id: uuid.UUID
+    ) -> Result[None, IdentityError]: ...

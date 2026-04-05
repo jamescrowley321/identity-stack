@@ -1,14 +1,16 @@
 import logging
+import uuid
 from typing import Annotated
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.dependencies.identity import get_identity_service
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_claims, get_tenant_id
+from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
-from app.services.descope import get_descope_client
+from app.services.identity import IdentityService
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,14 @@ class UpdateRoleRequest(BaseModel):
     new_name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=1000)
     permission_names: list[Annotated[str, Field(min_length=1)]] | None = Field(default=None, max_length=100)
+
+
+def _parse_uuid(value: str, name: str) -> uuid.UUID:
+    """Parse a string to UUID at the router boundary."""
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid {name} format")
 
 
 # --- Existing user-facing endpoints (must stay before /roles/{name}) ---
@@ -59,24 +69,27 @@ async def assign_roles(
     body: RoleAssignmentRequest,
     current_tenant: str = Depends(get_tenant_id),
     admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    service: IdentityService = Depends(get_identity_service),
 ):
     """Assign roles to a user in a tenant. Requires owner or admin role."""
     if body.tenant_id != current_tenant:
         raise HTTPException(status_code=403, detail="Cannot manage roles for a different tenant")
     if "owner" in body.role_names and "owner" not in admin_roles:
         raise HTTPException(status_code=403, detail="Only owners can assign the owner role")
-    try:
-        client = get_descope_client()
-        login_id = await client.resolve_login_id(body.user_id)
-        await client.assign_roles(login_id, body.tenant_id, body.role_names)
-        return {"status": "roles_assigned", "user_id": body.user_id, "role_names": body.role_names}
-    except httpx.HTTPStatusError as exc:
-        body = exc.response.text[:500]
-        logger.warning("Descope API error assigning roles: %s %s", exc.response.status_code, body)
-        raise HTTPException(status_code=502, detail=f"Descope API {exc.response.status_code}: {body}") from exc
-    except httpx.RequestError as exc:
-        logger.error("Network error assigning roles: %s", exc)
-        raise HTTPException(status_code=502, detail=f"Network error: {exc}") from exc
+
+    tid = _parse_uuid(body.tenant_id, "tenant_id")
+    uid = _parse_uuid(body.user_id, "user_id")
+
+    for role_name in body.role_names:
+        role_result = await service.get_role_by_name(name=role_name)
+        if role_result.is_error():
+            return result_to_response(role_result, request)
+        role_id = uuid.UUID(role_result.ok["id"])
+        assign_result = await service.assign_role_to_user(tenant_id=tid, user_id=uid, role_id=role_id)
+        if assign_result.is_error():
+            return result_to_response(assign_result, request)
+
+    return {"status": "roles_assigned", "user_id": body.user_id, "role_names": body.role_names}
 
 
 @router.post("/roles/remove")
@@ -86,24 +99,27 @@ async def remove_roles(
     body: RoleAssignmentRequest,
     current_tenant: str = Depends(get_tenant_id),
     admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    service: IdentityService = Depends(get_identity_service),
 ):
     """Remove roles from a user in a tenant. Requires owner or admin role."""
     if body.tenant_id != current_tenant:
         raise HTTPException(status_code=403, detail="Cannot manage roles for a different tenant")
     if "owner" in body.role_names and "owner" not in admin_roles:
         raise HTTPException(status_code=403, detail="Only owners can remove the owner role")
-    try:
-        client = get_descope_client()
-        login_id = await client.resolve_login_id(body.user_id)
-        await client.remove_roles(login_id, body.tenant_id, body.role_names)
-        return {"status": "roles_removed", "user_id": body.user_id, "role_names": body.role_names}
-    except httpx.HTTPStatusError as exc:
-        body = exc.response.text[:500]
-        logger.warning("Descope API error removing roles: %s %s", exc.response.status_code, body)
-        raise HTTPException(status_code=502, detail=f"Descope API {exc.response.status_code}: {body}") from exc
-    except httpx.RequestError as exc:
-        logger.error("Network error removing roles: %s", exc)
-        raise HTTPException(status_code=502, detail=f"Network error: {exc}") from exc
+
+    tid = _parse_uuid(body.tenant_id, "tenant_id")
+    uid = _parse_uuid(body.user_id, "user_id")
+
+    for role_name in body.role_names:
+        role_result = await service.get_role_by_name(name=role_name)
+        if role_result.is_error():
+            return result_to_response(role_result, request)
+        role_id = uuid.UUID(role_result.ok["id"])
+        remove_result = await service.remove_role_from_user(tenant_id=tid, user_id=uid, role_id=role_id)
+        if remove_result.is_error():
+            return result_to_response(remove_result, request)
+
+    return {"status": "roles_removed", "user_id": body.user_id, "role_names": body.role_names}
 
 
 # --- Role definition CRUD (admin-only) ---
@@ -111,20 +127,15 @@ async def remove_roles(
 
 @router.get("/roles")
 async def list_roles(
+    request: Request,
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    service: IdentityService = Depends(get_identity_service),
 ):
     """List all role definitions. Requires owner or admin role."""
-    try:
-        client = get_descope_client()
-        roles = await client.list_roles()
-        return {"roles": roles}
-    except httpx.HTTPStatusError as exc:
-        body = exc.response.text[:500]
-        logger.warning("Descope API error listing roles: %s %s", exc.response.status_code, body)
-        raise HTTPException(status_code=502, detail=f"Descope API {exc.response.status_code}: {body}") from exc
-    except httpx.RequestError as exc:
-        logger.error("Network error listing roles: %s", exc)
-        raise HTTPException(status_code=502, detail=f"Network error: {exc}") from exc
+    result = await service.list_roles()
+    if result.is_error():
+        return result_to_response(result, request)
+    return {"roles": result.ok}
 
 
 @router.post("/roles", status_code=201)
@@ -133,23 +144,26 @@ async def create_role(
     request: Request,
     body: CreateRoleRequest,
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    service: IdentityService = Depends(get_identity_service),
 ):
     """Create a new role definition. Requires owner or admin role."""
-    try:
-        client = get_descope_client()
-        await client.create_role(body.name, body.description, body.permission_names or None)
-        return {"name": body.name, "description": body.description, "permission_names": body.permission_names}
-    except httpx.HTTPStatusError as exc:
-        resp_body = exc.response.text[:500]
-        logger.warning("Descope API error creating role '%s': %s %s", body.name, exc.response.status_code, resp_body)
-        if exc.response.status_code == 400:
-            raise HTTPException(status_code=400, detail=f"Invalid role data: {resp_body}") from exc
-        if exc.response.status_code == 409:
-            raise HTTPException(status_code=409, detail="Role already exists") from exc
-        raise HTTPException(status_code=502, detail=f"Descope API {exc.response.status_code}: {resp_body}") from exc
-    except httpx.RequestError as exc:
-        logger.error("Network error creating role '%s': %s", body.name, exc)
-        raise HTTPException(status_code=502, detail=f"Network error: {exc}") from exc
+    create_result = await service.create_role(name=body.name, description=body.description)
+    if create_result.is_error():
+        return result_to_response(create_result, request)
+    role_dict = create_result.ok
+    role_id = uuid.UUID(role_dict["id"])
+
+    # Map permissions to role if provided
+    for perm_name in body.permission_names:
+        perm_result = await service.get_permission_by_name(name=perm_name)
+        if perm_result.is_error():
+            return result_to_response(perm_result, request)
+        perm_id = uuid.UUID(perm_result.ok["id"])
+        map_result = await service.map_permission_to_role(role_id=role_id, permission_id=perm_id)
+        if map_result.is_error():
+            return result_to_response(map_result, request)
+
+    return result_to_response(create_result, request, status=201)
 
 
 @router.put("/roles/{name}")
@@ -159,25 +173,20 @@ async def update_role(
     name: str,
     body: UpdateRoleRequest,
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    service: IdentityService = Depends(get_identity_service),
 ):
     """Update a role definition. Requires owner or admin role."""
-    try:
-        client = get_descope_client()
-        effective_name = body.new_name if body.new_name is not None else name
-        await client.update_role(name, effective_name, body.description, body.permission_names)
-        return {"name": effective_name, "description": body.description, "permission_names": body.permission_names}
-    except httpx.HTTPStatusError as exc:
-        logger.warning("Descope API error updating role '%s': %s", name, exc.response.status_code)
-        if exc.response.status_code == 404:
-            raise HTTPException(status_code=404, detail="Role not found") from exc
-        if exc.response.status_code == 409:
-            raise HTTPException(status_code=409, detail="Role name conflict") from exc
-        if exc.response.status_code == 400:
-            raise HTTPException(status_code=400, detail="Invalid role data") from exc
-        raise HTTPException(status_code=502, detail="Failed to update role in Descope") from exc
-    except httpx.RequestError as exc:
-        logger.error("Network error updating role '%s': %s", name, exc)
-        raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
+    role_result = await service.get_role_by_name(name=name)
+    if role_result.is_error():
+        return result_to_response(role_result, request)
+    role_id = uuid.UUID(role_result.ok["id"])
+
+    update_result = await service.update_role(
+        role_id=role_id,
+        name=body.new_name,
+        description=body.description,
+    )
+    return result_to_response(update_result, request)
 
 
 @router.delete("/roles/{name}")
@@ -186,19 +195,15 @@ async def delete_role(
     request: Request,
     name: str,
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    service: IdentityService = Depends(get_identity_service),
 ):
     """Delete a role definition. Requires owner or admin role."""
-    try:
-        client = get_descope_client()
-        await client.delete_role(name)
-        return {"status": "deleted", "name": name}
-    except httpx.HTTPStatusError as exc:
-        logger.warning("Descope API error deleting role '%s': %s", name, exc.response.status_code)
-        if exc.response.status_code == 404:
-            raise HTTPException(status_code=404, detail="Role not found") from exc
-        if exc.response.status_code == 400:
-            raise HTTPException(status_code=400, detail="Invalid role data") from exc
-        raise HTTPException(status_code=502, detail="Failed to delete role in Descope") from exc
-    except httpx.RequestError as exc:
-        logger.error("Network error deleting role '%s': %s", name, exc)
-        raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
+    role_result = await service.get_role_by_name(name=name)
+    if role_result.is_error():
+        return result_to_response(role_result, request)
+    role_id = uuid.UUID(role_result.ok["id"])
+
+    delete_result = await service.delete_role(role_id=role_id)
+    if delete_result.is_error():
+        return result_to_response(delete_result, request)
+    return {"status": "deleted", "name": name}

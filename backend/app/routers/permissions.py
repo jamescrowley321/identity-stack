@@ -1,14 +1,13 @@
-import logging
+import uuid
 
-import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
+from app.dependencies.identity import get_identity_service
 from app.dependencies.rbac import require_role
+from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
-from app.services.descope import get_descope_client
-
-logger = logging.getLogger(__name__)
+from app.services.identity import IdentityService
 
 router = APIRouter(tags=["Permissions"])
 
@@ -25,20 +24,15 @@ class UpdatePermissionRequest(BaseModel):
 
 @router.get("/permissions")
 async def list_permissions(
+    request: Request,
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    service: IdentityService = Depends(get_identity_service),
 ):
     """List all permission definitions. Requires owner or admin role."""
-    try:
-        client = get_descope_client()
-        permissions = await client.list_permissions()
-        return {"permissions": permissions}
-    except httpx.HTTPStatusError as exc:
-        body = exc.response.text[:500]
-        logger.warning("Descope API error listing permissions: %s %s", exc.response.status_code, body)
-        raise HTTPException(status_code=502, detail=f"Descope API {exc.response.status_code}: {body}")
-    except httpx.RequestError as exc:
-        logger.error("Network error listing permissions: %s", exc)
-        raise HTTPException(status_code=502, detail=f"Network error: {exc}")
+    result = await service.list_permissions()
+    if result.is_error():
+        return result_to_response(result, request)
+    return {"permissions": result.ok}
 
 
 @router.post("/permissions", status_code=201)
@@ -47,20 +41,11 @@ async def create_permission(
     request: Request,
     body: CreatePermissionRequest,
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    service: IdentityService = Depends(get_identity_service),
 ):
     """Create a new permission definition. Requires owner or admin role."""
-    try:
-        client = get_descope_client()
-        await client.create_permission(body.name, body.description)
-        return {"name": body.name, "description": body.description}
-    except httpx.HTTPStatusError as exc:
-        logger.warning("Descope API error creating permission '%s': %s", body.name, exc.response.status_code)
-        if exc.response.status_code in (400, 409):
-            raise HTTPException(status_code=exc.response.status_code, detail="Permission already exists or invalid")
-        raise HTTPException(status_code=502, detail="Failed to create permission in Descope")
-    except httpx.RequestError as exc:
-        logger.error("Network error creating permission '%s': %s", body.name, exc)
-        raise HTTPException(status_code=502, detail="Failed to reach Descope API")
+    result = await service.create_permission(name=body.name, description=body.description)
+    return result_to_response(result, request, status=201)
 
 
 @router.put("/permissions/{name}")
@@ -70,20 +55,20 @@ async def update_permission(
     name: str,
     body: UpdatePermissionRequest,
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    service: IdentityService = Depends(get_identity_service),
 ):
     """Update a permission definition. Requires owner or admin role."""
-    try:
-        client = get_descope_client()
-        await client.update_permission(name, body.new_name, body.description)
-        return {"name": body.new_name, "description": body.description}
-    except httpx.HTTPStatusError as exc:
-        logger.warning("Descope API error updating permission '%s': %s", name, exc.response.status_code)
-        if exc.response.status_code in (400, 404, 409):
-            raise HTTPException(status_code=exc.response.status_code, detail="Permission not found or invalid")
-        raise HTTPException(status_code=502, detail="Failed to update permission in Descope")
-    except httpx.RequestError as exc:
-        logger.error("Network error updating permission '%s': %s", name, exc)
-        raise HTTPException(status_code=502, detail="Failed to reach Descope API")
+    perm_result = await service.get_permission_by_name(name=name)
+    if perm_result.is_error():
+        return result_to_response(perm_result, request)
+    perm_id = uuid.UUID(perm_result.ok["id"])
+
+    update_result = await service.update_permission(
+        permission_id=perm_id,
+        name=body.new_name,
+        description=body.description,
+    )
+    return result_to_response(update_result, request)
 
 
 @router.delete("/permissions/{name}")
@@ -92,17 +77,15 @@ async def delete_permission(
     request: Request,
     name: str,
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    service: IdentityService = Depends(get_identity_service),
 ):
     """Delete a permission definition. Requires owner or admin role."""
-    try:
-        client = get_descope_client()
-        await client.delete_permission(name)
-        return {"status": "deleted", "name": name}
-    except httpx.HTTPStatusError as exc:
-        logger.warning("Descope API error deleting permission '%s': %s", name, exc.response.status_code)
-        if exc.response.status_code in (400, 404):
-            raise HTTPException(status_code=exc.response.status_code, detail="Permission not found or invalid")
-        raise HTTPException(status_code=502, detail="Failed to delete permission in Descope")
-    except httpx.RequestError as exc:
-        logger.error("Network error deleting permission '%s': %s", name, exc)
-        raise HTTPException(status_code=502, detail="Failed to reach Descope API")
+    perm_result = await service.get_permission_by_name(name=name)
+    if perm_result.is_error():
+        return result_to_response(perm_result, request)
+    perm_id = uuid.UUID(perm_result.ok["id"])
+
+    delete_result = await service.delete_permission(permission_id=perm_id)
+    if delete_result.is_error():
+        return result_to_response(delete_result, request)
+    return {"status": "deleted", "name": name}

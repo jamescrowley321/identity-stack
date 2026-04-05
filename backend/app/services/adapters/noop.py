@@ -47,3 +47,19 @@ class NoOpSyncAdapter(IdentityProviderAdapter):
 
     async def delete_tenant(self, *, tenant_id: uuid.UUID) -> Result[None, SyncError]:
         return Ok(None)
+
+    async def invite_user(self, *, email: str, tenant_id: uuid.UUID, role_names: list[str]) -> Result[None, SyncError]:
+        return Ok(None)
+
+    async def remove_user_from_tenant(self, *, user_id: uuid.UUID, tenant_id: uuid.UUID) -> Result[None, SyncError]:
+        return Ok(None)
+
+    async def remove_role_assignment(
+        self,
+        *,
+        user_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        role_id: uuid.UUID,
+        role_name: str,
+    ) -> Result[None, SyncError]:
+        return Ok(None)
