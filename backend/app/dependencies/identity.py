@@ -6,7 +6,6 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import get_async_session
-from app.services.adapters.noop import NoOpSyncAdapter
 from app.services.identity import IdentityService
 
 
@@ -18,8 +17,7 @@ async def get_identity_service(
     Currently raises NotImplementedError — the concrete PostgresIdentityService
     will be wired in story 2.x. The NoOpSyncAdapter is ready for injection.
     """
-    _adapter = NoOpSyncAdapter()
-    # PostgresIdentityService(session=session, adapter=_adapter) — story 2.x
+    # Story 2.x: return PostgresIdentityService(session=session, adapter=NoOpSyncAdapter())
     raise NotImplementedError(
         "PostgresIdentityService is not yet implemented (story 2.x). "
         "Use NoOpSyncAdapter in tests via dependency override."
