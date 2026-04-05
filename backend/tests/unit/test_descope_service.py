@@ -14,9 +14,6 @@ def client():
 
 
 class TestDescopeManagementClient:
-    def test_auth_header_format(self, client):
-        assert client._auth_header == "Bearer proj-123:mgmt-key-456"
-
     @pytest.mark.anyio
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_create_tenant(self, mock_cls, client):

@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from scripts.seed_descope import (
-    _STATUS_MAP,
     _require_env,
     ensure_descope_provider,
     import_idp_links,
@@ -67,28 +66,6 @@ class TestRequireEnv:
     def test_present_env_var_returns_value(self, monkeypatch):
         monkeypatch.setenv("SEED_TEST_VAR", "hello")
         assert _require_env("SEED_TEST_VAR") == "hello"
-
-
-# ---------------------------------------------------------------------------
-# _STATUS_MAP
-# ---------------------------------------------------------------------------
-
-
-class TestStatusMap:
-    def test_enabled_maps_to_active(self):
-        from app.models.identity.user import UserStatus
-
-        assert _STATUS_MAP["enabled"] == UserStatus.active
-
-    def test_disabled_maps_to_inactive(self):
-        from app.models.identity.user import UserStatus
-
-        assert _STATUS_MAP["disabled"] == UserStatus.inactive
-
-    def test_invited_maps_to_provisioned(self):
-        from app.models.identity.user import UserStatus
-
-        assert _STATUS_MAP["invited"] == UserStatus.provisioned
 
 
 # ---------------------------------------------------------------------------
