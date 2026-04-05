@@ -154,7 +154,7 @@ class PostgresIdentityService(IdentityService):
                 await self._session.flush()
             except IntegrityError:
                 await self._session.rollback()
-                return Error(Conflict(message=f"User with email '{email}' already exists"))
+                return Error(Conflict(message=f"User with email '{user.email}' already exists"))
 
             user_dict = self._user_to_dict(user)
 
@@ -226,7 +226,11 @@ class PostgresIdentityService(IdentityService):
             )
 
             if status:
-                stmt = stmt.where(User.status == status)
+                try:
+                    status_enum = UserStatus(status)
+                except ValueError:
+                    return Ok([])  # Invalid status matches no users
+                stmt = stmt.where(User.status == status_enum)
 
             if query:
                 # Escape ILIKE metacharacters to prevent wildcard injection
