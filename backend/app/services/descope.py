@@ -342,6 +342,11 @@ class DescopeManagementClient:
         )
         return resp.json().get("user", {})
 
+    async def search_all_users(self) -> list[dict]:
+        """Search for all users in the Descope project."""
+        resp = await self._request("/v1/mgmt/user/search", {})
+        return resp.json().get("users", [])
+
     async def search_tenant_users(self, tenant_id: str) -> list[dict]:
         """Search for users belonging to a specific tenant."""
         resp = await self._request("/v1/mgmt/user/search", {"tenantIds": [tenant_id]})
