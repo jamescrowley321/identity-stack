@@ -23,11 +23,13 @@ from app.routers import (
     users,
 )
 from app.services.descope import init_descope_client, shutdown_descope_client
+from app.telemetry import init_telemetry, shutdown_telemetry
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
+    init_telemetry(engine=async_engine)
     http_client = httpx.AsyncClient(timeout=30.0)
     init_descope_client(http_client=http_client)
     try:
@@ -36,6 +38,7 @@ async def lifespan(app: FastAPI):
         shutdown_descope_client()
         await http_client.aclose()
         await async_engine.dispose()
+        shutdown_telemetry()
 
 
 app = FastAPI(title="Descope SaaS Starter API", docs_url=None, redoc_url="/redoc", lifespan=lifespan)
