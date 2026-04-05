@@ -1,12 +1,41 @@
-"""Unit tests for the permissions router."""
+"""Unit tests for the permissions router — Story 2.3 rewire.
 
+All permission endpoints now use IdentityService via get_identity_service.
+"""
+
+import uuid
 from unittest.mock import AsyncMock, patch
 
-import httpx
 import pytest
+from expression import Error, Ok
 from httpx import ASGITransport, AsyncClient
 
+from app.dependencies.identity import get_identity_service
+from app.errors.identity import Conflict, NotFound, ProviderError
 from app.main import app
+
+TENANT_UUID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+PERM_UUID = "33333333-3333-3333-3333-333333333333"
+
+AUTH_HEADER = {"Authorization": "Bearer valid.token"}
+
+ADMIN_CLAIMS = {
+    "sub": "user123",
+    "dct": TENANT_UUID,
+    "tenants": {
+        TENANT_UUID: {"roles": ["admin"], "permissions": ["settings.manage"]},
+    },
+}
+
+VIEWER_CLAIMS = {
+    "sub": "user456",
+    "dct": TENANT_UUID,
+    "tenants": {
+        TENANT_UUID: {"roles": ["viewer"], "permissions": ["projects.read"]},
+    },
+}
+
+NO_TENANT_CLAIMS = {"sub": "user789", "tenants": {}}
 
 
 @pytest.fixture
@@ -21,33 +50,27 @@ def _set_env(monkeypatch):
 
 
 @pytest.fixture
+def mock_service():
+    return AsyncMock()
+
+
+@pytest.fixture(autouse=True)
+def _override_identity_service(mock_service):
+    app.dependency_overrides[get_identity_service] = lambda: mock_service
+    yield
+    app.dependency_overrides.pop(get_identity_service, None)
+
+
+@pytest.fixture
 async def client():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
 
 
-ADMIN_CLAIMS = {
-    "sub": "user123",
-    "dct": "tenant-abc",
-    "tenants": {
-        "tenant-abc": {"roles": ["admin"], "permissions": ["settings.manage"]},
-    },
-}
-
-VIEWER_CLAIMS = {
-    "sub": "user456",
-    "dct": "tenant-abc",
-    "tenants": {
-        "tenant-abc": {"roles": ["viewer"], "permissions": ["projects.read"]},
-    },
-}
-
-AUTH_HEADER = {"Authorization": "Bearer valid.token"}
-
 SAMPLE_PERMISSIONS = [
-    {"name": "reports.read", "description": "View reports"},
-    {"name": "reports.write", "description": "Edit reports"},
+    {"id": str(uuid.uuid4()), "name": "reports.read", "description": "View reports"},
+    {"id": str(uuid.uuid4()), "name": "reports.write", "description": "Edit reports"},
 ]
 
 
@@ -92,32 +115,35 @@ async def test_delete_permission_rejects_viewer(mock_validate, client):
     assert response.status_code == 403
 
 
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_list_permissions_rejected_without_tenant(mock_validate, client):
+    mock_validate.return_value = NO_TENANT_CLAIMS
+    response = await client.get("/api/permissions", headers=AUTH_HEADER)
+    assert response.status_code == 403
+
+
 # --- Happy path ---
 
 
 @pytest.mark.anyio
-@patch("app.routers.permissions.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_list_permissions(mock_validate, mock_factory, client):
+async def test_list_permissions(mock_validate, mock_service, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.list_permissions.return_value = SAMPLE_PERMISSIONS
-    mock_factory.return_value = mock_client
+    mock_service.list_permissions.return_value = Ok(SAMPLE_PERMISSIONS)
 
     response = await client.get("/api/permissions", headers=AUTH_HEADER)
     assert response.status_code == 200
-    data = response.json()
-    assert data["permissions"] == SAMPLE_PERMISSIONS
-    mock_client.list_permissions.assert_called_once()
+    assert response.json()["permissions"] == SAMPLE_PERMISSIONS
+    mock_service.list_permissions.assert_awaited_once()
 
 
 @pytest.mark.anyio
-@patch("app.routers.permissions.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_permission(mock_validate, mock_factory, client):
+async def test_create_permission(mock_validate, mock_service, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_factory.return_value = mock_client
+    perm_dict = {"id": PERM_UUID, "name": "reports.read", "description": "View reports"}
+    mock_service.create_permission.return_value = Ok(perm_dict)
 
     response = await client.post(
         "/api/permissions",
@@ -125,19 +151,18 @@ async def test_create_permission(mock_validate, mock_factory, client):
         json={"name": "reports.read", "description": "View reports"},
     )
     assert response.status_code == 201
-    data = response.json()
-    assert data["name"] == "reports.read"
-    assert data["description"] == "View reports"
-    mock_client.create_permission.assert_called_once_with("reports.read", "View reports")
+    mock_service.create_permission.assert_awaited_once_with(
+        name="reports.read",
+        description="View reports",
+    )
 
 
 @pytest.mark.anyio
-@patch("app.routers.permissions.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_permission_default_description(mock_validate, mock_factory, client):
+async def test_create_permission_default_description(mock_validate, mock_service, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_factory.return_value = mock_client
+    perm_dict = {"id": PERM_UUID, "name": "reports.read", "description": ""}
+    mock_service.create_permission.return_value = Ok(perm_dict)
 
     response = await client.post(
         "/api/permissions",
@@ -145,16 +170,18 @@ async def test_create_permission_default_description(mock_validate, mock_factory
         json={"name": "reports.read"},
     )
     assert response.status_code == 201
-    mock_client.create_permission.assert_called_once_with("reports.read", "")
+    mock_service.create_permission.assert_awaited_once_with(name="reports.read", description="")
 
 
 @pytest.mark.anyio
-@patch("app.routers.permissions.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_permission(mock_validate, mock_factory, client):
+async def test_update_permission(mock_validate, mock_service, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_factory.return_value = mock_client
+    mock_service.get_permission_by_name.return_value = Ok(
+        {"id": PERM_UUID, "name": "reports.read"},
+    )
+    updated = {"id": PERM_UUID, "name": "reports.view", "description": "View reports"}
+    mock_service.update_permission.return_value = Ok(updated)
 
     response = await client.put(
         "/api/permissions/reports.read",
@@ -162,167 +189,91 @@ async def test_update_permission(mock_validate, mock_factory, client):
         json={"new_name": "reports.view", "description": "View reports"},
     )
     assert response.status_code == 200
-    data = response.json()
-    assert data["name"] == "reports.view"
-    assert data["description"] == "View reports"
-    mock_client.update_permission.assert_called_once_with("reports.read", "reports.view", "View reports")
+    mock_service.get_permission_by_name.assert_awaited_once_with(name="reports.read")
+    mock_service.update_permission.assert_awaited_once_with(
+        permission_id=uuid.UUID(PERM_UUID),
+        name="reports.view",
+        description="View reports",
+    )
 
 
 @pytest.mark.anyio
-@patch("app.routers.permissions.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_delete_permission(mock_validate, mock_factory, client):
+async def test_delete_permission(mock_validate, mock_service, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_factory.return_value = mock_client
+    mock_service.get_permission_by_name.return_value = Ok(
+        {"id": PERM_UUID, "name": "reports.read"},
+    )
+    mock_service.delete_permission.return_value = Ok(None)
 
     response = await client.delete("/api/permissions/reports.read", headers=AUTH_HEADER)
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "deleted"
     assert data["name"] == "reports.read"
-    mock_client.delete_permission.assert_called_once_with("reports.read")
+    mock_service.delete_permission.assert_awaited_once_with(
+        permission_id=uuid.UUID(PERM_UUID),
+    )
 
 
 # --- Error handling ---
 
 
-def _make_http_status_error(status_code: int = 500) -> httpx.HTTPStatusError:
-    request = httpx.Request("POST", "https://api.descope.com/v1/mgmt/permission/create")
-    response = httpx.Response(status_code, request=request, text="error detail")
-    return httpx.HTTPStatusError(f"{status_code} Server Error", request=request, response=response)
-
-
 @pytest.mark.anyio
-@patch("app.routers.permissions.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_permission_duplicate_returns_client_error(mock_validate, mock_factory, client):
-    """Descope returns 4xx for duplicate permission names — forwarded to caller."""
+async def test_create_permission_conflict(mock_validate, mock_service, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.create_permission.side_effect = _make_http_status_error(400)
-    mock_factory.return_value = mock_client
+    mock_service.create_permission.return_value = Error(
+        Conflict(message="duplicate name"),
+    )
 
     response = await client.post(
         "/api/permissions",
         headers=AUTH_HEADER,
         json={"name": "existing.perm"},
     )
-    assert response.status_code == 400
+    assert response.status_code == 409
+    assert response.json()["type"] == "/errors/conflict"
 
 
 @pytest.mark.anyio
-@patch("app.routers.permissions.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_list_permissions_descope_server_error(mock_validate, mock_factory, client):
-    """Descope 5xx → 502."""
+async def test_list_permissions_provider_error(mock_validate, mock_service, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.list_permissions.side_effect = _make_http_status_error(500)
-    mock_factory.return_value = mock_client
+    mock_service.list_permissions.return_value = Error(
+        ProviderError(message="upstream failed"),
+    )
 
     response = await client.get("/api/permissions", headers=AUTH_HEADER)
     assert response.status_code == 502
 
 
 @pytest.mark.anyio
-@patch("app.routers.permissions.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_permission_network_error(mock_validate, mock_factory, client):
-    """Network error → 502."""
+async def test_update_permission_not_found(mock_validate, mock_service, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.create_permission.side_effect = httpx.RequestError("Connection refused")
-    mock_factory.return_value = mock_client
-
-    response = await client.post(
-        "/api/permissions",
-        headers=AUTH_HEADER,
-        json={"name": "test.perm"},
+    mock_service.get_permission_by_name.return_value = Error(
+        NotFound(message="Permission 'missing' not found"),
     )
-    assert response.status_code == 502
-
-
-@pytest.mark.anyio
-@patch("app.routers.permissions.get_descope_client")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_permission_descope_error(mock_validate, mock_factory, client):
-    """Descope 5xx on update → 502."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.update_permission.side_effect = _make_http_status_error(500)
-    mock_factory.return_value = mock_client
 
     response = await client.put(
-        "/api/permissions/test.perm",
+        "/api/permissions/missing",
         headers=AUTH_HEADER,
-        json={"new_name": "test.perm2"},
+        json={"new_name": "new-name"},
     )
-    assert response.status_code == 502
+    assert response.status_code == 404
 
 
 @pytest.mark.anyio
-@patch("app.routers.permissions.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_delete_permission_descope_error(mock_validate, mock_factory, client):
-    """Descope 5xx on delete → 502."""
+async def test_delete_permission_not_found(mock_validate, mock_service, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.delete_permission.side_effect = _make_http_status_error(500)
-    mock_factory.return_value = mock_client
-
-    response = await client.delete("/api/permissions/test.perm", headers=AUTH_HEADER)
-    assert response.status_code == 502
-
-
-@pytest.mark.anyio
-@patch("app.routers.permissions.get_descope_client")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_delete_permission_network_error(mock_validate, mock_factory, client):
-    """Network error on delete → 502."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.delete_permission.side_effect = httpx.RequestError("Connection refused")
-    mock_factory.return_value = mock_client
-
-    response = await client.delete("/api/permissions/test.perm", headers=AUTH_HEADER)
-    assert response.status_code == 502
-
-
-@pytest.mark.anyio
-@patch("app.routers.permissions.get_descope_client")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_permission_network_error(mock_validate, mock_factory, client):
-    """Network error on update → 502."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.update_permission.side_effect = httpx.RequestError("Connection refused")
-    mock_factory.return_value = mock_client
-
-    response = await client.put(
-        "/api/permissions/test.perm",
-        headers=AUTH_HEADER,
-        json={"new_name": "test.perm2"},
+    mock_service.get_permission_by_name.return_value = Error(
+        NotFound(message="Permission 'missing' not found"),
     )
-    assert response.status_code == 502
 
-
-@pytest.mark.anyio
-@patch("app.routers.permissions.get_descope_client")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_permission_descope_401_becomes_502(mock_validate, mock_factory, client):
-    """Descope 401 (e.g. expired mgmt key) should not be forwarded — returns 502."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.create_permission.side_effect = _make_http_status_error(401)
-    mock_factory.return_value = mock_client
-
-    response = await client.post(
-        "/api/permissions",
-        headers=AUTH_HEADER,
-        json={"name": "test.perm"},
-    )
-    assert response.status_code == 502
+    response = await client.delete("/api/permissions/missing", headers=AUTH_HEADER)
+    assert response.status_code == 404
 
 
 # --- Input validation ---
@@ -350,14 +301,3 @@ async def test_update_permission_empty_new_name_rejected(mock_validate, client):
         json={"new_name": ""},
     )
     assert response.status_code == 422
-
-
-# --- No tenant context ---
-
-
-@pytest.mark.anyio
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_list_permissions_rejected_without_tenant(mock_validate, client):
-    mock_validate.return_value = {"sub": "user789", "tenants": {}}
-    response = await client.get("/api/permissions", headers=AUTH_HEADER)
-    assert response.status_code == 403

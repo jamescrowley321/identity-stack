@@ -59,6 +59,7 @@ markers = [
 
 [dependency-groups]
 dev = [
+    "aiosqlite>=0.22.1",
     "pip-audit>=2.9",
     "pytest-playwright>=0.7.2",
 ]

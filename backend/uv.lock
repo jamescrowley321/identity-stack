@@ -684,6 +684,7 @@ dev = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "aiosqlite" },
     { name = "pip-audit" },
     { name = "pytest-playwright" },
 ]
@@ -721,6 +722,7 @@ provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "pip-audit", specifier = ">=2.9" },
     { name = "pytest-playwright", specifier = ">=0.7.2" },
 ]
