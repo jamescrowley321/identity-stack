@@ -35,12 +35,13 @@ class IdentityService(ABC):
     ) -> Result[dict, IdentityError]: ...
 
     @abstractmethod
-    async def get_user(self, *, user_id: uuid.UUID) -> Result[dict, IdentityError]: ...
+    async def get_user(self, *, tenant_id: uuid.UUID, user_id: uuid.UUID) -> Result[dict, IdentityError]: ...
 
     @abstractmethod
     async def update_user(
         self,
         *,
+        tenant_id: uuid.UUID,
         user_id: uuid.UUID,
         email: str | None = None,
         user_name: str | None = None,
@@ -49,10 +50,12 @@ class IdentityService(ABC):
     ) -> Result[dict, IdentityError]: ...
 
     @abstractmethod
-    async def deactivate_user(self, *, user_id: uuid.UUID) -> Result[dict, IdentityError]: ...
+    async def deactivate_user(self, *, tenant_id: uuid.UUID, user_id: uuid.UUID) -> Result[dict, IdentityError]: ...
 
     @abstractmethod
-    async def search_users(self, *, tenant_id: uuid.UUID, query: str = "") -> Result[list[dict], IdentityError]: ...
+    async def search_users(
+        self, *, tenant_id: uuid.UUID, query: str = "", status: str | None = None
+    ) -> Result[list[dict], IdentityError]: ...
 
     # --- Role operations ---
 
