@@ -1,9 +1,10 @@
 """Unit tests for DescopeSyncAdapter (AC-2.1.5).
 
 Tests cover:
-- sync_user: success → Ok(None), maps inactive→disabled/active→enabled
+- sync_user: success → Ok(None), maps inactive→disabled/active→enabled/provisioned→enabled
 - sync_user: client exception → Error(SyncError) with operation context
-- sync_user: missing email/status in data → Ok(None) without calling client
+- sync_user: missing email/status in data → Error(SyncError)
+- sync_user: unknown status → Error(SyncError) (fail-closed)
 - sync_role, sync_permission, sync_tenant: success and failure paths
 """
 
@@ -58,11 +59,37 @@ class TestSyncUser:
         assert result == Ok(None)
         mock_client.update_user_status.assert_awaited_once_with("a@b.com", "enabled")
 
-    async def test_sync_user_missing_data_skips_call(self, adapter, mock_client):
-        """When email or status is missing, no client call is made."""
+    async def test_sync_user_missing_data_returns_error(self, adapter, mock_client):
+        """When email or status is missing, return Error(SyncError)."""
         result = await adapter.sync_user(user_id=uuid.uuid4(), data={})
 
-        assert result == Ok(None)
+        assert result.is_error()
+        assert isinstance(result.error, SyncError)
+        assert result.error.operation == "sync_user"
+        assert "Missing required" in result.error.message
+        mock_client.update_user_status.assert_not_awaited()
+
+    async def test_sync_user_missing_email_returns_error(self, adapter, mock_client):
+        result = await adapter.sync_user(user_id=uuid.uuid4(), data={"status": "active"})
+
+        assert result.is_error()
+        assert "Missing required" in result.error.message
+
+    async def test_sync_user_missing_status_returns_error(self, adapter, mock_client):
+        result = await adapter.sync_user(user_id=uuid.uuid4(), data={"email": "a@b.com"})
+
+        assert result.is_error()
+        assert "Missing required" in result.error.message
+
+    async def test_sync_user_unknown_status_returns_error(self, adapter, mock_client):
+        """Unknown status should fail closed, not map to 'enabled'."""
+        result = await adapter.sync_user(
+            user_id=uuid.uuid4(),
+            data={"email": "a@b.com", "status": "garbage"},
+        )
+
+        assert result.is_error()
+        assert "Unknown status" in result.error.message
         mock_client.update_user_status.assert_not_awaited()
 
     async def test_sync_user_client_error_returns_sync_error(self, adapter, mock_client):

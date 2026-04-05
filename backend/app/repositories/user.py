@@ -9,10 +9,20 @@ from __future__ import annotations
 import uuid
 
 import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.user import User, UserStatus
+
+
+class RepositoryConflictError(Exception):
+    """Raised when a database constraint violation indicates a conflict."""
+
+
+def _escape_like(value: str) -> str:
+    """Escape SQL LIKE/ILIKE wildcard characters."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 class UserRepository:
@@ -25,9 +35,16 @@ class UserRepository:
         self._session = session
 
     async def create(self, user: User) -> User:
-        """Add a new user to the session and flush to generate defaults."""
+        """Add a new user to the session and flush to generate defaults.
+
+        Raises RepositoryConflictError if a uniqueness constraint is violated.
+        """
         self._session.add(user)
-        await self._session.flush()
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            raise RepositoryConflictError(str(exc)) from exc
         return user
 
     async def get(self, user_id: uuid.UUID) -> User | None:
@@ -41,10 +58,16 @@ class UserRepository:
         return result.scalar_one_or_none()
 
     async def update(self, user: User) -> User:
-        """Merge updated user state and flush."""
-        merged = await self._session.merge(user)
-        await self._session.flush()
-        return merged
+        """Flush updated user state.
+
+        Raises RepositoryConflictError if a uniqueness constraint is violated.
+        """
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            raise RepositoryConflictError(str(exc)) from exc
+        return user
 
     async def search(
         self,
@@ -67,14 +90,16 @@ class UserRepository:
         )
 
         if email is not None:
-            stmt = stmt.where(User.email.ilike(f"%{email}%"))
+            escaped = _escape_like(email)
+            stmt = stmt.where(User.email.ilike(f"%{escaped}%", escape="\\"))
 
         if name is not None:
+            escaped = _escape_like(name)
             stmt = stmt.where(
                 sa.or_(
-                    User.given_name.ilike(f"%{name}%"),
-                    User.family_name.ilike(f"%{name}%"),
-                    User.user_name.ilike(f"%{name}%"),
+                    User.given_name.ilike(f"%{escaped}%", escape="\\"),
+                    User.family_name.ilike(f"%{escaped}%", escape="\\"),
+                    User.user_name.ilike(f"%{escaped}%", escape="\\"),
                 )
             )
 
