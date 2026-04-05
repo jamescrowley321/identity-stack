@@ -24,7 +24,7 @@ class Provider(SQLModel, table=True):
     id: uuid_mod.UUID = Field(default_factory=uuid_mod.uuid4, primary_key=True, sa_type=sa.Uuid)
     name: str = Field(sa_column=sa.Column(sa.String, nullable=False, unique=True))
     type: ProviderType = Field(
-        sa_column=sa.Column(sa.Enum(ProviderType, name="providertype"), nullable=False, index=True)
+        sa_column=sa.Column(sa.Enum(ProviderType, name="provider_type"), nullable=False, index=True)
     )
     issuer_url: str = Field(default="", sa_column=sa.Column(sa.String, nullable=False, server_default=""))
     base_url: str = Field(default="", sa_column=sa.Column(sa.String, nullable=False, server_default=""))

@@ -684,8 +684,14 @@ dev = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "aiosqlite" },
+    { name = "anyio", extra = ["trio"] },
     { name = "pip-audit" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
     { name = "pytest-playwright" },
+    { name = "ruff" },
+    { name = "testcontainers" },
 ]
 
 [package.metadata]
@@ -721,8 +727,14 @@ provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "aiosqlite", specifier = ">=0.20" },
+    { name = "anyio", extras = ["trio"], specifier = ">=4.0" },
     { name = "pip-audit", specifier = ">=2.9" },
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "pytest-playwright", specifier = ">=0.7.2" },
+    { name = "ruff", specifier = ">=0.9" },
+    { name = "testcontainers", extras = ["postgres"], specifier = ">=4.0" },
 ]
 
 [[package]]
