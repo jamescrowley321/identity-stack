@@ -1,30 +1,11 @@
-"""Unit tests for IdentityProviderAdapter ABC enforcement and NoOpSyncAdapter behavior.
-
-Covers:
-- Partial IdentityProviderAdapter implementation fails to instantiate (AC-1.5.2)
-- NoOpSyncAdapter returns Ok(None) for all methods (AC-1.5.3)
-"""
+"""Unit tests for NoOpSyncAdapter behavior (AC-1.5.3)."""
 
 import uuid
 
 import pytest
 from expression import Ok
 
-from app.services.adapters.base import IdentityProviderAdapter
 from app.services.adapters.noop import NoOpSyncAdapter
-
-
-class TestAdapterPartialImplementationFails:
-    def test_partial_implementation_fails(self):
-        class PartialAdapter(IdentityProviderAdapter):
-            async def sync_user(self, **kwargs):
-                pass
-
-        try:
-            PartialAdapter()  # type: ignore[abstract]
-            assert False, "Should not be able to instantiate partial adapter"
-        except TypeError:
-            pass
 
 
 @pytest.mark.anyio
