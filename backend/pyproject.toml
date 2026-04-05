@@ -15,8 +15,14 @@ dependencies = [
     "httpx>=0.28,<1",
     "pydantic[email]>=2.0",
     "slowapi>=0.1.9,<1",
-    "python-json-logger>=3.0,<5",
+    "python-json-logger>=3.2,<5",
     "scalar-fastapi>=1.0.0",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.20",
+    "opentelemetry-instrumentation-fastapi>=0.41b0",
+    "opentelemetry-instrumentation-httpx>=0.41b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.41b0",
+    "opentelemetry-instrumentation-logging>=0.41b0",
 ]
 
 [project.optional-dependencies]

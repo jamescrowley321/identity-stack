@@ -1,18 +1,7 @@
 import logging
 import os
-from contextvars import ContextVar
 
 from pythonjsonlogger.json import JsonFormatter
-
-correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="-")
-
-
-class CorrelationIdFilter(logging.Filter):
-    """Injects the current request's correlation ID into every log record."""
-
-    def filter(self, record):
-        record.correlation_id = correlation_id_var.get("-")
-        return True
 
 
 def setup_logging() -> None:
@@ -27,16 +16,18 @@ def setup_logging() -> None:
     root.handlers.clear()
 
     handler = logging.StreamHandler()
-    handler.addFilter(CorrelationIdFilter())
 
     if environment == "production":
+        # OTel logging instrumentor injects otelTraceID / otelSpanID automatically.
+        # defaults={} provides fallback values when OTel is not active.
         formatter = JsonFormatter(
-            fmt="%(asctime)s %(levelname)s %(name)s %(message)s %(correlation_id)s",
+            fmt="%(asctime)s %(levelname)s %(name)s %(message)s %(otelTraceID)s %(otelSpanID)s",
             rename_fields={"asctime": "timestamp", "levelname": "level"},
+            defaults={"otelTraceID": "", "otelSpanID": ""},
         )
     else:
         formatter = logging.Formatter(
-            "%(asctime)s %(levelname)s [%(correlation_id)s] %(name)s — %(message)s",
+            "%(asctime)s %(levelname)s %(name)s — %(message)s",
             datefmt="%H:%M:%S",
         )
 
@@ -50,5 +41,5 @@ def setup_logging() -> None:
 
 
 def get_logger(name: str) -> logging.Logger:
-    """Get a logger that automatically includes the correlation ID."""
+    """Get a named logger."""
     return logging.getLogger(name)

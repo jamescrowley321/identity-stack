@@ -169,8 +169,8 @@ class TestDockerComposeConfiguration:
         svc = compose_config["services"]["aspire-dashboard"]
         assert "aspire-dashboard" in svc["image"]
         ports = svc["ports"]
-        assert "18888:18888" in ports
-        assert "4317:18889" in ports
+        assert "127.0.0.1:18888:18888" in ports
+        assert "127.0.0.1:4317:18889" in ports
 
     def test_redis_service(self, compose_config):
         svc = compose_config["services"]["redis"]

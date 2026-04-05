@@ -16,7 +16,6 @@ from slowapi.middleware import SlowAPIMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.middleware.auth import TokenValidationMiddleware
-from app.middleware.correlation import CorrelationIdMiddleware
 from app.middleware.security import SecurityHeadersMiddleware
 
 logger = logging.getLogger(__name__)
@@ -88,11 +87,7 @@ def configure_middleware(app: FastAPI) -> None:
     app.add_middleware(SecurityHeadersMiddleware, environment=os.getenv("ENVIRONMENT", "development"))
     logger.info("Middleware included: SecurityHeadersMiddleware")
 
-    # 5. Correlation ID — always
-    app.add_middleware(CorrelationIdMiddleware)
-    logger.info("Middleware included: CorrelationIdMiddleware")
-
-    # 6. Proxy headers — outermost (always)
+    # 5. Proxy headers — outermost (always)
     app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=trusted_proxy_hosts)
     logger.info("Middleware included: ProxyHeadersMiddleware")
 
