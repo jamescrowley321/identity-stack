@@ -1,0 +1,95 @@
+"""UserRepository — data access layer for canonical User model.
+
+Handles all SQLAlchemy queries for user CRUD and search.
+Contains NO business logic, NO OTel spans, NO adapter calls — data access only.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.identity.assignment import UserTenantRole
+from app.models.identity.user import User, UserStatus
+
+
+class UserRepository:
+    """Repository for User table operations.
+
+    Takes AsyncSession via constructor injection (inner layer of onion architecture).
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def create(self, user: User) -> User:
+        """Add a new user to the session and flush to generate defaults."""
+        self._session.add(user)
+        await self._session.flush()
+        return user
+
+    async def get(self, user_id: uuid.UUID) -> User | None:
+        """Fetch a user by primary key. Returns None if not found."""
+        return await self._session.get(User, user_id)
+
+    async def get_by_email(self, email: str) -> User | None:
+        """Fetch a user by email address. Returns None if not found."""
+        stmt = sa.select(User).where(User.email == email)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def update(self, user: User) -> User:
+        """Merge updated user state and flush."""
+        merged = await self._session.merge(user)
+        await self._session.flush()
+        return merged
+
+    async def search(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        email: str | None = None,
+        name: str | None = None,
+        status: UserStatus | None = None,
+    ) -> list[User]:
+        """Search users scoped to a tenant with optional filters.
+
+        Tenant scoping uses a JOIN through user_tenant_roles since users
+        don't have a direct tenant_id column.
+        """
+        stmt = (
+            sa.select(User)
+            .join(UserTenantRole, UserTenantRole.user_id == User.id)
+            .where(UserTenantRole.tenant_id == tenant_id)
+            .distinct()
+        )
+
+        if email is not None:
+            stmt = stmt.where(User.email.ilike(f"%{email}%"))
+
+        if name is not None:
+            stmt = stmt.where(
+                sa.or_(
+                    User.given_name.ilike(f"%{name}%"),
+                    User.family_name.ilike(f"%{name}%"),
+                    User.user_name.ilike(f"%{name}%"),
+                )
+            )
+
+        if status is not None:
+            stmt = stmt.where(User.status == status)
+
+        stmt = stmt.order_by(User.created_at.desc())
+
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def commit(self) -> None:
+        """Commit the current transaction."""
+        await self._session.commit()
+
+    async def rollback(self) -> None:
+        """Roll back the current transaction."""
+        await self._session.rollback()
