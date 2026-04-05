@@ -38,6 +38,7 @@ class TestNoOpSyncAdapterMethods:
             user_id=uuid.uuid4(),
             tenant_id=uuid.uuid4(),
             role_id=uuid.uuid4(),
+            role_name="admin",
         )
         assert result == Ok(None)
 
@@ -48,12 +49,12 @@ class TestNoOpSyncAdapterMethods:
 
     async def test_delete_role(self):
         adapter = NoOpSyncAdapter()
-        result = await adapter.delete_role(role_id=uuid.uuid4())
+        result = await adapter.delete_role(role_id=uuid.uuid4(), role_name="admin")
         assert result == Ok(None)
 
     async def test_delete_permission(self):
         adapter = NoOpSyncAdapter()
-        result = await adapter.delete_permission(permission_id=uuid.uuid4())
+        result = await adapter.delete_permission(permission_id=uuid.uuid4(), permission_name="documents.write")
         assert result == Ok(None)
 
     async def test_delete_tenant(self):
@@ -72,10 +73,10 @@ class TestNoOpSyncAdapterMethods:
             await adapter.sync_role(role_id=uid, data=data),
             await adapter.sync_permission(permission_id=uid, data=data),
             await adapter.sync_tenant(tenant_id=uid, data=data),
-            await adapter.sync_role_assignment(user_id=uid, tenant_id=uid, role_id=uid),
+            await adapter.sync_role_assignment(user_id=uid, tenant_id=uid, role_id=uid, role_name="admin"),
             await adapter.delete_user(user_id=uid),
-            await adapter.delete_role(role_id=uid),
-            await adapter.delete_permission(permission_id=uid),
+            await adapter.delete_role(role_id=uid, role_name="admin"),
+            await adapter.delete_permission(permission_id=uid, permission_name="documents.write"),
             await adapter.delete_tenant(tenant_id=uid),
         ]
 
