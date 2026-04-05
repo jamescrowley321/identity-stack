@@ -87,7 +87,10 @@ def _instrument_httpx() -> None:
     try:
         from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
-        HTTPXClientInstrumentor().instrument(request_hook=_sanitize_httpx_request)
+        HTTPXClientInstrumentor().instrument(
+            request_hook=_sanitize_httpx_request,
+            async_request_hook=_sanitize_httpx_request,
+        )
         logger.debug("OTel: httpx instrumentor registered")
     except Exception:
         logger.warning("OTel: httpx instrumentor failed", exc_info=True)

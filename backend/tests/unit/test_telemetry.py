@@ -4,10 +4,30 @@ import builtins
 from unittest.mock import MagicMock, patch
 
 import pytest
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
 
 from app.telemetry import init_telemetry, shutdown_telemetry
 
 _original_import = builtins.__import__
+
+
+def _reset_tracer_provider():
+    """Reset the global OTel tracer provider to the default proxy.
+
+    The OTel SDK enforces set-once semantics. We reset via the internal
+    _TRACER_PROVIDER_SET_ONCE guard. This is unavoidable for unit tests —
+    the SDK provides no public reset API.
+    """
+    provider = trace.get_tracer_provider()
+    if hasattr(provider, "shutdown"):
+        provider.shutdown()
+    # The SDK's set-once guard must be reset for subsequent tests.
+    # These are private but stable across opentelemetry-api >=1.12.
+    if hasattr(trace, "_TRACER_PROVIDER_SET_ONCE"):
+        trace._TRACER_PROVIDER_SET_ONCE._done = False
+    if hasattr(trace, "_TRACER_PROVIDER"):
+        trace._TRACER_PROVIDER = None
 
 
 class TestInitTelemetryDisabled:
@@ -81,14 +101,7 @@ class TestInitTelemetryEnabled:
     def _clean_tracer(self):
         """Reset the global tracer provider after each test."""
         yield
-        try:
-            from opentelemetry import trace
-
-            # Reset to default (no-op) provider
-            trace._TRACER_PROVIDER = None
-            trace._TRACER_PROVIDER_SET_ONCE._done = False
-        except Exception:  # noqa: BLE001, S110
-            pass
+        _reset_tracer_provider()
 
     def test_calls_all_instrumentors(self):
         with (
@@ -243,31 +256,80 @@ class TestInstrumentorGracefulDegradation:
 class TestGetTraceIdIntegration:
     """AC-1.4.3: traceId populated with current OTel trace ID when span is active."""
 
-    def test_get_trace_id_returns_hex_trace_id_within_active_span(self):
-        from opentelemetry import trace
-        from opentelemetry.sdk.trace import TracerProvider
+    @pytest.fixture(autouse=True)
+    def _clean_tracer(self):
+        yield
+        _reset_tracer_provider()
 
+    def test_get_trace_id_returns_hex_trace_id_within_active_span(self):
         provider = TracerProvider()
         trace.set_tracer_provider(provider)
-        try:
-            tracer = trace.get_tracer("test")
-            with tracer.start_as_current_span("test-span") as span:
-                from app.errors.problem_detail import _get_trace_id
+        tracer = trace.get_tracer("test")
+        with tracer.start_as_current_span("test-span") as span:
+            from app.errors.problem_detail import _get_trace_id
 
-                trace_id = _get_trace_id()
-                expected = format(span.get_span_context().trace_id, "032x")
-                assert trace_id == expected
-                assert len(trace_id) == 32
-                assert trace_id != "0" * 32
-        finally:
-            trace._TRACER_PROVIDER = None
-            trace._TRACER_PROVIDER_SET_ONCE._done = False
+            trace_id = _get_trace_id()
+            expected = format(span.get_span_context().trace_id, "032x")
+            assert trace_id == expected
+            assert len(trace_id) == 32
+            assert trace_id != "0" * 32
 
     def test_get_trace_id_returns_empty_without_active_span(self):
         from app.errors.problem_detail import _get_trace_id
 
         trace_id = _get_trace_id()
         assert trace_id == ""
+
+
+class TestTraceparentPropagation:
+    """AC-1.4.2: W3C traceparent header used for distributed tracing."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_tracer(self):
+        yield
+        _reset_tracer_provider()
+
+    def test_fastapi_instrumentor_propagates_traceparent(self):
+        """Verify inbound traceparent header joins the parent trace context."""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
+
+        exported_spans = []
+
+        class _CollectorExporter(SpanExporter):
+            def export(self, spans):
+                exported_spans.extend(spans)
+                return SpanExportResult.SUCCESS
+
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(_CollectorExporter()))
+        trace.set_tracer_provider(provider)
+
+        test_app = FastAPI()
+
+        @test_app.get("/test")
+        async def test_endpoint():
+            return {"ok": True}
+
+        FastAPIInstrumentor.instrument_app(test_app)
+        try:
+            client = TestClient(test_app)
+            # W3C traceparent: version-traceId-spanId-flags
+            parent_trace_id = "4bf92f3577b34da6a3ce929d0e0e4736"
+            parent_span_id = "00f067aa0ba902b7"
+            traceparent = f"00-{parent_trace_id}-{parent_span_id}-01"
+
+            response = client.get("/test", headers={"traceparent": traceparent})
+            assert response.status_code == 200
+
+            assert len(exported_spans) >= 1
+            server_span = exported_spans[0]
+            actual_trace_id = format(server_span.context.trace_id, "032x")
+            assert actual_trace_id == parent_trace_id
+        finally:
+            FastAPIInstrumentor.uninstrument_app(test_app)
 
 
 def _block_otel_imports(name, *args, **kwargs):
