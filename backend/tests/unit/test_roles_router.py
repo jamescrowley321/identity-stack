@@ -161,7 +161,7 @@ async def test_assign_roles_as_admin(mock_validate, mock_service, client):
     )
     assert response.status_code == 200
     assert response.json()["status"] == "roles_assigned"
-    mock_service.get_role_by_name.assert_awaited_once_with(name="member", tenant_id=uuid.UUID(TENANT_UUID))
+    mock_service.get_role_by_name.assert_awaited_once_with(name="member")
     mock_service.assign_role_to_user.assert_awaited_once_with(
         tenant_id=uuid.UUID(TENANT_UUID),
         user_id=uuid.UUID(USER_UUID),

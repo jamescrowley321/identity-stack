@@ -80,7 +80,7 @@ async def assign_roles(
     # Pre-validate all role names before mutating state
     resolved_roles: list[uuid.UUID] = []
     for role_name in body.role_names:
-        role_result = await service.get_role_by_name(name=role_name, tenant_id=tid)
+        role_result = await service.get_role_by_name(name=role_name)
         if role_result.is_error():
             return result_to_response(role_result, request)
         resolved_roles.append(_parse_uuid(role_result.ok["id"], "role_id"))
@@ -114,7 +114,7 @@ async def remove_roles(
     # Pre-validate all role names before mutating state
     resolved_roles: list[uuid.UUID] = []
     for role_name in body.role_names:
-        role_result = await service.get_role_by_name(name=role_name, tenant_id=tid)
+        role_result = await service.get_role_by_name(name=role_name)
         if role_result.is_error():
             return result_to_response(role_result, request)
         resolved_roles.append(_parse_uuid(role_result.ok["id"], "role_id"))

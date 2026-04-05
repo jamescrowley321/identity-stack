@@ -166,7 +166,7 @@ async def test_invite_member(mock_validate, mock_service, client):
         email="new@test.com",
         user_name="new@test.com",
     )
-    mock_service.get_role_by_name.assert_awaited_once_with(name="member", tenant_id=uuid.UUID(TENANT_UUID))
+    mock_service.get_role_by_name.assert_awaited_once_with(name="member")
     mock_service.assign_role_to_user.assert_awaited_once_with(
         tenant_id=uuid.UUID(TENANT_UUID),
         user_id=uuid.UUID(USER_UUID),
@@ -191,7 +191,7 @@ async def test_invite_with_default_role(mock_validate, mock_service, client):
         json={"email": "default@test.com"},
     )
     assert response.status_code == 200
-    mock_service.get_role_by_name.assert_awaited_once_with(name="member", tenant_id=uuid.UUID(TENANT_UUID))
+    mock_service.get_role_by_name.assert_awaited_once_with(name="member")
 
 
 @pytest.mark.anyio

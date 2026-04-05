@@ -10,6 +10,7 @@ from sqlmodel import select
 from app.dependencies.auth import get_claims
 from app.dependencies.identity import get_identity_service
 from app.dependencies.tenant import get_tenant_claims, get_tenant_id
+from app.errors.identity import NotFound as NotFoundError
 from app.errors.problem_detail import result_to_response
 from app.models.database import get_async_session
 from app.models.tenant import TenantResource
@@ -93,8 +94,6 @@ async def get_current_tenant(
     if result.is_ok():
         return {"tenant_id": tenant_id, "tenant": result.ok}
     # NotFound is expected (tenant not yet synced to local DB) — return null
-    from app.errors.identity import NotFound as NotFoundError  # noqa: PLC0415
-
     if isinstance(result.error, NotFoundError):
         return {"tenant_id": tenant_id, "tenant": None}
     # Other errors (ProviderError, Conflict, etc.) — propagate as Problem Detail
