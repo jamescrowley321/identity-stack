@@ -102,6 +102,9 @@ class TestTenantScopedMethods:
     # Methods where tenant_id is required (no default)
     TENANT_SCOPED_REQUIRED = [
         "create_user",
+        "get_user",
+        "update_user",
+        "deactivate_user",
         "search_users",
         "assign_role_to_user",
         "remove_role_from_user",
@@ -135,9 +138,6 @@ class TestNonTenantMethods:
     """Methods that identify entities by their own ID, not tenant_id."""
 
     NON_TENANT_METHODS = [
-        "get_user",
-        "update_user",
-        "deactivate_user",
         "get_role",
         "update_role",
         "delete_role",

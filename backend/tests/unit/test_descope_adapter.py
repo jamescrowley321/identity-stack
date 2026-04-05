@@ -148,6 +148,18 @@ class TestSyncUser:
         call_args = mock_client.update_user_status.call_args
         assert call_args[0][1] == "enabled"
 
+    @pytest.mark.anyio
+    async def test_value_error_returns_sync_error(self, adapter, mock_client):
+        """ValueError from resolve_login_id (e.g. empty loginIds) → SyncError."""
+        mock_client.resolve_login_id = AsyncMock(side_effect=ValueError("empty loginIds"))
+        result = await adapter.sync_user(
+            user_id=uuid.uuid4(),
+            data={"email": "val@test.com", "status": "active"},
+        )
+        assert result.is_error()
+        assert isinstance(result.error, SyncError)
+        assert result.error.operation == "sync_user"
+
 
 # ---------------------------------------------------------------------------
 # delete_user
@@ -163,6 +175,18 @@ class TestDeleteUser:
         mock_client.update_user_status.assert_awaited_once()
         call_args = mock_client.update_user_status.call_args
         assert call_args[0][1] == "disabled"
+
+    @pytest.mark.anyio
+    async def test_user_not_found_in_descope_skips(self, adapter, mock_client):
+        """404 from Descope → skip delete, return Ok(None)."""
+        response = MagicMock()
+        response.status_code = 404
+        mock_client.resolve_login_id = AsyncMock(
+            side_effect=httpx.HTTPStatusError("not found", request=MagicMock(), response=response)
+        )
+        result = await adapter.delete_user(user_id=uuid.uuid4())
+        assert result == Ok(None)
+        mock_client.update_user_status.assert_not_awaited()
 
     @pytest.mark.anyio
     async def test_http_error_returns_sync_error(self, adapter, mock_client):
@@ -181,6 +205,15 @@ class TestDeleteUser:
         mock_client.resolve_login_id = AsyncMock(side_effect=httpx.RequestError("timeout", request=MagicMock()))
         result = await adapter.delete_user(user_id=uuid.uuid4())
         assert result.is_error()
+        assert result.error.operation == "delete_user"
+
+    @pytest.mark.anyio
+    async def test_value_error_returns_sync_error(self, adapter, mock_client):
+        """ValueError from resolve_login_id (e.g. empty loginIds) → SyncError."""
+        mock_client.resolve_login_id = AsyncMock(side_effect=ValueError("empty loginIds"))
+        result = await adapter.delete_user(user_id=uuid.uuid4())
+        assert result.is_error()
+        assert isinstance(result.error, SyncError)
         assert result.error.operation == "delete_user"
 
     @pytest.mark.anyio

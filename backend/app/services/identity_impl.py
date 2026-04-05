@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 from expression import Error, Ok, Result
 from opentelemetry import trace
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -57,6 +57,13 @@ class PostgresIdentityService(IdentityService):
         given_name: str = "",
         family_name: str = "",
     ) -> Result[dict, IdentityError]:
+        """Create a user record in Postgres and sync to IdP.
+
+        Note: tenant_id is used for OTel tracing. The user-to-tenant association
+        (UserTenantRole) is created via assign_role_to_user() because the data model
+        requires a role_id as part of the composite PK. Until assigned, the user will
+        not appear in search_users() which queries via UserTenantRole join.
+        """
         with tracer.start_as_current_span(
             "identity.create_user",
             attributes={"tenant.id": str(tenant_id)},
@@ -85,29 +92,35 @@ class PostgresIdentityService(IdentityService):
             if sync_result.is_error():
                 sync_err = sync_result.error
                 logger.warning(
-                    "Sync failed after create_user: operation=%s user_id=%s error=%s",
+                    "Sync failed after create_user: operation=%s user_id=%s payload=%s error=%s",
                     sync_err.operation,
                     user.id,
+                    user_dict,
                     sync_err.message,
                 )
                 return Ok(user_dict)
 
             return Ok(user_dict)
 
-    async def get_user(self, *, user_id: uuid.UUID) -> Result[dict, IdentityError]:
+    async def get_user(self, *, tenant_id: uuid.UUID, user_id: uuid.UUID) -> Result[dict, IdentityError]:
         with tracer.start_as_current_span(
             "identity.get_user",
-            attributes={"user.id": str(user_id)},
+            attributes={"tenant.id": str(tenant_id), "user.id": str(user_id)},
         ):
-            result = await self._session.execute(select(User).where(User.id == user_id))
+            tenant_membership = exists().where(
+                UserTenantRole.user_id == user_id,
+                UserTenantRole.tenant_id == tenant_id,
+            )
+            result = await self._session.execute(select(User).where(User.id == user_id, tenant_membership))
             user = result.scalar_one_or_none()
             if user is None:
-                return Error(NotFound(message=f"User '{user_id}' not found"))
+                return Error(NotFound(message=f"User '{user_id}' not found in tenant '{tenant_id}'"))
             return Ok(self._user_to_dict(user))
 
     async def update_user(
         self,
         *,
+        tenant_id: uuid.UUID,
         user_id: uuid.UUID,
         email: str | None = None,
         user_name: str | None = None,
@@ -116,12 +129,16 @@ class PostgresIdentityService(IdentityService):
     ) -> Result[dict, IdentityError]:
         with tracer.start_as_current_span(
             "identity.update_user",
-            attributes={"user.id": str(user_id)},
+            attributes={"tenant.id": str(tenant_id), "user.id": str(user_id)},
         ):
-            result = await self._session.execute(select(User).where(User.id == user_id))
+            tenant_membership = exists().where(
+                UserTenantRole.user_id == user_id,
+                UserTenantRole.tenant_id == tenant_id,
+            )
+            result = await self._session.execute(select(User).where(User.id == user_id, tenant_membership))
             user = result.scalar_one_or_none()
             if user is None:
-                return Error(NotFound(message=f"User '{user_id}' not found"))
+                return Error(NotFound(message=f"User '{user_id}' not found in tenant '{tenant_id}'"))
 
             if email is not None:
                 user.email = email
@@ -146,27 +163,37 @@ class PostgresIdentityService(IdentityService):
             if sync_result.is_error():
                 sync_err = sync_result.error
                 logger.warning(
-                    "Sync failed after update_user: operation=%s user_id=%s error=%s",
+                    "Sync failed after update_user: operation=%s user_id=%s payload=%s error=%s",
                     sync_err.operation,
                     user.id,
+                    user_dict,
                     sync_err.message,
                 )
 
             return Ok(user_dict)
 
-    async def deactivate_user(self, *, user_id: uuid.UUID) -> Result[dict, IdentityError]:
+    async def deactivate_user(self, *, tenant_id: uuid.UUID, user_id: uuid.UUID) -> Result[dict, IdentityError]:
         with tracer.start_as_current_span(
             "identity.deactivate_user",
-            attributes={"user.id": str(user_id)},
+            attributes={"tenant.id": str(tenant_id), "user.id": str(user_id)},
         ):
-            result = await self._session.execute(select(User).where(User.id == user_id))
+            tenant_membership = exists().where(
+                UserTenantRole.user_id == user_id,
+                UserTenantRole.tenant_id == tenant_id,
+            )
+            result = await self._session.execute(select(User).where(User.id == user_id, tenant_membership))
             user = result.scalar_one_or_none()
             if user is None:
-                return Error(NotFound(message=f"User '{user_id}' not found"))
+                return Error(NotFound(message=f"User '{user_id}' not found in tenant '{tenant_id}'"))
 
             user.status = UserStatus.inactive
             user.updated_at = datetime.now(timezone.utc)
-            await self._session.flush()
+
+            try:
+                await self._session.flush()
+            except IntegrityError:
+                await self._session.rollback()
+                return Error(Conflict(message=f"Constraint violation during deactivation of user '{user_id}'"))
 
             user_dict = self._user_to_dict(user)
 
@@ -175,15 +202,18 @@ class PostgresIdentityService(IdentityService):
             if sync_result.is_error():
                 sync_err = sync_result.error
                 logger.warning(
-                    "Sync failed after deactivate_user: operation=%s user_id=%s error=%s",
+                    "Sync failed after deactivate_user: operation=%s user_id=%s payload=%s error=%s",
                     sync_err.operation,
                     user.id,
+                    user_dict,
                     sync_err.message,
                 )
 
             return Ok(user_dict)
 
-    async def search_users(self, *, tenant_id: uuid.UUID, query: str = "") -> Result[list[dict], IdentityError]:
+    async def search_users(
+        self, *, tenant_id: uuid.UUID, query: str = "", status: str | None = None
+    ) -> Result[list[dict], IdentityError]:
         with tracer.start_as_current_span(
             "identity.search_users",
             attributes={"tenant.id": str(tenant_id)},
@@ -195,13 +225,18 @@ class PostgresIdentityService(IdentityService):
                 .where(UserTenantRole.tenant_id == tenant_id)
             )
 
+            if status:
+                stmt = stmt.where(User.status == status)
+
             if query:
-                like_pattern = f"%{query}%"
+                # Escape ILIKE metacharacters to prevent wildcard injection
+                escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                like_pattern = f"%{escaped}%"
                 stmt = stmt.where(
-                    (User.email.ilike(like_pattern))
-                    | (User.user_name.ilike(like_pattern))
-                    | (User.given_name.ilike(like_pattern))
-                    | (User.family_name.ilike(like_pattern))
+                    (User.email.ilike(like_pattern, escape="\\"))
+                    | (User.user_name.ilike(like_pattern, escape="\\"))
+                    | (User.given_name.ilike(like_pattern, escape="\\"))
+                    | (User.family_name.ilike(like_pattern, escape="\\"))
                 )
 
             stmt = stmt.distinct()

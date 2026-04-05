@@ -32,11 +32,10 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
             attributes={"user.id": str(user_id)},
         ):
             try:
-                email = data.get("email", "")
                 status = data.get("status", "active")
                 descope_status = "disabled" if status == "inactive" else "enabled"
 
-                # Try to load existing user first; if not found, create via invite
+                # Try to load existing user first; if not found, skip sync
                 try:
                     await self._client.load_user(str(user_id))
                     # User exists — update status if needed
@@ -53,11 +52,11 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
                         raise
 
                 return Ok(None)
-            except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as exc:
                 err = SyncError(
                     message=str(exc),
                     operation="sync_user",
-                    context={"user_id": str(user_id), "email": email},
+                    context={"user_id": str(user_id)},
                 )
                 logger.warning(
                     "Descope sync_user failed: operation=%s user_id=%s error=%s",
@@ -73,10 +72,19 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
             attributes={"user.id": str(user_id)},
         ):
             try:
-                login_id = await self._client.resolve_login_id(str(user_id))
-                await self._client.update_user_status(login_id, "disabled")
+                try:
+                    login_id = await self._client.resolve_login_id(str(user_id))
+                    await self._client.update_user_status(login_id, "disabled")
+                except httpx.HTTPStatusError as err:
+                    if err.response.status_code == 404:
+                        logger.info(
+                            "User %s not found in Descope, skipping delete",
+                            user_id,
+                        )
+                    else:
+                        raise
                 return Ok(None)
-            except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as exc:
                 err = SyncError(
                     message=str(exc),
                     operation="delete_user",

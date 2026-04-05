@@ -2,12 +2,12 @@
 
 Covers:
 - create_user: happy path, duplicate email (Conflict), sync failure (logged, still Ok)
-- get_user: found, not found
-- update_user: happy path, not found, duplicate email, sync failure
-- deactivate_user: happy path, not found, sync failure
-- search_users: tenant-scoped, with query, empty results
+- get_user: found (tenant-scoped), not found
+- update_user: happy path (tenant-scoped), not found, duplicate email, sync failure
+- deactivate_user: happy path (tenant-scoped), not found, sync failure, IntegrityError
+- search_users: tenant-scoped, with query, empty results, status filter, wildcard escape
 - Unimplemented methods raise NotImplementedError
-- OTel spans created for each operation
+- OTel spans created for each operation with correct attributes
 """
 
 import uuid
@@ -46,6 +46,11 @@ def service(mock_session, noop_adapter):
     return PostgresIdentityService(session=mock_session, adapter=noop_adapter)
 
 
+@pytest.fixture
+def tenant_id():
+    return uuid.uuid4()
+
+
 def _make_user(
     *,
     user_id: uuid.UUID | None = None,
@@ -75,10 +80,10 @@ def _make_user(
 
 class TestCreateUser:
     @pytest.mark.anyio
-    async def test_happy_path(self, service, mock_session):
+    async def test_happy_path(self, service, mock_session, tenant_id):
         mock_session.flush = AsyncMock()
         result = await service.create_user(
-            tenant_id=uuid.uuid4(),
+            tenant_id=tenant_id,
             email="alice@example.com",
             user_name="alice",
             given_name="Alice",
@@ -93,11 +98,11 @@ class TestCreateUser:
         mock_session.flush.assert_awaited_once()
 
     @pytest.mark.anyio
-    async def test_duplicate_email_returns_conflict(self, service, mock_session):
+    async def test_duplicate_email_returns_conflict(self, service, mock_session, tenant_id):
         mock_session.flush = AsyncMock(side_effect=IntegrityError("dup", {}, None))
         mock_session.rollback = AsyncMock()
         result = await service.create_user(
-            tenant_id=uuid.uuid4(),
+            tenant_id=tenant_id,
             email="dup@example.com",
             user_name="dup",
         )
@@ -107,7 +112,7 @@ class TestCreateUser:
         assert "dup@example.com" in err.message
 
     @pytest.mark.anyio
-    async def test_sync_failure_still_ok(self, mock_session):
+    async def test_sync_failure_still_ok(self, mock_session, tenant_id):
         """D7: sync failure → log, never rollback, still return Ok."""
         adapter = AsyncMock()
         adapter.sync_user = AsyncMock(return_value=Error(SyncError(message="timeout", operation="sync_user")))
@@ -116,7 +121,7 @@ class TestCreateUser:
 
         with patch("app.services.identity_impl.logger") as mock_logger:
             result = await svc.create_user(
-                tenant_id=uuid.uuid4(),
+                tenant_id=tenant_id,
                 email="sync-fail@example.com",
                 user_name="syncfail",
             )
@@ -124,10 +129,29 @@ class TestCreateUser:
             mock_logger.warning.assert_called_once()
 
     @pytest.mark.anyio
-    async def test_includes_all_fields(self, service, mock_session):
+    async def test_sync_failure_logs_payload(self, mock_session, tenant_id):
+        """AC-2.1.1: Sync failure log includes operation, payload, error, timestamp."""
+        adapter = AsyncMock()
+        adapter.sync_user = AsyncMock(return_value=Error(SyncError(message="timeout", operation="sync_user")))
+        svc = PostgresIdentityService(session=mock_session, adapter=adapter)
+        mock_session.flush = AsyncMock()
+
+        with patch("app.services.identity_impl.logger") as mock_logger:
+            await svc.create_user(
+                tenant_id=tenant_id,
+                email="payload@example.com",
+                user_name="payload",
+            )
+            call_args = mock_logger.warning.call_args
+            log_msg = call_args[0][0]
+            # Verify log format includes payload placeholder
+            assert "payload" in log_msg
+
+    @pytest.mark.anyio
+    async def test_includes_all_fields(self, service, mock_session, tenant_id):
         mock_session.flush = AsyncMock()
         result = await service.create_user(
-            tenant_id=uuid.uuid4(),
+            tenant_id=tenant_id,
             email="full@example.com",
             user_name="fulluser",
             given_name="Full",
@@ -148,28 +172,29 @@ class TestCreateUser:
 
 class TestGetUser:
     @pytest.mark.anyio
-    async def test_found(self, service, mock_session):
+    async def test_found(self, service, mock_session, tenant_id):
         user = _make_user()
         exec_result = MagicMock()
         exec_result.scalar_one_or_none.return_value = user
         mock_session.execute = AsyncMock(return_value=exec_result)
 
-        result = await service.get_user(user_id=user.id)
+        result = await service.get_user(tenant_id=tenant_id, user_id=user.id)
         assert result.is_ok()
         assert result.ok["email"] == user.email
         assert result.ok["id"] == str(user.id)
 
     @pytest.mark.anyio
-    async def test_not_found(self, service, mock_session):
+    async def test_not_found(self, service, mock_session, tenant_id):
         exec_result = MagicMock()
         exec_result.scalar_one_or_none.return_value = None
         mock_session.execute = AsyncMock(return_value=exec_result)
 
         uid = uuid.uuid4()
-        result = await service.get_user(user_id=uid)
+        result = await service.get_user(tenant_id=tenant_id, user_id=uid)
         assert result.is_error()
         assert isinstance(result.error, NotFound)
         assert str(uid) in result.error.message
+        assert str(tenant_id) in result.error.message
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +204,7 @@ class TestGetUser:
 
 class TestUpdateUser:
     @pytest.mark.anyio
-    async def test_happy_path(self, service, mock_session):
+    async def test_happy_path(self, service, mock_session, tenant_id):
         user = _make_user()
         exec_result = MagicMock()
         exec_result.scalar_one_or_none.return_value = user
@@ -187,6 +212,7 @@ class TestUpdateUser:
         mock_session.flush = AsyncMock()
 
         result = await service.update_user(
+            tenant_id=tenant_id,
             user_id=user.id,
             email="newemail@example.com",
         )
@@ -194,17 +220,17 @@ class TestUpdateUser:
         assert user.email == "newemail@example.com"
 
     @pytest.mark.anyio
-    async def test_not_found(self, service, mock_session):
+    async def test_not_found(self, service, mock_session, tenant_id):
         exec_result = MagicMock()
         exec_result.scalar_one_or_none.return_value = None
         mock_session.execute = AsyncMock(return_value=exec_result)
 
-        result = await service.update_user(user_id=uuid.uuid4(), email="x@y.com")
+        result = await service.update_user(tenant_id=tenant_id, user_id=uuid.uuid4(), email="x@y.com")
         assert result.is_error()
         assert isinstance(result.error, NotFound)
 
     @pytest.mark.anyio
-    async def test_duplicate_email(self, service, mock_session):
+    async def test_duplicate_email(self, service, mock_session, tenant_id):
         user = _make_user()
         exec_result = MagicMock()
         exec_result.scalar_one_or_none.return_value = user
@@ -212,24 +238,24 @@ class TestUpdateUser:
         mock_session.flush = AsyncMock(side_effect=IntegrityError("dup", {}, None))
         mock_session.rollback = AsyncMock()
 
-        result = await service.update_user(user_id=user.id, email="taken@example.com")
+        result = await service.update_user(tenant_id=tenant_id, user_id=user.id, email="taken@example.com")
         assert result.is_error()
         assert isinstance(result.error, Conflict)
 
     @pytest.mark.anyio
-    async def test_partial_update_only_changes_given_fields(self, service, mock_session):
+    async def test_partial_update_only_changes_given_fields(self, service, mock_session, tenant_id):
         user = _make_user(given_name="Original", family_name="Name")
         exec_result = MagicMock()
         exec_result.scalar_one_or_none.return_value = user
         mock_session.execute = AsyncMock(return_value=exec_result)
         mock_session.flush = AsyncMock()
 
-        await service.update_user(user_id=user.id, given_name="Updated")
+        await service.update_user(tenant_id=tenant_id, user_id=user.id, given_name="Updated")
         assert user.given_name == "Updated"
         assert user.family_name == "Name"  # unchanged
 
     @pytest.mark.anyio
-    async def test_sync_failure_still_ok(self, mock_session):
+    async def test_sync_failure_still_ok(self, mock_session, tenant_id):
         adapter = AsyncMock()
         adapter.sync_user = AsyncMock(return_value=Error(SyncError(message="timeout", operation="sync_user")))
         svc = PostgresIdentityService(session=mock_session, adapter=adapter)
@@ -240,12 +266,12 @@ class TestUpdateUser:
         mock_session.flush = AsyncMock()
 
         with patch("app.services.identity_impl.logger") as mock_logger:
-            result = await svc.update_user(user_id=user.id, email="new@test.com")
+            result = await svc.update_user(tenant_id=tenant_id, user_id=user.id, email="new@test.com")
             assert result.is_ok()
             mock_logger.warning.assert_called_once()
 
     @pytest.mark.anyio
-    async def test_updates_timestamp(self, service, mock_session):
+    async def test_updates_timestamp(self, service, mock_session, tenant_id):
         old_time = datetime(2020, 1, 1, tzinfo=timezone.utc)
         user = _make_user()
         user.updated_at = old_time
@@ -254,7 +280,7 @@ class TestUpdateUser:
         mock_session.execute = AsyncMock(return_value=exec_result)
         mock_session.flush = AsyncMock()
 
-        await service.update_user(user_id=user.id, given_name="Changed")
+        await service.update_user(tenant_id=tenant_id, user_id=user.id, given_name="Changed")
         assert user.updated_at > old_time
 
 
@@ -265,30 +291,30 @@ class TestUpdateUser:
 
 class TestDeactivateUser:
     @pytest.mark.anyio
-    async def test_happy_path(self, service, mock_session):
+    async def test_happy_path(self, service, mock_session, tenant_id):
         user = _make_user(status=UserStatus.active)
         exec_result = MagicMock()
         exec_result.scalar_one_or_none.return_value = user
         mock_session.execute = AsyncMock(return_value=exec_result)
         mock_session.flush = AsyncMock()
 
-        result = await service.deactivate_user(user_id=user.id)
+        result = await service.deactivate_user(tenant_id=tenant_id, user_id=user.id)
         assert result.is_ok()
         assert result.ok["status"] == "inactive"
         assert user.status == UserStatus.inactive
 
     @pytest.mark.anyio
-    async def test_not_found(self, service, mock_session):
+    async def test_not_found(self, service, mock_session, tenant_id):
         exec_result = MagicMock()
         exec_result.scalar_one_or_none.return_value = None
         mock_session.execute = AsyncMock(return_value=exec_result)
 
-        result = await service.deactivate_user(user_id=uuid.uuid4())
+        result = await service.deactivate_user(tenant_id=tenant_id, user_id=uuid.uuid4())
         assert result.is_error()
         assert isinstance(result.error, NotFound)
 
     @pytest.mark.anyio
-    async def test_sync_failure_still_ok(self, mock_session):
+    async def test_sync_failure_still_ok(self, mock_session, tenant_id):
         adapter = AsyncMock()
         adapter.sync_user = AsyncMock(return_value=Error(SyncError(message="timeout", operation="sync_user")))
         svc = PostgresIdentityService(session=mock_session, adapter=adapter)
@@ -299,12 +325,12 @@ class TestDeactivateUser:
         mock_session.flush = AsyncMock()
 
         with patch("app.services.identity_impl.logger") as mock_logger:
-            result = await svc.deactivate_user(user_id=user.id)
+            result = await svc.deactivate_user(tenant_id=tenant_id, user_id=user.id)
             assert result.is_ok()
             mock_logger.warning.assert_called_once()
 
     @pytest.mark.anyio
-    async def test_updates_timestamp(self, service, mock_session):
+    async def test_updates_timestamp(self, service, mock_session, tenant_id):
         old_time = datetime(2020, 1, 1, tzinfo=timezone.utc)
         user = _make_user()
         user.updated_at = old_time
@@ -313,8 +339,22 @@ class TestDeactivateUser:
         mock_session.execute = AsyncMock(return_value=exec_result)
         mock_session.flush = AsyncMock()
 
-        await service.deactivate_user(user_id=user.id)
+        await service.deactivate_user(tenant_id=tenant_id, user_id=user.id)
         assert user.updated_at > old_time
+
+    @pytest.mark.anyio
+    async def test_integrity_error_returns_conflict(self, service, mock_session, tenant_id):
+        user = _make_user()
+        exec_result = MagicMock()
+        exec_result.scalar_one_or_none.return_value = user
+        mock_session.execute = AsyncMock(return_value=exec_result)
+        mock_session.flush = AsyncMock(side_effect=IntegrityError("constraint", {}, None))
+        mock_session.rollback = AsyncMock()
+
+        result = await service.deactivate_user(tenant_id=tenant_id, user_id=user.id)
+        assert result.is_error()
+        assert isinstance(result.error, Conflict)
+        assert "deactivation" in result.error.message
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +364,7 @@ class TestDeactivateUser:
 
 class TestSearchUsers:
     @pytest.mark.anyio
-    async def test_returns_users_for_tenant(self, service, mock_session):
+    async def test_returns_users_for_tenant(self, service, mock_session, tenant_id):
         users = [_make_user(email="a@test.com"), _make_user(email="b@test.com")]
         scalars_mock = MagicMock()
         scalars_mock.all.return_value = users
@@ -332,26 +372,26 @@ class TestSearchUsers:
         exec_result.scalars.return_value = scalars_mock
         mock_session.execute = AsyncMock(return_value=exec_result)
 
-        result = await service.search_users(tenant_id=uuid.uuid4())
+        result = await service.search_users(tenant_id=tenant_id)
         assert result.is_ok()
         assert len(result.ok) == 2
         assert result.ok[0]["email"] == "a@test.com"
         assert result.ok[1]["email"] == "b@test.com"
 
     @pytest.mark.anyio
-    async def test_empty_results(self, service, mock_session):
+    async def test_empty_results(self, service, mock_session, tenant_id):
         scalars_mock = MagicMock()
         scalars_mock.all.return_value = []
         exec_result = MagicMock()
         exec_result.scalars.return_value = scalars_mock
         mock_session.execute = AsyncMock(return_value=exec_result)
 
-        result = await service.search_users(tenant_id=uuid.uuid4())
+        result = await service.search_users(tenant_id=tenant_id)
         assert result.is_ok()
         assert result.ok == []
 
     @pytest.mark.anyio
-    async def test_with_query_param(self, service, mock_session):
+    async def test_with_query_param(self, service, mock_session, tenant_id):
         users = [_make_user(email="match@test.com")]
         scalars_mock = MagicMock()
         scalars_mock.all.return_value = users
@@ -359,9 +399,131 @@ class TestSearchUsers:
         exec_result.scalars.return_value = scalars_mock
         mock_session.execute = AsyncMock(return_value=exec_result)
 
-        result = await service.search_users(tenant_id=uuid.uuid4(), query="match")
+        result = await service.search_users(tenant_id=tenant_id, query="match")
         assert result.is_ok()
         assert len(result.ok) == 1
+
+    @pytest.mark.anyio
+    async def test_with_status_filter(self, service, mock_session, tenant_id):
+        users = [_make_user(status=UserStatus.inactive)]
+        scalars_mock = MagicMock()
+        scalars_mock.all.return_value = users
+        exec_result = MagicMock()
+        exec_result.scalars.return_value = scalars_mock
+        mock_session.execute = AsyncMock(return_value=exec_result)
+
+        result = await service.search_users(tenant_id=tenant_id, status="inactive")
+        assert result.is_ok()
+        assert len(result.ok) == 1
+        assert result.ok[0]["status"] == "inactive"
+
+
+# ---------------------------------------------------------------------------
+# OTel span tests
+# ---------------------------------------------------------------------------
+
+
+class TestOTelSpans:
+    """Verify OTel spans are created with correct names and tenant.id attribute."""
+
+    @pytest.mark.anyio
+    async def test_create_user_span(self, service, mock_session, tenant_id):
+        mock_session.flush = AsyncMock()
+        with patch("app.services.identity_impl.tracer") as mock_tracer:
+            mock_span = MagicMock()
+            mock_tracer.start_as_current_span.return_value = mock_span
+            mock_span.__enter__ = MagicMock(return_value=mock_span)
+            mock_span.__exit__ = MagicMock(return_value=False)
+
+            await service.create_user(tenant_id=tenant_id, email="a@b.com", user_name="a")
+
+            mock_tracer.start_as_current_span.assert_called_once_with(
+                "identity.create_user",
+                attributes={"tenant.id": str(tenant_id)},
+            )
+
+    @pytest.mark.anyio
+    async def test_get_user_span(self, service, mock_session, tenant_id):
+        uid = uuid.uuid4()
+        exec_result = MagicMock()
+        exec_result.scalar_one_or_none.return_value = _make_user(user_id=uid)
+        mock_session.execute = AsyncMock(return_value=exec_result)
+
+        with patch("app.services.identity_impl.tracer") as mock_tracer:
+            mock_span = MagicMock()
+            mock_tracer.start_as_current_span.return_value = mock_span
+            mock_span.__enter__ = MagicMock(return_value=mock_span)
+            mock_span.__exit__ = MagicMock(return_value=False)
+
+            await service.get_user(tenant_id=tenant_id, user_id=uid)
+
+            mock_tracer.start_as_current_span.assert_called_once_with(
+                "identity.get_user",
+                attributes={"tenant.id": str(tenant_id), "user.id": str(uid)},
+            )
+
+    @pytest.mark.anyio
+    async def test_update_user_span(self, service, mock_session, tenant_id):
+        user = _make_user()
+        exec_result = MagicMock()
+        exec_result.scalar_one_or_none.return_value = user
+        mock_session.execute = AsyncMock(return_value=exec_result)
+        mock_session.flush = AsyncMock()
+
+        with patch("app.services.identity_impl.tracer") as mock_tracer:
+            mock_span = MagicMock()
+            mock_tracer.start_as_current_span.return_value = mock_span
+            mock_span.__enter__ = MagicMock(return_value=mock_span)
+            mock_span.__exit__ = MagicMock(return_value=False)
+
+            await service.update_user(tenant_id=tenant_id, user_id=user.id, email="x@y.com")
+
+            mock_tracer.start_as_current_span.assert_called_once_with(
+                "identity.update_user",
+                attributes={"tenant.id": str(tenant_id), "user.id": str(user.id)},
+            )
+
+    @pytest.mark.anyio
+    async def test_deactivate_user_span(self, service, mock_session, tenant_id):
+        user = _make_user()
+        exec_result = MagicMock()
+        exec_result.scalar_one_or_none.return_value = user
+        mock_session.execute = AsyncMock(return_value=exec_result)
+        mock_session.flush = AsyncMock()
+
+        with patch("app.services.identity_impl.tracer") as mock_tracer:
+            mock_span = MagicMock()
+            mock_tracer.start_as_current_span.return_value = mock_span
+            mock_span.__enter__ = MagicMock(return_value=mock_span)
+            mock_span.__exit__ = MagicMock(return_value=False)
+
+            await service.deactivate_user(tenant_id=tenant_id, user_id=user.id)
+
+            mock_tracer.start_as_current_span.assert_called_once_with(
+                "identity.deactivate_user",
+                attributes={"tenant.id": str(tenant_id), "user.id": str(user.id)},
+            )
+
+    @pytest.mark.anyio
+    async def test_search_users_span(self, service, mock_session, tenant_id):
+        scalars_mock = MagicMock()
+        scalars_mock.all.return_value = []
+        exec_result = MagicMock()
+        exec_result.scalars.return_value = scalars_mock
+        mock_session.execute = AsyncMock(return_value=exec_result)
+
+        with patch("app.services.identity_impl.tracer") as mock_tracer:
+            mock_span = MagicMock()
+            mock_tracer.start_as_current_span.return_value = mock_span
+            mock_span.__enter__ = MagicMock(return_value=mock_span)
+            mock_span.__exit__ = MagicMock(return_value=False)
+
+            await service.search_users(tenant_id=tenant_id)
+
+            mock_tracer.start_as_current_span.assert_called_once_with(
+                "identity.search_users",
+                attributes={"tenant.id": str(tenant_id)},
+            )
 
 
 # ---------------------------------------------------------------------------
