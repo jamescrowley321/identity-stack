@@ -17,6 +17,7 @@ from py_identity_model import (
     get_discovery_document,
     request_client_credentials_token,
 )
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from testcontainers.postgres import PostgresContainer
 
@@ -158,15 +159,20 @@ async def db_session(async_engine):
     """
     async with async_engine.connect() as conn:
         transaction = await conn.begin()
-        # Use SAVEPOINT so code under test can call session.commit()
-        # without committing the outer transaction
-        nested = await conn.begin_nested()
+        await conn.begin_nested()
         session_factory = async_sessionmaker(bind=conn, class_=AsyncSession, expire_on_commit=False)
         async with session_factory() as session:
+            # Re-create SAVEPOINT after each commit so that multiple
+            # session.commit() calls in test code don't escape the
+            # outer transaction
+            @event.listens_for(session.sync_session, "after_transaction_end")
+            def _restart_savepoint(sync_session, trans):
+                if conn.closed or not conn.in_transaction():
+                    return
+                if not conn.in_nested_transaction():
+                    conn.sync_connection.begin_nested()
+
             yield session
-        # Roll back the savepoint if still active, then the outer transaction
-        if nested.is_active:
-            await nested.rollback()
         await transaction.rollback()
 
 

@@ -53,7 +53,8 @@ class TestIdentityDependencyImports:
         source = inspect.getsource(identity)
         assert "IdentityService" in source
 
-    def test_imports_noop_adapter(self):
+    def test_references_noop_adapter(self):
+        """NoOpSyncAdapter is referenced in the factory (wired in story 2.x)."""
         from app.dependencies import identity
 
         source = inspect.getsource(identity)
