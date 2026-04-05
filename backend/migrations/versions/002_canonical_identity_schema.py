@@ -72,6 +72,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("name", name="uq_tenants_name"),
     )
 
     # --- 3. providers ---

@@ -41,6 +41,9 @@ def upgrade() -> None:
         sa.Column("tenant_id", sa.String(), nullable=False),
         sa.Column("name", sa.String(), nullable=False),
         sa.Column("description", sa.String(), nullable=False, server_default=""),
+        # Note: created_at is String to match the existing TenantResource model
+        # which stores ISO-format timestamps as strings. A future migration can
+        # ALTER this to DateTime(timezone=True) if the model is updated.
         sa.Column("created_at", sa.String(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         if_not_exists=True,

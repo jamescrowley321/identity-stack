@@ -82,7 +82,6 @@ class TestConfigureMiddlewareStandalone:
             assert "SlowAPIMiddleware" in middleware_classes
             assert "CORSMiddleware" in middleware_classes
             assert "SecurityHeadersMiddleware" in middleware_classes
-            assert "CorrelationIdMiddleware" in middleware_classes
             assert "ProxyHeadersMiddleware" in middleware_classes
 
     def test_standalone_middleware_order(self):
@@ -158,19 +157,6 @@ class TestConfigureMiddlewareGateway:
             middleware_classes = [m.cls.__name__ for m in test_app.user_middleware if hasattr(m, "cls")]
             assert "SecurityHeadersMiddleware" in middleware_classes
 
-    def test_gateway_keeps_correlation_id(self):
-        """Gateway mode still includes CorrelationIdMiddleware."""
-        with patch.dict(os.environ, {"DEPLOYMENT_MODE": "gateway"}):
-            import app.middleware.factory as factory
-
-            factory = importlib.reload(factory)
-
-            test_app = FastAPI()
-            factory.configure_middleware(test_app)
-
-            middleware_classes = [m.cls.__name__ for m in test_app.user_middleware if hasattr(m, "cls")]
-            assert "CorrelationIdMiddleware" in middleware_classes
-
     def test_gateway_keeps_proxy_headers(self):
         """Gateway mode still includes ProxyHeadersMiddleware."""
         with patch.dict(os.environ, {"DEPLOYMENT_MODE": "gateway"}):
@@ -184,8 +170,8 @@ class TestConfigureMiddlewareGateway:
             middleware_classes = [m.cls.__name__ for m in test_app.user_middleware if hasattr(m, "cls")]
             assert "ProxyHeadersMiddleware" in middleware_classes
 
-    def test_gateway_has_four_middleware(self):
-        """Gateway mode should have exactly 4 middleware (CORS, Security, Correlation, Proxy)."""
+    def test_gateway_has_three_middleware(self):
+        """Gateway mode should have exactly 3 middleware (CORS, Security, Proxy)."""
         with patch.dict(os.environ, {"DEPLOYMENT_MODE": "gateway"}):
             import app.middleware.factory as factory
 
@@ -195,7 +181,7 @@ class TestConfigureMiddlewareGateway:
             factory.configure_middleware(test_app)
 
             middleware_with_cls = [m for m in test_app.user_middleware if hasattr(m, "cls")]
-            assert len(middleware_with_cls) == 4
+            assert len(middleware_with_cls) == 3
 
 
 class TestConfigureMiddlewareLogging:

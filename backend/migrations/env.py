@@ -23,10 +23,19 @@ if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL environment variable is required but not set")
 
 
+def _strip_async_driver(url: str) -> str:
+    """Strip async driver suffixes for offline SQL generation.
+
+    Handles +asyncpg, +aiosqlite, and any future +aiofoo pattern.
+    """
+    import re
+
+    return re.sub(r"\+(?:asyncpg|aiosqlite|aio\w+)", "", url, count=1)
+
+
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode — emit SQL to stdout."""
-    # Strip +asyncpg for offline SQL generation (no driver needed)
-    offline_url = DATABASE_URL.replace("+asyncpg", "")
+    offline_url = _strip_async_driver(DATABASE_URL)
     context.configure(
         url=offline_url,
         target_metadata=target_metadata,

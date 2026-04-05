@@ -172,3 +172,4 @@ jobs:
         run: docker compose build
         env:
           DESCOPE_PROJECT_ID: "test-project-id"
+          POSTGRES_PASSWORD: "ci-build-only"

@@ -15,7 +15,12 @@ class UserStatus(str, enum.Enum):
 
 
 class User(SQLModel, table=True):
-    """SCIM-aligned canonical user identity."""
+    """SCIM-aligned canonical user identity.
+
+    Note: updated_at uses ORM-level onupdate=sa.func.now(), which only fires for
+    ORM updates (session.commit()). Raw SQL UPDATE statements bypass this — if raw
+    SQL updates are needed in the future, add a database-level trigger.
+    """
 
     __tablename__ = "users"
 
@@ -41,7 +46,12 @@ class User(SQLModel, table=True):
 
 
 class IdPLink(SQLModel, table=True):
-    """Links a canonical user to an external identity provider identity."""
+    """Links a canonical user to an external identity provider identity.
+
+    Note: The `metadata_` field uses a trailing underscore to avoid shadowing
+    Python's built-in `metadata`. The actual DB column is named `metadata`.
+    When writing queries, use the column name `metadata` (not `metadata_`).
+    """
 
     __tablename__ = "idp_links"
     __table_args__ = (

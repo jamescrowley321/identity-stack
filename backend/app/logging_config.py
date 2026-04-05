@@ -1,18 +1,25 @@
 import logging
 import os
-from contextvars import ContextVar
+from typing import Any
 
 from pythonjsonlogger.json import JsonFormatter
 
-correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="-")
 
+class _OTelAwareJsonFormatter(JsonFormatter):
+    """JSON formatter that suppresses zero-value OTel trace/span IDs.
 
-class CorrelationIdFilter(logging.Filter):
-    """Injects the current request's correlation ID into every log record."""
+    When OTel is inactive, the logging instrumentor injects "0" as the trace
+    and span IDs. This filter removes those noise fields from the JSON output.
+    """
 
-    def filter(self, record):
-        record.correlation_id = correlation_id_var.get("-")
-        return True
+    _ZERO_OTEL_VALUES = {"0", "00000000000000000000000000000000", "0000000000000000", ""}
+
+    def process_log_record(self, log_record: dict[str, Any]) -> dict[str, Any]:
+        """Remove otelTraceID/otelSpanID when they are zero or empty."""
+        for key in ("otelTraceID", "otelSpanID"):
+            if str(log_record.get(key, "")) in self._ZERO_OTEL_VALUES:
+                log_record.pop(key, None)
+        return super().process_log_record(log_record)
 
 
 def setup_logging() -> None:
@@ -27,16 +34,18 @@ def setup_logging() -> None:
     root.handlers.clear()
 
     handler = logging.StreamHandler()
-    handler.addFilter(CorrelationIdFilter())
 
     if environment == "production":
-        formatter = JsonFormatter(
-            fmt="%(asctime)s %(levelname)s %(name)s %(message)s %(correlation_id)s",
+        # OTel logging instrumentor injects otelTraceID / otelSpanID automatically.
+        # defaults={} provides fallback values when OTel is not active.
+        formatter = _OTelAwareJsonFormatter(
+            fmt="%(asctime)s %(levelname)s %(name)s %(message)s %(otelTraceID)s %(otelSpanID)s",
             rename_fields={"asctime": "timestamp", "levelname": "level"},
+            defaults={"otelTraceID": "", "otelSpanID": ""},
         )
     else:
         formatter = logging.Formatter(
-            "%(asctime)s %(levelname)s [%(correlation_id)s] %(name)s — %(message)s",
+            "%(asctime)s %(levelname)s %(name)s — %(message)s",
             datefmt="%H:%M:%S",
         )
 
@@ -50,5 +59,5 @@ def setup_logging() -> None:
 
 
 def get_logger(name: str) -> logging.Logger:
-    """Get a logger that automatically includes the correlation ID."""
+    """Get a named logger."""
     return logging.getLogger(name)
