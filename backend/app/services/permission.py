@@ -61,6 +61,7 @@ class PermissionService:
             try:
                 permission = await self._repository.create(permission)
             except RepositoryConflictError:
+                await self._repository.rollback()
                 return Error(Conflict(message=f"Permission '{name}' already exists"))
 
             result_dict = permission.model_dump()

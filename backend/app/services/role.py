@@ -73,6 +73,7 @@ class RoleService:
             try:
                 role = await self._repository.create(role)
             except RepositoryConflictError:
+                await self._repository.rollback()
                 return Error(Conflict(message=f"Role '{name}' already exists in this scope"))
 
             result_dict = role.model_dump()
@@ -129,6 +130,7 @@ class RoleService:
             try:
                 mapping = await self._repository.add_permission(role_id, permission_id)
             except RepositoryConflictError:
+                await self._repository.rollback()
                 return Error(Conflict(message=f"Permission '{permission_id}' is already mapped to role '{role_id}'"))
 
             result_dict = {
@@ -188,6 +190,7 @@ class RoleService:
             try:
                 assignment = await self._assignment_repository.create(assignment)
             except RepositoryConflictError:
+                await self._assignment_repository.rollback()
                 return Error(Conflict(message=f"User '{user_id}' already has role '{role_id}' in tenant '{tenant_id}'"))
 
             result_dict = {
