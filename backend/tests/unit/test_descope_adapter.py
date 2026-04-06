@@ -196,10 +196,29 @@ class TestDeleteOperations:
         result = await adapter.delete_tenant(tenant_id=uuid.uuid4())
         assert result == Ok(None)
 
-    async def test_sync_role_assignment(self, adapter):
+    async def test_sync_role_assignment(self, adapter, mock_client):
+        user_id = uuid.uuid4()
+        tenant_id = uuid.uuid4()
+        role_id = uuid.uuid4()
+
+        result = await adapter.sync_role_assignment(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            role_id=role_id,
+        )
+
+        assert result == Ok(None)
+        mock_client.assign_roles.assert_awaited_once_with(str(user_id), str(tenant_id), [str(role_id)])
+
+    async def test_sync_role_assignment_failure(self, adapter, mock_client):
+        mock_client.assign_roles.side_effect = RuntimeError("API error")
+
         result = await adapter.sync_role_assignment(
             user_id=uuid.uuid4(),
             tenant_id=uuid.uuid4(),
             role_id=uuid.uuid4(),
         )
-        assert result == Ok(None)
+
+        assert result.is_error()
+        assert result.error.operation == "sync_role_assignment"
+        assert "API error" in result.error.message
