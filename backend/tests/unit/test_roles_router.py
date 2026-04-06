@@ -299,7 +299,8 @@ async def test_list_roles(mock_validate, mock_role_service, client):
     response = await client.get("/api/roles", headers=AUTH_HEADER)
     assert response.status_code == 200
     data = response.json()
-    assert len(data) == 2
+    assert "roles" in data
+    assert len(data["roles"]) == 2
     mock_role_service.list_roles.assert_awaited_once()
 
 
@@ -318,7 +319,7 @@ async def test_create_role(mock_validate, mock_role_service, client):
     assert response.status_code == 201
     data = response.json()
     assert data["name"] == "editor"
-    mock_role_service.create_role.assert_awaited_once_with(name="editor", description="Can edit")
+    mock_role_service.create_role.assert_awaited_once_with(name="editor", description="Can edit", permission_names=None)
 
 
 @pytest.mark.anyio
@@ -334,7 +335,7 @@ async def test_create_role_default_fields(mock_validate, mock_role_service, clie
         json={"name": "viewer"},
     )
     assert response.status_code == 201
-    mock_role_service.create_role.assert_awaited_once_with(name="viewer", description="")
+    mock_role_service.create_role.assert_awaited_once_with(name="viewer", description="", permission_names=None)
 
 
 @pytest.mark.anyio

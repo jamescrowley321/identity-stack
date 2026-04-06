@@ -37,6 +37,16 @@ class NoOpSyncAdapter(IdentityProviderAdapter):
     ) -> Result[None, SyncError]:
         return Ok(None)
 
+    async def delete_role_assignment(
+        self,
+        *,
+        user_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        role_id: uuid.UUID,
+        data: dict | None = None,
+    ) -> Result[None, SyncError]:
+        return Ok(None)
+
     async def delete_user(self, *, user_id: uuid.UUID) -> Result[None, SyncError]:
         return Ok(None)
 

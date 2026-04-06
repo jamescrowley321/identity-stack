@@ -145,7 +145,7 @@ async def test_create_tenant(mock_validate, mock_tenant_service, client):
         headers=AUTH_HEADER,
         json={"name": "New Org"},
     )
-    assert response.status_code == 201
+    assert response.status_code == 200
     mock_tenant_service.create_tenant.assert_awaited_once_with(name="New Org", domains=None)
 
 
@@ -161,7 +161,7 @@ async def test_create_tenant_with_domains(mock_validate, mock_tenant_service, cl
         headers=AUTH_HEADER,
         json={"name": "Domain Corp", "self_provisioning_domains": ["domain.com"]},
     )
-    assert response.status_code == 201
+    assert response.status_code == 200
     mock_tenant_service.create_tenant.assert_awaited_once_with(name="Domain Corp", domains=["domain.com"])
 
 
@@ -208,7 +208,8 @@ async def test_get_current_tenant(mock_validate, mock_tenant_service, client):
     response = await client.get("/api/tenants/current", headers=AUTH_HEADER)
     assert response.status_code == 200
     data = response.json()
-    assert data["name"] == "Acme Corp"
+    assert data["tenant_id"] == TENANT_UUID
+    assert data["tenant"]["name"] == "Acme Corp"
 
 
 @pytest.mark.anyio

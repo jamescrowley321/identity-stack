@@ -1,4 +1,3 @@
-import logging
 import uuid
 from typing import Annotated
 
@@ -13,8 +12,6 @@ from app.errors.identity import NotFound
 from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.role import RoleService
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Roles"])
 
@@ -35,6 +32,14 @@ class UpdateRoleRequest(BaseModel):
     new_name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=1000)
     permission_names: list[Annotated[str, Field(min_length=1)]] | None = Field(default=None, max_length=100)
+
+
+def _parse_uuid(value: str, field_name: str) -> uuid.UUID:
+    """Parse a string to UUID, raising 422 on invalid input."""
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid UUID for {field_name}: {value}")
 
 
 # --- Existing user-facing endpoints (must stay before /roles/{name}) ---
@@ -71,8 +76,8 @@ async def assign_roles(
     if "owner" in body.role_names and "owner" not in admin_roles:
         raise HTTPException(status_code=403, detail="Only owners can assign the owner role")
 
-    tenant_uuid = uuid.UUID(body.tenant_id)
-    user_uuid = uuid.UUID(body.user_id)
+    tenant_uuid = _parse_uuid(body.tenant_id, "tenant_id")
+    user_uuid = _parse_uuid(body.user_id, "user_id")
 
     # Resolve role names to canonical IDs
     roles_result = await role_service.list_roles()
@@ -113,8 +118,8 @@ async def remove_roles(
     if "owner" in body.role_names and "owner" not in admin_roles:
         raise HTTPException(status_code=403, detail="Only owners can remove the owner role")
 
-    tenant_uuid = uuid.UUID(body.tenant_id)
-    user_uuid = uuid.UUID(body.user_id)
+    tenant_uuid = _parse_uuid(body.tenant_id, "tenant_id")
+    user_uuid = _parse_uuid(body.user_id, "user_id")
 
     # Resolve role names to canonical IDs
     roles_result = await role_service.list_roles()
@@ -151,6 +156,8 @@ async def list_roles(
 ):
     """List all role definitions. Requires owner or admin role."""
     result = await role_service.list_roles()
+    if result.is_ok():
+        result = Ok({"roles": result.ok})
     return result_to_response(result, request)
 
 
@@ -166,6 +173,7 @@ async def create_role(
     result = await role_service.create_role(
         name=body.name,
         description=body.description,
+        permission_names=body.permission_names or None,
     )
     return result_to_response(result, request, status=201)
 
