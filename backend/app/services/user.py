@@ -179,6 +179,39 @@ class UserService:
 
             return Ok(result_dict)
 
+    async def activate_user(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        user_id: uuid.UUID,
+    ) -> Result[dict, IdentityError]:
+        """Set user status to active and sync to IdP.
+
+        Mirrors deactivate_user for reactivation.
+        """
+        with tracer.start_as_current_span("UserService.activate_user") as span:
+            span.set_attribute("tenant.id", str(tenant_id))
+            span.set_attribute("user.id", str(user_id))
+
+            user = await self._repository.get(user_id)
+            if user is None:
+                return Error(NotFound(message=f"User '{user_id}' not found"))
+
+            user.status = UserStatus.active
+            user = await self._repository.update(user)
+
+            result_dict = user.model_dump()
+            sync_data = {"email": user.email, "status": user.status.value}
+            await self._repository.commit()
+
+            self._log_sync_failure(
+                await self._adapter.sync_user(user_id=user.id, data=sync_data),
+                user.id,
+                "activate",
+            )
+
+            return Ok(result_dict)
+
     async def search_users(
         self,
         *,

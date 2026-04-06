@@ -110,6 +110,13 @@ class RoleRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def delete(self, role_id: uuid.UUID) -> bool:
+        """Delete a role by ID. Returns True if deleted, False if not found."""
+        stmt = sa.delete(Role).where(Role.id == role_id)
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        return result.rowcount > 0
+
     async def commit(self) -> None:
         """Commit the current transaction."""
         await self._session.commit()

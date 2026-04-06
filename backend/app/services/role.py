@@ -215,6 +215,120 @@ class RoleService:
 
             return Ok(result_dict)
 
+    async def list_roles(
+        self,
+        *,
+        tenant_id: uuid.UUID | None = None,
+    ) -> Result[list[dict], IdentityError]:
+        """List roles filtered by tenant scope."""
+        with tracer.start_as_current_span("RoleService.list_roles") as span:
+            if tenant_id is not None:
+                span.set_attribute("tenant.id", str(tenant_id))
+
+            roles = await self._repository.list_by_tenant(tenant_id)
+            return Ok([r.model_dump() for r in roles])
+
+    async def update_role(
+        self,
+        *,
+        role_id: uuid.UUID,
+        name: str | None = None,
+        description: str | None = None,
+        permission_names: list[str] | None = None,
+    ) -> Result[dict, IdentityError]:
+        """Update role fields, then sync to IdP."""
+        with tracer.start_as_current_span("RoleService.update_role") as span:
+            span.set_attribute("role.id", str(role_id))
+
+            role = await self._repository.get(role_id)
+            if role is None:
+                return Error(NotFound(message=f"Role '{role_id}' not found"))
+
+            if name is not None:
+                existing = await self._repository.get_by_name(name, role.tenant_id)
+                if existing is not None and existing.id != role_id:
+                    return Error(Conflict(message=f"Role '{name}' already exists in this scope"))
+                role.name = name
+            if description is not None:
+                role.description = description
+
+            try:
+                role = await self._repository.update(role)
+            except RepositoryConflictError:
+                await self._repository.rollback()
+                return Error(Conflict(message=f"Role name '{name}' conflicts with existing role"))
+
+            result_dict = role.model_dump()
+            sync_data: dict = {"name": role.name, "description": role.description}
+            if permission_names is not None:
+                sync_data["permission_names"] = permission_names
+            await self._repository.commit()
+
+            self._log_sync_failure(
+                await self._adapter.sync_role(role_id=role.id, data=sync_data),
+                role.id,
+                "update_role",
+            )
+
+            return Ok(result_dict)
+
+    async def delete_role(
+        self,
+        *,
+        role_id: uuid.UUID,
+    ) -> Result[dict, IdentityError]:
+        """Delete a role from DB and sync deletion to IdP."""
+        with tracer.start_as_current_span("RoleService.delete_role") as span:
+            span.set_attribute("role.id", str(role_id))
+
+            role = await self._repository.get(role_id)
+            if role is None:
+                return Error(NotFound(message=f"Role '{role_id}' not found"))
+
+            role_name = role.name
+            deleted = await self._repository.delete(role_id)
+            if not deleted:
+                return Error(NotFound(message=f"Role '{role_id}' not found"))
+
+            await self._repository.commit()
+
+            self._log_sync_failure(
+                await self._adapter.delete_role(role_id=role_id),
+                role_id,
+                "delete_role",
+            )
+
+            return Ok({"status": "deleted", "name": role_name})
+
+    async def unassign_role_from_user(
+        self,
+        *,
+        user_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        role_id: uuid.UUID,
+    ) -> Result[dict, IdentityError]:
+        """Remove a role assignment from a user within a tenant."""
+        with tracer.start_as_current_span("RoleService.unassign_role_from_user") as span:
+            span.set_attribute("user.id", str(user_id))
+            span.set_attribute("tenant.id", str(tenant_id))
+            span.set_attribute("role.id", str(role_id))
+
+            deleted = await self._assignment_repository.delete(user_id, tenant_id, role_id)
+            if not deleted:
+                msg = f"Role assignment not found for user '{user_id}' in tenant '{tenant_id}'"
+                return Error(NotFound(message=msg))
+
+            await self._assignment_repository.commit()
+
+            return Ok(
+                {
+                    "status": "removed",
+                    "user_id": str(user_id),
+                    "tenant_id": str(tenant_id),
+                    "role_id": str(role_id),
+                }
+            )
+
     @staticmethod
     def _log_sync_failure(
         result: Result[None, SyncError],

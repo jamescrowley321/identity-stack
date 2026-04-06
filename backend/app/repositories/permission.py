@@ -64,6 +64,13 @@ class PermissionRepository:
             raise RepositoryConflictError(str(exc)) from exc
         return permission
 
+    async def delete(self, permission_id: uuid.UUID) -> bool:
+        """Delete a permission by ID. Returns True if deleted, False if not found."""
+        stmt = sa.delete(Permission).where(Permission.id == permission_id)
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        return result.rowcount > 0
+
     async def commit(self) -> None:
         """Commit the current transaction."""
         await self._session.commit()
