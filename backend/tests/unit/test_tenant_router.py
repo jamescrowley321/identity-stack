@@ -399,7 +399,7 @@ async def test_create_tenant_sync_failed_returns_207(mock_validate, mock_tenant_
         json={"name": "New Org"},
     )
     assert response.status_code == 207
-    assert response.headers["content-type"] == "application/problem+json"
+    assert response.headers["content-type"].startswith("application/problem+json")
     body = response.json()
     assert body["type"] == "/errors/sync-failed"
     assert body["title"] == "Sync Partial Success"

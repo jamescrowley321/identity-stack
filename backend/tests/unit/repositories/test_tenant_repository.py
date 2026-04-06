@@ -20,6 +20,8 @@ from app.models.identity.user import User, UserStatus
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import RepositoryConflictError
 
+pytestmark = pytest.mark.asyncio
+
 
 def _make_tenant(**overrides) -> Tenant:
     defaults = {"id": uuid.uuid4(), "name": f"tenant-{uuid.uuid4().hex[:8]}"}

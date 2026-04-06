@@ -23,36 +23,39 @@ def permission_service(db_session):
 @pytest.mark.asyncio
 async def test_permission_create_get_update_delete(db_session, permission_service):
     """Full permission lifecycle: create → get → update → get → delete → verify gone."""
+    suffix = uuid.uuid4().hex[:8]
+
     # --- Create ---
     result = await permission_service.create_permission(
-        name="perm.lifecycle.test",
+        name=f"perm.lifecycle.{suffix}",
         description="initial description",
     )
     assert result.is_ok()
     perm_data = result.ok
     perm_id = perm_data["id"]
-    assert perm_data["name"] == "perm.lifecycle.test"
+    assert perm_data["name"] == f"perm.lifecycle.{suffix}"
     assert perm_data["description"] == "initial description"
 
     # --- Get ---
     result = await permission_service.get_permission(permission_id=perm_id)
     assert result.is_ok()
-    assert result.ok["name"] == "perm.lifecycle.test"
+    assert result.ok["name"] == f"perm.lifecycle.{suffix}"
 
     # --- Update ---
+    update_suffix = uuid.uuid4().hex[:8]
     result = await permission_service.update_permission(
         permission_id=perm_id,
-        name="perm.lifecycle.updated",
+        name=f"perm.lifecycle.{update_suffix}",
         description="updated description",
     )
     assert result.is_ok()
-    assert result.ok["name"] == "perm.lifecycle.updated"
+    assert result.ok["name"] == f"perm.lifecycle.{update_suffix}"
     assert result.ok["description"] == "updated description"
 
     # --- Get after update ---
     result = await permission_service.get_permission(permission_id=perm_id)
     assert result.is_ok()
-    assert result.ok["name"] == "perm.lifecycle.updated"
+    assert result.ok["name"] == f"perm.lifecycle.{update_suffix}"
     assert result.ok["description"] == "updated description"
 
     # --- Delete ---
@@ -69,10 +72,11 @@ async def test_permission_create_get_update_delete(db_session, permission_servic
 @pytest.mark.asyncio
 async def test_permission_duplicate_name(db_session, permission_service):
     """Creating a permission with a duplicate name returns Conflict."""
-    result = await permission_service.create_permission(name="perm.dup.test")
+    suffix = uuid.uuid4().hex[:8]
+    result = await permission_service.create_permission(name=f"perm.dup.{suffix}")
     assert result.is_ok()
 
-    result = await permission_service.create_permission(name="perm.dup.test")
+    result = await permission_service.create_permission(name=f"perm.dup.{suffix}")
     assert result.is_error()
     assert "already exists" in result.error.message
 
@@ -88,11 +92,12 @@ async def test_permission_get_not_found(db_session, permission_service):
 @pytest.mark.asyncio
 async def test_permission_list(db_session, permission_service):
     """List permissions returns all created permissions."""
-    await permission_service.create_permission(name="perm.list.a")
-    await permission_service.create_permission(name="perm.list.b")
+    suffix = uuid.uuid4().hex[:8]
+    await permission_service.create_permission(name=f"perm.list.a.{suffix}")
+    await permission_service.create_permission(name=f"perm.list.b.{suffix}")
 
     result = await permission_service.list_permissions()
     assert result.is_ok()
     names = [p["name"] for p in result.ok]
-    assert "perm.list.a" in names
-    assert "perm.list.b" in names
+    assert f"perm.list.a.{suffix}" in names
+    assert f"perm.list.b.{suffix}" in names
