@@ -525,22 +525,42 @@ class TestUnassignRoleFromUser:
     """Story 2.3: unassign_role_from_user removes assignment record."""
 
     async def test_unassign_success(self):
-        service, _repo, _perm, assign_repo, _adapter = _build_service()
+        service, repo, _perm, assign_repo, adapter = _build_service()
         user_id = uuid.uuid4()
-        role_id = uuid.uuid4()
+        role = _make_role()
+        repo.get.return_value = role
         assign_repo.delete.return_value = True
+        adapter.delete_role_assignment.return_value = Ok(None)
 
-        result = await service.unassign_role_from_user(user_id=user_id, tenant_id=TENANT_ID, role_id=role_id)
+        result = await service.unassign_role_from_user(user_id=user_id, tenant_id=TENANT_ID, role_id=role.id)
 
         assert result.is_ok()
         assert result.ok["status"] == "removed"
         assign_repo.commit.assert_awaited_once()
+        adapter.delete_role_assignment.assert_awaited_once()
 
     async def test_unassign_not_found(self):
-        service, _repo, _perm, assign_repo, _adapter = _build_service()
+        service, repo, _perm, assign_repo, _adapter = _build_service()
+        repo.get.return_value = None
         assign_repo.delete.return_value = False
 
         result = await service.unassign_role_from_user(user_id=uuid.uuid4(), tenant_id=TENANT_ID, role_id=uuid.uuid4())
 
         assert result.is_error()
         assert isinstance(result.error, NotFound)
+
+    async def test_unassign_sync_failure_still_returns_ok(self):
+        service, repo, _perm, assign_repo, adapter = _build_service()
+        role = _make_role()
+        repo.get.return_value = role
+        assign_repo.delete.return_value = True
+        adapter.delete_role_assignment.return_value = Error(
+            SyncError(message="Descope down", operation="delete_role_assignment")
+        )
+
+        with patch("app.services.role.logger") as mock_logger:
+            result = await service.unassign_role_from_user(user_id=uuid.uuid4(), tenant_id=TENANT_ID, role_id=role.id)
+
+        assert result.is_ok()
+        assign_repo.commit.assert_awaited_once()
+        mock_logger.warning.assert_called_once()

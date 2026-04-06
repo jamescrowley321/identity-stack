@@ -65,6 +65,16 @@ class UserTenantRoleRepository:
         await self._session.flush()
         return result.rowcount > 0
 
+    async def delete_by_user_tenant(self, user_id: uuid.UUID, tenant_id: uuid.UUID) -> int:
+        """Delete all role assignments for a user in a tenant. Returns count of deleted rows."""
+        stmt = sa.delete(UserTenantRole).where(
+            UserTenantRole.user_id == user_id,
+            UserTenantRole.tenant_id == tenant_id,
+        )
+        result = await self._session.execute(stmt)
+        await self._session.flush()
+        return result.rowcount
+
     async def commit(self) -> None:
         """Commit the current transaction."""
         await self._session.commit()

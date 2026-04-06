@@ -41,6 +41,15 @@ class TestNoOpSyncAdapterMethods:
         )
         assert result == Ok(None)
 
+    async def test_delete_role_assignment(self):
+        adapter = NoOpSyncAdapter()
+        result = await adapter.delete_role_assignment(
+            user_id=uuid.uuid4(),
+            tenant_id=uuid.uuid4(),
+            role_id=uuid.uuid4(),
+        )
+        assert result == Ok(None)
+
     async def test_delete_user(self):
         adapter = NoOpSyncAdapter()
         result = await adapter.delete_user(user_id=uuid.uuid4())
@@ -73,6 +82,7 @@ class TestNoOpSyncAdapterMethods:
             await adapter.sync_permission(permission_id=uid, data=data),
             await adapter.sync_tenant(tenant_id=uid, data=data),
             await adapter.sync_role_assignment(user_id=uid, tenant_id=uid, role_id=uid),
+            await adapter.delete_role_assignment(user_id=uid, tenant_id=uid, role_id=uid),
             await adapter.delete_user(user_id=uid),
             await adapter.delete_role(role_id=uid),
             await adapter.delete_permission(permission_id=uid),

@@ -1,6 +1,7 @@
 import logging
 import uuid
 
+from expression import Ok
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
@@ -56,7 +57,7 @@ async def create_tenant(
         name=body.name,
         domains=body.self_provisioning_domains,
     )
-    return result_to_response(result, request, status=201)
+    return result_to_response(result, request)
 
 
 @router.get("/tenants")
@@ -80,7 +81,13 @@ async def get_current_tenant(
     tenant_service: TenantService = Depends(get_tenant_service),
 ):
     """Get the current tenant context from the JWT `dct` claim."""
-    result = await tenant_service.get_tenant(tenant_id=uuid.UUID(tenant_id))
+    try:
+        tenant_uuid = uuid.UUID(tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid UUID for tenant_id: {tenant_id}")
+    result = await tenant_service.get_tenant(tenant_id=tenant_uuid)
+    if result.is_ok():
+        result = Ok({"tenant_id": tenant_id, "tenant": result.ok})
     return result_to_response(result, request)
 
 

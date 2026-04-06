@@ -54,6 +54,7 @@ class RoleService:
         name: str,
         description: str = "",
         tenant_id: uuid.UUID | None = None,
+        permission_names: list[str] | None = None,
     ) -> Result[dict, IdentityError]:
         """Create a new role: persist via repo, then sync to IdP.
 
@@ -76,15 +77,29 @@ class RoleService:
                 await self._repository.rollback()
                 return Error(Conflict(message=f"Role '{name}' already exists in this scope"))
 
+            # Map permissions to role if specified
+            resolved_permission_names: list[str] = []
+            if permission_names:
+                for perm_name in permission_names:
+                    perm = await self._permission_repository.get_by_name(perm_name)
+                    if perm is None:
+                        await self._repository.rollback()
+                        return Error(NotFound(message=f"Permission '{perm_name}' not found"))
+                    try:
+                        await self._repository.add_permission(role.id, perm.id)
+                    except RepositoryConflictError:
+                        pass  # already mapped, skip
+                    resolved_permission_names.append(perm_name)
+
             result_dict = role.model_dump()
             role_id = role.id
             await self._repository.commit()
 
+            sync_data: dict = {"name": role.name, "description": role.description}
+            if resolved_permission_names:
+                sync_data["permission_names"] = resolved_permission_names
             self._log_sync_failure(
-                await self._adapter.sync_role(
-                    role_id=role_id,
-                    data={"name": role.name, "description": role.description},
-                ),
+                await self._adapter.sync_role(role_id=role_id, data=sync_data),
                 role_id,
                 "create_role",
             )
@@ -307,11 +322,14 @@ class RoleService:
         tenant_id: uuid.UUID,
         role_id: uuid.UUID,
     ) -> Result[dict, IdentityError]:
-        """Remove a role assignment from a user within a tenant."""
+        """Remove a role assignment from a user within a tenant, then sync to IdP."""
         with tracer.start_as_current_span("RoleService.unassign_role_from_user") as span:
             span.set_attribute("user.id", str(user_id))
             span.set_attribute("tenant.id", str(tenant_id))
             span.set_attribute("role.id", str(role_id))
+
+            role = await self._repository.get(role_id)
+            role_name = role.name if role else str(role_id)
 
             deleted = await self._assignment_repository.delete(user_id, tenant_id, role_id)
             if not deleted:
@@ -319,6 +337,17 @@ class RoleService:
                 return Error(NotFound(message=msg))
 
             await self._assignment_repository.commit()
+
+            self._log_sync_failure(
+                await self._adapter.delete_role_assignment(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    role_id=role_id,
+                    data={"role_name": role_name},
+                ),
+                role_id,
+                "unassign_role_from_user",
+            )
 
             return Ok(
                 {

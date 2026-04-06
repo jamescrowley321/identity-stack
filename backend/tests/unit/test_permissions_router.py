@@ -136,7 +136,8 @@ async def test_list_permissions(mock_validate, mock_permission_service, client):
     response = await client.get("/api/permissions", headers=AUTH_HEADER)
     assert response.status_code == 200
     data = response.json()
-    assert len(data) == 2
+    assert "permissions" in data
+    assert len(data["permissions"]) == 2
     mock_permission_service.list_permissions.assert_awaited_once()
 
 

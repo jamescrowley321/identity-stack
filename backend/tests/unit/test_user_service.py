@@ -14,8 +14,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from expression import Error, Ok
 
-from app.errors.identity import Conflict, NotFound
+from app.errors.identity import Conflict, Forbidden, NotFound
 from app.models.identity.user import User, UserStatus
+from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.user import RepositoryConflictError, UserRepository
 from app.services.adapters.base import IdentityProviderAdapter, SyncError
 from app.services.user import UserService
@@ -40,14 +41,19 @@ def _make_user(**overrides) -> User:
 def _build_service(
     repo: AsyncMock | None = None,
     adapter: AsyncMock | None = None,
-) -> tuple[UserService, AsyncMock, AsyncMock]:
+    assignment_repo: AsyncMock | None = None,
+) -> tuple[UserService, AsyncMock, AsyncMock, AsyncMock]:
     """Build a UserService with mocked repository and adapter."""
     if repo is None:
         repo = AsyncMock(spec=UserRepository)
     if adapter is None:
         adapter = AsyncMock(spec=IdentityProviderAdapter)
-    service = UserService(repository=repo, adapter=adapter)
-    return service, repo, adapter
+    if assignment_repo is None:
+        assignment_repo = AsyncMock(spec=UserTenantRoleRepository)
+    # Default: user exists in tenant
+    repo.exists_in_tenant.return_value = True
+    service = UserService(repository=repo, adapter=adapter, assignment_repository=assignment_repo)
+    return service, repo, adapter, assignment_repo
 
 
 @pytest.mark.anyio
@@ -55,7 +61,7 @@ class TestCreateUser:
     """AC-2.1.2: create_user persists via repo, commits, syncs to adapter, returns Ok(dict)."""
 
     async def test_create_user_success(self):
-        service, repo, adapter = _build_service()
+        service, repo, adapter, _assign_repo = _build_service()
         repo.get_by_email.return_value = None
         user = _make_user()
         repo.create.return_value = user
@@ -76,7 +82,7 @@ class TestCreateUser:
 
     async def test_create_user_commit_before_sync(self):
         """Commit must happen before sync to prevent ghost state in IdP."""
-        service, repo, adapter = _build_service()
+        service, repo, adapter, _assign_repo = _build_service()
         repo.get_by_email.return_value = None
         user = _make_user()
         repo.create.return_value = user
@@ -95,7 +101,7 @@ class TestCreateUser:
         assert call_order == ["commit", "sync"]
 
     async def test_create_user_duplicate_email_returns_conflict(self):
-        service, repo, _adapter = _build_service()
+        service, repo, _adapter, _assign_repo = _build_service()
         repo.get_by_email.return_value = _make_user()
 
         result = await service.create_user(
@@ -110,7 +116,7 @@ class TestCreateUser:
 
     async def test_create_user_integrity_error_returns_conflict(self):
         """TOCTOU race: get_by_email returns None but flush raises IntegrityError."""
-        service, repo, _adapter = _build_service()
+        service, repo, _adapter, _assign_repo = _build_service()
         repo.get_by_email.return_value = None
         repo.create.side_effect = RepositoryConflictError("duplicate key")
 
@@ -125,7 +131,7 @@ class TestCreateUser:
 
     async def test_create_user_sync_failure_still_returns_ok(self):
         """AC-2.1.2: sync failure → log warning, still return Ok(user)."""
-        service, repo, adapter = _build_service()
+        service, repo, adapter, _assign_repo = _build_service()
         repo.get_by_email.return_value = None
         user = _make_user()
         repo.create.return_value = user
@@ -146,7 +152,7 @@ class TestCreateUser:
 @pytest.mark.anyio
 class TestGetUser:
     async def test_get_user_found(self):
-        service, repo, _adapter = _build_service()
+        service, repo, _adapter, _assign_repo = _build_service()
         user = _make_user()
         repo.get.return_value = user
 
@@ -156,7 +162,7 @@ class TestGetUser:
         assert result.ok["email"] == user.email
 
     async def test_get_user_not_found(self):
-        service, repo, _adapter = _build_service()
+        service, repo, _adapter, _assign_repo = _build_service()
         repo.get.return_value = None
 
         result = await service.get_user(tenant_id=TENANT_ID, user_id=uuid.uuid4())
@@ -168,7 +174,7 @@ class TestGetUser:
 @pytest.mark.anyio
 class TestUpdateUser:
     async def test_update_user_success(self):
-        service, repo, adapter = _build_service()
+        service, repo, adapter, _assign_repo = _build_service()
         user = _make_user()
         repo.get.return_value = user
         repo.get_by_email.return_value = None
@@ -187,7 +193,7 @@ class TestUpdateUser:
         repo.commit.assert_awaited_once()
 
     async def test_update_user_not_found(self):
-        service, repo, _adapter = _build_service()
+        service, repo, _adapter, _assign_repo = _build_service()
         repo.get.return_value = None
 
         result = await service.update_user(tenant_id=TENANT_ID, user_id=uuid.uuid4(), email="x@y.com")
@@ -196,7 +202,7 @@ class TestUpdateUser:
         assert isinstance(result.error, NotFound)
 
     async def test_update_user_email_conflict_different_user(self):
-        service, repo, _adapter = _build_service()
+        service, repo, _adapter, _assign_repo = _build_service()
         existing = _make_user(id=uuid.uuid4())
         target = _make_user(id=uuid.uuid4())
         repo.get.return_value = target
@@ -214,7 +220,7 @@ class TestUpdateUser:
 
     async def test_update_user_same_email_no_conflict(self):
         """Updating to the same email the user already has should not conflict."""
-        service, repo, adapter = _build_service()
+        service, repo, adapter, _assign_repo = _build_service()
         user = _make_user()
         repo.get.return_value = user
         repo.get_by_email.return_value = user  # same user
@@ -227,7 +233,7 @@ class TestUpdateUser:
 
     async def test_update_user_integrity_error_returns_conflict(self):
         """TOCTOU race: email check passes but flush raises IntegrityError."""
-        service, repo, _adapter = _build_service()
+        service, repo, _adapter, _assign_repo = _build_service()
         user = _make_user()
         repo.get.return_value = user
         repo.get_by_email.return_value = None
@@ -249,7 +255,7 @@ class TestDeactivateUser:
     """AC-2.1.4: deactivate_user sets status=inactive and syncs."""
 
     async def test_deactivate_user_success(self):
-        service, repo, adapter = _build_service()
+        service, repo, adapter, _assign_repo = _build_service()
         user = _make_user(status=UserStatus.active)
         repo.get.return_value = user
         repo.update.return_value = user
@@ -263,7 +269,7 @@ class TestDeactivateUser:
         repo.commit.assert_awaited_once()
 
     async def test_deactivate_user_not_found(self):
-        service, repo, _adapter = _build_service()
+        service, repo, _adapter, _assign_repo = _build_service()
         repo.get.return_value = None
 
         result = await service.deactivate_user(tenant_id=TENANT_ID, user_id=uuid.uuid4())
@@ -272,7 +278,7 @@ class TestDeactivateUser:
         assert isinstance(result.error, NotFound)
 
     async def test_deactivate_sync_failure_still_returns_ok(self):
-        service, repo, adapter = _build_service()
+        service, repo, adapter, _assign_repo = _build_service()
         user = _make_user()
         repo.get.return_value = user
         repo.update.return_value = user
@@ -290,7 +296,7 @@ class TestActivateUser:
     """Story 2.3: activate_user sets status=active and syncs (mirrors deactivate)."""
 
     async def test_activate_user_success(self):
-        service, repo, adapter = _build_service()
+        service, repo, adapter, _assign_repo = _build_service()
         user = _make_user(status=UserStatus.inactive)
         repo.get.return_value = user
         repo.update.return_value = user
@@ -304,7 +310,7 @@ class TestActivateUser:
         repo.commit.assert_awaited_once()
 
     async def test_activate_user_not_found(self):
-        service, repo, _adapter = _build_service()
+        service, repo, _adapter, _assign_repo = _build_service()
         repo.get.return_value = None
 
         result = await service.activate_user(tenant_id=TENANT_ID, user_id=uuid.uuid4())
@@ -313,7 +319,7 @@ class TestActivateUser:
         assert isinstance(result.error, NotFound)
 
     async def test_activate_sync_failure_still_returns_ok(self):
-        service, repo, adapter = _build_service()
+        service, repo, adapter, _assign_repo = _build_service()
         user = _make_user(status=UserStatus.inactive)
         repo.get.return_value = user
         repo.update.return_value = user
@@ -331,7 +337,7 @@ class TestSearchUsers:
     """AC-2.1.3: search_users delegates to repository with tenant scoping."""
 
     async def test_search_returns_list_of_dicts(self):
-        service, repo, _adapter = _build_service()
+        service, repo, _adapter, _assign_repo = _build_service()
         users = [_make_user(), _make_user(email="bob@example.com", user_name="bob")]
         repo.search.return_value = users
         tenant_id = uuid.uuid4()
@@ -343,7 +349,7 @@ class TestSearchUsers:
         repo.search.assert_awaited_once_with(tenant_id=tenant_id, name=None)
 
     async def test_search_passes_query_as_name_filter(self):
-        service, repo, _adapter = _build_service()
+        service, repo, _adapter, _assign_repo = _build_service()
         repo.search.return_value = []
         tenant_id = uuid.uuid4()
 
@@ -352,10 +358,78 @@ class TestSearchUsers:
         repo.search.assert_awaited_once_with(tenant_id=tenant_id, name="alice")
 
     async def test_search_empty_query_passes_none(self):
-        service, repo, _adapter = _build_service()
+        service, repo, _adapter, _assign_repo = _build_service()
         repo.search.return_value = []
         tenant_id = uuid.uuid4()
 
         await service.search_users(tenant_id=tenant_id, query="")
 
         repo.search.assert_awaited_once_with(tenant_id=tenant_id, name=None)
+
+
+@pytest.mark.anyio
+class TestTenantMembershipVerification:
+    """Story 2.3: deactivate/activate verify user belongs to caller's tenant."""
+
+    async def test_deactivate_user_cross_tenant_rejected(self):
+        service, repo, _adapter, _assign_repo = _build_service()
+        user = _make_user()
+        repo.get.return_value = user
+        repo.exists_in_tenant.return_value = False
+
+        result = await service.deactivate_user(tenant_id=TENANT_ID, user_id=user.id)
+
+        assert result.is_error()
+        assert isinstance(result.error, Forbidden)
+        assert "does not belong" in result.error.message
+
+    async def test_activate_user_cross_tenant_rejected(self):
+        service, repo, _adapter, _assign_repo = _build_service()
+        user = _make_user(status=UserStatus.inactive)
+        repo.get.return_value = user
+        repo.exists_in_tenant.return_value = False
+
+        result = await service.activate_user(tenant_id=TENANT_ID, user_id=user.id)
+
+        assert result.is_error()
+        assert isinstance(result.error, Forbidden)
+        assert "does not belong" in result.error.message
+
+
+@pytest.mark.anyio
+class TestRemoveUserFromTenant:
+    """Story 2.3: remove_user_from_tenant deletes all role assignments for user+tenant."""
+
+    async def test_remove_user_from_tenant_success(self):
+        service, repo, _adapter, assign_repo = _build_service()
+        user = _make_user()
+        repo.get.return_value = user
+        repo.exists_in_tenant.return_value = True
+        assign_repo.delete_by_user_tenant.return_value = 2
+
+        result = await service.remove_user_from_tenant(tenant_id=TENANT_ID, user_id=user.id)
+
+        assert result.is_ok()
+        assert result.ok["status"] == "removed"
+        assign_repo.delete_by_user_tenant.assert_awaited_once_with(user.id, TENANT_ID)
+        assign_repo.commit.assert_awaited_once()
+
+    async def test_remove_user_not_found(self):
+        service, repo, _adapter, _assign_repo = _build_service()
+        repo.get.return_value = None
+
+        result = await service.remove_user_from_tenant(tenant_id=TENANT_ID, user_id=uuid.uuid4())
+
+        assert result.is_error()
+        assert isinstance(result.error, NotFound)
+
+    async def test_remove_user_cross_tenant_rejected(self):
+        service, repo, _adapter, _assign_repo = _build_service()
+        user = _make_user()
+        repo.get.return_value = user
+        repo.exists_in_tenant.return_value = False
+
+        result = await service.remove_user_from_tenant(tenant_id=TENANT_ID, user_id=user.id)
+
+        assert result.is_error()
+        assert isinstance(result.error, Forbidden)
