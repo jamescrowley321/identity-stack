@@ -473,9 +473,9 @@ class TestMemberCrud:
                 pytest.skip("Invite returned 207 (sync failed) — canonical fields not in Problem Detail body")
             assert "user" in body, f"Missing 'user' key in invite response: {body.keys()}"
             user = body["user"]
-            created_user_id = str(user["id"])
             assert "id" in user, f"Missing 'id' in user response: {user}"
             assert "created_at" in user, f"Missing 'created_at' in user response: {user}"
+            created_user_id = str(user["id"])
         finally:
             if created_user_id:
                 with contextlib.suppress(Exception):
@@ -579,3 +579,7 @@ class TestTenantOperations:
         body = resp.json()
         assert "tenant_id" in body
         assert "tenant" in body, f"Missing 'tenant' key in current tenant response: {body.keys()}"
+        tenant = body["tenant"]
+        assert "id" in tenant, f"Missing 'id' in tenant response: {tenant}"
+        assert "created_at" in tenant, f"Missing 'created_at' in tenant response: {tenant}"
+        assert "updated_at" in tenant, f"Missing 'updated_at' in tenant response: {tenant}"
