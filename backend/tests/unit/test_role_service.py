@@ -377,3 +377,170 @@ class TestAssignRoleToUser:
 
         assert result.is_ok()
         assert result.ok["assigned_by"] == str(assigner_id)
+
+
+@pytest.mark.anyio
+class TestListRoles:
+    """Story 2.3: list_roles delegates to repository."""
+
+    async def test_list_roles_returns_list(self):
+        service, repo, _perm, _assign, _adapter = _build_service()
+        roles = [_make_role(name="admin"), _make_role(name="viewer")]
+        repo.list_by_tenant.return_value = roles
+
+        result = await service.list_roles()
+
+        assert result.is_ok()
+        assert len(result.ok) == 2
+        repo.list_by_tenant.assert_awaited_once_with(None)
+
+    async def test_list_roles_with_tenant(self):
+        service, repo, _perm, _assign, _adapter = _build_service()
+        repo.list_by_tenant.return_value = []
+
+        result = await service.list_roles(tenant_id=TENANT_ID)
+
+        assert result.is_ok()
+        repo.list_by_tenant.assert_awaited_once_with(TENANT_ID)
+
+    async def test_list_roles_empty(self):
+        service, repo, _perm, _assign, _adapter = _build_service()
+        repo.list_by_tenant.return_value = []
+
+        result = await service.list_roles()
+
+        assert result.is_ok()
+        assert result.ok == []
+
+
+@pytest.mark.anyio
+class TestUpdateRole:
+    """Story 2.3: update_role updates fields, commits, syncs."""
+
+    async def test_update_role_success(self):
+        service, repo, _perm, _assign, adapter = _build_service()
+        role = _make_role(name="editor")
+        repo.get.return_value = role
+        repo.get_by_name.return_value = None
+        repo.update.return_value = role
+        adapter.sync_role.return_value = Ok(None)
+
+        result = await service.update_role(role_id=role.id, name="senior-editor", description="Senior")
+
+        assert result.is_ok()
+        repo.update.assert_awaited_once()
+        repo.commit.assert_awaited_once()
+        adapter.sync_role.assert_awaited_once()
+
+    async def test_update_role_not_found(self):
+        service, repo, _perm, _assign, _adapter = _build_service()
+        repo.get.return_value = None
+
+        result = await service.update_role(role_id=uuid.uuid4(), name="new-name")
+
+        assert result.is_error()
+        assert isinstance(result.error, NotFound)
+
+    async def test_update_role_name_conflict(self):
+        service, repo, _perm, _assign, _adapter = _build_service()
+        role = _make_role(name="editor")
+        existing = _make_role(name="admin")
+        repo.get.return_value = role
+        repo.get_by_name.return_value = existing
+
+        result = await service.update_role(role_id=role.id, name="admin")
+
+        assert result.is_error()
+        assert isinstance(result.error, Conflict)
+
+    async def test_update_role_same_name_no_conflict(self):
+        service, repo, _perm, _assign, adapter = _build_service()
+        role = _make_role(name="editor")
+        repo.get.return_value = role
+        repo.get_by_name.return_value = role  # same role
+        repo.update.return_value = role
+        adapter.sync_role.return_value = Ok(None)
+
+        result = await service.update_role(role_id=role.id, name="editor")
+
+        assert result.is_ok()
+
+    async def test_update_role_integrity_error(self):
+        service, repo, _perm, _assign, _adapter = _build_service()
+        role = _make_role()
+        repo.get.return_value = role
+        repo.get_by_name.return_value = None
+        repo.update.side_effect = RepositoryConflictError("duplicate key")
+
+        result = await service.update_role(role_id=role.id, name="new-name")
+
+        assert result.is_error()
+        assert isinstance(result.error, Conflict)
+
+
+@pytest.mark.anyio
+class TestDeleteRole:
+    """Story 2.3: delete_role removes from DB, commits, syncs deletion."""
+
+    async def test_delete_role_success(self):
+        service, repo, _perm, _assign, adapter = _build_service()
+        role = _make_role(name="editor")
+        repo.get.return_value = role
+        repo.delete.return_value = True
+        adapter.delete_role.return_value = Ok(None)
+
+        result = await service.delete_role(role_id=role.id)
+
+        assert result.is_ok()
+        assert result.ok["status"] == "deleted"
+        assert result.ok["name"] == "editor"
+        repo.commit.assert_awaited_once()
+        adapter.delete_role.assert_awaited_once()
+
+    async def test_delete_role_not_found(self):
+        service, repo, _perm, _assign, _adapter = _build_service()
+        repo.get.return_value = None
+
+        result = await service.delete_role(role_id=uuid.uuid4())
+
+        assert result.is_error()
+        assert isinstance(result.error, NotFound)
+
+    async def test_delete_role_sync_failure_still_ok(self):
+        service, repo, _perm, _assign, adapter = _build_service()
+        role = _make_role()
+        repo.get.return_value = role
+        repo.delete.return_value = True
+        adapter.delete_role.return_value = Error(SyncError(message="down", operation="delete_role"))
+
+        with patch("app.services.role.logger") as mock_logger:
+            result = await service.delete_role(role_id=role.id)
+
+        assert result.is_ok()
+        mock_logger.warning.assert_called_once()
+
+
+@pytest.mark.anyio
+class TestUnassignRoleFromUser:
+    """Story 2.3: unassign_role_from_user removes assignment record."""
+
+    async def test_unassign_success(self):
+        service, _repo, _perm, assign_repo, _adapter = _build_service()
+        user_id = uuid.uuid4()
+        role_id = uuid.uuid4()
+        assign_repo.delete.return_value = True
+
+        result = await service.unassign_role_from_user(user_id=user_id, tenant_id=TENANT_ID, role_id=role_id)
+
+        assert result.is_ok()
+        assert result.ok["status"] == "removed"
+        assign_repo.commit.assert_awaited_once()
+
+    async def test_unassign_not_found(self):
+        service, _repo, _perm, assign_repo, _adapter = _build_service()
+        assign_repo.delete.return_value = False
+
+        result = await service.unassign_role_from_user(user_id=uuid.uuid4(), tenant_id=TENANT_ID, role_id=uuid.uuid4())
+
+        assert result.is_error()
+        assert isinstance(result.error, NotFound)
