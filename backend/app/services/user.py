@@ -132,7 +132,7 @@ class UserService:
             try:
                 user = await self._repository.update(user)
             except RepositoryConflictError:
-                return Error(Conflict(message=f"User with email '{email}' already exists"))
+                return Error(Conflict(message="User update conflicts with existing data"))
 
             result_dict = user.model_dump()
             sync_data = {"email": user.email, "status": user.status.value}
