@@ -3,6 +3,7 @@
 AC-2.1.7: get_user_service() wires AsyncSession -> UserRepository -> UserService
 AC-2.2.6: get_role_service(), get_permission_service(), get_tenant_service()
 with DescopeSyncAdapter wrapping the singleton DescopeManagementClient.
+AC-3.1.1: get_inbound_sync_service() wires repositories for inbound sync.
 """
 
 from __future__ import annotations
@@ -12,12 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import get_async_session
 from app.repositories.assignment import UserTenantRoleRepository
+from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.permission import PermissionRepository
+from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 from app.services.adapters.descope import DescopeSyncAdapter
 from app.services.descope import get_descope_client
+from app.services.inbound_sync import InboundSyncService
 from app.services.permission import PermissionService
 from app.services.role import RoleService
 from app.services.tenant import TenantService
@@ -86,3 +90,21 @@ async def get_tenant_service(
     repository = TenantRepository(session)
     adapter = DescopeSyncAdapter(client=get_descope_client())
     return TenantService(repository=repository, adapter=adapter)
+
+
+async def get_inbound_sync_service(
+    session: AsyncSession = Depends(get_async_session),
+) -> InboundSyncService:
+    """Build an InboundSyncService with its repositories.
+
+    AC-3.1.1: Wiring: AsyncSession -> UserRepository + IdPLinkRepository + ProviderRepository
+               -> InboundSyncService(user_repository, idp_link_repository, provider_repository)
+    """
+    user_repository = UserRepository(session)
+    idp_link_repository = IdPLinkRepository(session)
+    provider_repository = ProviderRepository(session)
+    return InboundSyncService(
+        user_repository=user_repository,
+        idp_link_repository=idp_link_repository,
+        provider_repository=provider_repository,
+    )
