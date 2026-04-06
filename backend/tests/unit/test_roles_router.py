@@ -1,12 +1,20 @@
-"""Unit tests for the roles router endpoints."""
+"""Unit tests for the roles router endpoints.
 
+Story 2.3: tests rewired endpoints that use RoleService via DI
+instead of get_descope_client().
+"""
+
+import uuid
 from unittest.mock import AsyncMock, patch
 
-import httpx
 import pytest
+from expression import Error, Ok
 from httpx import ASGITransport, AsyncClient
 
+from app.dependencies.identity import get_role_service
+from app.errors.identity import Conflict
 from app.main import app
+from app.services.role import RoleService
 
 
 @pytest.fixture
@@ -21,17 +29,31 @@ def _set_env(monkeypatch):
 
 
 @pytest.fixture
+def mock_role_service():
+    return AsyncMock(spec=RoleService)
+
+
+@pytest.fixture(autouse=True)
+def _override_role_service(mock_role_service):
+    app.dependency_overrides[get_role_service] = lambda: mock_role_service
+    yield
+    app.dependency_overrides.pop(get_role_service, None)
+
+
+@pytest.fixture
 async def client():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
 
 
+TENANT_ID = "51c5957b-684a-453f-8ab1-8f239999c4d8"
+
 ADMIN_CLAIMS = {
     "sub": "user123",
-    "dct": "tenant-abc",
+    "dct": TENANT_ID,
     "tenants": {
-        "tenant-abc": {
+        TENANT_ID: {
             "roles": ["admin"],
             "permissions": ["projects.create", "projects.read", "members.invite", "members.update_role"],
         },
@@ -40,9 +62,9 @@ ADMIN_CLAIMS = {
 
 VIEWER_CLAIMS = {
     "sub": "user456",
-    "dct": "tenant-abc",
+    "dct": TENANT_ID,
     "tenants": {
-        "tenant-abc": {
+        TENANT_ID: {
             "roles": ["viewer"],
             "permissions": ["projects.read", "documents.read"],
         },
@@ -51,9 +73,9 @@ VIEWER_CLAIMS = {
 
 OWNER_CLAIMS = {
     "sub": "owner1",
-    "dct": "tenant-abc",
+    "dct": TENANT_ID,
     "tenants": {
-        "tenant-abc": {
+        TENANT_ID: {
             "roles": ["owner"],
             "permissions": ["projects.create", "members.update_role", "billing.manage"],
         },
@@ -64,6 +86,18 @@ NO_TENANT_CLAIMS = {
     "sub": "user789",
     "tenants": {},
 }
+
+AUTH_HEADER = {"Authorization": "Bearer valid.token"}
+
+ROLE_ID = str(uuid.uuid4())
+
+SAMPLE_ROLES = [
+    {"id": str(uuid.uuid4()), "name": "editor", "description": "Can edit", "tenant_id": None},
+    {"id": str(uuid.uuid4()), "name": "viewer", "description": "Read only", "tenant_id": None},
+]
+
+
+# --- /roles/me (claims-based, no service) ---
 
 
 @pytest.mark.anyio
@@ -76,10 +110,10 @@ async def test_roles_me_rejects_unauthenticated(client):
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_roles_me_returns_current_roles(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    response = await client.get("/api/roles/me", headers={"Authorization": "Bearer valid.token"})
+    response = await client.get("/api/roles/me", headers=AUTH_HEADER)
     assert response.status_code == 200
     data = response.json()
-    assert data["tenant_id"] == "tenant-abc"
+    assert data["tenant_id"] == TENANT_ID
     assert "admin" in data["roles"]
     assert "projects.create" in data["permissions"]
 
@@ -88,80 +122,15 @@ async def test_roles_me_returns_current_roles(mock_validate, client):
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_roles_me_returns_403_without_tenant(mock_validate, client):
     mock_validate.return_value = NO_TENANT_CLAIMS
-    response = await client.get("/api/roles/me", headers={"Authorization": "Bearer valid.token"})
-    assert response.status_code == 403
-
-
-@pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_assign_roles_as_admin(mock_validate, mock_factory, client):
-    mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.resolve_login_id.return_value = "target-user@example.com"
-    mock_factory.return_value = mock_client
-
-    response = await client.post(
-        "/api/roles/assign",
-        headers={"Authorization": "Bearer valid.token"},
-        json={"user_id": "target-user", "tenant_id": "tenant-abc", "role_names": ["member"]},
-    )
-    assert response.status_code == 200
-    assert response.json()["status"] == "roles_assigned"
-    mock_client.resolve_login_id.assert_called_once_with("target-user")
-    mock_client.assign_roles.assert_called_once_with("target-user@example.com", "tenant-abc", ["member"])
-
-
-@pytest.mark.anyio
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_assign_roles_rejected_for_viewer(mock_validate, client):
-    mock_validate.return_value = VIEWER_CLAIMS
-    response = await client.post(
-        "/api/roles/assign",
-        headers={"Authorization": "Bearer valid.token"},
-        json={"user_id": "target-user", "tenant_id": "tenant-abc", "role_names": ["admin"]},
-    )
-    assert response.status_code == 403
-
-
-@pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_remove_roles_as_admin(mock_validate, mock_factory, client):
-    mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.resolve_login_id.return_value = "target-user@example.com"
-    mock_factory.return_value = mock_client
-
-    response = await client.post(
-        "/api/roles/remove",
-        headers={"Authorization": "Bearer valid.token"},
-        json={"user_id": "target-user", "tenant_id": "tenant-abc", "role_names": ["member"]},
-    )
-    assert response.status_code == 200
-    assert response.json()["status"] == "roles_removed"
-    mock_client.resolve_login_id.assert_called_once_with("target-user")
-    mock_client.remove_roles.assert_called_once_with("target-user@example.com", "tenant-abc", ["member"])
-
-
-@pytest.mark.anyio
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_remove_roles_rejected_for_viewer(mock_validate, client):
-    mock_validate.return_value = VIEWER_CLAIMS
-    response = await client.post(
-        "/api/roles/remove",
-        headers={"Authorization": "Bearer valid.token"},
-        json={"user_id": "target-user", "tenant_id": "tenant-abc", "role_names": ["admin"]},
-    )
+    response = await client.get("/api/roles/me", headers=AUTH_HEADER)
     assert response.status_code == 403
 
 
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_roles_me_viewer(mock_validate, client):
-    """Viewer should see their own roles and permissions."""
     mock_validate.return_value = VIEWER_CLAIMS
-    response = await client.get("/api/roles/me", headers={"Authorization": "Bearer valid.token"})
+    response = await client.get("/api/roles/me", headers=AUTH_HEADER)
     assert response.status_code == 200
     data = response.json()
     assert "viewer" in data["roles"]
@@ -170,105 +139,14 @@ async def test_roles_me_viewer(mock_validate, client):
 
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_assign_roles_rejected_without_tenant(mock_validate, client):
-    """Role assignment should fail when user has no tenant context."""
-    mock_validate.return_value = NO_TENANT_CLAIMS
-    response = await client.post(
-        "/api/roles/assign",
-        headers={"Authorization": "Bearer valid.token"},
-        json={"user_id": "target-user", "tenant_id": "tenant-abc", "role_names": ["member"]},
-    )
-    assert response.status_code == 403
-
-
-@pytest.mark.anyio
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_assign_roles_rejected_cross_tenant(mock_validate, client):
-    """Admin in tenant-abc cannot assign roles in tenant-other."""
+async def test_roles_me_not_captured_by_name_param(mock_validate, client):
+    """Ensure /roles/me is NOT interpreted as /roles/{name} with name='me'."""
     mock_validate.return_value = ADMIN_CLAIMS
-    response = await client.post(
-        "/api/roles/assign",
-        headers={"Authorization": "Bearer valid.token"},
-        json={"user_id": "target-user", "tenant_id": "tenant-other", "role_names": ["member"]},
-    )
-    assert response.status_code == 403
-    assert "different tenant" in response.json()["detail"]
-
-
-@pytest.mark.anyio
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_admin_cannot_assign_owner_role(mock_validate, client):
-    """Admin should not be able to escalate to owner."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    response = await client.post(
-        "/api/roles/assign",
-        headers={"Authorization": "Bearer valid.token"},
-        json={"user_id": "target-user", "tenant_id": "tenant-abc", "role_names": ["owner"]},
-    )
-    assert response.status_code == 403
-    assert "owner" in response.json()["detail"].lower()
-
-
-@pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_owner_can_assign_owner_role(mock_validate, mock_factory, client):
-    """Owner should be able to assign the owner role."""
-    mock_validate.return_value = OWNER_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.resolve_login_id.return_value = "target-user@example.com"
-    mock_factory.return_value = mock_client
-
-    response = await client.post(
-        "/api/roles/assign",
-        headers={"Authorization": "Bearer valid.token"},
-        json={"user_id": "target-user", "tenant_id": "tenant-abc", "role_names": ["owner"]},
-    )
+    response = await client.get("/api/roles/me", headers=AUTH_HEADER)
     assert response.status_code == 200
-
-
-@pytest.mark.anyio
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_assign_empty_role_names_rejected(mock_validate, client):
-    """Empty role_names list should be rejected by validation."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    response = await client.post(
-        "/api/roles/assign",
-        headers={"Authorization": "Bearer valid.token"},
-        json={"user_id": "target-user", "tenant_id": "tenant-abc", "role_names": []},
-    )
-    assert response.status_code == 422
-
-
-@pytest.mark.anyio
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_remove_roles_rejected_cross_tenant(mock_validate, client):
-    """Admin cannot remove roles in a different tenant."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    response = await client.post(
-        "/api/roles/remove",
-        headers={"Authorization": "Bearer valid.token"},
-        json={"user_id": "target-user", "tenant_id": "tenant-other", "role_names": ["member"]},
-    )
-    assert response.status_code == 403
-
-
-# =============================================================================
-# Role Definition CRUD Tests
-# =============================================================================
-
-AUTH_HEADER = {"Authorization": "Bearer valid.token"}
-
-SAMPLE_ROLES = [
-    {"name": "editor", "description": "Can edit", "permissionNames": ["docs.write"]},
-    {"name": "viewer", "description": "Read only", "permissionNames": ["docs.read"]},
-]
-
-
-def _make_http_status_error(status_code: int = 500) -> httpx.HTTPStatusError:
-    request = httpx.Request("POST", "https://api.descope.com/v1/mgmt/role/create")
-    response = httpx.Response(status_code, request=request, text="error detail")
-    return httpx.HTTPStatusError(f"{status_code} Server Error", request=request, response=response)
+    data = response.json()
+    assert "tenant_id" in data
+    assert "roles" in data
 
 
 # --- Auth enforcement for CRUD endpoints ---
@@ -312,53 +190,143 @@ async def test_delete_role_rejects_viewer(mock_validate, client):
     assert response.status_code == 403
 
 
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_list_roles_rejected_without_tenant(mock_validate, client):
+    mock_validate.return_value = NO_TENANT_CLAIMS
+    response = await client.get("/api/roles", headers=AUTH_HEADER)
+    assert response.status_code == 403
+
+
+# --- Role assign/remove auth ---
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_assign_roles_rejected_for_viewer(mock_validate, client):
+    mock_validate.return_value = VIEWER_CLAIMS
+    response = await client.post(
+        "/api/roles/assign",
+        headers=AUTH_HEADER,
+        json={"user_id": "dd98f159-658f-47f3-9ed2-99e85686b04c", "tenant_id": TENANT_ID, "role_names": ["admin"]},
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_remove_roles_rejected_for_viewer(mock_validate, client):
+    mock_validate.return_value = VIEWER_CLAIMS
+    response = await client.post(
+        "/api/roles/remove",
+        headers=AUTH_HEADER,
+        json={"user_id": "dd98f159-658f-47f3-9ed2-99e85686b04c", "tenant_id": TENANT_ID, "role_names": ["admin"]},
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_assign_roles_rejected_without_tenant(mock_validate, client):
+    mock_validate.return_value = NO_TENANT_CLAIMS
+    response = await client.post(
+        "/api/roles/assign",
+        headers=AUTH_HEADER,
+        json={"user_id": "dd98f159-658f-47f3-9ed2-99e85686b04c", "tenant_id": TENANT_ID, "role_names": ["member"]},
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_assign_roles_rejected_cross_tenant(mock_validate, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    response = await client.post(
+        "/api/roles/assign",
+        headers=AUTH_HEADER,
+        json={"user_id": "dd98f159-658f-47f3-9ed2-99e85686b04c", "tenant_id": "tenant-other", "role_names": ["member"]},
+    )
+    assert response.status_code == 403
+    assert "different tenant" in response.json()["detail"]
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_admin_cannot_assign_owner_role(mock_validate, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    response = await client.post(
+        "/api/roles/assign",
+        headers=AUTH_HEADER,
+        json={"user_id": "dd98f159-658f-47f3-9ed2-99e85686b04c", "tenant_id": TENANT_ID, "role_names": ["owner"]},
+    )
+    assert response.status_code == 403
+    assert "owner" in response.json()["detail"].lower()
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_assign_empty_role_names_rejected(mock_validate, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    response = await client.post(
+        "/api/roles/assign",
+        headers=AUTH_HEADER,
+        json={"user_id": "dd98f159-658f-47f3-9ed2-99e85686b04c", "tenant_id": TENANT_ID, "role_names": []},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_remove_roles_rejected_cross_tenant(mock_validate, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    response = await client.post(
+        "/api/roles/remove",
+        headers=AUTH_HEADER,
+        json={"user_id": "dd98f159-658f-47f3-9ed2-99e85686b04c", "tenant_id": "tenant-other", "role_names": ["member"]},
+    )
+    assert response.status_code == 403
+
+
 # --- Happy path ---
 
 
 @pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_list_roles(mock_validate, mock_factory, client):
+async def test_list_roles(mock_validate, mock_role_service, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.list_roles.return_value = SAMPLE_ROLES
-    mock_factory.return_value = mock_client
+    mock_role_service.list_roles.return_value = Ok(SAMPLE_ROLES)
 
     response = await client.get("/api/roles", headers=AUTH_HEADER)
     assert response.status_code == 200
     data = response.json()
-    assert data["roles"] == SAMPLE_ROLES
-    mock_client.list_roles.assert_called_once()
+    assert len(data) == 2
+    mock_role_service.list_roles.assert_awaited_once()
 
 
 @pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_role(mock_validate, mock_factory, client):
+async def test_create_role(mock_validate, mock_role_service, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_factory.return_value = mock_client
+    role_dict = {"id": ROLE_ID, "name": "editor", "description": "Can edit", "tenant_id": None}
+    mock_role_service.create_role.return_value = Ok(role_dict)
 
     response = await client.post(
         "/api/roles",
         headers=AUTH_HEADER,
-        json={"name": "editor", "description": "Can edit", "permission_names": ["docs.write"]},
+        json={"name": "editor", "description": "Can edit"},
     )
     assert response.status_code == 201
     data = response.json()
     assert data["name"] == "editor"
-    assert data["description"] == "Can edit"
-    assert data["permission_names"] == ["docs.write"]
-    mock_client.create_role.assert_called_once_with("editor", "Can edit", ["docs.write"])
+    mock_role_service.create_role.assert_awaited_once_with(name="editor", description="Can edit")
 
 
 @pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_role_default_fields(mock_validate, mock_factory, client):
+async def test_create_role_default_fields(mock_validate, mock_role_service, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_factory.return_value = mock_client
+    role_dict = {"id": ROLE_ID, "name": "viewer", "description": "", "tenant_id": None}
+    mock_role_service.create_role.return_value = Ok(role_dict)
 
     response = await client.post(
         "/api/roles",
@@ -366,224 +334,126 @@ async def test_create_role_default_fields(mock_validate, mock_factory, client):
         json={"name": "viewer"},
     )
     assert response.status_code == 201
-    data = response.json()
-    assert data["description"] == ""
-    assert data["permission_names"] == []
-    mock_client.create_role.assert_called_once_with("viewer", "", None)
+    mock_role_service.create_role.assert_awaited_once_with(name="viewer", description="")
 
 
 @pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_role(mock_validate, mock_factory, client):
+async def test_update_role(mock_validate, mock_role_service, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_factory.return_value = mock_client
+    role_id = str(uuid.uuid4())
+    mock_role_service.list_roles.return_value = Ok([{"id": role_id, "name": "editor"}])
+    mock_role_service.update_role.return_value = Ok(
+        {"id": role_id, "name": "senior-editor", "description": "Senior editor", "tenant_id": None}
+    )
 
     response = await client.put(
         "/api/roles/editor",
         headers=AUTH_HEADER,
-        json={
-            "new_name": "senior-editor",
-            "description": "Senior editor",
-            "permission_names": ["docs.write", "docs.admin"],
-        },
+        json={"new_name": "senior-editor", "description": "Senior editor"},
     )
     assert response.status_code == 200
     data = response.json()
     assert data["name"] == "senior-editor"
-    assert data["description"] == "Senior editor"
-    assert data["permission_names"] == ["docs.write", "docs.admin"]
-    mock_client.update_role.assert_called_once_with(
-        "editor", "senior-editor", "Senior editor", ["docs.write", "docs.admin"]
-    )
+    mock_role_service.update_role.assert_awaited_once()
 
 
 @pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_delete_role(mock_validate, mock_factory, client):
+async def test_delete_role(mock_validate, mock_role_service, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_factory.return_value = mock_client
+    role_id = str(uuid.uuid4())
+    mock_role_service.list_roles.return_value = Ok([{"id": role_id, "name": "editor"}])
+    mock_role_service.delete_role.return_value = Ok({"status": "deleted", "name": "editor"})
 
     response = await client.delete("/api/roles/editor", headers=AUTH_HEADER)
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "deleted"
     assert data["name"] == "editor"
-    mock_client.delete_role.assert_called_once_with("editor")
-
-
-# --- Partial update ---
 
 
 @pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_role_partial_description_only(mock_validate, mock_factory, client):
-    """Omitting new_name and permission_names should not wipe them."""
+async def test_assign_roles_as_admin(mock_validate, mock_role_service, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_factory.return_value = mock_client
-
-    response = await client.put(
-        "/api/roles/editor",
-        headers=AUTH_HEADER,
-        json={"description": "Updated desc"},
+    role_id = str(uuid.uuid4())
+    mock_role_service.list_roles.return_value = Ok([{"id": role_id, "name": "member"}])
+    mock_role_service.assign_role_to_user.return_value = Ok(
+        {"user_id": "dd98f159-658f-47f3-9ed2-99e85686b04c", "tenant_id": TENANT_ID, "role_id": role_id}
     )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["name"] == "editor"  # defaults to path param
-    assert data["description"] == "Updated desc"
-    assert data["permission_names"] is None  # not sent → unchanged
-    mock_client.update_role.assert_called_once_with("editor", "editor", "Updated desc", None)
 
-
-@pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_role_empty_body(mock_validate, mock_factory, client):
-    """Empty body is a no-op: name defaults to path param, others are None."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_factory.return_value = mock_client
-
-    response = await client.put(
-        "/api/roles/editor",
-        headers=AUTH_HEADER,
-        json={},
-    )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["name"] == "editor"
-    mock_client.update_role.assert_called_once_with("editor", "editor", None, None)
-
-
-@pytest.mark.anyio
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_role_empty_permission_name_rejected(mock_validate, client):
-    """Empty strings in permission_names list should be rejected."""
-    mock_validate.return_value = ADMIN_CLAIMS
     response = await client.post(
-        "/api/roles",
+        "/api/roles/assign",
         headers=AUTH_HEADER,
-        json={"name": "test-role", "permission_names": ["", "docs.read"]},
+        json={"user_id": "dd98f159-658f-47f3-9ed2-99e85686b04c", "tenant_id": TENANT_ID, "role_names": ["member"]},
     )
-    assert response.status_code == 422
+    assert response.status_code == 200
+    assert response.json()["status"] == "roles_assigned"
+    mock_role_service.assign_role_to_user.assert_awaited_once()
 
 
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_role_empty_permission_name_rejected(mock_validate, client):
-    """Empty strings in permission_names list should be rejected on update."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    response = await client.put(
-        "/api/roles/editor",
-        headers=AUTH_HEADER,
-        json={"permission_names": ["", "docs.read"]},
+async def test_owner_can_assign_owner_role(mock_validate, mock_role_service, client):
+    mock_validate.return_value = OWNER_CLAIMS
+    role_id = str(uuid.uuid4())
+    mock_role_service.list_roles.return_value = Ok([{"id": role_id, "name": "owner"}])
+    mock_role_service.assign_role_to_user.return_value = Ok(
+        {"user_id": "dd98f159-658f-47f3-9ed2-99e85686b04c", "tenant_id": TENANT_ID, "role_id": role_id}
     )
-    assert response.status_code == 422
+
+    response = await client.post(
+        "/api/roles/assign",
+        headers=AUTH_HEADER,
+        json={"user_id": "dd98f159-658f-47f3-9ed2-99e85686b04c", "tenant_id": TENANT_ID, "role_names": ["owner"]},
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_remove_roles_as_admin(mock_validate, mock_role_service, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    role_id = str(uuid.uuid4())
+    mock_role_service.list_roles.return_value = Ok([{"id": role_id, "name": "member"}])
+    user_id = "dd98f159-658f-47f3-9ed2-99e85686b04c"
+    mock_role_service.unassign_role_from_user.return_value = Ok(
+        {"status": "removed", "user_id": user_id, "tenant_id": TENANT_ID, "role_id": role_id}
+    )
+
+    response = await client.post(
+        "/api/roles/remove",
+        headers=AUTH_HEADER,
+        json={"user_id": "dd98f159-658f-47f3-9ed2-99e85686b04c", "tenant_id": TENANT_ID, "role_names": ["member"]},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "roles_removed"
 
 
 # --- Error handling ---
 
 
 @pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_role_duplicate_returns_client_error(mock_validate, mock_factory, client):
-    """Descope returns 400/409 for duplicate role names — forwarded to caller."""
+async def test_create_role_duplicate_returns_conflict(mock_validate, mock_role_service, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.create_role.side_effect = _make_http_status_error(409)
-    mock_factory.return_value = mock_client
+    mock_role_service.create_role.return_value = Error(Conflict(message="Role 'editor' already exists in this scope"))
 
     response = await client.post(
         "/api/roles",
         headers=AUTH_HEADER,
-        json={"name": "existing-role"},
+        json={"name": "editor"},
     )
     assert response.status_code == 409
 
 
 @pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_role_bad_request_forwarded(mock_validate, mock_factory, client):
-    """Descope 400 on create → forwarded."""
+async def test_update_role_not_found(mock_validate, mock_role_service, client):
+    """Role name not found in list → 404."""
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.create_role.side_effect = _make_http_status_error(400)
-    mock_factory.return_value = mock_client
-
-    response = await client.post(
-        "/api/roles",
-        headers=AUTH_HEADER,
-        json={"name": "bad-role"},
-    )
-    assert response.status_code == 400
-
-
-@pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_list_roles_descope_server_error(mock_validate, mock_factory, client):
-    """Descope 5xx → 502."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.list_roles.side_effect = _make_http_status_error(500)
-    mock_factory.return_value = mock_client
-
-    response = await client.get("/api/roles", headers=AUTH_HEADER)
-    assert response.status_code == 502
-
-
-@pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_role_network_error(mock_validate, mock_factory, client):
-    """Network error → 502."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.create_role.side_effect = httpx.RequestError("Connection refused")
-    mock_factory.return_value = mock_client
-
-    response = await client.post(
-        "/api/roles",
-        headers=AUTH_HEADER,
-        json={"name": "test-role"},
-    )
-    assert response.status_code == 502
-
-
-@pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_role_descope_error(mock_validate, mock_factory, client):
-    """Descope 5xx on update → 502."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.update_role.side_effect = _make_http_status_error(500)
-    mock_factory.return_value = mock_client
-
-    response = await client.put(
-        "/api/roles/editor",
-        headers=AUTH_HEADER,
-        json={"new_name": "senior-editor"},
-    )
-    assert response.status_code == 502
-
-
-@pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_role_not_found(mock_validate, mock_factory, client):
-    """Descope 404 on update → forwarded."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.update_role.side_effect = _make_http_status_error(404)
-    mock_factory.return_value = mock_client
+    mock_role_service.list_roles.return_value = Ok([])
 
     response = await client.put(
         "/api/roles/nonexistent",
@@ -594,95 +464,29 @@ async def test_update_role_not_found(mock_validate, mock_factory, client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_delete_role_descope_error(mock_validate, mock_factory, client):
-    """Descope 5xx on delete → 502."""
+async def test_delete_role_not_found(mock_validate, mock_role_service, client):
+    """Role name not found in list → 404."""
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.delete_role.side_effect = _make_http_status_error(500)
-    mock_factory.return_value = mock_client
-
-    response = await client.delete("/api/roles/editor", headers=AUTH_HEADER)
-    assert response.status_code == 502
-
-
-@pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_delete_role_not_found(mock_validate, mock_factory, client):
-    """Descope 404 on delete → forwarded."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.delete_role.side_effect = _make_http_status_error(404)
-    mock_factory.return_value = mock_client
+    mock_role_service.list_roles.return_value = Ok([])
 
     response = await client.delete("/api/roles/nonexistent", headers=AUTH_HEADER)
     assert response.status_code == 404
 
 
 @pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_delete_role_network_error(mock_validate, mock_factory, client):
-    """Network error on delete → 502."""
+async def test_assign_role_not_found(mock_validate, mock_role_service, client):
+    """Role name not in list → 404."""
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.delete_role.side_effect = httpx.RequestError("Connection refused")
-    mock_factory.return_value = mock_client
-
-    response = await client.delete("/api/roles/editor", headers=AUTH_HEADER)
-    assert response.status_code == 502
-
-
-@pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_role_network_error(mock_validate, mock_factory, client):
-    """Network error on update → 502."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.update_role.side_effect = httpx.RequestError("Connection refused")
-    mock_factory.return_value = mock_client
-
-    response = await client.put(
-        "/api/roles/editor",
-        headers=AUTH_HEADER,
-        json={"new_name": "senior-editor"},
-    )
-    assert response.status_code == 502
-
-
-@pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_list_roles_network_error(mock_validate, mock_factory, client):
-    """Network error on list → 502."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.list_roles.side_effect = httpx.RequestError("Connection refused")
-    mock_factory.return_value = mock_client
-
-    response = await client.get("/api/roles", headers=AUTH_HEADER)
-    assert response.status_code == 502
-
-
-@pytest.mark.anyio
-@patch("app.routers.roles.get_descope_client")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_role_descope_401_becomes_502(mock_validate, mock_factory, client):
-    """Descope 401 (e.g. expired mgmt key) should not be forwarded — returns 502."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    mock_client = AsyncMock()
-    mock_client.create_role.side_effect = _make_http_status_error(401)
-    mock_factory.return_value = mock_client
+    mock_role_service.list_roles.return_value = Ok([])
 
     response = await client.post(
-        "/api/roles",
+        "/api/roles/assign",
         headers=AUTH_HEADER,
-        json={"name": "test-role"},
+        json={"user_id": "dd98f159-658f-47f3-9ed2-99e85686b04c", "tenant_id": TENANT_ID, "role_names": ["nonexistent"]},
     )
-    assert response.status_code == 502
+    assert response.status_code == 404
 
 
 # --- Input validation ---
@@ -712,28 +516,25 @@ async def test_update_role_empty_new_name_rejected(mock_validate, client):
     assert response.status_code == 422
 
 
-# --- No tenant context ---
-
-
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_list_roles_rejected_without_tenant(mock_validate, client):
-    mock_validate.return_value = NO_TENANT_CLAIMS
-    response = await client.get("/api/roles", headers=AUTH_HEADER)
-    assert response.status_code == 403
-
-
-# --- Route ordering: /roles/me still works ---
-
-
-@pytest.mark.anyio
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_roles_me_not_captured_by_name_param(mock_validate, client):
-    """Ensure /roles/me is NOT interpreted as /roles/{name} with name='me'."""
+async def test_create_role_empty_permission_name_rejected(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    response = await client.get("/api/roles/me", headers=AUTH_HEADER)
-    assert response.status_code == 200
-    data = response.json()
-    # /roles/me returns tenant_id, roles, permissions — not a role definition
-    assert "tenant_id" in data
-    assert "roles" in data
+    response = await client.post(
+        "/api/roles",
+        headers=AUTH_HEADER,
+        json={"name": "test-role", "permission_names": ["", "docs.read"]},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_update_role_empty_permission_name_rejected(mock_validate, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    response = await client.put(
+        "/api/roles/editor",
+        headers=AUTH_HEADER,
+        json={"permission_names": ["", "docs.read"]},
+    )
+    assert response.status_code == 422

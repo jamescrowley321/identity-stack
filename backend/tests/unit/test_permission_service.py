@@ -131,3 +131,123 @@ class TestGetPermission:
 
         assert result.is_error()
         assert isinstance(result.error, NotFound)
+
+
+@pytest.mark.anyio
+class TestListPermissions:
+    """Story 2.3: list_permissions delegates to repository."""
+
+    async def test_list_permissions_returns_list(self):
+        service, repo, _adapter = _build_service()
+        perms = [_make_permission(name="read"), _make_permission(name="write")]
+        repo.list_all.return_value = perms
+
+        result = await service.list_permissions()
+
+        assert result.is_ok()
+        assert len(result.ok) == 2
+        repo.list_all.assert_awaited_once()
+
+    async def test_list_permissions_empty(self):
+        service, repo, _adapter = _build_service()
+        repo.list_all.return_value = []
+
+        result = await service.list_permissions()
+
+        assert result.is_ok()
+        assert result.ok == []
+
+
+@pytest.mark.anyio
+class TestUpdatePermission:
+    """Story 2.3: update_permission updates fields, commits, syncs."""
+
+    async def test_update_permission_success(self):
+        service, repo, adapter = _build_service()
+        perm = _make_permission(name="reports.read")
+        repo.get.return_value = perm
+        repo.get_by_name.return_value = None
+        repo.update.return_value = perm
+        adapter.sync_permission.return_value = Ok(None)
+
+        result = await service.update_permission(permission_id=perm.id, name="reports.view", description="View reports")
+
+        assert result.is_ok()
+        repo.update.assert_awaited_once()
+        repo.commit.assert_awaited_once()
+        adapter.sync_permission.assert_awaited_once()
+
+    async def test_update_permission_not_found(self):
+        service, repo, _adapter = _build_service()
+        repo.get.return_value = None
+
+        result = await service.update_permission(permission_id=uuid.uuid4(), name="new")
+
+        assert result.is_error()
+        assert isinstance(result.error, NotFound)
+
+    async def test_update_permission_name_conflict(self):
+        service, repo, _adapter = _build_service()
+        perm = _make_permission(name="reports.read")
+        existing = _make_permission(name="reports.write")
+        repo.get.return_value = perm
+        repo.get_by_name.return_value = existing
+
+        result = await service.update_permission(permission_id=perm.id, name="reports.write")
+
+        assert result.is_error()
+        assert isinstance(result.error, Conflict)
+
+    async def test_update_permission_integrity_error(self):
+        service, repo, _adapter = _build_service()
+        perm = _make_permission()
+        repo.get.return_value = perm
+        repo.get_by_name.return_value = None
+        repo.update.side_effect = RepositoryConflictError("duplicate key")
+
+        result = await service.update_permission(permission_id=perm.id, name="new")
+
+        assert result.is_error()
+        assert isinstance(result.error, Conflict)
+
+
+@pytest.mark.anyio
+class TestDeletePermission:
+    """Story 2.3: delete_permission removes from DB, commits, syncs deletion."""
+
+    async def test_delete_permission_success(self):
+        service, repo, adapter = _build_service()
+        perm = _make_permission(name="reports.read")
+        repo.get.return_value = perm
+        repo.delete.return_value = True
+        adapter.delete_permission.return_value = Ok(None)
+
+        result = await service.delete_permission(permission_id=perm.id)
+
+        assert result.is_ok()
+        assert result.ok["status"] == "deleted"
+        assert result.ok["name"] == "reports.read"
+        repo.commit.assert_awaited_once()
+        adapter.delete_permission.assert_awaited_once()
+
+    async def test_delete_permission_not_found(self):
+        service, repo, _adapter = _build_service()
+        repo.get.return_value = None
+
+        result = await service.delete_permission(permission_id=uuid.uuid4())
+
+        assert result.is_error()
+        assert isinstance(result.error, NotFound)
+
+    async def test_delete_permission_sync_failure_still_ok(self):
+        service, repo, adapter = _build_service()
+        perm = _make_permission()
+        repo.get.return_value = perm
+        repo.delete.return_value = True
+        adapter.delete_permission.return_value = Error(SyncError(message="down", operation="delete_permission"))
+
+        with patch("app.services.permission.logger") as mock_logger:
+            result = await service.delete_permission(permission_id=perm.id)
+
+        assert result.is_ok()
+        mock_logger.warning.assert_called_once()

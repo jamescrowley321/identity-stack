@@ -286,6 +286,47 @@ class TestDeactivateUser:
 
 
 @pytest.mark.anyio
+class TestActivateUser:
+    """Story 2.3: activate_user sets status=active and syncs (mirrors deactivate)."""
+
+    async def test_activate_user_success(self):
+        service, repo, adapter = _build_service()
+        user = _make_user(status=UserStatus.inactive)
+        repo.get.return_value = user
+        repo.update.return_value = user
+        adapter.sync_user.return_value = Ok(None)
+
+        result = await service.activate_user(tenant_id=TENANT_ID, user_id=user.id)
+
+        assert result.is_ok()
+        assert user.status == UserStatus.active
+        repo.update.assert_awaited_once()
+        repo.commit.assert_awaited_once()
+
+    async def test_activate_user_not_found(self):
+        service, repo, _adapter = _build_service()
+        repo.get.return_value = None
+
+        result = await service.activate_user(tenant_id=TENANT_ID, user_id=uuid.uuid4())
+
+        assert result.is_error()
+        assert isinstance(result.error, NotFound)
+
+    async def test_activate_sync_failure_still_returns_ok(self):
+        service, repo, adapter = _build_service()
+        user = _make_user(status=UserStatus.inactive)
+        repo.get.return_value = user
+        repo.update.return_value = user
+        adapter.sync_user.return_value = Error(SyncError(message="timeout", operation="sync_user"))
+
+        with patch("app.services.user.logger"):
+            result = await service.activate_user(tenant_id=TENANT_ID, user_id=user.id)
+
+        assert result.is_ok()
+        repo.commit.assert_awaited_once()
+
+
+@pytest.mark.anyio
 class TestSearchUsers:
     """AC-2.1.3: search_users delegates to repository with tenant scoping."""
 

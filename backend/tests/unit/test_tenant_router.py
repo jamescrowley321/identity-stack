@@ -1,16 +1,23 @@
-"""Unit tests for the tenant router endpoints."""
+"""Unit tests for the tenant router endpoints.
+
+Story 2.3: create_tenant and get_current_tenant now use TenantService via DI.
+list_user_tenants stays claims-based. tenant resources stay direct SQLAlchemy.
+"""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
+from expression import Error, Ok
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
+from app.dependencies.identity import get_tenant_service
+from app.errors.identity import NotFound
 from app.main import app
 from app.models.database import get_async_session
+from app.services.tenant import TenantService
 
 
 @pytest.fixture
@@ -24,8 +31,13 @@ def _set_env(monkeypatch):
     monkeypatch.setenv("DESCOPE_MANAGEMENT_KEY", "test-management-key")
 
 
+@pytest.fixture
+def mock_tenant_service():
+    return AsyncMock(spec=TenantService)
+
+
 @pytest.fixture(autouse=True)
-async def _test_db():
+async def _test_db(mock_tenant_service):
     """Use an in-memory async SQLite database for each test."""
     engine = create_async_engine("sqlite+aiosqlite://", echo=False)
     async with engine.begin() as conn:
@@ -38,8 +50,10 @@ async def _test_db():
             yield session
 
     app.dependency_overrides[get_async_session] = override_get_async_session
+    app.dependency_overrides[get_tenant_service] = lambda: mock_tenant_service
     yield
     app.dependency_overrides.pop(get_async_session, None)
+    app.dependency_overrides.pop(get_tenant_service, None)
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.drop_all)
     await engine.dispose()
@@ -52,32 +66,40 @@ async def client():
         yield c
 
 
+TENANT_UUID = "51c5957b-684a-453f-8ab1-8f239999c4d8"
+TENANT_UUID_2 = "dd98f159-658f-47f3-9ed2-99e85686b04c"
+
 MOCK_CLAIMS_ADMIN = {
     "sub": "user123",
-    "dct": "tenant-abc",
+    "dct": TENANT_UUID,
     "roles": ["admin"],
     "tenants": {
-        "tenant-abc": {"roles": ["admin"], "permissions": ["read", "write"]},
-        "tenant-xyz": {"roles": ["viewer"], "permissions": ["read"]},
+        TENANT_UUID: {"roles": ["admin"], "permissions": ["read", "write"]},
+        TENANT_UUID_2: {"roles": ["viewer"], "permissions": ["read"]},
     },
 }
 
 MOCK_CLAIMS_WITH_TENANT = {
     "sub": "user123",
-    "dct": "tenant-abc",
+    "dct": TENANT_UUID,
     "tenants": {
-        "tenant-abc": {"roles": ["admin"], "permissions": ["read", "write"]},
-        "tenant-xyz": {"roles": ["viewer"], "permissions": ["read"]},
+        TENANT_UUID: {"roles": ["admin"], "permissions": ["read", "write"]},
+        TENANT_UUID_2: {"roles": ["viewer"], "permissions": ["read"]},
     },
 }
 
 MOCK_CLAIMS_NO_TENANT = {
     "sub": "user123",
     "tenants": {
-        "tenant-abc": {"roles": ["admin"], "permissions": ["read"]},
-        "tenant-xyz": {"roles": ["viewer"], "permissions": ["read"]},
+        TENANT_UUID: {"roles": ["admin"], "permissions": ["read"]},
+        TENANT_UUID_2: {"roles": ["viewer"], "permissions": ["read"]},
     },
 }
+
+AUTH_HEADER = {"Authorization": "Bearer valid.token"}
+
+
+# --- Claims-based endpoints (unchanged) ---
 
 
 @pytest.mark.anyio
@@ -89,9 +111,8 @@ async def test_list_tenants_rejects_unauthenticated(client):
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_list_user_tenants_empty(mock_validate, client):
-    """User with no tenants claim should get an empty list."""
     mock_validate.return_value = {"sub": "user123"}
-    response = await client.get("/api/tenants", headers={"Authorization": "Bearer valid.token"})
+    response = await client.get("/api/tenants", headers=AUTH_HEADER)
     assert response.status_code == 200
     assert response.json()["tenants"] == []
 
@@ -100,123 +121,48 @@ async def test_list_user_tenants_empty(mock_validate, client):
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_list_user_tenants(mock_validate, client):
     mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
-    response = await client.get("/api/tenants", headers={"Authorization": "Bearer valid.token"})
+    response = await client.get("/api/tenants", headers=AUTH_HEADER)
     assert response.status_code == 200
     data = response.json()
     assert len(data["tenants"]) == 2
     ids = {t["id"] for t in data["tenants"]}
-    assert "tenant-abc" in ids
-    assert "tenant-xyz" in ids
+    assert TENANT_UUID in ids
+    assert TENANT_UUID_2 in ids
+
+
+# --- create_tenant (via TenantService) ---
 
 
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_current_tenant(mock_validate, client):
-    mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
-    with patch("app.routers.tenants.get_descope_client") as mock_factory:
-        mock_client = AsyncMock()
-        mock_client.load_tenant.return_value = {"id": "tenant-abc", "name": "Acme Corp"}
-        mock_factory.return_value = mock_client
-
-        response = await client.get("/api/tenants/current", headers={"Authorization": "Bearer valid.token"})
-        assert response.status_code == 200
-        data = response.json()
-        assert data["tenant_id"] == "tenant-abc"
-        assert data["tenant"]["name"] == "Acme Corp"
-
-
-@pytest.mark.anyio
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_current_tenant_returns_403_without_dct(mock_validate, client):
-    mock_validate.return_value = MOCK_CLAIMS_NO_TENANT
-    response = await client.get("/api/tenants/current", headers={"Authorization": "Bearer valid.token"})
-    assert response.status_code == 403
-
-
-@pytest.mark.anyio
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_current_tenant_returns_null_on_404(mock_validate, client):
-    """When Descope API returns 404 for tenant, return tenant_id with null tenant."""
-    mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
-    with patch("app.routers.tenants.get_descope_client") as mock_factory:
-        mock_client = AsyncMock()
-        req = httpx.Request("POST", "http://test")
-        response_404 = httpx.Response(404, request=req)
-        mock_client.load_tenant.side_effect = httpx.HTTPStatusError("Not Found", request=req, response=response_404)
-        mock_factory.return_value = mock_client
-
-        response = await client.get("/api/tenants/current", headers={"Authorization": "Bearer valid.token"})
-        assert response.status_code == 200
-        data = response.json()
-        assert data["tenant_id"] == "tenant-abc"
-        assert data["tenant"] is None
-
-
-@pytest.mark.anyio
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_current_tenant_returns_502_on_api_error(mock_validate, client):
-    """When Descope API returns a non-404 error, return 502."""
-    mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
-    with patch("app.routers.tenants.get_descope_client") as mock_factory:
-        mock_client = AsyncMock()
-        req = httpx.Request("POST", "http://test")
-        response_500 = httpx.Response(500, request=req)
-        mock_client.load_tenant.side_effect = httpx.HTTPStatusError("Server Error", request=req, response=response_500)
-        mock_factory.return_value = mock_client
-
-        response = await client.get("/api/tenants/current", headers={"Authorization": "Bearer valid.token"})
-        assert response.status_code == 502
-
-
-@pytest.mark.anyio
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_current_tenant_returns_502_on_network_error(mock_validate, client):
-    """When a network error occurs, return 502."""
-    mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
-    with patch("app.routers.tenants.get_descope_client") as mock_factory:
-        mock_client = AsyncMock()
-        mock_client.load_tenant.side_effect = httpx.RequestError("Connection refused")
-        mock_factory.return_value = mock_client
-
-        response = await client.get("/api/tenants/current", headers={"Authorization": "Bearer valid.token"})
-        assert response.status_code == 502
-
-
-@pytest.mark.anyio
-@patch("app.routers.tenants.get_descope_client")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_tenant(mock_validate, mock_factory, client):
+async def test_create_tenant(mock_validate, mock_tenant_service, client):
     mock_validate.return_value = MOCK_CLAIMS_ADMIN
-    mock_client = AsyncMock()
-    mock_client.create_tenant.return_value = {"id": "new-tenant-id"}
-    mock_factory.return_value = mock_client
+    tenant_dict = {"id": "new-tenant-id", "name": "New Org", "domains": []}
+    mock_tenant_service.create_tenant.return_value = Ok(tenant_dict)
 
     response = await client.post(
         "/api/tenants",
-        headers={"Authorization": "Bearer valid.token"},
+        headers=AUTH_HEADER,
         json={"name": "New Org"},
     )
-    assert response.status_code == 200
-    assert response.json()["id"] == "new-tenant-id"
+    assert response.status_code == 201
+    mock_tenant_service.create_tenant.assert_awaited_once_with(name="New Org", domains=None)
 
 
 @pytest.mark.anyio
-@patch("app.routers.tenants.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_tenant_with_domains(mock_validate, mock_factory, client):
-    """Create tenant with self-provisioning domains."""
+async def test_create_tenant_with_domains(mock_validate, mock_tenant_service, client):
     mock_validate.return_value = MOCK_CLAIMS_ADMIN
-    mock_client = AsyncMock()
-    mock_client.create_tenant.return_value = {"id": "domain-tenant"}
-    mock_factory.return_value = mock_client
+    tenant_dict = {"id": "domain-tenant", "name": "Domain Corp", "domains": ["domain.com"]}
+    mock_tenant_service.create_tenant.return_value = Ok(tenant_dict)
 
     response = await client.post(
         "/api/tenants",
-        headers={"Authorization": "Bearer valid.token"},
+        headers=AUTH_HEADER,
         json={"name": "Domain Corp", "self_provisioning_domains": ["domain.com"]},
     )
-    assert response.status_code == 200
-    mock_client.create_tenant.assert_called_once_with(name="Domain Corp", self_provisioning_domains=["domain.com"])
+    assert response.status_code == 201
+    mock_tenant_service.create_tenant.assert_awaited_once_with(name="Domain Corp", domains=["domain.com"])
 
 
 @pytest.mark.anyio
@@ -228,11 +174,10 @@ async def test_create_tenant_rejects_unauthenticated(client):
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_create_tenant_rejects_non_admin(mock_validate, client):
-    """User without admin/owner role cannot create tenants."""
     mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT  # no top-level roles
     response = await client.post(
         "/api/tenants",
-        headers={"Authorization": "Bearer valid.token"},
+        headers=AUTH_HEADER,
         json={"name": "Sneaky Org"},
     )
     assert response.status_code == 403
@@ -241,14 +186,51 @@ async def test_create_tenant_rejects_non_admin(mock_validate, client):
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_create_tenant_rejects_empty_name(mock_validate, client):
-    """Empty tenant name should be rejected by validation."""
     mock_validate.return_value = MOCK_CLAIMS_ADMIN
     response = await client.post(
         "/api/tenants",
-        headers={"Authorization": "Bearer valid.token"},
+        headers=AUTH_HEADER,
         json={"name": ""},
     )
     assert response.status_code == 422
+
+
+# --- get_current_tenant (via TenantService) ---
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_get_current_tenant(mock_validate, mock_tenant_service, client):
+    mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
+    tenant_dict = {"id": TENANT_UUID, "name": "Acme Corp", "domains": []}
+    mock_tenant_service.get_tenant.return_value = Ok(tenant_dict)
+
+    response = await client.get("/api/tenants/current", headers=AUTH_HEADER)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["name"] == "Acme Corp"
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_get_current_tenant_returns_403_without_dct(mock_validate, client):
+    mock_validate.return_value = MOCK_CLAIMS_NO_TENANT
+    response = await client.get("/api/tenants/current", headers=AUTH_HEADER)
+    assert response.status_code == 403
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_get_current_tenant_not_found(mock_validate, mock_tenant_service, client):
+    """Tenant not found in canonical DB → 404."""
+    mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
+    mock_tenant_service.get_tenant.return_value = Error(NotFound(message="Tenant 'tenant-abc' not found"))
+
+    response = await client.get("/api/tenants/current", headers=AUTH_HEADER)
+    assert response.status_code == 404
+
+
+# --- Tenant resources (direct SQLAlchemy, unchanged) ---
 
 
 @pytest.mark.anyio
@@ -256,8 +238,8 @@ async def test_create_tenant_rejects_empty_name(mock_validate, client):
 async def test_list_tenant_resources_empty(mock_validate, client):
     mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
     response = await client.get(
-        "/api/tenants/tenant-abc/resources",
-        headers={"Authorization": "Bearer valid.token"},
+        f"/api/tenants/{TENANT_UUID}/resources",
+        headers=AUTH_HEADER,
     )
     assert response.status_code == 200
     assert response.json()["resources"] == []
@@ -268,21 +250,19 @@ async def test_list_tenant_resources_empty(mock_validate, client):
 async def test_create_and_list_tenant_resources(mock_validate, client):
     mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
 
-    # Create a resource
     create_resp = await client.post(
-        "/api/tenants/tenant-abc/resources",
-        headers={"Authorization": "Bearer valid.token"},
+        f"/api/tenants/{TENANT_UUID}/resources",
+        headers=AUTH_HEADER,
         json={"name": "Test Resource", "description": "A test"},
     )
     assert create_resp.status_code == 200
     resource = create_resp.json()
     assert resource["name"] == "Test Resource"
-    assert resource["tenant_id"] == "tenant-abc"
+    assert resource["tenant_id"] == TENANT_UUID
 
-    # List resources
     list_resp = await client.get(
-        "/api/tenants/tenant-abc/resources",
-        headers={"Authorization": "Bearer valid.token"},
+        f"/api/tenants/{TENANT_UUID}/resources",
+        headers=AUTH_HEADER,
     )
     assert list_resp.status_code == 200
     resources = list_resp.json()["resources"]
@@ -293,11 +273,10 @@ async def test_create_and_list_tenant_resources(mock_validate, client):
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_cannot_access_non_member_tenant_resources(mock_validate, client):
-    """User who is not a member of a tenant cannot access its resources."""
-    mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT  # member of tenant-abc and tenant-xyz
+    mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
     response = await client.get(
-        "/api/tenants/tenant-other/resources",
-        headers={"Authorization": "Bearer valid.token"},
+        "/api/tenants/8a70c45c-dc5e-48ed-a8ea-34b0b35058a4/resources",
+        headers=AUTH_HEADER,
     )
     assert response.status_code == 403
 
@@ -305,11 +284,10 @@ async def test_cannot_access_non_member_tenant_resources(mock_validate, client):
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_cannot_create_resource_in_non_member_tenant(mock_validate, client):
-    """User who is not a member of a tenant cannot create resources in it."""
-    mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT  # member of tenant-abc and tenant-xyz
+    mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
     response = await client.post(
-        "/api/tenants/tenant-other/resources",
-        headers={"Authorization": "Bearer valid.token"},
+        "/api/tenants/8a70c45c-dc5e-48ed-a8ea-34b0b35058a4/resources",
+        headers=AUTH_HEADER,
         json={"name": "Sneaky Resource"},
     )
     assert response.status_code == 403
@@ -318,11 +296,10 @@ async def test_cannot_create_resource_in_non_member_tenant(mock_validate, client
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_can_access_member_tenant_resources_without_dct(mock_validate, client):
-    """User can access resources for a tenant they are a member of, even if dct points elsewhere."""
-    mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT  # dct=tenant-abc, member of tenant-xyz too
+    mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
     response = await client.get(
-        "/api/tenants/tenant-xyz/resources",
-        headers={"Authorization": "Bearer valid.token"},
+        f"/api/tenants/{TENANT_UUID_2}/resources",
+        headers=AUTH_HEADER,
     )
     assert response.status_code == 200
 
@@ -330,11 +307,10 @@ async def test_can_access_member_tenant_resources_without_dct(mock_validate, cli
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_create_resource_rejects_empty_name(mock_validate, client):
-    """Empty resource name should be rejected by validation."""
     mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
     response = await client.post(
-        "/api/tenants/tenant-abc/resources",
-        headers={"Authorization": "Bearer valid.token"},
+        f"/api/tenants/{TENANT_UUID}/resources",
+        headers=AUTH_HEADER,
         json={"name": ""},
     )
     assert response.status_code == 422
@@ -343,11 +319,10 @@ async def test_create_resource_rejects_empty_name(mock_validate, client):
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_list_resources_with_pagination(mock_validate, client):
-    """Pagination params are accepted."""
     mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
     response = await client.get(
-        "/api/tenants/tenant-abc/resources?limit=10&offset=0",
-        headers={"Authorization": "Bearer valid.token"},
+        f"/api/tenants/{TENANT_UUID}/resources?limit=10&offset=0",
+        headers=AUTH_HEADER,
     )
     assert response.status_code == 200
 
@@ -355,7 +330,6 @@ async def test_list_resources_with_pagination(mock_validate, client):
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_create_resource_integrity_error_returns_409(mock_validate, client):
-    """IntegrityError (e.g. duplicate name) returns 409 Conflict."""
     mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
 
     async def _integrity_error_session():
@@ -371,8 +345,8 @@ async def test_create_resource_integrity_error_returns_409(mock_validate, client
     app.dependency_overrides[get_async_session] = _integrity_error_session
 
     response = await client.post(
-        "/api/tenants/tenant-abc/resources",
-        headers={"Authorization": "Bearer valid.token"},
+        f"/api/tenants/{TENANT_UUID}/resources",
+        headers=AUTH_HEADER,
         json={"name": "Duplicate Resource"},
     )
     assert response.status_code == 409
@@ -382,7 +356,6 @@ async def test_create_resource_integrity_error_returns_409(mock_validate, client
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_create_resource_db_error_returns_500(mock_validate, client):
-    """Generic DB error returns 500."""
     mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
 
     async def _db_error_session():
@@ -396,8 +369,8 @@ async def test_create_resource_db_error_returns_500(mock_validate, client):
     app.dependency_overrides[get_async_session] = _db_error_session
 
     response = await client.post(
-        "/api/tenants/tenant-abc/resources",
-        headers={"Authorization": "Bearer valid.token"},
+        f"/api/tenants/{TENANT_UUID}/resources",
+        headers=AUTH_HEADER,
         json={"name": "Some Resource"},
     )
     assert response.status_code == 500
