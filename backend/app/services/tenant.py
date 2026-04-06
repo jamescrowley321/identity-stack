@@ -60,6 +60,7 @@ class TenantService:
             try:
                 tenant = await self._repository.create(tenant)
             except RepositoryConflictError:
+                await self._repository.rollback()
                 return Error(Conflict(message=f"Tenant '{name}' already exists"))
 
             result_dict = tenant.model_dump()
