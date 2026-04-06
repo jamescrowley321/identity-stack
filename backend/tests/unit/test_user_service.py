@@ -401,11 +401,12 @@ class TestRemoveUserFromTenant:
     """Story 2.3: remove_user_from_tenant deletes all role assignments for user+tenant."""
 
     async def test_remove_user_from_tenant_success(self):
-        service, repo, _adapter, assign_repo = _build_service()
+        service, repo, adapter, assign_repo = _build_service()
         user = _make_user()
         repo.get.return_value = user
         repo.exists_in_tenant.return_value = True
         assign_repo.delete_by_user_tenant.return_value = 2
+        adapter.sync_user.return_value = Ok(None)
 
         result = await service.remove_user_from_tenant(tenant_id=TENANT_ID, user_id=user.id)
 
@@ -413,6 +414,7 @@ class TestRemoveUserFromTenant:
         assert result.ok["status"] == "removed"
         assign_repo.delete_by_user_tenant.assert_awaited_once_with(user.id, TENANT_ID)
         assign_repo.commit.assert_awaited_once()
+        adapter.sync_user.assert_awaited_once()
 
     async def test_remove_user_not_found(self):
         service, repo, _adapter, _assign_repo = _build_service()
