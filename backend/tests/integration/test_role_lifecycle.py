@@ -42,7 +42,8 @@ def permission_service(db_session):
 @pytest_asyncio.fixture(loop_scope="session")
 async def seed_tenant(db_session):
     """Create a tenant for role lifecycle tests."""
-    tenant = Tenant(name="role-lifecycle-tenant", domains=[])
+    suffix = uuid.uuid4().hex[:8]
+    tenant = Tenant(name=f"role-lifecycle-tenant-{suffix}", domains=[])
     db_session.add(tenant)
     await db_session.flush()
     return tenant
@@ -52,39 +53,41 @@ async def seed_tenant(db_session):
 async def test_role_create_get_update_delete(db_session, role_service, seed_tenant):
     """Full role lifecycle: create → get → update → get → delete → verify gone."""
     tenant_id = seed_tenant.id
+    suffix = uuid.uuid4().hex[:8]
 
     # --- Create ---
     result = await role_service.create_role(
-        name="lifecycle-role",
+        name=f"lifecycle-role-{suffix}",
         description="initial description",
         tenant_id=tenant_id,
     )
     assert result.is_ok()
     role_data = result.ok
     role_id = role_data["id"]
-    assert role_data["name"] == "lifecycle-role"
+    assert role_data["name"] == f"lifecycle-role-{suffix}"
     assert role_data["description"] == "initial description"
     assert role_data["tenant_id"] == tenant_id
 
     # --- Get ---
     result = await role_service.get_role(role_id=role_id)
     assert result.is_ok()
-    assert result.ok["name"] == "lifecycle-role"
+    assert result.ok["name"] == f"lifecycle-role-{suffix}"
 
     # --- Update ---
+    update_suffix = uuid.uuid4().hex[:8]
     result = await role_service.update_role(
         role_id=role_id,
-        name="updated-role",
+        name=f"updated-role-{update_suffix}",
         description="updated description",
     )
     assert result.is_ok()
-    assert result.ok["name"] == "updated-role"
+    assert result.ok["name"] == f"updated-role-{update_suffix}"
     assert result.ok["description"] == "updated description"
 
     # --- Get after update ---
     result = await role_service.get_role(role_id=role_id)
     assert result.is_ok()
-    assert result.ok["name"] == "updated-role"
+    assert result.ok["name"] == f"updated-role-{update_suffix}"
 
     # --- Delete ---
     result = await role_service.delete_role(role_id=role_id)
@@ -100,24 +103,26 @@ async def test_role_create_get_update_delete(db_session, role_service, seed_tena
 @pytest.mark.asyncio
 async def test_role_with_permission_mapping(db_session, role_service, permission_service, seed_tenant):
     """Create a role with permissions, then verify mapping lifecycle."""
+    suffix = uuid.uuid4().hex[:8]
+
     # Create permissions first
-    perm1_result = await permission_service.create_permission(name="role-test.read", description="read")
+    perm1_result = await permission_service.create_permission(name=f"role-test-{suffix}.read", description="read")
     assert perm1_result.is_ok()
 
-    perm2_result = await permission_service.create_permission(name="role-test.write", description="write")
+    perm2_result = await permission_service.create_permission(name=f"role-test-{suffix}.write", description="write")
     assert perm2_result.is_ok()
 
     # Create role with permission_names
     result = await role_service.create_role(
-        name="permissioned-role",
+        name=f"permissioned-role-{suffix}",
         tenant_id=seed_tenant.id,
-        permission_names=["role-test.read", "role-test.write"],
+        permission_names=[f"role-test-{suffix}.read", f"role-test-{suffix}.write"],
     )
     assert result.is_ok()
     role_id = result.ok["id"]
 
     # Map an additional permission via map_permission_to_role
-    perm3_result = await permission_service.create_permission(name="role-test.delete", description="delete")
+    perm3_result = await permission_service.create_permission(name=f"role-test-{suffix}.delete", description="delete")
     assert perm3_result.is_ok()
     perm3_id = perm3_result.ok["id"]
 
@@ -131,11 +136,12 @@ async def test_role_with_permission_mapping(db_session, role_service, permission
 async def test_role_duplicate_name_in_scope(db_session, role_service, seed_tenant):
     """Creating a role with a duplicate name in the same tenant scope returns Conflict."""
     tenant_id = seed_tenant.id
+    suffix = uuid.uuid4().hex[:8]
 
-    result = await role_service.create_role(name="unique-role", tenant_id=tenant_id)
+    result = await role_service.create_role(name=f"unique-role-{suffix}", tenant_id=tenant_id)
     assert result.is_ok()
 
-    result = await role_service.create_role(name="unique-role", tenant_id=tenant_id)
+    result = await role_service.create_role(name=f"unique-role-{suffix}", tenant_id=tenant_id)
     assert result.is_error()
     assert "already exists" in result.error.message
 

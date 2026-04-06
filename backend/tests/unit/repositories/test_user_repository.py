@@ -19,6 +19,8 @@ from app.models.identity.tenant import Tenant
 from app.models.identity.user import User, UserStatus
 from app.repositories.user import RepositoryConflictError, UserRepository
 
+pytestmark = pytest.mark.asyncio
+
 
 def _make_user(**overrides) -> User:
     defaults = {

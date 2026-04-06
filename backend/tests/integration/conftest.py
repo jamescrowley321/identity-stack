@@ -141,9 +141,10 @@ def _run_migrations(postgres_url):
         env=env,
         capture_output=True,
         text=True,
+        timeout=60,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"Alembic migration failed:\n{result.stderr}")
+        raise RuntimeError(f"Alembic migration failed:\nstdout={result.stdout}\nstderr={result.stderr}")
 
 
 @pytest.fixture(scope="session")
@@ -174,6 +175,8 @@ async def db_session(async_engine):
                     conn.sync_connection.begin_nested()
 
             yield session
+
+            event.remove(session.sync_session, "after_transaction_end", _restart_savepoint)
         await transaction.rollback()
 
 

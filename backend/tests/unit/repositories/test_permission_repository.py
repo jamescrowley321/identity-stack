@@ -17,6 +17,8 @@ from app.models.identity.role import Permission
 from app.repositories.permission import PermissionRepository
 from app.repositories.user import RepositoryConflictError
 
+pytestmark = pytest.mark.asyncio
+
 
 def _make_permission(**overrides) -> Permission:
     defaults = {
