@@ -29,13 +29,14 @@ async def get_user_service(
 ) -> UserService:
     """Build a UserService with its repository and sync adapter.
 
-    Wiring: AsyncSession -> UserRepository(session)
+    Wiring: AsyncSession -> UserRepository(session) + UserTenantRoleRepository(session)
             DescopeManagementClient -> DescopeSyncAdapter(client)
-            -> UserService(repository, adapter)
+            -> UserService(repository, adapter, assignment_repository)
     """
     repository = UserRepository(session)
+    assignment_repository = UserTenantRoleRepository(session)
     adapter = DescopeSyncAdapter(client=get_descope_client())
-    return UserService(repository=repository, adapter=adapter)
+    return UserService(repository=repository, adapter=adapter, assignment_repository=assignment_repository)
 
 
 async def get_role_service(

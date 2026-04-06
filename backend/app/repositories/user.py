@@ -111,6 +111,17 @@ class UserRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def exists_in_tenant(self, user_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
+        """Check if a user has any role assignment in the given tenant."""
+        stmt = sa.select(
+            sa.exists().where(
+                UserTenantRole.user_id == user_id,
+                UserTenantRole.tenant_id == tenant_id,
+            )
+        )
+        result = await self._session.execute(stmt)
+        return bool(result.scalar())
+
     async def commit(self) -> None:
         """Commit the current transaction."""
         await self._session.commit()

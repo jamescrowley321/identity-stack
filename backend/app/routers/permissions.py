@@ -1,6 +1,6 @@
 import uuid
 
-from expression import Error
+from expression import Error, Ok
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
@@ -32,6 +32,8 @@ async def list_permissions(
 ):
     """List all permission definitions. Requires owner or admin role."""
     result = await permission_service.list_permissions()
+    if result.is_ok():
+        result = Ok({"permissions": result.ok})
     return result_to_response(result, request)
 
 
