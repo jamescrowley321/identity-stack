@@ -12,7 +12,7 @@ from expression import Error, Ok
 from httpx import ASGITransport, AsyncClient
 
 from app.dependencies.identity import get_permission_service
-from app.errors.identity import Conflict
+from app.errors.identity import Conflict, SyncFailed
 from app.main import app
 from app.services.permission import PermissionService
 
@@ -282,3 +282,34 @@ async def test_update_permission_empty_new_name_rejected(mock_validate, client):
         json={"new_name": ""},
     )
     assert response.status_code == 422
+
+
+# --- SyncFailed → 207 Multi-Status ---
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_create_permission_sync_failed_returns_207(mock_validate, mock_permission_service, client):
+    """Service returns SyncFailed (DB write ok, IdP sync failed) → 207 Multi-Status."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_permission_service.create_permission.return_value = Error(
+        SyncFailed(
+            message="Descope sync failed for permission creation",
+            operation="create_permission",
+            underlying_error="httpx.ConnectError",
+        )
+    )
+
+    response = await client.post(
+        "/api/permissions",
+        headers=AUTH_HEADER,
+        json={"name": "new.perm"},
+    )
+    assert response.status_code == 207
+    assert response.headers["content-type"] == "application/problem+json"
+    body = response.json()
+    assert body["type"] == "/errors/sync-failed"
+    assert body["title"] == "Sync Partial Success"
+    assert body["status"] == 207
+    assert "succeeded" in body["detail"]
+    assert "synchronisation failed" in body["detail"]

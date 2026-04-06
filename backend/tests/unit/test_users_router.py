@@ -12,7 +12,7 @@ from expression import Error, Ok
 from httpx import ASGITransport, AsyncClient
 
 from app.dependencies.identity import get_role_service, get_user_service
-from app.errors.identity import Conflict, Forbidden, NotFound
+from app.errors.identity import Conflict, Forbidden, NotFound, SyncFailed
 from app.main import app
 from app.services.role import RoleService
 from app.services.user import UserService
@@ -404,3 +404,34 @@ async def test_remove_invalid_uuid_returns_422(mock_validate, client):
         headers=AUTH_HEADER,
     )
     assert response.status_code == 422
+
+
+# --- SyncFailed → 207 Multi-Status ---
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_invite_member_sync_failed_returns_207(mock_validate, mock_user_service, client):
+    """Service returns SyncFailed (DB write ok, IdP sync failed) → 207 Multi-Status."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_user_service.create_user.return_value = Error(
+        SyncFailed(
+            message="Descope sync failed for user creation",
+            operation="create_user",
+            underlying_error="httpx.ConnectError",
+        )
+    )
+
+    response = await client.post(
+        "/api/members/invite",
+        headers=AUTH_HEADER,
+        json={"email": "new@test.com"},
+    )
+    assert response.status_code == 207
+    assert response.headers["content-type"] == "application/problem+json"
+    body = response.json()
+    assert body["type"] == "/errors/sync-failed"
+    assert body["title"] == "Sync Partial Success"
+    assert body["status"] == 207
+    assert "succeeded" in body["detail"]
+    assert "synchronisation failed" in body["detail"]
