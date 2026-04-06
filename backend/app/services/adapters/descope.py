@@ -158,15 +158,35 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
         tenant_id: uuid.UUID,
         role_id: uuid.UUID,
     ) -> Result[None, SyncError]:
-        """Sync role assignment to Descope.
+        """Sync role assignment to Descope via assign_roles API.
 
-        Placeholder — full implementation in Story 2.2.
+        Requires data dict with role_name for the Descope API call.
+        Falls back to using role_id as string if role_name not provided.
         """
         with tracer.start_as_current_span("descope.sync_role_assignment") as span:
             span.set_attribute("user.id", str(user_id))
             span.set_attribute("tenant.id", str(tenant_id))
             span.set_attribute("role.id", str(role_id))
-            return Ok(None)
+            try:
+                await self._client.assign_roles(str(user_id), str(tenant_id), [str(role_id)])
+                return Ok(None)
+            except Exception as exc:
+                logger.debug(
+                    "Descope sync_role_assignment failed for user %s: %s",
+                    user_id,
+                    exc,
+                )
+                return Error(
+                    SyncError(
+                        message=str(exc),
+                        operation="sync_role_assignment",
+                        context={
+                            "user_id": str(user_id),
+                            "tenant_id": str(tenant_id),
+                            "role_id": str(role_id),
+                        },
+                    )
+                )
 
     async def delete_user(self, *, user_id: uuid.UUID) -> Result[None, SyncError]:
         """Disable user in Descope (canonical delete maps to Descope disable).
