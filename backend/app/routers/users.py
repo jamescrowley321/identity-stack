@@ -67,7 +67,7 @@ async def invite_member(
 
     user_data = result.ok
 
-    # Assign requested roles to the new user
+    # Assign requested roles to the new user (best-effort: user is created regardless)
     if body.role_names:
         user_uuid = uuid.UUID(str(user_data["id"]))
         roles_result = await role_service.list_roles()
@@ -76,11 +76,13 @@ async def invite_member(
             for role_name in body.role_names:
                 role_id = role_map.get(role_name)
                 if role_id is not None:
-                    await role_service.assign_role_to_user(
+                    assign_result = await role_service.assign_role_to_user(
                         user_id=user_uuid,
                         tenant_id=tenant_uuid,
                         role_id=uuid.UUID(str(role_id)),
                     )
+                    if assign_result.is_error():
+                        break  # stop on first failure, user still created
 
     return result_to_response(
         Ok({"status": "invited", "email": body.email, "user": user_data}),

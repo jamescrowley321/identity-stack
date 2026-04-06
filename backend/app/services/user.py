@@ -258,6 +258,16 @@ class UserService:
 
             await self._assignment_repository.commit()
 
+            # Best-effort sync: notify IdP of membership removal
+            self._log_sync_failure(
+                await self._adapter.sync_user(
+                    user_id=user_id,
+                    data={"email": user.email, "status": user.status.value},
+                ),
+                user_id,
+                "remove_user_from_tenant",
+            )
+
             return Ok({"status": "removed", "user_id": str(user_id)})
 
     async def search_users(
