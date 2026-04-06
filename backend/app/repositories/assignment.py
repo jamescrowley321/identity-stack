@@ -34,7 +34,6 @@ class UserTenantRoleRepository:
         try:
             await self._session.flush()
         except IntegrityError as exc:
-            await self._session.rollback()
             raise RepositoryConflictError(str(exc)) from exc
         return assignment
 

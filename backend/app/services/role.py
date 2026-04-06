@@ -135,10 +135,10 @@ class RoleService:
                 "role_id": str(mapping.role_id),
                 "permission_id": str(mapping.permission_id),
             }
-            await self._repository.commit()
 
             permissions = await self._repository.get_permissions(role_id)
             permission_names = [p.name for p in permissions]
+            await self._repository.commit()
             self._log_sync_failure(
                 await self._adapter.sync_role(
                     role_id=role_id,
@@ -204,6 +204,7 @@ class RoleService:
                     user_id=user_id,
                     tenant_id=tenant_id,
                     role_id=role_id,
+                    data={"role_name": role.name},
                 ),
                 role_id,
                 "assign_role_to_user",

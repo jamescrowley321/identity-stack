@@ -157,21 +157,26 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
         user_id: uuid.UUID,
         tenant_id: uuid.UUID,
         role_id: uuid.UUID,
+        data: dict | None = None,
     ) -> Result[None, SyncError]:
         """Sync role assignment to Descope via assign_roles API.
 
-        Requires data dict with role_name for the Descope API call.
-        Falls back to using role_id as string if role_name not provided.
+        Expected data keys:
+            role_name: str — Descope role name (required for correct API call)
+            login_id: str — Descope loginId/email (optional, falls back to str(user_id))
         """
         with tracer.start_as_current_span("descope.sync_role_assignment") as span:
             span.set_attribute("user.id", str(user_id))
             span.set_attribute("tenant.id", str(tenant_id))
             span.set_attribute("role.id", str(role_id))
             try:
-                await self._client.assign_roles(str(user_id), str(tenant_id), [str(role_id)])
+                data = data or {}
+                role_name = data.get("role_name", str(role_id))
+                login_id = data.get("login_id", str(user_id))
+                await self._client.assign_roles(login_id, str(tenant_id), [role_name])
                 return Ok(None)
             except Exception as exc:
-                logger.debug(
+                logger.warning(
                     "Descope sync_role_assignment failed for user %s: %s",
                     user_id,
                     exc,

@@ -198,6 +198,28 @@ class TestMapPermissionToRole:
         repo.commit.assert_awaited_once()
         adapter.sync_role.assert_awaited_once()
 
+    async def test_map_permission_fetches_permissions_before_commit(self):
+        """get_permissions must happen before commit to avoid post-commit query issues."""
+        service, repo, perm_repo, _assign, adapter = _build_service()
+        role = _make_role()
+        perm = _make_permission()
+        mapping = RolePermission(role_id=role.id, permission_id=perm.id)
+
+        repo.get.return_value = role
+        perm_repo.get.return_value = perm
+        repo.add_permission.return_value = mapping
+        repo.get_permissions.return_value = [perm]
+        adapter.sync_role.return_value = Ok(None)
+
+        call_order = []
+        repo.get_permissions.side_effect = lambda rid: (call_order.append("get_perms"), [perm])[1]
+        repo.commit.side_effect = lambda: call_order.append("commit")
+        adapter.sync_role.side_effect = lambda **kw: (call_order.append("sync"), Ok(None))[1]
+
+        await service.map_permission_to_role(role_id=role.id, permission_id=perm.id)
+
+        assert call_order == ["get_perms", "commit", "sync"]
+
     async def test_map_permission_role_not_found(self):
         service, repo, _perm_repo, _assign, _adapter = _build_service()
         repo.get.return_value = None
@@ -273,6 +295,8 @@ class TestAssignRoleToUser:
         assert result.ok["role_id"] == str(role.id)
         assign_repo.commit.assert_awaited_once()
         adapter.sync_role_assignment.assert_awaited_once()
+        sync_call = adapter.sync_role_assignment.call_args
+        assert sync_call.kwargs["data"] == {"role_name": role.name}
 
     async def test_assign_role_not_found(self):
         service, repo, _perm, _assign, _adapter = _build_service()

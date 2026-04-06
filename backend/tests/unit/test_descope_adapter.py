@@ -205,6 +205,22 @@ class TestDeleteOperations:
             user_id=user_id,
             tenant_id=tenant_id,
             role_id=role_id,
+            data={"role_name": "admin", "login_id": "user@example.com"},
+        )
+
+        assert result == Ok(None)
+        mock_client.assign_roles.assert_awaited_once_with("user@example.com", str(tenant_id), ["admin"])
+
+    async def test_sync_role_assignment_fallback_without_data(self, adapter, mock_client):
+        """Without data, falls back to str(role_id) and str(user_id)."""
+        user_id = uuid.uuid4()
+        tenant_id = uuid.uuid4()
+        role_id = uuid.uuid4()
+
+        result = await adapter.sync_role_assignment(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            role_id=role_id,
         )
 
         assert result == Ok(None)
