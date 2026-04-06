@@ -34,7 +34,6 @@ class RoleRepository:
         try:
             await self._session.flush()
         except IntegrityError as exc:
-            await self._session.rollback()
             raise RepositoryConflictError(str(exc)) from exc
         return role
 
@@ -71,7 +70,6 @@ class RoleRepository:
         try:
             await self._session.flush()
         except IntegrityError as exc:
-            await self._session.rollback()
             raise RepositoryConflictError(str(exc)) from exc
         return role
 
@@ -85,7 +83,6 @@ class RoleRepository:
         try:
             await self._session.flush()
         except IntegrityError as exc:
-            await self._session.rollback()
             raise RepositoryConflictError(str(exc)) from exc
         return mapping
 
@@ -96,7 +93,10 @@ class RoleRepository:
             RolePermission.permission_id == permission_id,
         )
         result = await self._session.execute(stmt)
-        await self._session.flush()
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            raise RepositoryConflictError(str(exc)) from exc
         return result.rowcount > 0
 
     async def get_permissions(self, role_id: uuid.UUID) -> list[Permission]:

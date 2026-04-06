@@ -33,6 +33,7 @@ class NoOpSyncAdapter(IdentityProviderAdapter):
         user_id: uuid.UUID,
         tenant_id: uuid.UUID,
         role_id: uuid.UUID,
+        data: dict | None = None,
     ) -> Result[None, SyncError]:
         return Ok(None)
 
