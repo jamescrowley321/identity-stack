@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlmodel import SQLModel
 
 from app.dependencies.identity import get_tenant_service
-from app.errors.identity import NotFound
+from app.errors.identity import NotFound, SyncFailed
 from app.main import app
 from app.models.database import get_async_session
 from app.services.tenant import TenantService
@@ -375,3 +375,34 @@ async def test_create_resource_db_error_returns_500(mock_validate, client):
         json={"name": "Some Resource"},
     )
     assert response.status_code == 500
+
+
+# --- SyncFailed → 207 Multi-Status ---
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_create_tenant_sync_failed_returns_207(mock_validate, mock_tenant_service, client):
+    """Service returns SyncFailed (DB write ok, IdP sync failed) → 207 Multi-Status."""
+    mock_validate.return_value = MOCK_CLAIMS_ADMIN
+    mock_tenant_service.create_tenant.return_value = Error(
+        SyncFailed(
+            message="Descope sync failed for tenant creation",
+            operation="create_tenant",
+            underlying_error="httpx.ConnectError",
+        )
+    )
+
+    response = await client.post(
+        "/api/tenants",
+        headers=AUTH_HEADER,
+        json={"name": "New Org"},
+    )
+    assert response.status_code == 207
+    assert response.headers["content-type"] == "application/problem+json"
+    body = response.json()
+    assert body["type"] == "/errors/sync-failed"
+    assert body["title"] == "Sync Partial Success"
+    assert body["status"] == 207
+    assert "succeeded" in body["detail"]
+    assert "synchronisation failed" in body["detail"]
