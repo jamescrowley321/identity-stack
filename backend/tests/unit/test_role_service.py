@@ -271,6 +271,26 @@ class TestMapPermissionToRole:
         sync_call = adapter.sync_role.call_args
         assert sync_call.kwargs["data"]["permission_names"] == ["read", "write"]
 
+    async def test_map_permission_sync_failure_still_returns_ok(self):
+        """AC-2.4.2: sync failure on map_permission → log warning, still return Ok."""
+        service, repo, perm_repo, _assign, adapter = _build_service()
+        role = _make_role()
+        perm = _make_permission()
+        mapping = RolePermission(role_id=role.id, permission_id=perm.id)
+
+        repo.get.return_value = role
+        perm_repo.get.return_value = perm
+        repo.add_permission.return_value = mapping
+        repo.get_permissions.return_value = [perm]
+        adapter.sync_role.return_value = Error(SyncError(message="Descope down", operation="sync_role"))
+
+        with patch("app.services.role.logger") as mock_logger:
+            result = await service.map_permission_to_role(role_id=role.id, permission_id=perm.id)
+
+        assert result.is_ok()
+        repo.commit.assert_awaited_once()
+        mock_logger.warning.assert_called_once()
+
 
 @pytest.mark.anyio
 class TestAssignRoleToUser:
@@ -476,6 +496,22 @@ class TestUpdateRole:
 
         assert result.is_error()
         assert isinstance(result.error, Conflict)
+
+    async def test_update_role_sync_failure_still_returns_ok(self):
+        """AC-2.4.2: sync failure on update → log warning, still return Ok."""
+        service, repo, _perm, _assign, adapter = _build_service()
+        role = _make_role(name="editor")
+        repo.get.return_value = role
+        repo.get_by_name.return_value = None
+        repo.update.return_value = role
+        adapter.sync_role.return_value = Error(SyncError(message="Descope down", operation="sync_role"))
+
+        with patch("app.services.role.logger") as mock_logger:
+            result = await service.update_role(role_id=role.id, name="senior-editor")
+
+        assert result.is_ok()
+        repo.commit.assert_awaited_once()
+        mock_logger.warning.assert_called_once()
 
 
 @pytest.mark.anyio

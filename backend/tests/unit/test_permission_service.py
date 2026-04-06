@@ -210,6 +210,22 @@ class TestUpdatePermission:
         assert result.is_error()
         assert isinstance(result.error, Conflict)
 
+    async def test_update_permission_sync_failure_still_returns_ok(self):
+        """AC-2.4.2: sync failure on update → log warning, still return Ok."""
+        service, repo, adapter = _build_service()
+        perm = _make_permission(name="reports.read")
+        repo.get.return_value = perm
+        repo.get_by_name.return_value = None
+        repo.update.return_value = perm
+        adapter.sync_permission.return_value = Error(SyncError(message="Descope down", operation="sync_permission"))
+
+        with patch("app.services.permission.logger") as mock_logger:
+            result = await service.update_permission(permission_id=perm.id, name="reports.view")
+
+        assert result.is_ok()
+        repo.commit.assert_awaited_once()
+        mock_logger.warning.assert_called_once()
+
 
 @pytest.mark.anyio
 class TestDeletePermission:

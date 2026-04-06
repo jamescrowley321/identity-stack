@@ -249,6 +249,26 @@ class TestUpdateUser:
         assert isinstance(result.error, Conflict)
         assert "conflicts" in result.error.message
 
+    async def test_update_user_sync_failure_still_returns_ok(self):
+        """AC-2.4.2: sync failure on update → log warning, still return Ok."""
+        service, repo, adapter, _assign_repo = _build_service()
+        user = _make_user()
+        repo.get.return_value = user
+        repo.get_by_email.return_value = None
+        repo.update.return_value = user
+        adapter.sync_user.return_value = Error(SyncError(message="Descope down", operation="sync_user"))
+
+        with patch("app.services.user.logger") as mock_logger:
+            result = await service.update_user(
+                tenant_id=TENANT_ID,
+                user_id=user.id,
+                given_name="Updated",
+            )
+
+        assert result.is_ok()
+        repo.commit.assert_awaited_once()
+        mock_logger.warning.assert_called_once()
+
 
 @pytest.mark.anyio
 class TestDeactivateUser:
@@ -435,3 +455,19 @@ class TestRemoveUserFromTenant:
 
         assert result.is_error()
         assert isinstance(result.error, Forbidden)
+
+    async def test_remove_user_sync_failure_still_returns_ok(self):
+        """AC-2.4.2: sync failure on remove → log warning, still return Ok."""
+        service, repo, adapter, assign_repo = _build_service()
+        user = _make_user()
+        repo.get.return_value = user
+        repo.exists_in_tenant.return_value = True
+        assign_repo.delete_by_user_tenant.return_value = 2
+        adapter.sync_user.return_value = Error(SyncError(message="timeout", operation="sync_user"))
+
+        with patch("app.services.user.logger") as mock_logger:
+            result = await service.remove_user_from_tenant(tenant_id=TENANT_ID, user_id=user.id)
+
+        assert result.is_ok()
+        assign_repo.commit.assert_awaited_once()
+        mock_logger.warning.assert_called_once()
