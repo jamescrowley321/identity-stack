@@ -10,6 +10,7 @@ import os
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost:5432/testdb")
 
 import pytest
+import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from py_identity_model import (
     ClientCredentialsTokenRequest,
@@ -19,6 +20,7 @@ from py_identity_model import (
 )
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 from testcontainers.postgres import PostgresContainer
 
 
@@ -122,49 +124,48 @@ def postgres_url(postgres_container):
 
 @pytest.fixture(scope="session")
 def _run_migrations(postgres_url):
-    """Run Alembic migrations against the test Postgres instance (once per session)."""
-    from alembic import command
-    from alembic.config import Config
+    """Run Alembic migrations against the test Postgres instance (once per session).
 
-    # Set DATABASE_URL so migrations/env.py picks it up; restore original after
-    original_url = os.environ.get("DATABASE_URL")
-    os.environ["DATABASE_URL"] = postgres_url
-    try:
-        project_root = os.path.join(os.path.dirname(__file__), "..", "..")
-        alembic_cfg = Config(os.path.join(project_root, "alembic.ini"))
-        alembic_cfg.set_main_option("script_location", os.path.join(project_root, "migrations"))
-        command.upgrade(alembic_cfg, "head")
-    finally:
-        if original_url is None:
-            os.environ.pop("DATABASE_URL", None)
-        else:
-            os.environ["DATABASE_URL"] = original_url
+    Uses subprocess to avoid asyncio.run() inside Alembic's env.py from
+    interfering with the pytest-asyncio session event loop.
+    """
+    import subprocess
+    import sys
+
+    project_root = os.path.join(os.path.dirname(__file__), "..", "..")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = postgres_url
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=project_root,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Alembic migration failed:\n{result.stderr}")
 
 
 @pytest.fixture(scope="session")
 def async_engine(postgres_url, _run_migrations):
     """Create an async engine pointing at the test Postgres instance."""
-    engine = create_async_engine(postgres_url, echo=False)
+    engine = create_async_engine(postgres_url, echo=False, poolclass=NullPool)
     return engine
 
 
-@pytest.fixture
+@pytest_asyncio.fixture(loop_scope="session")
 async def db_session(async_engine):
     """Per-test async session with transactional rollback for clean state.
 
-    Each test runs inside a transaction that is rolled back after the test,
-    ensuring complete isolation between tests. Uses SAVEPOINT (begin_nested)
-    so that session.commit() inside the test only commits the savepoint,
-    allowing the outer transaction to still roll back.
+    Uses loop_scope="session" to match the session-scoped event loop
+    configured via asyncio_default_test_loop_scope in pyproject.toml.
     """
     async with async_engine.connect() as conn:
         transaction = await conn.begin()
         await conn.begin_nested()
         session_factory = async_sessionmaker(bind=conn, class_=AsyncSession, expire_on_commit=False)
         async with session_factory() as session:
-            # Re-create SAVEPOINT after each commit so that multiple
-            # session.commit() calls in test code don't escape the
-            # outer transaction
+
             @event.listens_for(session.sync_session, "after_transaction_end")
             def _restart_savepoint(sync_session, trans):
                 if conn.closed or not conn.in_transaction():
