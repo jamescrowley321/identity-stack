@@ -241,6 +241,7 @@ class TestUpdateUser:
 
         assert result.is_error()
         assert isinstance(result.error, Conflict)
+        assert "conflicts" in result.error.message
 
 
 @pytest.mark.anyio
