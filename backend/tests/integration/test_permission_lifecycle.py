@@ -93,8 +93,10 @@ async def test_permission_get_not_found(db_session, permission_service):
 async def test_permission_list(db_session, permission_service):
     """List permissions returns all created permissions."""
     suffix = uuid.uuid4().hex[:8]
-    await permission_service.create_permission(name=f"perm.list.a.{suffix}")
-    await permission_service.create_permission(name=f"perm.list.b.{suffix}")
+    result_a = await permission_service.create_permission(name=f"perm.list.a.{suffix}")
+    assert result_a.is_ok()
+    result_b = await permission_service.create_permission(name=f"perm.list.b.{suffix}")
+    assert result_b.is_ok()
 
     result = await permission_service.list_permissions()
     assert result.is_ok()
