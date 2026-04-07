@@ -63,21 +63,23 @@ services:
   tyk-gateway:
     image: tykio/tyk-gateway:v5.3
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./tyk/tyk.conf:/opt/tyk-gateway/tyk.conf
       - ./tyk/apps:/opt/tyk-gateway/apps
       - ./tyk/middleware:/opt/tyk-gateway/middleware
       - ./tyk/policies:/opt/tyk-gateway/policies
     environment:
-      - TYK_GW_SECRET=${TYK_GATEWAY_SECRET}
+      - TYK_GW_SECRET=${TYK_GATEWAY_SECRET:?Set TYK_GATEWAY_SECRET in .env}
       - TYK_GW_STORAGE_HOST=tyk-redis
       - TYK_GW_STORAGE_PORT=6379
     depends_on:
       - tyk-redis
       - backend
+    restart: unless-stopped
     profiles:
       - gateway
+      - full
 
   tyk-redis:
     image: redis:7-alpine
@@ -85,6 +87,7 @@ services:
       - tyk-redis-data:/data
     profiles:
       - gateway
+      - full
 
 volumes:
   pgdata:

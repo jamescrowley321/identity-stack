@@ -34,7 +34,14 @@ class TestTykGatewayService:
 
     def test_tyk_gateway_port(self):
         svc = _load_compose()["services"]["tyk-gateway"]
-        assert "8080:8080" in svc["ports"]
+        ports = svc["ports"]
+        assert any("8080" in str(p) for p in ports)
+
+    def test_tyk_gateway_port_localhost_binding(self):
+        """Gateway port must bind to 127.0.0.1, matching other services."""
+        svc = _load_compose()["services"]["tyk-gateway"]
+        ports = svc["ports"]
+        assert any("127.0.0.1:8080:8080" in str(p) for p in ports)
 
     def test_tyk_gateway_volume_tyk_conf(self):
         svc = _load_compose()["services"]["tyk-gateway"]
@@ -55,6 +62,11 @@ class TestTykGatewayService:
         svc = _load_compose()["services"]["tyk-gateway"]
         volumes = svc["volumes"]
         assert any("tyk/policies" in v for v in volumes)
+
+    def test_tyk_gateway_restart_policy(self):
+        """Gateway should have a restart policy for crash recovery."""
+        svc = _load_compose()["services"]["tyk-gateway"]
+        assert "restart" in svc
 
 
 class TestTykRedisService:
@@ -84,7 +96,6 @@ class TestTykGatewayDependencies:
     def test_depends_on_tyk_redis(self):
         svc = _load_compose()["services"]["tyk-gateway"]
         deps = svc.get("depends_on", [])
-        # depends_on can be a list or dict
         if isinstance(deps, dict):
             assert "tyk-redis" in deps
         else:
@@ -100,15 +111,23 @@ class TestTykGatewayDependencies:
 
 
 class TestGatewayProfiles:
-    """AC4: Both tyk services under gateway profile — not started by default."""
+    """AC4: Both tyk services under gateway and full profiles — not started by default."""
 
     def test_tyk_gateway_has_gateway_profile(self):
         svc = _load_compose()["services"]["tyk-gateway"]
         assert "gateway" in svc.get("profiles", [])
 
+    def test_tyk_gateway_has_full_profile(self):
+        svc = _load_compose()["services"]["tyk-gateway"]
+        assert "full" in svc.get("profiles", [])
+
     def test_tyk_redis_has_gateway_profile(self):
         svc = _load_compose()["services"]["tyk-redis"]
         assert "gateway" in svc.get("profiles", [])
+
+    def test_tyk_redis_has_full_profile(self):
+        svc = _load_compose()["services"]["tyk-redis"]
+        assert "full" in svc.get("profiles", [])
 
     def test_existing_services_have_no_profile(self):
         """Default services (frontend, backend, postgres, etc.) have no profiles."""
@@ -121,22 +140,37 @@ class TestGatewayProfiles:
 
 
 class TestTykGatewaySecret:
-    """AC5: TYK_GATEWAY_SECRET sourced from env var substitution, not hardcoded."""
+    """AC5: TYK_GATEWAY_SECRET sourced from env var substitution with fail-fast guard."""
 
     def test_tyk_gateway_secret_env_var(self):
         svc = _load_compose()["services"]["tyk-gateway"]
-        env_list = svc.get("environment", [])
-        secret_entries = [e for e in env_list if "TYK_GW_SECRET" in str(e)]
-        assert len(secret_entries) == 1
-        entry = secret_entries[0]
-        # Must reference ${TYK_GATEWAY_SECRET}, not a hardcoded value
-        assert "${TYK_GATEWAY_SECRET}" in str(entry)
+        env = svc.get("environment", [])
+        # Handle both list and dict forms of environment
+        if isinstance(env, dict):
+            secret_value = env.get("TYK_GW_SECRET", "")
+            assert "TYK_GATEWAY_SECRET" in secret_value
+        else:
+            secret_entries = [e for e in env if "TYK_GW_SECRET" in str(e)]
+            assert len(secret_entries) == 1
+            assert "TYK_GATEWAY_SECRET" in str(secret_entries[0])
 
-    def test_tyk_conf_secret_placeholder(self):
-        """tyk.conf uses a placeholder (not a real secret)."""
+    def test_tyk_gateway_secret_has_fail_fast_guard(self):
+        """TYK_GATEWAY_SECRET must use :? syntax to fail if unset."""
+        svc = _load_compose()["services"]["tyk-gateway"]
+        env = svc.get("environment", [])
+        if isinstance(env, dict):
+            secret_value = env.get("TYK_GW_SECRET", "")
+        else:
+            secret_entries = [e for e in env if "TYK_GW_SECRET" in str(e)]
+            secret_value = str(secret_entries[0]) if secret_entries else ""
+        assert ":?" in secret_value, "TYK_GATEWAY_SECRET must use :? syntax to abort if unset"
+
+    def test_tyk_conf_secret_is_sentinel(self):
+        """tyk.conf uses a sentinel value (not a shell-like variable reference)."""
         conf = json.loads((TYK_DIR / "tyk.conf").read_text())
         secret = conf.get("secret", "")
-        assert secret == "${TYK_GATEWAY_SECRET}"
+        # Must not look like a real secret or a shell variable reference
+        assert secret == "REPLACE_AT_RUNTIME"
 
 
 class TestEnvExample:
@@ -201,7 +235,6 @@ class TestServiceIsolation:
         compose = _load_compose()
         app_redis = compose["services"]["redis"]
         tyk_redis = compose["services"]["tyk-redis"]
-        # App redis has no named volume (no volumes key or different volume)
         app_volumes = app_redis.get("volumes", [])
         tyk_volumes = tyk_redis.get("volumes", [])
         # tyk-redis-data should only appear in tyk-redis
