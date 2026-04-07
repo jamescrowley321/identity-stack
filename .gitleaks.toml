@@ -6,4 +6,5 @@ paths = [
     '''\.env\.example''',
     '''frontend/src/test/''',
     '''backend/tests/''',
+    '''scripts/test-gateway-proxy\.sh''',
 ]
