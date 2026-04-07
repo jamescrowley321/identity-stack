@@ -74,9 +74,9 @@ async def delete_idp_link(
     idp_link_service: IdPLinkService = Depends(get_idp_link_service),
 ):
     """Delete an IdP link."""
-    _parse_uuid(user_id, "user_id")
+    user_uuid = _parse_uuid(user_id, "user_id")
     link_uuid = _parse_uuid(link_id, "link_id")
-    result = await idp_link_service.delete_idp_link(link_id=link_uuid)
+    result = await idp_link_service.delete_idp_link(link_id=link_uuid, user_id=user_uuid)
     if result.is_ok():
         return Response(status_code=204)
     return result_to_response(result, request)
