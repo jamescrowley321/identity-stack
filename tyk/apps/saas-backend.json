@@ -2,6 +2,7 @@
   "name": "Identity Stack Backend",
   "api_id": "saas-backend",
   "slug": "api",
+  "org_id": "",
   "x-description": "Tyk validates JWT token authenticity (signature, expiry, issuer) via OpenID Connect discovery. FastAPI checks tenant-scoped roles/permissions from the forwarded Authorization header. The Authorization header is NOT stripped — it is forwarded to the backend so FastAPI authorization logic can decode tenant claims. DESCOPE_PROJECT_ID must be substituted at deploy time via envsubst or Docker entrypoint script (Tyk does not support shell variable expansion in config files).",
   "listen_path": "/api/",
   "target_url": "http://backend:8000/api/",
@@ -26,6 +27,7 @@
     "segregate_by_client": false
   },
   "jwt_identity_base_field": "sub",
+  "strip_auth_data": false,
   "proxy": {
     "preserve_host_header": true,
     "listen_path": "/api/",
