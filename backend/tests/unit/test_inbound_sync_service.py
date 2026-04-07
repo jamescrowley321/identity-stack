@@ -473,3 +473,175 @@ class TestProcessWebhookEvent:
 
         assert result.is_error()
         assert isinstance(result.error, Conflict)
+
+
+@pytest.mark.anyio
+class TestFlowSyncIdempotentReplay:
+    """AC-3.4.1: Replaying sync_user_from_flow with same data is idempotent."""
+
+    async def test_replay_returns_created_false_no_duplicate_user(self):
+        """Second call with same user_id finds existing link → update, no new user/link."""
+        service, user_repo, link_repo, provider_repo = _build_service()
+        provider = _make_provider()
+        provider_repo.get_by_type.return_value = provider
+        existing_user = _make_user()
+        existing_link = _make_link()
+
+        # Replay: link already exists from first sync
+        link_repo.get_by_provider_and_sub.return_value = existing_link
+        user_repo.get.return_value = existing_user
+
+        result = await service.sync_user_from_flow(
+            user_id="descope-user-123",
+            email="alice@example.com",
+            name="Alice Smith",
+        )
+
+        assert result.is_ok()
+        assert result.ok["created"] is False
+        # Must NOT create a new user or link
+        user_repo.create.assert_not_awaited()
+        link_repo.create.assert_not_awaited()
+        # Must update existing user and commit
+        user_repo.update.assert_awaited_once()
+        user_repo.commit.assert_awaited_once()
+
+    async def test_replay_preserves_user_fields(self):
+        """Replaying with identical data preserves user fields unchanged."""
+        service, user_repo, link_repo, provider_repo = _build_service()
+        provider_repo.get_by_type.return_value = _make_provider()
+        user = _make_user(
+            email="alice@example.com",
+            given_name="Alice",
+            family_name="Smith",
+        )
+        link_repo.get_by_provider_and_sub.return_value = _make_link()
+        user_repo.get.return_value = user
+
+        result = await service.sync_user_from_flow(
+            user_id="descope-user-123",
+            email="alice@example.com",
+            given_name="Alice",
+            family_name="Smith",
+        )
+
+        assert result.is_ok()
+        assert result.ok["user"]["email"] == "alice@example.com"
+        assert result.ok["user"]["given_name"] == "Alice"
+        assert result.ok["user"]["family_name"] == "Smith"
+
+    async def test_two_calls_same_result_shape(self):
+        """First call (create) and second call (update) return same dict shape."""
+        service, user_repo, link_repo, provider_repo = _build_service()
+        provider_repo.get_by_type.return_value = _make_provider()
+        user = _make_user()
+
+        # First call: no link, no user → create
+        link_repo.get_by_provider_and_sub.return_value = None
+        user_repo.get_by_email.return_value = None
+        user_repo.create.return_value = user
+
+        result1 = await service.sync_user_from_flow(
+            user_id="descope-user-123",
+            email="alice@example.com",
+            name="Alice Smith",
+        )
+
+        # Second call: link exists → update path
+        link_repo.get_by_provider_and_sub.return_value = _make_link()
+        user_repo.get.return_value = user
+
+        result2 = await service.sync_user_from_flow(
+            user_id="descope-user-123",
+            email="alice@example.com",
+            name="Alice Smith",
+        )
+
+        assert result1.is_ok()
+        assert result2.is_ok()
+        # Both return dict with "user" and "created" keys
+        assert set(result1.ok.keys()) == {"user", "created"}
+        assert set(result2.ok.keys()) == {"user", "created"}
+        assert result1.ok["created"] is True
+        assert result2.ok["created"] is False
+
+
+@pytest.mark.anyio
+class TestWebhookIdempotentReplay:
+    """AC-3.4.2: Replaying webhook events is idempotent."""
+
+    async def test_user_created_replay_no_duplicate(self):
+        """Replaying user.created when link already exists → update, not create."""
+        service, user_repo, link_repo, provider_repo = _build_service()
+        provider_repo.get_by_type.return_value = _make_provider()
+        existing_user = _make_user()
+        existing_link = _make_link()
+
+        # Replay: link exists from first webhook
+        link_repo.get_by_provider_and_sub.return_value = existing_link
+        user_repo.get.return_value = existing_user
+
+        result = await service.process_webhook_event(
+            event_type="user.created",
+            data={
+                "user_id": "descope-user-123",
+                "email": "alice@example.com",
+                "name": "Alice Smith",
+            },
+        )
+
+        assert result.is_ok()
+        assert result.ok["created"] is False
+        user_repo.create.assert_not_awaited()
+        link_repo.create.assert_not_awaited()
+
+    async def test_user_updated_replay_safe(self):
+        """Replaying user.updated applies same fields again → no error."""
+        service, user_repo, link_repo, provider_repo = _build_service()
+        provider_repo.get_by_type.return_value = _make_provider()
+        user = _make_user(email="updated@example.com")
+        link_repo.get_by_provider_and_sub.return_value = _make_link()
+        user_repo.get.return_value = user
+
+        # First call
+        result1 = await service.process_webhook_event(
+            event_type="user.updated",
+            data={"user_id": "descope-user-123", "email": "updated@example.com"},
+        )
+
+        # Reset mocks for second call
+        user_repo.update.reset_mock()
+        user_repo.commit.reset_mock()
+
+        # Replay with identical data
+        result2 = await service.process_webhook_event(
+            event_type="user.updated",
+            data={"user_id": "descope-user-123", "email": "updated@example.com"},
+        )
+
+        assert result1.is_ok()
+        assert result2.is_ok()
+        assert result2.ok["created"] is False
+        # Both calls succeed — idempotent
+        user_repo.update.assert_awaited_once()
+
+    async def test_user_deleted_replay_stays_inactive(self):
+        """Replaying user.deleted on already-inactive user → still deactivated, no error."""
+        service, user_repo, link_repo, provider_repo = _build_service()
+        provider_repo.get_by_type.return_value = _make_provider()
+        # User already inactive from first deletion event
+        user = _make_user(status=UserStatus.inactive)
+        link_repo.get_by_provider_and_sub.return_value = _make_link()
+        user_repo.get.return_value = user
+
+        result = await service.process_webhook_event(
+            event_type="user.deleted",
+            data={"user_id": "descope-user-123"},
+        )
+
+        assert result.is_ok()
+        assert result.ok["status"] == "deactivated"
+        # Status should remain inactive
+        assert user.status == UserStatus.inactive
+        user_repo.update.assert_awaited_once()
+        user_repo.commit.assert_awaited_once()
