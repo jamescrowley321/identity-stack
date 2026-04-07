@@ -15,7 +15,7 @@ fi
 # Validate DESCOPE_PROJECT_ID contains only safe characters (alphanumeric, hyphens, underscores)
 case "$DESCOPE_PROJECT_ID" in
     *[!A-Za-z0-9_-]*)
-        echo "FATAL: DESCOPE_PROJECT_ID contains invalid characters: $DESCOPE_PROJECT_ID" >&2
+        echo "FATAL: DESCOPE_PROJECT_ID contains invalid characters (expected alphanumeric, hyphens, underscores)" >&2
         exit 1
         ;;
 esac

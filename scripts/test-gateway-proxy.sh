@@ -100,7 +100,7 @@ header "AC4: Invalid JWT rejection"
 INVALID_JWT="eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0IiwiZXhwIjoxMDAwMDAwMDAwfQ.invalid-signature"
 INVALID_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
     -H "Authorization: Bearer ${INVALID_JWT}" \
-    "${TYK_URL}/api/health" 2>/dev/null)
+    "${TYK_URL}/api/health" 2>/dev/null || echo "000")
 
 if [ "$INVALID_CODE" = "401" ] || [ "$INVALID_CODE" = "403" ]; then
     pass "Invalid JWT rejected with HTTP ${INVALID_CODE}"
@@ -111,7 +111,7 @@ fi
 # ── AC5: Missing Authorization header rejected with 401 ──
 header "AC5: Missing auth rejection"
 NOAUTH_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
-    "${TYK_URL}/api/me" 2>/dev/null)
+    "${TYK_URL}/api/me" 2>/dev/null || echo "000")
 
 if [ "$NOAUTH_CODE" = "401" ] || [ "$NOAUTH_CODE" = "403" ]; then
     pass "Missing Authorization header rejected with HTTP ${NOAUTH_CODE}"
