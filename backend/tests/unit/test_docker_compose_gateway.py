@@ -96,18 +96,12 @@ class TestTykGatewayDependencies:
     def test_depends_on_tyk_redis(self):
         svc = _load_compose()["services"]["tyk-gateway"]
         deps = svc.get("depends_on", [])
-        if isinstance(deps, dict):
-            assert "tyk-redis" in deps
-        else:
-            assert "tyk-redis" in deps
+        assert "tyk-redis" in deps
 
     def test_depends_on_backend(self):
         svc = _load_compose()["services"]["tyk-gateway"]
         deps = svc.get("depends_on", [])
-        if isinstance(deps, dict):
-            assert "backend" in deps
-        else:
-            assert "backend" in deps
+        assert "backend" in deps
 
 
 class TestGatewayProfiles:
