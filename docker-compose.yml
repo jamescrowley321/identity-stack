@@ -62,17 +62,21 @@ services:
 
   tyk-gateway:
     image: tykio/tyk-gateway:v5.3
+    entrypoint: ["/opt/tyk-gateway/entrypoint.sh"]
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
+      - ./tyk/entrypoint.sh:/opt/tyk-gateway/entrypoint.sh:ro
       - ./tyk/tyk.conf:/opt/tyk-gateway/tyk.conf
-      - ./tyk/apps:/opt/tyk-gateway/apps
+      - ./tyk/apps:/opt/tyk-gateway/apps-templates:ro
       - ./tyk/middleware:/opt/tyk-gateway/middleware
       - ./tyk/policies:/opt/tyk-gateway/policies
     environment:
       - TYK_GW_SECRET=${TYK_GATEWAY_SECRET:?Set TYK_GATEWAY_SECRET in .env}
       - TYK_GW_STORAGE_HOST=tyk-redis
       - TYK_GW_STORAGE_PORT=6379
+      - TYK_GW_STORAGE_PASSWORD=${TYK_REDIS_PASSWORD:-changeme}
+      - DESCOPE_PROJECT_ID=${DESCOPE_PROJECT_ID}
     depends_on:
       - tyk-redis
       - backend
@@ -83,6 +87,7 @@ services:
 
   tyk-redis:
     image: redis:7-alpine
+    command: redis-server --requirepass ${TYK_REDIS_PASSWORD:-changeme}
     volumes:
       - tyk-redis-data:/data
     restart: unless-stopped
