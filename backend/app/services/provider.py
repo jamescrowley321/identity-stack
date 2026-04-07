@@ -66,6 +66,10 @@ class ProviderService:
                 capabilities=capabilities or [],
                 config_ref=config_ref,
             )
+            # TOCTOU guard: get_by_name pre-check above provides clean error
+            # messages, but a concurrent insert can race past it. The
+            # RepositoryConflictError fallback below catches the DB-level
+            # unique constraint violation. Both checks are required.
             try:
                 provider = await self._repository.create(provider)
             except RepositoryConflictError:
@@ -92,8 +96,14 @@ class ProviderService:
             if provider is None:
                 return Error(NotFound(message=f"Provider '{provider_id}' not found"))
 
+            if not provider.active:
+                return Ok(provider.model_dump())
+
             provider.active = False
-            provider = await self._repository.update(provider)
+            try:
+                provider = await self._repository.update(provider)
+            except RepositoryConflictError:
+                return Error(Conflict(message=f"Provider '{provider_id}' conflict during deactivation"))
 
             result_dict = provider.model_dump()
             await self._repository.commit()

@@ -29,12 +29,13 @@ class ProviderRepository:
         """Add a new provider to the session and flush to generate defaults.
 
         Raises RepositoryConflictError if a uniqueness constraint is violated.
-        Does NOT rollback — the caller (service layer) owns the transaction.
+        Rolls back the session before raising so it is not left in an invalid state.
         """
         self._session.add(provider)
         try:
             await self._session.flush()
         except IntegrityError as exc:
+            await self._session.rollback()
             raise RepositoryConflictError(str(exc)) from exc
         return provider
 
@@ -42,10 +43,12 @@ class ProviderRepository:
         """Flush pending mutations on a provider already attached to the session.
 
         Raises RepositoryConflictError if a uniqueness constraint is violated.
+        Rolls back the session before raising so it is not left in an invalid state.
         """
         try:
             await self._session.flush()
         except IntegrityError as exc:
+            await self._session.rollback()
             raise RepositoryConflictError(str(exc)) from exc
         return provider
 
@@ -72,3 +75,7 @@ class ProviderRepository:
     async def commit(self) -> None:
         """Commit the current transaction."""
         await self._session.commit()
+
+    async def rollback(self) -> None:
+        """Roll back the current transaction."""
+        await self._session.rollback()
