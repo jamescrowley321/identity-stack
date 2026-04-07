@@ -42,6 +42,7 @@ fi
 header "AC1: Health endpoint proxy"
 # Single curl call captures both body and status code atomically
 HEALTH_TMPFILE=$(mktemp)
+trap 'rm -f "$HEALTH_TMPFILE"' EXIT
 HEALTH_CODE=$(curl -s -w '%{http_code}' -o "$HEALTH_TMPFILE" "${TYK_URL}/api/health" 2>/dev/null || echo "000")
 HEALTH_RESPONSE=$(cat "$HEALTH_TMPFILE" 2>/dev/null || true)
 rm -f "$HEALTH_TMPFILE"
