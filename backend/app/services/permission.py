@@ -18,6 +18,7 @@ from app.models.identity.role import Permission
 from app.repositories.permission import PermissionRepository
 from app.repositories.user import RepositoryConflictError
 from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.cache_invalidation import CacheInvalidationPublisher
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -35,9 +36,11 @@ class PermissionService:
         *,
         repository: PermissionRepository,
         adapter: IdentityProviderAdapter,
+        publisher: CacheInvalidationPublisher | None = None,
     ) -> None:
         self._repository = repository
         self._adapter = adapter
+        self._publisher = publisher
 
     async def create_permission(
         self,
@@ -67,6 +70,9 @@ class PermissionService:
             result_dict = permission.model_dump()
             permission_id = permission.id
             await self._repository.commit()
+
+            if self._publisher:
+                await self._publisher.publish(entity_type="permission", entity_id=permission_id, operation="create")
 
             self._log_sync_failure(
                 await self._adapter.sync_permission(
@@ -131,6 +137,9 @@ class PermissionService:
             result_dict = permission.model_dump()
             await self._repository.commit()
 
+            if self._publisher:
+                await self._publisher.publish(entity_type="permission", entity_id=permission.id, operation="update")
+
             self._log_sync_failure(
                 await self._adapter.sync_permission(
                     permission_id=permission.id,
@@ -161,6 +170,9 @@ class PermissionService:
                 return Error(NotFound(message=f"Permission '{permission_id}' not found"))
 
             await self._repository.commit()
+
+            if self._publisher:
+                await self._publisher.publish(entity_type="permission", entity_id=permission_id, operation="delete")
 
             self._log_sync_failure(
                 await self._adapter.delete_permission(permission_id=permission_id),

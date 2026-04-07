@@ -18,6 +18,7 @@ from app.models.identity.tenant import Tenant
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import RepositoryConflictError
 from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.cache_invalidation import CacheInvalidationPublisher
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -35,9 +36,11 @@ class TenantService:
         *,
         repository: TenantRepository,
         adapter: IdentityProviderAdapter,
+        publisher: CacheInvalidationPublisher | None = None,
     ) -> None:
         self._repository = repository
         self._adapter = adapter
+        self._publisher = publisher
 
     async def create_tenant(
         self,
@@ -66,6 +69,9 @@ class TenantService:
             result_dict = tenant.model_dump()
             tenant_id = tenant.id
             await self._repository.commit()
+
+            if self._publisher:
+                await self._publisher.publish(entity_type="tenant", entity_id=tenant_id, operation="create")
 
             self._log_sync_failure(
                 await self._adapter.sync_tenant(

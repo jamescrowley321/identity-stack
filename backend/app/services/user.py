@@ -18,6 +18,7 @@ from app.models.identity.user import User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.user import RepositoryConflictError, UserRepository
 from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.cache_invalidation import CacheInvalidationPublisher
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -36,10 +37,12 @@ class UserService:
         repository: UserRepository,
         adapter: IdentityProviderAdapter,
         assignment_repository: UserTenantRoleRepository | None = None,
+        publisher: CacheInvalidationPublisher | None = None,
     ) -> None:
         self._repository = repository
         self._adapter = adapter
         self._assignment_repository = assignment_repository
+        self._publisher = publisher
 
     async def create_user(
         self,
@@ -76,6 +79,11 @@ class UserService:
             sync_data = {"email": user.email, "status": user.status.value}
             user_id = user.id
             await self._repository.commit()
+
+            if self._publisher:
+                await self._publisher.publish(
+                    entity_type="user", entity_id=user_id, operation="create", tenant_id=tenant_id
+                )
 
             self._log_sync_failure(
                 await self._adapter.sync_user(user_id=user_id, data=sync_data),
@@ -141,6 +149,11 @@ class UserService:
             sync_data = {"email": user.email, "status": user.status.value}
             await self._repository.commit()
 
+            if self._publisher:
+                await self._publisher.publish(
+                    entity_type="user", entity_id=user.id, operation="update", tenant_id=tenant_id
+                )
+
             self._log_sync_failure(
                 await self._adapter.sync_user(user_id=user.id, data=sync_data),
                 user.id,
@@ -184,6 +197,11 @@ class UserService:
             sync_data = {"email": user.email, "status": user.status.value}
             await self._repository.commit()
 
+            if self._publisher:
+                await self._publisher.publish(
+                    entity_type="user", entity_id=user.id, operation="deactivate", tenant_id=tenant_id
+                )
+
             self._log_sync_failure(
                 await self._adapter.sync_user(user_id=user.id, data=sync_data),
                 user.id,
@@ -221,6 +239,11 @@ class UserService:
             sync_data = {"email": user.email, "status": user.status.value}
             await self._repository.commit()
 
+            if self._publisher:
+                await self._publisher.publish(
+                    entity_type="user", entity_id=user.id, operation="activate", tenant_id=tenant_id
+                )
+
             self._log_sync_failure(
                 await self._adapter.sync_user(user_id=user.id, data=sync_data),
                 user.id,
@@ -257,6 +280,11 @@ class UserService:
                 return Error(NotFound(message=msg))
 
             await self._assignment_repository.commit()
+
+            if self._publisher:
+                await self._publisher.publish(
+                    entity_type="user", entity_id=user_id, operation="update", tenant_id=tenant_id
+                )
 
             # Best-effort sync: notify IdP of membership removal
             self._log_sync_failure(

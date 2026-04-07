@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 import httpx
@@ -27,6 +28,7 @@ from app.routers import (
     tenants,
     users,
 )
+from app.services.cache_invalidation import init_cache_publisher, shutdown_cache_publisher
 from app.services.descope import init_descope_client, shutdown_descope_client
 from app.telemetry import init_telemetry, shutdown_telemetry
 
@@ -60,27 +62,52 @@ async def lifespan(app: FastAPI):
     init_telemetry(engine=engine)
     http_client = httpx.AsyncClient(timeout=30.0)
     init_descope_client(http_client=http_client)
+
+    # Redis for cache invalidation pub/sub — optional, degrades gracefully
+    redis_client = None
+    redis_url = os.getenv("REDIS_URL")
+    if redis_url:
+        try:
+            import redis.asyncio as aioredis
+
+            redis_client = aioredis.from_url(redis_url)
+            await redis_client.ping()
+            logger.info("Redis connected for cache invalidation")
+        except Exception:
+            logger.warning("Redis connection failed — cache invalidation disabled", exc_info=True)
+            redis_client = None
+    else:
+        logger.info("REDIS_URL not set — cache invalidation disabled")
+    init_cache_publisher(redis_client=redis_client)
+
     try:
         yield
     finally:
         try:
-            # Run synchronous shutdown in executor to avoid blocking the event loop
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, shutdown_telemetry)
+            shutdown_cache_publisher()
+            if redis_client is not None:
+                await redis_client.aclose()
         except Exception:
-            logger.warning("Telemetry shutdown failed", exc_info=True)
+            logger.warning("Redis shutdown failed", exc_info=True)
         finally:
             try:
-                shutdown_descope_client()
+                # Run synchronous shutdown in executor to avoid blocking the event loop
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, shutdown_telemetry)
             except Exception:
-                logger.warning("Descope client shutdown failed", exc_info=True)
+                logger.warning("Telemetry shutdown failed", exc_info=True)
             finally:
                 try:
-                    await http_client.aclose()
+                    shutdown_descope_client()
                 except Exception:
-                    logger.warning("HTTP client close failed", exc_info=True)
+                    logger.warning("Descope client shutdown failed", exc_info=True)
                 finally:
-                    await engine.dispose()
+                    try:
+                        await http_client.aclose()
+                    except Exception:
+                        logger.warning("HTTP client close failed", exc_info=True)
+                    finally:
+                        await engine.dispose()
 
 
 app = FastAPI(title="Descope SaaS Starter API", docs_url=None, redoc_url="/redoc", lifespan=lifespan)

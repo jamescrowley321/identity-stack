@@ -31,6 +31,7 @@ from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import RepositoryConflictError, UserRepository
+from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.descope import DescopeManagementClient
 
 if TYPE_CHECKING:
@@ -68,6 +69,7 @@ class ReconciliationService:
         tenant_repository: TenantRepository,
         idp_link_repository: IdPLinkRepository,
         provider_repository: ProviderRepository,
+        publisher: CacheInvalidationPublisher | None = None,
     ) -> None:
         self._session = session
         self._acquire_lock = acquire_lock
@@ -78,6 +80,7 @@ class ReconciliationService:
         self._tenant_repo = tenant_repository
         self._link_repo = idp_link_repository
         self._provider_repo = provider_repository
+        self._publisher = publisher
 
     async def run(self) -> Result[dict, IdentityError]:
         """Execute a full reconciliation pass.
@@ -152,6 +155,9 @@ class ReconciliationService:
             total_changes = sum(stats.values())
             span.set_attribute("reconciliation.status", "completed")
             span.set_attribute("reconciliation.total_changes", total_changes)
+
+            if self._publisher and total_changes > 0:
+                await self._publisher.publish_batch(operation="reconcile", stats=stats)
 
             logger.info("Reconciliation completed: %s", stats)
             return Ok({"status": "completed", "stats": stats})

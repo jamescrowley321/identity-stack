@@ -22,6 +22,7 @@ from app.repositories.permission import PermissionRepository
 from app.repositories.role import RoleRepository
 from app.repositories.user import RepositoryConflictError
 from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.cache_invalidation import CacheInvalidationPublisher
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -42,11 +43,13 @@ class RoleService:
         permission_repository: PermissionRepository,
         assignment_repository: UserTenantRoleRepository,
         adapter: IdentityProviderAdapter,
+        publisher: CacheInvalidationPublisher | None = None,
     ) -> None:
         self._repository = repository
         self._permission_repository = permission_repository
         self._assignment_repository = assignment_repository
         self._adapter = adapter
+        self._publisher = publisher
 
     async def create_role(
         self,
@@ -94,6 +97,11 @@ class RoleService:
             result_dict = role.model_dump()
             role_id = role.id
             await self._repository.commit()
+
+            if self._publisher:
+                await self._publisher.publish(
+                    entity_type="role", entity_id=role_id, operation="create", tenant_id=tenant_id
+                )
 
             sync_data: dict = {"name": role.name, "description": role.description}
             if resolved_permission_names:
@@ -156,6 +164,10 @@ class RoleService:
             permissions = await self._repository.get_permissions(role_id)
             permission_names = [p.name for p in permissions]
             await self._repository.commit()
+
+            if self._publisher:
+                await self._publisher.publish(entity_type="role", entity_id=role_id, operation="update")
+
             self._log_sync_failure(
                 await self._adapter.sync_role(
                     role_id=role_id,
@@ -216,6 +228,11 @@ class RoleService:
                 "assigned_at": assignment.assigned_at.isoformat() if assignment.assigned_at else None,
             }
             await self._assignment_repository.commit()
+
+            if self._publisher:
+                await self._publisher.publish(
+                    entity_type="role", entity_id=role_id, operation="assign", tenant_id=tenant_id
+                )
 
             self._log_sync_failure(
                 await self._adapter.sync_role_assignment(
@@ -279,6 +296,11 @@ class RoleService:
                 sync_data["permission_names"] = permission_names
             await self._repository.commit()
 
+            if self._publisher:
+                await self._publisher.publish(
+                    entity_type="role", entity_id=role.id, operation="update", tenant_id=role.tenant_id
+                )
+
             self._log_sync_failure(
                 await self._adapter.sync_role(role_id=role.id, data=sync_data),
                 role.id,
@@ -306,6 +328,11 @@ class RoleService:
                 return Error(NotFound(message=f"Role '{role_id}' not found"))
 
             await self._repository.commit()
+
+            if self._publisher:
+                await self._publisher.publish(
+                    entity_type="role", entity_id=role_id, operation="delete", tenant_id=role.tenant_id
+                )
 
             self._log_sync_failure(
                 await self._adapter.delete_role(role_id=role_id),
@@ -337,6 +364,11 @@ class RoleService:
                 return Error(NotFound(message=msg))
 
             await self._assignment_repository.commit()
+
+            if self._publisher:
+                await self._publisher.publish(
+                    entity_type="role", entity_id=role_id, operation="unassign", tenant_id=tenant_id
+                )
 
             self._log_sync_failure(
                 await self._adapter.delete_role_assignment(

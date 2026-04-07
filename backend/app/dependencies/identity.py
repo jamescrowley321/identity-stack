@@ -22,6 +22,7 @@ from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 from app.services.adapters.descope import DescopeSyncAdapter
+from app.services.cache_invalidation import get_cache_publisher
 from app.services.descope import get_descope_client
 from app.services.inbound_sync import InboundSyncService
 from app.services.permission import PermissionService
@@ -46,7 +47,12 @@ async def get_user_service(
     repository = UserRepository(session)
     assignment_repository = UserTenantRoleRepository(session)
     adapter = DescopeSyncAdapter(client=get_descope_client())
-    return UserService(repository=repository, adapter=adapter, assignment_repository=assignment_repository)
+    return UserService(
+        repository=repository,
+        adapter=adapter,
+        assignment_repository=assignment_repository,
+        publisher=get_cache_publisher(),
+    )
 
 
 async def get_role_service(
@@ -67,6 +73,7 @@ async def get_role_service(
         permission_repository=permission_repository,
         assignment_repository=assignment_repository,
         adapter=adapter,
+        publisher=get_cache_publisher(),
     )
 
 
@@ -81,7 +88,7 @@ async def get_permission_service(
     """
     repository = PermissionRepository(session)
     adapter = DescopeSyncAdapter(client=get_descope_client())
-    return PermissionService(repository=repository, adapter=adapter)
+    return PermissionService(repository=repository, adapter=adapter, publisher=get_cache_publisher())
 
 
 async def get_tenant_service(
@@ -95,7 +102,7 @@ async def get_tenant_service(
     """
     repository = TenantRepository(session)
     adapter = DescopeSyncAdapter(client=get_descope_client())
-    return TenantService(repository=repository, adapter=adapter)
+    return TenantService(repository=repository, adapter=adapter, publisher=get_cache_publisher())
 
 
 async def get_inbound_sync_service(
@@ -113,6 +120,7 @@ async def get_inbound_sync_service(
         user_repository=user_repository,
         idp_link_repository=idp_link_repository,
         provider_repository=provider_repository,
+        publisher=get_cache_publisher(),
     )
 
 
@@ -148,4 +156,5 @@ async def get_reconciliation_service(
         tenant_repository=tenant_repository,
         idp_link_repository=idp_link_repository,
         provider_repository=provider_repository,
+        publisher=get_cache_publisher(),
     )
