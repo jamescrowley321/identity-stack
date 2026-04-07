@@ -1,8 +1,9 @@
 """Shared fixtures for integration tests.
 
-Two fixture groups:
+Three fixture groups:
 1. Descope fixtures — for live integration tests against a Descope instance
 2. Postgres fixtures — testcontainers-based real Postgres with Alembic migrations
+3. Redis fixtures — testcontainers-based real Redis for cache tests
 """
 
 import os
@@ -186,3 +187,29 @@ def noop_adapter():
     from app.services.adapters.noop import NoOpSyncAdapter
 
     return NoOpSyncAdapter()
+
+
+# ──────────────────────────────────────────────
+# Testcontainers Redis fixtures (AC-4.4.4)
+# ──────────────────────────────────────────────
+
+
+@pytest.fixture(scope="session")
+def redis_container():
+    """Start a real Redis container for the test session."""
+    from testcontainers.redis import RedisContainer
+
+    with RedisContainer("redis:7-alpine") as rc:
+        yield rc
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def redis_client(redis_container):
+    """Async Redis client connected to the testcontainers Redis instance."""
+    from redis.asyncio import Redis
+
+    host = redis_container.get_container_host_ip()
+    port = redis_container.get_exposed_port(6379)
+    client = Redis(host=host, port=int(port), decode_responses=True)
+    yield client
+    await client.aclose()
