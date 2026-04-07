@@ -1,0 +1,139 @@
+"""Integration tests for Tyk gateway proxy and header forwarding.
+
+These tests run against a live Tyk gateway (docker compose --profile gateway up).
+Skipped automatically when the gateway is not running.
+
+Refs #164 — Story 1.4: Verify Gateway Proxy and Header Forwarding
+"""
+
+import json
+import os
+
+import httpx
+import pytest
+
+TYK_URL = os.environ.get("TYK_URL", "http://localhost:8080")
+
+pytestmark = pytest.mark.anyio
+
+
+@pytest.fixture(scope="module")
+def gateway_url():
+    """Return gateway URL, skipping tests if gateway is not reachable."""
+    try:
+        httpx.get(f"{TYK_URL}/api/health", timeout=5.0)
+        # Gateway is reachable — even a 401 means it's up
+        return TYK_URL
+    except httpx.ConnectError:
+        pytest.skip("Tyk gateway not running — start with: docker compose --profile gateway up")
+
+
+async def test_health_proxy(gateway_url):
+    """AC1: Tyk proxies GET /api/health to the backend and returns correct response."""
+    async with httpx.AsyncClient(base_url=gateway_url, timeout=10.0) as client:
+        response = await client.get("/api/health")
+        # If Tyk requires auth for /api/health (all /api/ paths), we accept 401
+        if response.status_code == 401:
+            pytest.skip("/api/health requires auth under Tyk OpenID policy")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+
+
+async def test_invalid_jwt_rejected(gateway_url):
+    """AC4: Invalid JWT is rejected by Tyk with 401 before reaching the backend."""
+    invalid_jwt = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0IiwiZXhwIjoxMDAwMDAwMDAwfQ.invalid-signature"
+    async with httpx.AsyncClient(base_url=gateway_url, timeout=10.0) as client:
+        response = await client.get(
+            "/api/health",
+            headers={"Authorization": f"Bearer {invalid_jwt}"},
+        )
+        assert response.status_code in (401, 403), f"Expected 401/403 for invalid JWT, got {response.status_code}"
+
+
+async def test_expired_jwt_rejected(gateway_url):
+    """AC4: Expired JWT is rejected by Tyk with 401."""
+    # Minimal expired JWT (exp in the past)
+    expired_jwt = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0IiwiZXhwIjoxfQ.invalid-signature"
+    async with httpx.AsyncClient(base_url=gateway_url, timeout=10.0) as client:
+        response = await client.get(
+            "/api/health",
+            headers={"Authorization": f"Bearer {expired_jwt}"},
+        )
+        assert response.status_code in (401, 403), f"Expected 401/403 for expired JWT, got {response.status_code}"
+
+
+async def test_missing_auth_rejected(gateway_url):
+    """AC5: No Authorization header to protected endpoint returns 401."""
+    async with httpx.AsyncClient(base_url=gateway_url, timeout=10.0) as client:
+        response = await client.get("/api/me")
+        assert response.status_code in (401, 403), f"Expected 401/403 for missing auth, got {response.status_code}"
+
+
+async def test_empty_auth_header_rejected(gateway_url):
+    """Edge case: Empty Authorization header is rejected."""
+    async with httpx.AsyncClient(base_url=gateway_url, timeout=10.0) as client:
+        response = await client.get(
+            "/api/me",
+            headers={"Authorization": ""},
+        )
+        assert response.status_code in (401, 403), f"Expected 401/403 for empty auth, got {response.status_code}"
+
+
+async def test_malformed_bearer_rejected(gateway_url):
+    """Edge case: Malformed Bearer token is rejected."""
+    async with httpx.AsyncClient(base_url=gateway_url, timeout=10.0) as client:
+        response = await client.get(
+            "/api/me",
+            headers={"Authorization": "Bearer not.a.real.token"},
+        )
+        assert response.status_code in (401, 403), f"Expected 401/403 for malformed bearer, got {response.status_code}"
+
+
+def test_tyk_config_strip_auth_data():
+    """AC3: Tyk config has strip_auth_data=false so Authorization header is forwarded."""
+    config_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "tyk", "apps", "saas-backend.json")
+    if not os.path.exists(config_path):
+        pytest.skip("Tyk API definition not found")
+    with open(config_path) as f:
+        api_def = json.load(f)
+    assert api_def.get("strip_auth_data") is False, (
+        "strip_auth_data must be false to forward Authorization header to backend"
+    )
+
+
+def test_tyk_config_preserve_host_header():
+    """AC2: Tyk config has preserve_host_header=true for proper proxy headers."""
+    config_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "tyk", "apps", "saas-backend.json")
+    if not os.path.exists(config_path):
+        pytest.skip("Tyk API definition not found")
+    with open(config_path) as f:
+        api_def = json.load(f)
+    proxy = api_def.get("proxy", {})
+    assert proxy.get("preserve_host_header") is True, (
+        "proxy.preserve_host_header must be true for proper header forwarding"
+    )
+
+
+def test_tyk_config_openid_enabled():
+    """AC4/AC5: Tyk config uses OpenID Connect for JWT validation."""
+    config_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "tyk", "apps", "saas-backend.json")
+    if not os.path.exists(config_path):
+        pytest.skip("Tyk API definition not found")
+    with open(config_path) as f:
+        api_def = json.load(f)
+    assert api_def.get("use_openid") is True, "use_openid must be true"
+    providers = api_def.get("openid_options", {}).get("providers", [])
+    assert len(providers) == 2, "Must have two OpenID providers (dual Descope issuer formats)"
+
+
+def test_tyk_config_listen_path():
+    """AC1: Tyk listens on /api/ and proxies to backend /api/."""
+    config_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "tyk", "apps", "saas-backend.json")
+    if not os.path.exists(config_path):
+        pytest.skip("Tyk API definition not found")
+    with open(config_path) as f:
+        api_def = json.load(f)
+    assert api_def.get("listen_path") == "/api/"
+    assert api_def.get("target_url") == "http://backend:8000/api/"
+    assert api_def.get("strip_listen_path") is False

@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup lint test-unit test-frontend test-integration test-e2e test-all security dev-backend dev-frontend dev
+.PHONY: help setup lint test-unit test-frontend test-integration test-e2e test-all security dev-backend dev-frontend dev test-gateway-proxy dev-gateway
 
 help: ## show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -35,3 +35,9 @@ dev-backend: ## start backend dev server
 
 dev-frontend: ## start frontend dev server
 	cd frontend && npm run dev
+
+test-gateway-proxy: ## verify gateway proxy and header forwarding (requires gateway profile)
+	./scripts/test-gateway-proxy.sh
+
+dev-gateway: ## start full stack with gateway profile
+	docker compose --profile gateway up --build
