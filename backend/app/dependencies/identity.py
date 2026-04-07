@@ -5,6 +5,7 @@ AC-2.2.6: get_role_service(), get_permission_service(), get_tenant_service()
 with DescopeSyncAdapter wrapping the singleton DescopeManagementClient.
 AC-3.1.1: get_inbound_sync_service() wires repositories for inbound sync.
 AC-3.2.1: get_reconciliation_service() wires repositories + Descope client for reconciliation.
+AC-4.1.3: get_idp_link_service(), get_provider_service() for IdP link/provider domain services.
 """
 
 from __future__ import annotations
@@ -24,8 +25,10 @@ from app.repositories.user import UserRepository
 from app.services.adapters.descope import DescopeSyncAdapter
 from app.services.cache_invalidation import get_cache_publisher
 from app.services.descope import get_descope_client
+from app.services.idp_link import IdPLinkService
 from app.services.inbound_sync import InboundSyncService
 from app.services.permission import PermissionService
+from app.services.provider import ProviderService
 from app.services.reconciliation import ReconciliationService
 from app.services.role import RoleService
 from app.services.tenant import TenantService
@@ -158,3 +161,33 @@ async def get_reconciliation_service(
         provider_repository=provider_repository,
         publisher=get_cache_publisher(),
     )
+
+
+async def get_idp_link_service(
+    session: AsyncSession = Depends(get_async_session),
+) -> IdPLinkService:
+    """Build an IdPLinkService with its repositories.
+
+    AC-4.1.3: Wiring: AsyncSession -> IdPLinkRepository + UserRepository + ProviderRepository
+               -> IdPLinkService(repository, user_repository, provider_repository)
+    """
+    repository = IdPLinkRepository(session)
+    user_repository = UserRepository(session)
+    provider_repository = ProviderRepository(session)
+    return IdPLinkService(
+        repository=repository,
+        user_repository=user_repository,
+        provider_repository=provider_repository,
+    )
+
+
+async def get_provider_service(
+    session: AsyncSession = Depends(get_async_session),
+) -> ProviderService:
+    """Build a ProviderService with its repository.
+
+    AC-4.1.3: Wiring: AsyncSession -> ProviderRepository(session)
+               -> ProviderService(repository)
+    """
+    repository = ProviderRepository(session)
+    return ProviderService(repository=repository)
