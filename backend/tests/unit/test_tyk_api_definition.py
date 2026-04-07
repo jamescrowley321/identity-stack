@@ -4,6 +4,7 @@ Validates that tyk/apps/saas-backend.json satisfies all acceptance criteria
 for backend proxy configuration with Descope JWT validation.
 """
 
+import copy
 import json
 import re
 from functools import lru_cache
@@ -16,9 +17,14 @@ API_DEF_FILE = TYK_APPS_DIR / "saas-backend.json"
 
 
 @lru_cache(maxsize=1)
+def _load_api_def_cached() -> dict:
+    """Load and parse saas-backend.json (cached)."""
+    return json.loads(API_DEF_FILE.read_text(encoding="utf-8"))
+
+
 def _load_api_def() -> dict:
-    """Load and parse saas-backend.json (cached for test session)."""
-    return json.loads(API_DEF_FILE.read_text())
+    """Return a deep copy of the cached API definition to prevent shared mutable state."""
+    return copy.deepcopy(_load_api_def_cached())
 
 
 def _find_provider_by_issuer_pattern(providers: list, pattern: str) -> dict:
@@ -177,7 +183,10 @@ class TestAC6DescopeProjectIdParameterized:
         api_def = _load_api_def()
         providers = api_def["openid_options"]["providers"]
         for provider in providers:
-            assert "${DESCOPE_PROJECT_ID}" in str(provider["client_ids"])
+            client_ids = provider["client_ids"]
+            assert any("${DESCOPE_PROJECT_ID}" in key for key in client_ids), (
+                f"No client_id key contains placeholder: {list(client_ids.keys())}"
+            )
 
     def test_no_hardcoded_project_id(self):
         """Ensure no real Descope project ID is hardcoded (format: P...)."""
