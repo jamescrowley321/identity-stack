@@ -80,6 +80,20 @@ class ProviderService:
 
             return Ok(result_dict)
 
+    async def list_providers(self) -> Result[list[dict], IdentityError]:
+        """List all registered providers with config_ref stripped.
+
+        AC-4.2.2: config_ref MUST never be exposed in API responses.
+        """
+        with tracer.start_as_current_span("ProviderService.list_providers"):
+            providers = await self._repository.list_all()
+            result = []
+            for p in providers:
+                d = p.model_dump()
+                d.pop("config_ref", None)
+                result.append(d)
+            return Ok(result)
+
     async def deactivate_provider(
         self,
         *,
