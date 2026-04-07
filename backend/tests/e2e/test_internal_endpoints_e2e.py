@@ -1,15 +1,19 @@
-"""E2E tests for internal endpoints: flow sync + webhook + reconciliation.
+"""E2E tests for internal endpoints: flow sync + webhook + reconciliation + identity resolution.
 
 Story 3.1 ACs:
   AC-3.1.4: /api/internal/ prefix bypasses JWT auth.
   AC-3.1.3: Webhook HMAC validation rejects unauthenticated requests.
 Story 3.4 ACs:
   AC-3.4.4: E2E regression — authenticated sync endpoint tests.
+Story 4.3 ACs:
+  AC-4.3.1: GET /api/internal/identity — identity resolution endpoint.
+  AC-4.3.4: Identity endpoint bypasses JWT auth.
 
 Internal endpoints do not use the 3-tier JWT auth model. Instead:
 - Flow sync: shared secret (X-Flow-Secret header)
 - Webhook: HMAC-SHA256 signature validation
 - Reconciliation: shared secret (X-Flow-Secret header)
+- Identity resolution: no auth required (internal-only)
 
 These tests validate behavior against a running backend without needing
 Descope credentials (internal endpoints bypass JWT).
@@ -233,3 +237,61 @@ class TestReconciliationEndpointE2E:
             assert "type" in body, "Error response must be RFC 9457 problem detail"
             assert "title" in body, "Error response must include 'title'"
             assert "detail" in body, "Error response must include 'detail'"
+
+
+# --- AC-4.3.1 / AC-4.3.4: Identity resolution endpoint ---
+
+
+class TestIdentityResolutionEndpoint:
+    """AC-4.3.1 + AC-4.3.4: Identity resolution endpoint bypasses JWT, validates params."""
+
+    def test_identity_endpoint_accessible_without_jwt(self, api_context: APIRequestContext, backend_url: str):
+        """GET /api/internal/identity does not require Authorization header.
+
+        Without query params, returns 422 (missing params) — NOT 401 from JWT.
+        This proves the internal prefix bypasses JWT auth (AC-4.3.4).
+        """
+        resp = api_context.get(f"{backend_url}/api/internal/identity")
+        # 422 (missing query params) proves JWT was bypassed
+        assert resp.status == 422, f"Expected 422 (missing params), got {resp.status}"
+
+    def test_identity_missing_sub_param(self, api_context: APIRequestContext, backend_url: str):
+        """Missing 'sub' query parameter → 422."""
+        resp = api_context.get(
+            f"{backend_url}/api/internal/identity",
+            params={"provider": "descope"},
+        )
+        assert resp.status == 422
+
+    def test_identity_missing_provider_param(self, api_context: APIRequestContext, backend_url: str):
+        """Missing 'provider' query parameter → 422."""
+        resp = api_context.get(
+            f"{backend_url}/api/internal/identity",
+            params={"sub": "ext-123"},
+        )
+        assert resp.status == 422
+
+    def test_identity_unknown_provider_returns_404(self, api_context: APIRequestContext, backend_url: str):
+        """Unknown provider name returns 404 (not 401 or 500)."""
+        resp = api_context.get(
+            f"{backend_url}/api/internal/identity",
+            params={"sub": "ext-123", "provider": f"nonexistent-{uuid.uuid4().hex[:8]}"},
+        )
+        assert resp.status == 404, f"Expected 404 for unknown provider, got {resp.status}"
+        body = resp.json()
+        # RFC 9457 problem detail
+        assert "type" in body
+        assert "title" in body
+        assert "detail" in body
+
+    def test_identity_unknown_sub_returns_404(self, api_context: APIRequestContext, backend_url: str):
+        """Unknown sub for existing provider returns 404.
+
+        Even if 'descope' provider exists, a non-existent sub should get 404.
+        If 'descope' provider doesn't exist either, also 404 — both are valid.
+        """
+        resp = api_context.get(
+            f"{backend_url}/api/internal/identity",
+            params={"sub": f"nonexistent-{uuid.uuid4().hex[:8]}", "provider": "descope"},
+        )
+        assert resp.status == 404, f"Expected 404 for unknown sub, got {resp.status}"
