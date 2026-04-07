@@ -30,7 +30,7 @@ from app.routers import (
     tenants,
     users,
 )
-from app.services.cache_invalidation import init_cache_publisher, shutdown_cache_publisher
+from app.services.cache_invalidation import init_cache_publisher, set_redis_client, shutdown_cache_publisher
 from app.services.descope import init_descope_client, shutdown_descope_client
 from app.telemetry import init_telemetry, shutdown_telemetry
 
@@ -89,11 +89,29 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("REDIS_URL not set — cache invalidation disabled")
     init_cache_publisher(redis_client=redis_client)
+    set_redis_client(redis_client)
+
+    # Start cache invalidation subscriber (AC-4.3.3) — background task
+    subscriber_task = None
+    if redis_client is not None:
+        from app.services.identity_resolution import run_cache_invalidation_subscriber
+
+        subscriber_task = asyncio.create_task(run_cache_invalidation_subscriber(redis_client))
 
     try:
         yield
     finally:
+        # Cancel cache invalidation subscriber before closing Redis
+        if subscriber_task is not None:
+            subscriber_task.cancel()
+            try:
+                await subscriber_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.warning("Cache invalidation subscriber shutdown error", exc_info=True)
         try:
+            set_redis_client(None)
             shutdown_cache_publisher()
         except Exception:
             logger.warning("Cache publisher shutdown failed", exc_info=True)

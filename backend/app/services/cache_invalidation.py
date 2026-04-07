@@ -131,3 +131,20 @@ def shutdown_cache_publisher() -> None:
     """Clear the singleton on shutdown."""
     global _publisher  # noqa: PLW0603
     _publisher = None
+
+
+# ---------------------------------------------------------------------------
+# Redis client singleton (shared between publisher and identity resolution)
+# ---------------------------------------------------------------------------
+_redis_client: Redis | None = None
+
+
+def get_redis_client() -> Redis | None:
+    """Return the shared Redis client, or None if not initialised."""
+    return _redis_client
+
+
+def set_redis_client(client: Redis | None) -> None:
+    """Store the shared Redis client during app lifespan."""
+    global _redis_client  # noqa: PLW0603
+    _redis_client = client

@@ -12,6 +12,7 @@ import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.identity.provider import Provider
 from app.models.identity.user import IdPLink
 from app.repositories.user import RepositoryConflictError
 
@@ -59,6 +60,19 @@ class IdPLinkRepository:
         except IntegrityError as exc:
             raise RepositoryConflictError(str(exc)) from exc
         return link
+
+    async def get_by_provider_name_and_sub(self, provider_name: str, external_sub: str) -> IdPLink | None:
+        """Fetch an IdP link by provider name and external subject (joins Provider table).
+
+        Returns None if no matching link is found.
+        """
+        stmt = (
+            sa.select(IdPLink)
+            .join(Provider, Provider.id == IdPLink.provider_id)
+            .where(Provider.name == provider_name, IdPLink.external_sub == external_sub)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
 
     async def get_by_user(self, user_id: uuid.UUID) -> list[IdPLink]:
         """Fetch all IdP links for a user."""
