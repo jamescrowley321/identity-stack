@@ -1,4 +1,4 @@
-"""Unit tests for the internal router (Story 3.1).
+"""Unit tests for the internal router (Story 3.1 + Story 4.3).
 
 Tests cover:
 - POST /api/internal/users/sync — flow connector endpoint (with shared secret)
@@ -7,6 +7,8 @@ Tests cover:
 - AC-3.1.4: Internal endpoints bypass JWT auth
 - Flow sync shared secret validation
 - Error handling via result_to_response
+- AC-4.3.1: GET /api/internal/identity — identity resolution endpoint
+- AC-4.3.4: Identity endpoint bypasses JWT auth
 """
 
 import hashlib
@@ -17,9 +19,10 @@ import pytest
 from expression import Error, Ok
 from httpx import ASGITransport, AsyncClient
 
-from app.dependencies.identity import get_inbound_sync_service
+from app.dependencies.identity import get_identity_resolution_service, get_inbound_sync_service
 from app.errors.identity import Conflict, NotFound, ValidationError
 from app.main import app
+from app.services.identity_resolution import IdentityResolutionService
 from app.services.inbound_sync import InboundSyncService
 
 
@@ -346,4 +349,123 @@ async def test_webhook_no_auth_required(mock_sync_service, client):
     )
 
     # 422 from missing header, NOT 401 from JWT middleware
+    assert response.status_code == 422
+
+
+# --- AC-4.3.1 / AC-4.3.4: Identity resolution endpoint ---
+
+
+@pytest.fixture
+def mock_resolution_service():
+    return AsyncMock(spec=IdentityResolutionService)
+
+
+@pytest.fixture(autouse=True)
+def _override_resolution_service(mock_resolution_service):
+    app.dependency_overrides[get_identity_resolution_service] = lambda: mock_resolution_service
+    yield
+    app.dependency_overrides.pop(get_identity_resolution_service, None)
+
+
+SAMPLE_IDENTITY_PAYLOAD = {
+    "user": {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "email": "alice@example.com",
+        "user_name": "alice",
+        "given_name": "Alice",
+        "family_name": "Smith",
+        "status": "active",
+    },
+    "roles": [{"tenant_id": "t-1", "role_name": "admin", "permissions": ["read:users"]}],
+    "tenant_memberships": [{"tenant_id": "t-1", "tenant_name": "Acme"}],
+    "linked_idps": [{"provider_name": "descope", "external_sub": "ext-123"}],
+}
+
+
+@pytest.mark.anyio
+async def test_identity_resolution_success(mock_resolution_service, client):
+    """AC-4.3.1: GET /api/internal/identity returns full identity payload."""
+    mock_resolution_service.resolve.return_value = Ok(SAMPLE_IDENTITY_PAYLOAD)
+
+    response = await client.get(
+        "/api/internal/identity",
+        params={"sub": "ext-123", "provider": "descope"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["user"]["email"] == "alice@example.com"
+    assert len(data["roles"]) == 1
+    assert data["roles"][0]["role_name"] == "admin"
+    mock_resolution_service.resolve.assert_awaited_once_with(provider="descope", sub="ext-123")
+
+
+@pytest.mark.anyio
+async def test_identity_resolution_provider_not_found(mock_resolution_service, client):
+    """Unknown provider returns 404."""
+    mock_resolution_service.resolve.return_value = Error(NotFound(message="Provider 'unknown' not found"))
+
+    response = await client.get(
+        "/api/internal/identity",
+        params={"sub": "ext-123", "provider": "unknown"},
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_identity_resolution_link_not_found(mock_resolution_service, client):
+    """No IdP link for sub+provider returns 404."""
+    mock_resolution_service.resolve.return_value = Error(
+        NotFound(message="No identity found for provider 'descope' with sub 'nonexistent'")
+    )
+
+    response = await client.get(
+        "/api/internal/identity",
+        params={"sub": "nonexistent", "provider": "descope"},
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_identity_resolution_missing_sub_param(client):
+    """Missing 'sub' query parameter → 422."""
+    response = await client.get(
+        "/api/internal/identity",
+        params={"provider": "descope"},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_identity_resolution_missing_provider_param(client):
+    """Missing 'provider' query parameter → 422."""
+    response = await client.get(
+        "/api/internal/identity",
+        params={"sub": "ext-123"},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_identity_resolution_missing_both_params(client):
+    """Missing both query parameters → 422."""
+    response = await client.get("/api/internal/identity")
+
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_identity_endpoint_bypasses_jwt(client):
+    """AC-4.3.4: /api/internal/identity bypasses JWT auth.
+
+    Without Authorization header, does NOT return 401 from JWT middleware.
+    Returns 422 (missing params) which proves JWT was bypassed.
+    """
+    response = await client.get("/api/internal/identity")
+
+    # 422 from missing query params, NOT 401 from JWT middleware
     assert response.status_code == 422
