@@ -98,6 +98,7 @@ fi
 
 # ── AC4: Invalid/expired JWT rejected with 401 ──
 header "AC4: Invalid JWT rejection"
+# nosemgrep: generic.secrets.security.detected-jwt-token.detected-jwt-token
 INVALID_JWT="eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0IiwiZXhwIjoxMDAwMDAwMDAwfQ.invalid-signature"
 INVALID_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
     -H "Authorization: Bearer ${INVALID_JWT}" \
