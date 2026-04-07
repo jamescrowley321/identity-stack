@@ -51,6 +51,19 @@ class UserRepository:
         """Fetch a user by primary key. Returns None if not found."""
         return await self._session.get(User, user_id)
 
+    async def get_for_tenant(self, user_id: uuid.UUID, tenant_id: uuid.UUID) -> User | None:
+        """Fetch a user by ID, scoped to a tenant via UserTenantRole.
+
+        Returns None if the user does not exist or has no role in the tenant.
+        """
+        stmt = (
+            sa.select(User)
+            .join(UserTenantRole, UserTenantRole.user_id == User.id)
+            .where(User.id == user_id, UserTenantRole.tenant_id == tenant_id)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def get_by_email(self, email: str) -> User | None:
         """Fetch a user by email address. Returns None if not found."""
         stmt = sa.select(User).where(User.email == email)

@@ -148,16 +148,27 @@ class TestGetUser:
     async def test_get_user_found(self):
         service, repo, _adapter = _build_service()
         user = _make_user()
-        repo.get.return_value = user
+        repo.get_for_tenant.return_value = user
 
         result = await service.get_user(tenant_id=TENANT_ID, user_id=user.id)
 
         assert result.is_ok()
         assert result.ok["email"] == user.email
+        repo.get_for_tenant.assert_awaited_once_with(user.id, TENANT_ID)
 
     async def test_get_user_not_found(self):
         service, repo, _adapter = _build_service()
-        repo.get.return_value = None
+        repo.get_for_tenant.return_value = None
+
+        result = await service.get_user(tenant_id=TENANT_ID, user_id=uuid.uuid4())
+
+        assert result.is_error()
+        assert isinstance(result.error, NotFound)
+
+    async def test_get_user_wrong_tenant_returns_not_found(self):
+        """User exists but has no role in the requested tenant — IDOR prevention."""
+        service, repo, _adapter = _build_service()
+        repo.get_for_tenant.return_value = None
 
         result = await service.get_user(tenant_id=TENANT_ID, user_id=uuid.uuid4())
 
@@ -170,7 +181,7 @@ class TestUpdateUser:
     async def test_update_user_success(self):
         service, repo, adapter = _build_service()
         user = _make_user()
-        repo.get.return_value = user
+        repo.get_for_tenant.return_value = user
         repo.get_by_email.return_value = None
         repo.update.return_value = user
         adapter.sync_user.return_value = Ok(None)
@@ -183,12 +194,13 @@ class TestUpdateUser:
         )
 
         assert result.is_ok()
+        repo.get_for_tenant.assert_awaited_once_with(user.id, TENANT_ID)
         repo.update.assert_awaited_once()
         repo.commit.assert_awaited_once()
 
     async def test_update_user_not_found(self):
         service, repo, _adapter = _build_service()
-        repo.get.return_value = None
+        repo.get_for_tenant.return_value = None
 
         result = await service.update_user(tenant_id=TENANT_ID, user_id=uuid.uuid4(), email="x@y.com")
 
@@ -199,7 +211,7 @@ class TestUpdateUser:
         service, repo, _adapter = _build_service()
         existing = _make_user(id=uuid.uuid4())
         target = _make_user(id=uuid.uuid4())
-        repo.get.return_value = target
+        repo.get_for_tenant.return_value = target
         repo.get_by_email.return_value = existing
 
         result = await service.update_user(
@@ -216,7 +228,7 @@ class TestUpdateUser:
         """Updating to the same email the user already has should not conflict."""
         service, repo, adapter = _build_service()
         user = _make_user()
-        repo.get.return_value = user
+        repo.get_for_tenant.return_value = user
         repo.get_by_email.return_value = user  # same user
         repo.update.return_value = user
         adapter.sync_user.return_value = Ok(None)
@@ -229,7 +241,7 @@ class TestUpdateUser:
         """TOCTOU race: email check passes but flush raises IntegrityError."""
         service, repo, _adapter = _build_service()
         user = _make_user()
-        repo.get.return_value = user
+        repo.get_for_tenant.return_value = user
         repo.get_by_email.return_value = None
         repo.update.side_effect = RepositoryConflictError("duplicate key")
 
@@ -243,6 +255,23 @@ class TestUpdateUser:
         assert isinstance(result.error, Conflict)
         assert "conflicts" in result.error.message
 
+    async def test_update_user_commit_failure_returns_error(self):
+        """commit() failure should return Error, not raise."""
+        service, repo, adapter = _build_service()
+        user = _make_user()
+        repo.get_for_tenant.return_value = user
+        repo.update.return_value = user
+        repo.commit.side_effect = Exception("connection lost")
+
+        result = await service.update_user(
+            tenant_id=TENANT_ID,
+            user_id=user.id,
+            given_name="Bob",
+        )
+
+        assert result.is_error()
+        assert "persist" in result.error.message.lower()
+
 
 @pytest.mark.anyio
 class TestDeactivateUser:
@@ -251,7 +280,7 @@ class TestDeactivateUser:
     async def test_deactivate_user_success(self):
         service, repo, adapter = _build_service()
         user = _make_user(status=UserStatus.active)
-        repo.get.return_value = user
+        repo.get_for_tenant.return_value = user
         repo.update.return_value = user
         adapter.sync_user.return_value = Ok(None)
 
@@ -259,12 +288,13 @@ class TestDeactivateUser:
 
         assert result.is_ok()
         assert user.status == UserStatus.inactive
+        repo.get_for_tenant.assert_awaited_once_with(user.id, TENANT_ID)
         repo.update.assert_awaited_once()
         repo.commit.assert_awaited_once()
 
     async def test_deactivate_user_not_found(self):
         service, repo, _adapter = _build_service()
-        repo.get.return_value = None
+        repo.get_for_tenant.return_value = None
 
         result = await service.deactivate_user(tenant_id=TENANT_ID, user_id=uuid.uuid4())
 
@@ -274,7 +304,7 @@ class TestDeactivateUser:
     async def test_deactivate_sync_failure_still_returns_ok(self):
         service, repo, adapter = _build_service()
         user = _make_user()
-        repo.get.return_value = user
+        repo.get_for_tenant.return_value = user
         repo.update.return_value = user
         adapter.sync_user.return_value = Error(SyncError(message="timeout", operation="sync_user"))
 
@@ -283,6 +313,18 @@ class TestDeactivateUser:
 
         assert result.is_ok()
         repo.commit.assert_awaited_once()
+
+    async def test_deactivate_conflict_returns_error(self):
+        """RepositoryConflictError during deactivate should return Error."""
+        service, repo, _adapter = _build_service()
+        user = _make_user()
+        repo.get_for_tenant.return_value = user
+        repo.update.side_effect = RepositoryConflictError("concurrent update")
+
+        result = await service.deactivate_user(tenant_id=TENANT_ID, user_id=user.id)
+
+        assert result.is_error()
+        assert isinstance(result.error, Conflict)
 
 
 @pytest.mark.anyio
