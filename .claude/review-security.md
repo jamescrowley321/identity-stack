@@ -4,42 +4,60 @@
 
 - none
 
-The prior review's BLOCK (unauthenticated flow sync endpoint) has been fully remediated. The flow sync endpoint at `backend/app/routers/internal.py:98` now requires an `X-Flow-Secret` header validated via `verify_flow_sync_secret` dependency (line 56-69) using `hmac.compare_digest()` for timing-safe comparison against `DESCOPE_FLOW_SYNC_SECRET`. Missing or invalid secrets return 401. The webhook endpoint retains HMAC-SHA256 validation. Both endpoints are protected.
-
 ### WARN (should fix)
 
-- **W1** [`backend/app/routers/internal.py:50`] `WebhookPayload.data` is an unvalidated `dict` with no schema enforcement. Webhook handlers extract fields via `.get()` with empty-string defaults (`inbound_sync.py:188-189,205,223,226-228,258`). A malformed payload that is missing expected fields silently returns `Ok({"status": "skipped"})` rather than an error, making production debugging difficult. If Descope changes its payload shape, the endpoint silently stops processing events with no alerting. Consider adding per-event-type Pydantic models or at minimum a structured warning log when required fields are absent for known event types.
+**From prior review (Story 3.1 — still open):**
 
-- **W2** [`backend/app/routers/internal.py:36-50`] No input length constraints on request model fields. `user_id` is a bare `str` with no `max_length`. `name`, `given_name`, `family_name` are similarly unconstrained. `WebhookPayload.data` is an unbounded `dict`. An attacker with the shared secret (or a compromised Descope instance) could submit arbitrarily large payloads that consume memory or fill database columns. The database columns use `sa.String` without length limits (`backend/app/models/identity/user.py:28-31`). Add `max_length` constraints on Pydantic fields (e.g., `user_id: str = Field(max_length=256)`) and consider a body size limit.
+- **W1** [`backend/app/routers/internal.py:50`] `WebhookPayload.data` is an unvalidated `dict` with no schema enforcement. Webhook handlers extract fields via `.get()` with empty-string defaults. A malformed payload silently returns `Ok({"status": "skipped"})` rather than an error, making production debugging difficult. If Descope changes its payload shape, the endpoint silently stops processing events with no alerting. Consider adding per-event-type Pydantic models or at minimum structured warning logs when required fields are absent for known event types.
 
-- **W3** [`backend/app/middleware/factory.py:79-80`] Gateway mode has no layered protection for internal endpoints. In gateway mode, `TokenValidationMiddleware` is not registered at all, so the `excluded_prefixes` mechanism is irrelevant. The flow sync shared secret and webhook HMAC still apply, which is correct. However, the comment at line 42-43 states "Network-level isolation or a shared gateway secret ensures only Tyk can reach the backend directly" -- until that network isolation is implemented, internal endpoints in gateway mode rely solely on the shared secrets with no additional defense. This should be documented as a deployment prerequisite and validated in gateway mode startup.
+- **W2** [`backend/app/routers/internal.py:36-50`] No input length constraints on request model fields. `user_id` is a bare `str` with no `max_length`. `name`, `given_name`, `family_name` are similarly unconstrained. `WebhookPayload.data` is an unbounded `dict`. An attacker with the shared secret could submit arbitrarily large payloads. Add `max_length` constraints on Pydantic fields and consider a body size limit.
 
-- **W4** [`backend/app/services/inbound_sync.py:110-112,151-153,245-247,284-286`] Commit failures return `Conflict` error type regardless of cause. The bare `except Exception` blocks around `commit()` catch all exceptions (including network errors, connection timeouts, etc.) and map them to `Conflict` error responses. A database connectivity failure should not be presented to callers as a conflict. This could mask operational issues and mislead debugging. Consider distinguishing between constraint violations and infrastructure failures.
+- **W3** [`backend/app/middleware/factory.py:79-80`] Gateway mode has no layered protection for internal endpoints. Until network-level isolation is implemented, internal endpoints in gateway mode rely solely on shared secrets with no additional defense. This should be documented as a deployment prerequisite.
 
-- **W5** [`backend/app/services/inbound_sync.py:223-225`] The `_handle_user_updated` webhook path reads `email` from the untyped webhook `data` dict and writes it directly to the user model without email format validation (unlike the flow sync path which uses Pydantic `EmailStr`). A webhook event with a malformed email value (e.g., empty string that passes the truthy check, or a string without `@`) would be persisted to the database. While SQLAlchemy parameterizes all values (no injection risk), this creates data quality degradation that could break downstream email-dependent logic. Consider validating webhook email values before assignment.
+- **W4** [`backend/app/services/inbound_sync.py:110-112,151-153`] Commit failures return `Conflict` error type regardless of cause. Bare `except Exception` blocks around `commit()` map all exceptions (including network errors, connection timeouts) to `Conflict` responses. A database connectivity failure should not be presented as a conflict.
+
+- **W5** [`backend/app/services/inbound_sync.py:223-225`] The `_handle_user_updated` webhook path reads `email` from the untyped webhook `data` dict and writes it directly to the user model without email format validation (unlike the flow sync path which uses Pydantic `EmailStr`). A malformed email value would be persisted to the database.
+
+**New findings — Story 3.3 (cache invalidation):**
+
+- **W6** [`backend/app/main.py:93-98`] Redis URL is consumed without scheme validation. `aioredis.from_url(redis_url)` accepts any URL scheme the `redis` library supports, including `unix://`. If `REDIS_URL` is misconfigured or injected (e.g., via a compromised secrets manager), the application will silently attempt to connect to a non-Redis endpoint. The graceful-degradation catch block swallows the error, which is intentional, but a badly formed URL pointing at an internal metadata endpoint (e.g., `http://169.254.169.254/...`) would cause a connection attempt to that host at startup without any scheme allowlist.
+  Mitigation: Validate `redis_url` scheme before calling `aioredis.from_url()` — e.g., assert scheme in `{"redis", "rediss"}`.
+
+- **W7** [`backend/app/services/cache_invalidation.py:267-275`] `get_cache_publisher()` has a singleton gap: if called before `init_cache_publisher()` (e.g., in tests that import the module without going through app lifespan), it returns a throwaway no-op `CacheInvalidationPublisher()` that is not stored in `_publisher`. A consumer that caches this returned reference before init completes will hold a permanently no-op publisher and silently miss all cache invalidation events after Redis connects. The security implication is that downstream caches may serve stale identity or permission data indefinitely with no indication of the misconfiguration.
+  Mitigation: Document init ordering requirement; add a warning log if `get_cache_publisher()` is called before `init_cache_publisher()`.
 
 ### INFO (acceptable risk)
 
-- **I1** PII handling in OTel traces is properly mitigated. The source code at `inbound_sync.py:27-29,66` uses `_hash_email(email)` (SHA-256 truncated to 12 hex chars) for the `user.email_hash` span attribute rather than raw email. The `descope.user_id` (an external IdP identifier, not PII by itself) is set as a span attribute, which is acceptable.
+- **I1** PII handling in OTel traces is properly mitigated. `inbound_sync.py` uses `_hash_email(email)` (SHA-256 truncated) for span attributes rather than raw email. UUIDs in span attributes are not PII.
 
-- **I2** PII in log messages is properly handled. Logger calls at `inbound_sync.py:114,156,249,288` include only `user.id` (a UUID, not PII). Skip-reason logs at lines `192,207-208,259-260` log `list(data.keys())` rather than raw data values, avoiding PII leakage from webhook payloads.
+- **I2** PII in log messages is properly handled. Logger calls include only `user.id` (a UUID). Skip-reason logs emit `list(data.keys())` rather than raw data values, avoiding PII leakage from webhook payloads.
 
-- **I3** HMAC implementation is cryptographically correct. `verify_hmac_signature` (`internal.py:75-92`) uses `hmac.new()` with SHA-256 and `hmac.compare_digest()` for timing-safe comparison. The secret is read once at import time (not per-request from env). Missing header returns 422 before HMAC logic executes.
+- **I3** HMAC implementation is cryptographically correct. `verify_hmac_signature` uses `hmac.new()` with SHA-256 and `hmac.compare_digest()` for timing-safe comparison. Secret read once at import time.
 
-- **I4** Flow sync shared secret implementation is correct. `verify_flow_sync_secret` (`internal.py:56-69`) uses `hmac.compare_digest()` for timing-safe string comparison. Empty/missing secret configuration is rejected at the dependency level with 401, and startup logs a warning (`main.py:41-42`).
+- **I4** Flow sync shared secret implementation is correct. `verify_flow_sync_secret` uses `hmac.compare_digest()` for timing-safe string comparison. Empty/missing secret configuration is rejected with 401.
 
-- **I5** Rate limiting is applied to both internal endpoints. Flow sync uses `@limiter.limit(RATE_LIMIT_AUTH)` at line 99 and webhook at line 123 (default: 10/minute). In standalone mode, SlowAPI middleware is active. The rate limit key falls back to client IP for unauthenticated requests.
+- **I5** Rate limiting is applied to both internal endpoints (default: 10/minute via `RATE_LIMIT_AUTH`). SlowAPI middleware is active in standalone mode.
 
-- **I6** `excluded_prefixes` implementation is not vulnerable to path traversal. `backend/app/middleware/auth.py:43` uses `str.startswith(tuple)`. Paths like `/api/internal/../protected` are normalized by ASGI servers before reaching the middleware.
+- **I6** `excluded_prefixes` implementation is not vulnerable to path traversal. Uses `str.startswith(tuple)`; ASGI servers normalize paths before middleware.
 
-- **I7** Fail-closed behavior on missing secrets. When `DESCOPE_WEBHOOK_SECRET` is empty/unset, the webhook endpoint rejects all requests with 401 (`internal.py:84-86`). Same for `DESCOPE_FLOW_SYNC_SECRET` (`internal.py:64-66`). Startup warnings at `main.py:39-42` alert operators.
+- **I7** Fail-closed behavior on missing secrets. When `DESCOPE_WEBHOOK_SECRET` or `DESCOPE_FLOW_SYNC_SECRET` is empty/unset, the respective endpoints reject all requests with 401.
 
-- **I8** No SQL injection risk. All data flows through SQLAlchemy ORM parameterized queries. User-supplied strings from request models and webhook data are used as ORM attribute assignments or `where()` clause parameters, both properly parameterized.
+- **I8** No SQL injection risk. All data flows through SQLAlchemy ORM parameterized queries.
 
-- **I9** Secrets loaded at import time (`internal.py:29-30`) are not reloadable without restart. Acceptable for current deployment model but worth noting for secret rotation procedures.
+- **I9** Secrets loaded at import time (`internal.py:29-30`) are not reloadable without restart. Acceptable for current deployment model.
 
-- **I10** IdPLinkRepository no longer calls `rollback()` on shared session. The actual source (`idp_link.py:42-47`) raises `RepositoryConflictError` on `IntegrityError` without rolling back, letting the service layer control transaction boundaries. This is correct.
+- **I10** Cache invalidation events contain no credentials or PII. Published events carry only UUIDs and enum-like strings. The `stats` dict in `publish_batch` contains only server-side integer counters — no user-supplied data flows into the Redis channel payload. A compromised Redis subscriber learns only that a mutation occurred on a given entity type/ID, not the content of the change.
+
+- **I11** Redis auth is configured in docker-compose. `REDIS_URL` includes password authentication; Redis port 6379 is bound to `127.0.0.1` only, limiting exposure to the Docker network. The default `changeme` password is documented as overridable via `REDIS_PASSWORD`.
+
+- **I12** Cache invalidation failure is genuinely fire-and-forget. All `publish()` and `publish_batch()` calls are wrapped in `try/except Exception`. Failures never propagate to the service layer and never roll back committed DB transactions. A Redis outage cannot cause data inconsistency in the canonical store.
+
+- **I13** No SSRF risk from Redis URL under normal operation. The URL is taken from a server-side environment variable, not from any user-supplied request parameter. (W6 above covers the env-injection edge case.)
+
+- **I14** `publish_batch` stats integrity. The `stats` dict is initialized with hardcoded string keys and integer zero values; only `+= 1` increments modify it before publication. No user-controlled data reaches the published stats payload.
+
+- **I15** `shutdown_cache_publisher()` correctly nulls the singleton before Redis client is closed (`main.py:87-89`). Subsequent calls to `get_cache_publisher()` after shutdown return a new no-op instance, preventing use-after-close of the Redis client.
 
 ### Summary
-- BLOCK: 0 | WARN: 5 | INFO: 10
+- BLOCK: 0 | WARN: 7 | INFO: 15
 - Overall: PASS
