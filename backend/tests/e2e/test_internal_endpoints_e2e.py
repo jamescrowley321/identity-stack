@@ -241,25 +241,31 @@ class TestReconciliationEndpointE2E:
 
 # --- AC-4.3.1 / AC-4.3.4: Identity resolution endpoint ---
 
+_IDENTITY_KEY = os.environ.get("INTERNAL_IDENTITY_KEY", "")
+
 
 class TestIdentityResolutionEndpoint:
-    """AC-4.3.1 + AC-4.3.4: Identity resolution endpoint bypasses JWT, validates params."""
+    """AC-4.3.1 + AC-4.3.4: Identity resolution requires shared-secret auth, bypasses JWT."""
 
-    def test_identity_endpoint_accessible_without_jwt(self, api_context: APIRequestContext, backend_url: str):
+    def _identity_headers(self) -> dict[str, str]:
+        return {"X-Identity-Key": _IDENTITY_KEY} if _IDENTITY_KEY else {}
+
+    def test_identity_endpoint_bypasses_jwt(self, api_context: APIRequestContext, backend_url: str):
         """GET /api/internal/identity does not require Authorization header.
 
-        Without query params, returns 422 (missing params) — NOT 401 from JWT.
+        Without X-Identity-Key, returns 422 (missing header) — NOT 401 from JWT.
         This proves the internal prefix bypasses JWT auth (AC-4.3.4).
         """
         resp = api_context.get(f"{backend_url}/api/internal/identity")
-        # 422 (missing query params) proves JWT was bypassed
-        assert resp.status == 422, f"Expected 422 (missing params), got {resp.status}"
+        # 422 (missing X-Identity-Key header) proves JWT was bypassed
+        assert resp.status == 422, f"Expected 422 (missing header), got {resp.status}"
 
     def test_identity_missing_sub_param(self, api_context: APIRequestContext, backend_url: str):
         """Missing 'sub' query parameter → 422."""
         resp = api_context.get(
             f"{backend_url}/api/internal/identity",
             params={"provider": "descope"},
+            headers=self._identity_headers(),
         )
         assert resp.status == 422
 
@@ -268,6 +274,7 @@ class TestIdentityResolutionEndpoint:
         resp = api_context.get(
             f"{backend_url}/api/internal/identity",
             params={"sub": "ext-123"},
+            headers=self._identity_headers(),
         )
         assert resp.status == 422
 
@@ -276,6 +283,7 @@ class TestIdentityResolutionEndpoint:
         resp = api_context.get(
             f"{backend_url}/api/internal/identity",
             params={"sub": "ext-123", "provider": f"nonexistent-{uuid.uuid4().hex[:8]}"},
+            headers=self._identity_headers(),
         )
         assert resp.status == 404, f"Expected 404 for unknown provider, got {resp.status}"
         body = resp.json()
@@ -293,5 +301,6 @@ class TestIdentityResolutionEndpoint:
         resp = api_context.get(
             f"{backend_url}/api/internal/identity",
             params={"sub": f"nonexistent-{uuid.uuid4().hex[:8]}", "provider": "descope"},
+            headers=self._identity_headers(),
         )
         assert resp.status == 404, f"Expected 404 for unknown sub, got {resp.status}"

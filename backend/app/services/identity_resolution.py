@@ -16,6 +16,7 @@ import logging
 import os
 import uuid
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from expression import Error, Ok, Result
 from opentelemetry import trace
@@ -34,7 +35,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
 
-IDENTITY_CACHE_TTL = int(os.getenv("IDENTITY_CACHE_TTL", "300"))
+try:
+    IDENTITY_CACHE_TTL = int(os.getenv("IDENTITY_CACHE_TTL", "300"))
+except (ValueError, TypeError):
+    logger.warning("Invalid IDENTITY_CACHE_TTL value, using default 300s")
+    IDENTITY_CACHE_TTL = 300
 
 
 class IdentityResolutionService:
@@ -62,6 +67,11 @@ class IdentityResolutionService:
         self._tenant_repository = tenant_repository
         self._redis = redis_client
 
+    @staticmethod
+    def _cache_key(provider: str, sub: str) -> str:
+        """Build a collision-safe cache key by URL-encoding dynamic parts."""
+        return f"identity:{quote(provider, safe='')}:{quote(sub, safe='')}"
+
     async def resolve(
         self,
         *,
@@ -77,7 +87,7 @@ class IdentityResolutionService:
             attributes={"identity.provider": provider, "identity.sub": sub},
         ):
             # Try cache first (AC-4.3.2)
-            cache_key = f"identity:{provider}:{sub}"
+            cache_key = self._cache_key(provider, sub)
             cached = await self._cache_get(cache_key)
             if cached is not None:
                 return Ok(cached)
@@ -191,12 +201,13 @@ class IdentityResolutionService:
             return
         try:
             serialized = json.dumps(payload)
-            pipe = self._redis.pipeline()
+            pipe = self._redis.pipeline(transaction=True)
             pipe.setex(key, IDENTITY_CACHE_TTL, serialized)
             # Reverse index: identity:user:{user_id} → set of cache keys
             reverse_key = f"identity:user:{user_id}"
             pipe.sadd(reverse_key, key)
-            pipe.expire(reverse_key, IDENTITY_CACHE_TTL)
+            # 2x TTL on reverse index to outlive the cache entries it tracks
+            pipe.expire(reverse_key, IDENTITY_CACHE_TTL * 2)
             # Master set for bulk invalidation
             pipe.sadd("identity:all-keys", key)
             await pipe.execute()
@@ -211,30 +222,47 @@ async def run_cache_invalidation_subscriber(redis_client: Redis) -> None:
     """Subscribe to ``identity:changes`` and invalidate relevant cache entries.
 
     Runs as a background asyncio task. Graceful shutdown via task cancellation.
+    Reconnects with exponential backoff on transient Redis errors.
     """
-    pubsub = redis_client.pubsub()
-    try:
-        await pubsub.subscribe("identity:changes")
-        logger.info("Cache invalidation subscriber started on identity:changes")
+    backoff = 1
+    max_backoff = 60
 
-        async for message in pubsub.listen():
-            if message["type"] != "message":
-                continue
-            try:
-                event = json.loads(message["data"])
-                await _handle_invalidation_event(redis_client, event)
-            except Exception:
-                logger.warning("Cache invalidation handler failed", exc_info=True)
-    except asyncio.CancelledError:
-        logger.info("Cache invalidation subscriber shutting down")
-    except Exception:
-        logger.warning("Cache invalidation subscriber error", exc_info=True)
-    finally:
+    while True:
+        pubsub = redis_client.pubsub()
         try:
-            await pubsub.unsubscribe("identity:changes")
-            await pubsub.aclose()
+            await pubsub.subscribe("identity:changes")
+            logger.info("Cache invalidation subscriber started on identity:changes")
+            backoff = 1  # reset on successful connection
+
+            async for message in pubsub.listen():
+                if message["type"] != "message":
+                    continue
+                try:
+                    event = json.loads(message["data"])
+                    await _handle_invalidation_event(redis_client, event)
+                except Exception:
+                    logger.warning("Cache invalidation handler failed", exc_info=True)
+        except asyncio.CancelledError:
+            logger.info("Cache invalidation subscriber shutting down")
+            try:
+                await pubsub.unsubscribe("identity:changes")
+                await pubsub.aclose()
+            except Exception:
+                logger.warning("Cache invalidation subscriber cleanup failed", exc_info=True)
+            return
         except Exception:
-            logger.warning("Cache invalidation subscriber cleanup failed", exc_info=True)
+            logger.warning(
+                "Cache invalidation subscriber error, reconnecting in %ds",
+                backoff,
+                exc_info=True,
+            )
+            try:
+                await pubsub.unsubscribe("identity:changes")
+                await pubsub.aclose()
+            except Exception:
+                logger.debug("Subscriber cleanup failed during reconnect", exc_info=True)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
 
 
 async def _handle_invalidation_event(redis_client: Redis, event: dict[str, Any]) -> None:
@@ -243,11 +271,18 @@ async def _handle_invalidation_event(redis_client: Redis, event: dict[str, Any])
     entity_id = event.get("entity_id", "")
 
     if entity_type == "user":
+        # Validate entity_id is a well-formed UUID
+        try:
+            uuid.UUID(entity_id)
+        except (ValueError, AttributeError):
+            logger.warning("Invalid entity_id in user invalidation event: %s", entity_id)
+            return
+
         # Delete all cache entries for this user via reverse index
         reverse_key = f"identity:user:{entity_id}"
         keys = await redis_client.smembers(reverse_key)
         if keys:
-            pipe = redis_client.pipeline()
+            pipe = redis_client.pipeline(transaction=True)
             for key in keys:
                 key_str = key.decode() if isinstance(key, bytes) else key
                 pipe.delete(key_str)
@@ -256,18 +291,26 @@ async def _handle_invalidation_event(redis_client: Redis, event: dict[str, Any])
             await pipe.execute()
             logger.debug("Invalidated %d cache entries for user %s", len(keys), entity_id)
     elif entity_type in ("role", "permission", "tenant", "batch"):
-        # Broad invalidation: delete all identity cache keys
+        # Broad invalidation: delete all identity cache keys + reverse indexes
         all_keys = await redis_client.smembers("identity:all-keys")
         if all_keys:
-            pipe = redis_client.pipeline()
+            pipe = redis_client.pipeline(transaction=True)
             for key in all_keys:
                 key_str = key.decode() if isinstance(key, bytes) else key
-                pipe.delete(key_str)
-                # Also delete any reverse index keys
-                if key_str.startswith("identity:user:"):
-                    continue
-                # Extract user reverse keys from the cache entries is complex,
-                # so just delete the master set — TTL will clean up orphaned reverse keys
+                # Only delete keys within the identity namespace
+                if key_str.startswith("identity:"):
+                    pipe.delete(key_str)
+            # Scan for reverse-index keys and delete them too
+            reverse_pattern = "identity:user:*"
+            cursor = 0
+            reverse_keys: list[str] = []
+            while True:
+                cursor, found = await redis_client.scan(cursor, match=reverse_pattern, count=100)
+                reverse_keys.extend(k.decode() if isinstance(k, bytes) else k for k in found)
+                if cursor == 0:
+                    break
+            for rk in reverse_keys:
+                pipe.delete(rk)
             pipe.delete("identity:all-keys")
             await pipe.execute()
             logger.debug("Broad invalidation: deleted %d cache entries for %s change", len(all_keys), entity_type)
