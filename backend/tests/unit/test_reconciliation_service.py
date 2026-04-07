@@ -11,6 +11,7 @@ Tests cover:
 """
 
 import uuid
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -28,6 +29,13 @@ from app.repositories.tenant import TenantRepository
 from app.repositories.user import RepositoryConflictError, UserRepository
 from app.services.descope import DescopeManagementClient
 from app.services.reconciliation import ReconciliationService
+
+
+@asynccontextmanager
+async def _noop_nested():
+    """Mock for session.begin_nested() — savepoint that lets exceptions propagate."""
+    yield
+
 
 PROVIDER_ID = uuid.uuid4()
 
@@ -85,6 +93,7 @@ def _make_permission(**overrides) -> Permission:
 
 def _build_service(
     session: AsyncMock | None = None,
+    acquire_lock: AsyncMock | None = None,
     descope_client: AsyncMock | None = None,
     user_repo: AsyncMock | None = None,
     role_repo: AsyncMock | None = None,
@@ -95,6 +104,9 @@ def _build_service(
 ) -> tuple[ReconciliationService, dict[str, AsyncMock]]:
     if session is None:
         session = AsyncMock()
+        session.begin_nested = _noop_nested
+    if acquire_lock is None:
+        acquire_lock = AsyncMock()
     if descope_client is None:
         descope_client = AsyncMock(spec=DescopeManagementClient)
     if user_repo is None:
@@ -112,6 +124,7 @@ def _build_service(
 
     service = ReconciliationService(
         session=session,
+        acquire_lock=acquire_lock,
         descope_client=descope_client,
         user_repository=user_repo,
         role_repository=role_repo,
@@ -122,6 +135,7 @@ def _build_service(
     )
     mocks = {
         "session": session,
+        "acquire_lock": acquire_lock,
         "descope": descope_client,
         "user_repo": user_repo,
         "role_repo": role_repo,
@@ -170,8 +184,8 @@ class TestRun:
 
     async def test_run_advisory_lock_failure_returns_error(self):
         """AC-3.2.2: Lock acquisition failure → ProviderError, no modifications."""
-        service, mocks = _build_service()
-        mocks["session"].execute.side_effect = RuntimeError("lock unavailable")
+        lock_fn = AsyncMock(side_effect=RuntimeError("lock unavailable"))
+        service, mocks = _build_service(acquire_lock=lock_fn)
 
         result = await service.run()
 
@@ -582,6 +596,25 @@ class TestReconcileUsers:
         assert result.is_ok()
         assert result.ok["stats"]["users_updated"] == 1
         assert existing.status == UserStatus.active
+
+    async def test_invited_user_mapped_to_provisioned(self):
+        """Descope invited → canonical provisioned (not inactive)."""
+        service, mocks = _build_service()
+        _empty_descope_state(mocks)
+        _empty_canonical_state(mocks)
+        new_user = _make_user(email="invite@example.com", status=UserStatus.provisioned)
+        mocks["user_repo"].create.return_value = new_user
+        mocks["descope"].search_all_users.return_value = [
+            {"userId": "ext-1", "email": "invite@example.com", "status": "invited"}
+        ]
+        mocks["user_repo"].list_all.return_value = []
+        mocks["link_repo"].get_by_provider_and_sub.return_value = None
+
+        result = await service.run()
+
+        assert result.is_ok()
+        created = mocks["user_repo"].create.call_args[0][0]
+        assert created.status == UserStatus.provisioned
 
     async def test_no_change_user_not_updated(self):
         service, mocks = _build_service()
