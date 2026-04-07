@@ -135,18 +135,17 @@ class TestDeactivateProvider:
         repo.commit.assert_awaited_once()
 
     async def test_deactivate_already_inactive_is_idempotent(self):
-        """Deactivating an already-inactive provider returns Ok (not an error)."""
+        """Deactivating an already-inactive provider short-circuits without writing."""
         service, repo = _build_service()
         provider = _make_provider(active=False)
         repo.get.return_value = provider
-        repo.update.return_value = provider
 
         result = await service.deactivate_provider(provider_id=provider.id)
 
         assert result.is_ok()
         assert provider.active is False
-        repo.update.assert_awaited_once()
-        repo.commit.assert_awaited_once()
+        repo.update.assert_not_awaited()
+        repo.commit.assert_not_awaited()
 
     async def test_deactivate_not_found(self):
         service, repo = _build_service()
@@ -157,6 +156,19 @@ class TestDeactivateProvider:
         assert result.is_error()
         assert isinstance(result.error, NotFound)
         repo.update.assert_not_awaited()
+
+    async def test_deactivate_conflict_returns_error(self):
+        """RepositoryConflictError on update is caught and returned as Conflict."""
+        service, repo = _build_service()
+        provider = _make_provider(active=True)
+        repo.get.return_value = provider
+        repo.update.side_effect = RepositoryConflictError("constraint violation")
+
+        result = await service.deactivate_provider(provider_id=provider.id)
+
+        assert result.is_error()
+        assert isinstance(result.error, Conflict)
+        repo.commit.assert_not_awaited()
 
 
 @pytest.mark.anyio
