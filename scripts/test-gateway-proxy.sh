@@ -9,6 +9,9 @@
 #
 set -euo pipefail
 
+# Ensure we run from the repo root (required for relative config file paths)
+cd "$(dirname "$0")/.."
+
 TYK_URL="${TYK_URL:-http://localhost:8080}"
 PASS=0
 FAIL=0
@@ -74,10 +77,10 @@ else
     fail "Tyk API definition file not found at tyk/apps/saas-backend.json"
 fi
 
-# Tyk automatically sets X-Forwarded-For and X-Real-IP for all proxied requests.
-# This is built-in gateway behavior, verified by config inspection.
-echo "  INFO: X-Forwarded-For, X-Forwarded-Proto, X-Real-IP are set by Tyk automatically"
-pass "Tyk proxy header behavior confirmed via configuration"
+# NOTE: X-Forwarded-For, X-Forwarded-Proto, X-Real-IP are set by Tyk's reverse proxy
+# layer automatically for all proxied requests. This is built-in behavior documented at
+# https://tyk.io/docs/. Runtime verification would require a backend debug/echo endpoint.
+echo "  INFO: X-Forwarded-For, X-Forwarded-Proto, X-Real-IP headers are set by Tyk automatically (built-in behavior, no runtime check available)"
 
 # ── AC3: Authorization header forwarded to backend ──
 # Config-based verification: Tyk's strip_auth_data=false ensures the original

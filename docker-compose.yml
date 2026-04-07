@@ -76,7 +76,7 @@ services:
       - TYK_GW_STORAGE_HOST=tyk-redis
       - TYK_GW_STORAGE_PORT=6379
       - TYK_GW_STORAGE_PASSWORD=${TYK_REDIS_PASSWORD:-changeme}
-      - DESCOPE_PROJECT_ID=${DESCOPE_PROJECT_ID}
+      - DESCOPE_PROJECT_ID=${DESCOPE_PROJECT_ID:?Set DESCOPE_PROJECT_ID in .env}
     depends_on:
       - tyk-redis
       - backend
