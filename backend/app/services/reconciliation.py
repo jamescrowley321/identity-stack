@@ -15,11 +15,10 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
 
-import sqlalchemy as sa
 from expression import Error, Ok, Result
 from opentelemetry import trace
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors.identity import IdentityError, ProviderError
 from app.models.identity.provider import ProviderType
@@ -34,24 +33,34 @@ from app.repositories.tenant import TenantRepository
 from app.repositories.user import RepositoryConflictError, UserRepository
 from app.services.descope import DescopeManagementClient
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
 
-# Postgres advisory lock ID for reconciliation (arbitrary constant)
-_RECONCILIATION_LOCK_ID = 73_82_69_67  # "RECON" in digits
+# Descope status → canonical UserStatus mapping
+_DESCOPE_STATUS_MAP: dict[str, UserStatus] = {
+    "enabled": UserStatus.active,
+    "disabled": UserStatus.inactive,
+    "invited": UserStatus.provisioned,
+}
 
 
 class ReconciliationService:
     """Domain service for drift detection and resolution between Postgres and Descope.
 
     Orchestrates repositories for canonical state and DescopeManagementClient for
-    Descope state. Contains NO direct SQLAlchemy imports (except for advisory lock).
+    Descope state. No direct SQLAlchemy imports — advisory lock injected via callable.
     """
 
     def __init__(
         self,
         *,
         session: AsyncSession,
+        acquire_lock: Callable[[], Coroutine[Any, Any, None]],
         descope_client: DescopeManagementClient,
         user_repository: UserRepository,
         role_repository: RoleRepository,
@@ -61,6 +70,7 @@ class ReconciliationService:
         provider_repository: ProviderRepository,
     ) -> None:
         self._session = session
+        self._acquire_lock = acquire_lock
         self._descope = descope_client
         self._user_repo = user_repository
         self._role_repo = role_repository
@@ -78,10 +88,7 @@ class ReconciliationService:
         with tracer.start_as_current_span("ReconciliationService.run") as span:
             # AC-3.2.2: Advisory lock — prevents concurrent reconciliation
             try:
-                await self._session.execute(
-                    sa.text("SELECT pg_advisory_xact_lock(:lock_id)"),
-                    {"lock_id": _RECONCILIATION_LOCK_ID},
-                )
+                await self._acquire_lock()
             except Exception as exc:
                 logger.error("Failed to acquire advisory lock: %s", exc)
                 return Error(ProviderError(message=f"Failed to acquire reconciliation lock: {exc}"))
@@ -139,6 +146,7 @@ class ReconciliationService:
                 await self._session.commit()
             except Exception as exc:
                 logger.error("Commit failed during reconciliation: %s", exc)
+                await self._session.rollback()
                 return Error(ProviderError(message=f"Failed to commit reconciliation: {exc}"))
 
             total_changes = sum(stats.values())
@@ -169,7 +177,8 @@ class ReconciliationService:
                 if existing is None:
                     tenant = Tenant(name=name, domains=domains, status=TenantStatus.active)
                     try:
-                        await self._tenant_repo.create(tenant)
+                        async with self._session.begin_nested():
+                            await self._tenant_repo.create(tenant)
                     except RepositoryConflictError:
                         logger.warning("Tenant '%s' conflict during reconciliation — skipping", name)
                         continue
@@ -177,13 +186,24 @@ class ReconciliationService:
                     logger.info("Reconciliation: created tenant '%s'", name)
                 else:
                     changed = False
+                    old_domains = list(existing.domains) if existing.domains else []
                     if existing.domains != domains:
                         existing.domains = domains
                         changed = True
                     if changed:
-                        await self._tenant_repo.update(existing)
+                        try:
+                            async with self._session.begin_nested():
+                                await self._tenant_repo.update(existing)
+                        except RepositoryConflictError:
+                            logger.warning("Tenant '%s' update conflict — skipping", name)
+                            continue
                         stats["tenants_updated"] += 1
-                        logger.info("Reconciliation: updated tenant '%s'", name)
+                        logger.info(
+                            "Reconciliation: updated tenant '%s' domains: %s → %s",
+                            name,
+                            old_domains,
+                            domains,
+                        )
 
             return Ok(None)
 
@@ -208,7 +228,8 @@ class ReconciliationService:
                 if existing is None:
                     perm = Permission(name=name, description=description)
                     try:
-                        await self._permission_repo.create(perm)
+                        async with self._session.begin_nested():
+                            await self._permission_repo.create(perm)
                     except RepositoryConflictError:
                         logger.warning("Permission '%s' conflict during reconciliation — skipping", name)
                         continue
@@ -216,13 +237,24 @@ class ReconciliationService:
                     logger.info("Reconciliation: created permission '%s'", name)
                 else:
                     changed = False
+                    old_description = existing.description
                     if existing.description != description:
                         existing.description = description
                         changed = True
                     if changed:
-                        await self._permission_repo.update(existing)
+                        try:
+                            async with self._session.begin_nested():
+                                await self._permission_repo.update(existing)
+                        except RepositoryConflictError:
+                            logger.warning("Permission '%s' update conflict — skipping", name)
+                            continue
                         stats["permissions_updated"] += 1
-                        logger.info("Reconciliation: updated permission '%s'", name)
+                        logger.info(
+                            "Reconciliation: updated permission '%s' description: '%s' → '%s'",
+                            name,
+                            old_description,
+                            description,
+                        )
 
             return Ok(None)
 
@@ -248,7 +280,8 @@ class ReconciliationService:
                 if existing is None:
                     role = Role(name=name, description=description, tenant_id=None)
                     try:
-                        await self._role_repo.create(role)
+                        async with self._session.begin_nested():
+                            await self._role_repo.create(role)
                     except RepositoryConflictError:
                         logger.warning("Role '%s' conflict during reconciliation — skipping", name)
                         continue
@@ -256,13 +289,24 @@ class ReconciliationService:
                     logger.info("Reconciliation: created role '%s'", name)
                 else:
                     changed = False
+                    old_description = existing.description
                     if existing.description != description:
                         existing.description = description
                         changed = True
                     if changed:
-                        await self._role_repo.update(existing)
+                        try:
+                            async with self._session.begin_nested():
+                                await self._role_repo.update(existing)
+                        except RepositoryConflictError:
+                            logger.warning("Role '%s' update conflict — skipping", name)
+                            continue
                         stats["roles_updated"] += 1
-                        logger.info("Reconciliation: updated role '%s'", name)
+                        logger.info(
+                            "Reconciliation: updated role '%s' description: '%s' → '%s'",
+                            name,
+                            old_description,
+                            description,
+                        )
 
             return Ok(None)
 
@@ -279,7 +323,10 @@ class ReconciliationService:
                 return Ok(None)
 
             canonical_users = await self._user_repo.list_all()
-            canonical_by_email = {u.email: u for u in canonical_users}
+            # Use setdefault to keep first entry for each email (avoid silent overwrite)
+            canonical_by_email: dict[str, User] = {}
+            for u in canonical_users:
+                canonical_by_email.setdefault(u.email, u)
 
             for du in descope_users:
                 email = du.get("email", "")
@@ -295,9 +342,9 @@ class ReconciliationService:
                     given_name = parts[0]
                     family_name = parts[1] if len(parts) > 1 else ""
 
-                # Map Descope status to canonical
+                # Map Descope status to canonical (invited → provisioned, not inactive)
                 descope_status = du.get("status", "enabled")
-                canonical_status = UserStatus.active if descope_status == "enabled" else UserStatus.inactive
+                canonical_status = _DESCOPE_STATUS_MAP.get(descope_status, UserStatus.inactive)
 
                 existing = canonical_by_email.get(email)
 
@@ -310,32 +357,34 @@ class ReconciliationService:
                         status=canonical_status,
                     )
                     try:
-                        user = await self._user_repo.create(user)
+                        async with self._session.begin_nested():
+                            user = await self._user_repo.create(user)
                     except RepositoryConflictError:
                         logger.warning("User '%s' conflict during reconciliation — skipping", email)
                         continue
                     stats["users_created"] += 1
-                    logger.info("Reconciliation: created user '%s'", email)
+                    logger.info("Reconciliation: created user '%s' (status=%s)", email, canonical_status.value)
                     existing = user
                 else:
-                    changed = False
+                    changes: list[str] = []
                     if given_name and existing.given_name != given_name:
+                        changes.append(f"given_name: '{existing.given_name}' → '{given_name}'")
                         existing.given_name = given_name
-                        changed = True
                     if family_name and existing.family_name != family_name:
+                        changes.append(f"family_name: '{existing.family_name}' → '{family_name}'")
                         existing.family_name = family_name
-                        changed = True
                     if existing.status != canonical_status:
+                        changes.append(f"status: '{existing.status.value}' → '{canonical_status.value}'")
                         existing.status = canonical_status
-                        changed = True
-                    if changed:
+                    if changes:
                         try:
-                            await self._user_repo.update(existing)
+                            async with self._session.begin_nested():
+                                await self._user_repo.update(existing)
                         except RepositoryConflictError:
                             logger.warning("User '%s' update conflict — skipping", email)
                             continue
                         stats["users_updated"] += 1
-                        logger.info("Reconciliation: updated user '%s'", email)
+                        logger.info("Reconciliation: updated user '%s': %s", email, ", ".join(changes))
 
                 # Ensure IdP link exists
                 existing_link = await self._link_repo.get_by_provider_and_sub(
@@ -349,7 +398,8 @@ class ReconciliationService:
                         external_email=email,
                     )
                     try:
-                        await self._link_repo.create(link)
+                        async with self._session.begin_nested():
+                            await self._link_repo.create(link)
                     except RepositoryConflictError:
                         logger.warning("IdP link conflict for user '%s' — skipping", email)
                         continue

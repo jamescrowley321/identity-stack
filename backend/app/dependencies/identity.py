@@ -10,6 +10,7 @@ AC-3.2.1: get_reconciliation_service() wires repositories + Descope client for r
 from __future__ import annotations
 
 from fastapi import Depends
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import get_async_session
@@ -28,6 +29,9 @@ from app.services.reconciliation import ReconciliationService
 from app.services.role import RoleService
 from app.services.tenant import TenantService
 from app.services.user import UserService
+
+# Postgres advisory lock ID for reconciliation (arbitrary constant)
+_RECONCILIATION_LOCK_ID = 73_82_69_67  # "RECON" in digits
 
 
 async def get_user_service(
@@ -118,7 +122,8 @@ async def get_reconciliation_service(
     """Build a ReconciliationService with all repositories and Descope client.
 
     AC-3.2.1: Wiring: AsyncSession -> all identity repositories + DescopeManagementClient
-               -> ReconciliationService(session, descope_client, repositories...)
+               -> ReconciliationService(session, acquire_lock, descope_client, repositories...)
+    Advisory lock callable injected here to keep SA imports out of the domain service.
     """
     user_repository = UserRepository(session)
     role_repository = RoleRepository(session)
@@ -126,8 +131,16 @@ async def get_reconciliation_service(
     tenant_repository = TenantRepository(session)
     idp_link_repository = IdPLinkRepository(session)
     provider_repository = ProviderRepository(session)
+
+    async def _acquire_lock() -> None:
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_id)"),
+            {"lock_id": _RECONCILIATION_LOCK_ID},
+        )
+
     return ReconciliationService(
         session=session,
+        acquire_lock=_acquire_lock,
         descope_client=get_descope_client(),
         user_repository=user_repository,
         role_repository=role_repository,
