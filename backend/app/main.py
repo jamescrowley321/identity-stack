@@ -45,6 +45,8 @@ def _warn_missing_secrets() -> None:
         logger.warning("DESCOPE_WEBHOOK_SECRET not set — webhook endpoint will reject all requests")
     if not os.getenv("DESCOPE_FLOW_SYNC_SECRET"):
         logger.warning("DESCOPE_FLOW_SYNC_SECRET not set — flow sync endpoint will reject all requests")
+    if not os.getenv("INTERNAL_IDENTITY_KEY"):
+        logger.warning("INTERNAL_IDENTITY_KEY not set — identity resolution endpoint will reject all requests")
 
 
 @asynccontextmanager

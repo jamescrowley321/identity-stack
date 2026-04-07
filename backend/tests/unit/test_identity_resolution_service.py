@@ -23,6 +23,7 @@ from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 from app.services.identity_resolution import (
+    IDENTITY_CACHE_TTL,
     IdentityResolutionService,
     _handle_invalidation_event,
     run_cache_invalidation_subscriber,
@@ -303,7 +304,9 @@ class TestRedisCache:
 
         assert result.is_ok()
         assert result.ok == cached_payload
-        redis.get.assert_awaited_once_with("identity:descope:ext-123")
+        # Cache key uses URL-encoding for dynamic parts
+        expected_key = IdentityResolutionService._cache_key("descope", "ext-123")
+        redis.get.assert_awaited_once_with(expected_key)
         # Should NOT have queried Postgres
         idp_link_repo.get_by_provider_name_and_sub.assert_not_awaited()
 
@@ -327,8 +330,11 @@ class TestRedisCache:
         result = await service.resolve(provider="descope", sub="ext-123")
 
         assert result.is_ok()
-        # Should have written to Redis pipeline
-        pipe.setex.assert_called_once()
+        # Should have created an atomic pipeline
+        redis.pipeline.assert_called_once_with(transaction=True)
+        # Should have written to Redis pipeline with correct TTL
+        expected_key = IdentityResolutionService._cache_key("descope", "ext-123")
+        pipe.setex.assert_called_once_with(expected_key, IDENTITY_CACHE_TTL, pipe.setex.call_args[0][2])
         pipe.sadd.assert_called()
         pipe.execute.assert_awaited_once()
 
@@ -387,6 +393,16 @@ class TestRedisCache:
         assert result.is_ok()
         idp_link_repo.get_by_provider_name_and_sub.assert_awaited_once()
 
+    async def test_cache_key_escapes_colons(self):
+        """Cache key URL-encodes dynamic parts to prevent key collision."""
+        # Two different (provider, sub) pairs that would collide without encoding
+        key1 = IdentityResolutionService._cache_key("a:b", "c")
+        key2 = IdentityResolutionService._cache_key("a", "b:c")
+        assert key1 != key2
+        # Colons in dynamic parts are encoded
+        assert "%3A" in key1
+        assert "%3A" in key2
+
 
 # --- AC-4.3.3: Cache invalidation subscriber ---
 
@@ -405,9 +421,20 @@ class TestHandleInvalidationEvent:
         await _handle_invalidation_event(redis, {"entity_type": "user", "entity_id": user_id})
 
         redis.smembers.assert_awaited_once_with(f"identity:user:{user_id}")
+        # Should use atomic pipeline
+        redis.pipeline.assert_called_once_with(transaction=True)
         # Should delete each cache key + remove from master set + delete reverse key
         assert pipe.delete.call_count >= 3  # 2 cache keys + 1 reverse key
         pipe.execute.assert_awaited_once()
+
+    async def test_user_event_rejects_invalid_entity_id(self):
+        """User event with non-UUID entity_id is rejected."""
+        redis, pipe = _make_redis_mock()
+
+        await _handle_invalidation_event(redis, {"entity_type": "user", "entity_id": "not-a-uuid"})
+
+        redis.smembers.assert_not_awaited()
+        redis.pipeline.assert_not_called()
 
     async def test_user_event_no_cache_keys_is_noop(self):
         """User change event with no cached entries does nothing."""
@@ -419,19 +446,26 @@ class TestHandleInvalidationEvent:
         redis.pipeline.assert_not_called()
 
     async def test_role_event_triggers_broad_invalidation(self):
-        """Role change event deletes all identity cache keys."""
+        """Role change event deletes all identity cache keys + reverse indexes."""
         redis, pipe = _make_redis_mock()
         all_keys = {b"identity:descope:ext-1", b"identity:google:goog-2"}
         redis.smembers.return_value = all_keys
+        # Mock scan to return reverse-index keys
+        redis.scan.return_value = (0, [b"identity:user:abc-123"])
 
         await _handle_invalidation_event(redis, {"entity_type": "role", "entity_id": str(uuid.uuid4())})
 
         redis.smembers.assert_awaited_once_with("identity:all-keys")
+        redis.pipeline.assert_called_once_with(transaction=True)
+        # Should delete cache keys + reverse-index keys + master set
+        # 2 cache keys + 1 reverse key + 1 master set = 4 deletes
+        assert pipe.delete.call_count >= 4
         pipe.execute.assert_awaited_once()
 
     async def test_permission_event_triggers_broad_invalidation(self):
         redis, pipe = _make_redis_mock()
         redis.smembers.return_value = {b"identity:descope:ext-1"}
+        redis.scan.return_value = (0, [])
 
         await _handle_invalidation_event(redis, {"entity_type": "permission", "entity_id": str(uuid.uuid4())})
 
@@ -440,6 +474,7 @@ class TestHandleInvalidationEvent:
     async def test_tenant_event_triggers_broad_invalidation(self):
         redis, pipe = _make_redis_mock()
         redis.smembers.return_value = {b"identity:descope:ext-1"}
+        redis.scan.return_value = (0, [])
 
         await _handle_invalidation_event(redis, {"entity_type": "tenant", "entity_id": str(uuid.uuid4())})
 
@@ -448,6 +483,7 @@ class TestHandleInvalidationEvent:
     async def test_batch_event_triggers_broad_invalidation(self):
         redis, pipe = _make_redis_mock()
         redis.smembers.return_value = {b"identity:descope:ext-1"}
+        redis.scan.return_value = (0, [])
 
         await _handle_invalidation_event(redis, {"entity_type": "batch", "entity_id": "reconciliation"})
 
@@ -496,7 +532,7 @@ class TestRunCacheInvalidationSubscriber:
         await task
 
         pubsub.subscribe.assert_awaited_once_with("identity:changes")
-        pubsub.unsubscribe.assert_awaited_once_with("identity:changes")
+        pubsub.unsubscribe.assert_awaited_with("identity:changes")
 
     async def test_subscriber_processes_valid_message(self):
         """Subscriber processes a valid identity:changes message."""

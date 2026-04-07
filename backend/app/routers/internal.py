@@ -29,6 +29,7 @@ router = APIRouter(tags=["Internal"])
 # Read secrets once at import time; validated at startup in lifespan.
 _FLOW_SYNC_SECRET = os.getenv("DESCOPE_FLOW_SYNC_SECRET", "")
 _WEBHOOK_SECRET = os.getenv("DESCOPE_WEBHOOK_SECRET", "")
+_IDENTITY_KEY = os.getenv("INTERNAL_IDENTITY_KEY", "")
 
 
 # --- Request models ---
@@ -68,6 +69,25 @@ async def verify_flow_sync_secret(
 
     if not hmac.compare_digest(_FLOW_SYNC_SECRET, x_flow_secret):
         raise HTTPException(status_code=401, detail="Invalid flow sync secret")
+
+
+# --- Auth dependency: shared secret for identity resolution ---
+
+
+async def verify_identity_key(
+    x_identity_key: str = Header(..., alias="X-Identity-Key"),
+) -> None:
+    """Validate shared secret on identity resolution requests.
+
+    Uses INTERNAL_IDENTITY_KEY env var with timing-safe comparison.
+    Missing/invalid key → 401.
+    """
+    if not _IDENTITY_KEY:
+        logger.error("INTERNAL_IDENTITY_KEY not configured — rejecting identity request")
+        raise HTTPException(status_code=401, detail="Identity key not configured")
+
+    if not hmac.compare_digest(_IDENTITY_KEY, x_identity_key):
+        raise HTTPException(status_code=401, detail="Invalid identity key")
 
 
 # --- Auth dependency: HMAC for webhooks ---
@@ -139,18 +159,18 @@ async def descope_webhook(
     return result_to_response(result, request)
 
 
-@router.get("/internal/identity")
+@router.get("/internal/identity", dependencies=[Depends(verify_identity_key)])
 @limiter.limit(RATE_LIMIT_AUTH)
 async def resolve_identity(
     request: Request,
-    sub: str = Query(..., description="External subject identifier from the IdP"),
-    provider: str = Query(..., description="Provider name (e.g. 'descope')"),
+    sub: str = Query(..., min_length=1, description="External subject identifier from the IdP"),
+    provider: str = Query(..., min_length=1, description="Provider name (e.g. 'descope')"),
     service: IdentityResolutionService = Depends(get_identity_resolution_service),
 ):
     """Resolve canonical identity from provider + external subject.
 
     AC-4.3.1: Internal-only endpoint for identity resolution.
-    AC-4.3.4: No JWT auth required (internal prefix excluded in middleware).
+    AC-4.3.4: Shared-secret auth via X-Identity-Key header (JWT excluded on internal prefix).
     """
     result = await service.resolve(provider=provider, sub=sub)
     return result_to_response(result, request)

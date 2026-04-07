@@ -67,6 +67,7 @@ SAMPLE_USER_DICT = {
 
 WEBHOOK_SECRET = "test-webhook-secret-key"
 FLOW_SECRET = "test-flow-sync-secret"
+IDENTITY_KEY = "test-identity-key"
 
 
 def _compute_hmac(body: bytes, secret: str = WEBHOOK_SECRET) -> str:
@@ -367,6 +368,15 @@ def _override_resolution_service(mock_resolution_service):
     app.dependency_overrides.pop(get_identity_resolution_service, None)
 
 
+@pytest.fixture(autouse=True)
+def _set_identity_key(monkeypatch):
+    """Set the INTERNAL_IDENTITY_KEY env var and patch the module-level variable."""
+    monkeypatch.setenv("INTERNAL_IDENTITY_KEY", IDENTITY_KEY)
+    import app.routers.internal as mod
+
+    monkeypatch.setattr(mod, "_IDENTITY_KEY", IDENTITY_KEY)
+
+
 SAMPLE_IDENTITY_PAYLOAD = {
     "user": {
         "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
@@ -390,6 +400,7 @@ async def test_identity_resolution_success(mock_resolution_service, client):
     response = await client.get(
         "/api/internal/identity",
         params={"sub": "ext-123", "provider": "descope"},
+        headers={"X-Identity-Key": IDENTITY_KEY},
     )
 
     assert response.status_code == 200
@@ -408,6 +419,7 @@ async def test_identity_resolution_provider_not_found(mock_resolution_service, c
     response = await client.get(
         "/api/internal/identity",
         params={"sub": "ext-123", "provider": "unknown"},
+        headers={"X-Identity-Key": IDENTITY_KEY},
     )
 
     assert response.status_code == 404
@@ -423,6 +435,7 @@ async def test_identity_resolution_link_not_found(mock_resolution_service, clien
     response = await client.get(
         "/api/internal/identity",
         params={"sub": "nonexistent", "provider": "descope"},
+        headers={"X-Identity-Key": IDENTITY_KEY},
     )
 
     assert response.status_code == 404
@@ -434,6 +447,7 @@ async def test_identity_resolution_missing_sub_param(client):
     response = await client.get(
         "/api/internal/identity",
         params={"provider": "descope"},
+        headers={"X-Identity-Key": IDENTITY_KEY},
     )
 
     assert response.status_code == 422
@@ -445,6 +459,7 @@ async def test_identity_resolution_missing_provider_param(client):
     response = await client.get(
         "/api/internal/identity",
         params={"sub": "ext-123"},
+        headers={"X-Identity-Key": IDENTITY_KEY},
     )
 
     assert response.status_code == 422
@@ -453,19 +468,64 @@ async def test_identity_resolution_missing_provider_param(client):
 @pytest.mark.anyio
 async def test_identity_resolution_missing_both_params(client):
     """Missing both query parameters → 422."""
-    response = await client.get("/api/internal/identity")
+    response = await client.get(
+        "/api/internal/identity",
+        headers={"X-Identity-Key": IDENTITY_KEY},
+    )
 
     assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_identity_missing_key_returns_422(client):
+    """Missing X-Identity-Key header → 422."""
+    response = await client.get(
+        "/api/internal/identity",
+        params={"sub": "ext-123", "provider": "descope"},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_identity_invalid_key_returns_401(client):
+    """Invalid X-Identity-Key → 401."""
+    response = await client.get(
+        "/api/internal/identity",
+        params={"sub": "ext-123", "provider": "descope"},
+        headers={"X-Identity-Key": "wrong-key"},
+    )
+
+    assert response.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_identity_unconfigured_key_returns_401(client, monkeypatch):
+    """Unconfigured INTERNAL_IDENTITY_KEY → 401."""
+    import app.routers.internal as mod
+
+    monkeypatch.setattr(mod, "_IDENTITY_KEY", "")
+
+    response = await client.get(
+        "/api/internal/identity",
+        params={"sub": "ext-123", "provider": "descope"},
+        headers={"X-Identity-Key": "any-key"},
+    )
+
+    assert response.status_code == 401
 
 
 @pytest.mark.anyio
 async def test_identity_endpoint_bypasses_jwt(client):
     """AC-4.3.4: /api/internal/identity bypasses JWT auth.
 
-    Without Authorization header, does NOT return 401 from JWT middleware.
+    Without Authorization header but with valid identity key, does NOT return 401 from JWT middleware.
     Returns 422 (missing params) which proves JWT was bypassed.
     """
-    response = await client.get("/api/internal/identity")
+    response = await client.get(
+        "/api/internal/identity",
+        headers={"X-Identity-Key": IDENTITY_KEY},
+    )
 
     # 422 from missing query params, NOT 401 from JWT middleware
     assert response.status_code == 422
