@@ -173,3 +173,4 @@ jobs:
         env:
           DESCOPE_PROJECT_ID: "test-project-id"
           POSTGRES_PASSWORD: "ci-build-only"
+          TYK_GATEWAY_SECRET: "ci-build-only"
