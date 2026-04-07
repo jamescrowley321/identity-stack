@@ -5,17 +5,27 @@ for backend proxy configuration with Descope JWT validation.
 """
 
 import json
+import re
+from functools import lru_cache
 from pathlib import Path
 
-# Repo root is two levels up from tests/unit/
+# Repo root: backend/tests/unit/ -> backend/tests/ -> backend/ -> repo root
 REPO_ROOT = Path(__file__).resolve().parents[2].parent
 TYK_APPS_DIR = REPO_ROOT / "tyk" / "apps"
 API_DEF_FILE = TYK_APPS_DIR / "saas-backend.json"
 
 
+@lru_cache(maxsize=1)
 def _load_api_def() -> dict:
-    """Load and parse saas-backend.json."""
+    """Load and parse saas-backend.json (cached for test session)."""
     return json.loads(API_DEF_FILE.read_text())
+
+
+def _find_provider_by_issuer_pattern(providers: list, pattern: str) -> dict:
+    """Find a provider whose issuer matches the given substring pattern."""
+    matches = [p for p in providers if pattern in p["issuer"]]
+    assert len(matches) == 1, f"Expected exactly one provider matching '{pattern}', found {len(matches)}"
+    return matches[0]
 
 
 class TestApiDefinitionJsonValidity:
@@ -75,7 +85,7 @@ class TestAC2DualIssuerOpenID:
     def test_enable_jwt_not_used(self):
         """ADR-GW-1: use_openid, NOT enable_jwt (single source only)."""
         api_def = _load_api_def()
-        assert "enable_jwt" not in api_def or api_def.get("enable_jwt") is not True
+        assert api_def.get("enable_jwt", False) is not True
 
     def test_two_providers(self):
         api_def = _load_api_def()
@@ -83,19 +93,17 @@ class TestAC2DualIssuerOpenID:
         assert len(providers) == 2
 
     def test_oidc_issuer_format(self):
-        """First provider: https://api.descope.com/{project_id}."""
+        """Provider exists: https://api.descope.com/{project_id} (non-v1/apps path)."""
         api_def = _load_api_def()
         providers = api_def["openid_options"]["providers"]
-        issuer = providers[0]["issuer"]
-        assert issuer.startswith("https://api.descope.com/")
-        assert "/v1/apps/" not in issuer
+        provider = _find_provider_by_issuer_pattern(providers, "api.descope.com/${DESCOPE_PROJECT_ID}")
+        assert "/v1/apps/" not in provider["issuer"]
 
     def test_session_token_issuer_format(self):
-        """Second provider: https://api.descope.com/v1/apps/{project_id}."""
+        """Provider exists: https://api.descope.com/v1/apps/{project_id}."""
         api_def = _load_api_def()
         providers = api_def["openid_options"]["providers"]
-        issuer = providers[1]["issuer"]
-        assert "https://api.descope.com/v1/apps/" in issuer
+        _find_provider_by_issuer_pattern(providers, "api.descope.com/v1/apps/")
 
     def test_providers_have_client_ids(self):
         api_def = _load_api_def()
@@ -156,14 +164,14 @@ class TestAC6DescopeProjectIdParameterized:
     def test_oidc_issuer_uses_placeholder(self):
         api_def = _load_api_def()
         providers = api_def["openid_options"]["providers"]
-        issuer = providers[0]["issuer"]
-        assert "${DESCOPE_PROJECT_ID}" in issuer
+        provider = _find_provider_by_issuer_pattern(providers, "api.descope.com/${DESCOPE_PROJECT_ID}")
+        assert "${DESCOPE_PROJECT_ID}" in provider["issuer"]
 
     def test_session_issuer_uses_placeholder(self):
         api_def = _load_api_def()
         providers = api_def["openid_options"]["providers"]
-        issuer = providers[1]["issuer"]
-        assert "${DESCOPE_PROJECT_ID}" in issuer
+        provider = _find_provider_by_issuer_pattern(providers, "/v1/apps/")
+        assert "${DESCOPE_PROJECT_ID}" in provider["issuer"]
 
     def test_client_ids_use_placeholder(self):
         api_def = _load_api_def()
@@ -175,8 +183,6 @@ class TestAC6DescopeProjectIdParameterized:
         """Ensure no real Descope project ID is hardcoded (format: P...)."""
         content = API_DEF_FILE.read_text()
         # DESCOPE_PROJECT_ID placeholders are expected; real IDs start with P and are 20+ chars
-        import re
-
         # Remove the placeholder references before checking
         cleaned = content.replace("${DESCOPE_PROJECT_ID}", "")
         # Real Descope project IDs are alphanumeric strings 20+ chars
