@@ -15,7 +15,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 
+from app.dependencies.identity import _RECONCILIATION_LOCK_ID
 from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.role import Permission, Role
 from app.models.identity.tenant import Tenant, TenantStatus
@@ -59,7 +61,10 @@ def _build_service(db_session, descope_client, publisher=None) -> Reconciliation
     """Build ReconciliationService wired to real repos and a mock Descope client."""
 
     async def acquire_lock():
-        await db_session.execute(__import__("sqlalchemy").text("SELECT pg_advisory_xact_lock(8675309)"))
+        await db_session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_id)"),
+            {"lock_id": _RECONCILIATION_LOCK_ID},
+        )
 
     return ReconciliationService(
         session=db_session,
@@ -249,7 +254,11 @@ async def test_idempotent_reconciliation(db_session, descope_provider):
     result1 = await svc.run()
     assert result1.is_ok()
     stats1 = result1.ok["stats"]
-    assert sum(stats1.values()) > 0
+    assert stats1["tenants_created"] == 1
+    assert stats1["permissions_created"] == 1
+    assert stats1["roles_created"] == 1
+    assert stats1["users_created"] == 1
+    assert stats1["links_created"] == 1
 
     # Second run with same data — zero changes
     client2 = _make_descope_client()
@@ -262,7 +271,8 @@ async def test_idempotent_reconciliation(db_session, descope_provider):
     result2 = await svc2.run()
     assert result2.is_ok()
     stats2 = result2.ok["stats"]
-    assert sum(stats2.values()) == 0, f"Expected zero changes on idempotent replay, got: {stats2}"
+    for key, val in stats2.items():
+        assert val == 0, f"Expected zero {key} on idempotent replay, got {val}"
 
 
 @pytest.mark.asyncio
@@ -274,7 +284,10 @@ async def test_advisory_lock_acquisition(db_session, descope_provider):
 
     async def tracking_lock():
         nonlocal lock_acquired
-        await db_session.execute(__import__("sqlalchemy").text("SELECT pg_advisory_xact_lock(8675309)"))
+        await db_session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_id)"),
+            {"lock_id": _RECONCILIATION_LOCK_ID},
+        )
         lock_acquired = True
 
     svc = ReconciliationService(

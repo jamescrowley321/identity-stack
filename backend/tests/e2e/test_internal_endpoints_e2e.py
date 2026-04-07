@@ -177,8 +177,9 @@ class TestFlowSyncWithSecret:
         body2 = resp2.json()
         assert body1.keys() == body2.keys(), "Replay must return same response shape"
 
-        # If both succeed, second call should return created=False (update, not duplicate)
+        # If both succeed, verify baseline and idempotency
         if resp1.status in (200, 201) and resp2.status in (200, 201):
+            assert body1["created"] is True, "First call should create user"
             assert body2["created"] is False, "Replay should update, not create duplicate"
 
 
@@ -200,7 +201,8 @@ class TestWebhookWithValidHmac:
                 "X-Descope-Webhook-S256": signature,
             },
         )
-        assert resp.status != 401, "Valid HMAC should pass auth"
+        # 200 proves HMAC accepted and event processed (not just "not 401")
+        assert resp.status == 200, f"Valid HMAC should return 200, got {resp.status}"
         body = resp.json()
         assert isinstance(body, dict)
 
@@ -229,3 +231,5 @@ class TestReconciliationEndpointE2E:
         else:
             # RFC 9457 problem detail
             assert "type" in body, "Error response must be RFC 9457 problem detail"
+            assert "title" in body, "Error response must include 'title'"
+            assert "detail" in body, "Error response must include 'detail'"
