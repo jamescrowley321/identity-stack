@@ -25,6 +25,19 @@ class IdPLinkRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
+    async def get(self, link_id: uuid.UUID) -> IdPLink | None:
+        """Fetch an IdP link by primary key. Returns None if not found."""
+        return await self._session.get(IdPLink, link_id)
+
+    async def delete(self, link_id: uuid.UUID) -> bool:
+        """Delete an IdP link by primary key. Returns True if deleted, False if not found."""
+        link = await self._session.get(IdPLink, link_id)
+        if link is None:
+            return False
+        await self._session.delete(link)
+        await self._session.flush()
+        return True
+
     async def get_by_provider_and_sub(self, provider_id: uuid.UUID, external_sub: str) -> IdPLink | None:
         """Fetch an IdP link by provider and external subject. Returns None if not found."""
         stmt = sa.select(IdPLink).where(
