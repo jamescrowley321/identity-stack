@@ -11,7 +11,6 @@ import json
 import uuid
 
 import pytest
-import pytest_asyncio
 
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.provider import ProviderType
@@ -30,13 +29,18 @@ from app.services.provider import ProviderService
 from app.services.user import UserService
 
 # ──────────────────────────────────────────────
-# Fixtures
+# Helpers
 # ──────────────────────────────────────────────
 
 
-@pytest_asyncio.fixture(loop_scope="session")
-async def seed_data(db_session):
-    """Seed a tenant, role, and permission for lifecycle tests."""
+async def _delete_cache_key(redis_client, cache_key: str) -> None:
+    """Delete a cache key using the provided Redis client."""
+    if redis_client is not None:
+        await redis_client.delete(cache_key)
+
+
+async def _create_seed_data(db_session) -> dict:
+    """Create a tenant and role for a single test. Called per-test to avoid scope issues."""
     suffix = uuid.uuid4().hex[:8]
 
     tenant = Tenant(name=f"multi-idp-tenant-{suffix}", domains=[f"{suffix}.test"])
@@ -48,6 +52,11 @@ async def seed_data(db_session):
     await db_session.flush()
 
     return {"tenant": tenant, "role": role}
+
+
+# ──────────────────────────────────────────────
+# Fixtures
+# ──────────────────────────────────────────────
 
 
 @pytest.fixture
@@ -113,9 +122,9 @@ async def test_full_multi_idp_lifecycle(
     idp_link_service,
     identity_resolution_service,
     redis_client,
-    seed_data,
 ):
     """Full lifecycle: provider → user → IdP link → resolve → cache → invalidate."""
+    seed_data = await _create_seed_data(db_session)
     tenant = seed_data["tenant"]
     role = seed_data["role"]
     suffix = uuid.uuid4().hex[:8]
@@ -219,9 +228,9 @@ async def test_duplicate_idp_link_returns_conflict(
     user_service,
     provider_service,
     idp_link_service,
-    seed_data,
 ):
     """Creating a duplicate IdP link (same user + provider) returns Conflict."""
+    seed_data = await _create_seed_data(db_session)
     tenant = seed_data["tenant"]
     suffix = uuid.uuid4().hex[:8]
 
@@ -267,9 +276,10 @@ async def test_delete_idp_link_clears_resolution(
     provider_service,
     idp_link_service,
     identity_resolution_service,
-    seed_data,
+    redis_client,
 ):
     """After deleting an IdP link, identity resolution returns NotFound."""
+    seed_data = await _create_seed_data(db_session)
     tenant = seed_data["tenant"]
     suffix = uuid.uuid4().hex[:8]
 
@@ -303,7 +313,7 @@ async def test_delete_idp_link_clears_resolution(
     from urllib.parse import quote
 
     cache_key = f"identity:{quote(f'del-test-{suffix}', safe='')}:{quote(f'ext-del-{suffix}', safe='')}"
-    await redis_client_or_skip(identity_resolution_service, cache_key)
+    await _delete_cache_key(redis_client, cache_key)
 
     # Re-resolve — link no longer exists, should return NotFound
     result = await identity_resolution_service.resolve(provider=f"del-test-{suffix}", sub=f"ext-del-{suffix}")
@@ -318,9 +328,9 @@ async def test_resolve_without_redis_graceful_degradation(
     provider_service,
     idp_link_service,
     identity_resolution_service_no_redis,
-    seed_data,
 ):
     """Identity resolution works without Redis (graceful degradation)."""
+    seed_data = await _create_seed_data(db_session)
     tenant = seed_data["tenant"]
     role = seed_data["role"]
     suffix = uuid.uuid4().hex[:8]
@@ -391,9 +401,9 @@ async def test_broad_cache_invalidation_clears_all(
     idp_link_service,
     identity_resolution_service,
     redis_client,
-    seed_data,
 ):
     """Broad invalidation (role change) clears all identity cache entries."""
+    seed_data = await _create_seed_data(db_session)
     tenant = seed_data["tenant"]
     role = seed_data["role"]
     suffix = uuid.uuid4().hex[:8]
@@ -437,9 +447,3 @@ async def test_broad_cache_invalidation_clears_all(
 
     # Cache should be cleared
     assert await redis_client.get(cache_key) is None
-
-
-async def redis_client_or_skip(service, cache_key):
-    """Helper: clear cache entry if service has Redis, otherwise pass."""
-    if service._redis is not None:
-        await service._redis.delete(cache_key)
