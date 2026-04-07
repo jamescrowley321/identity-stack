@@ -457,3 +457,19 @@ class TestProcessWebhookEvent:
 
         assert result.is_error()
         assert isinstance(result.error, Conflict)
+
+    async def test_user_deleted_conflict_returns_error(self):
+        """user.deleted raising conflict on update → Conflict error."""
+        service, user_repo, link_repo, provider_repo = _build_service()
+        provider_repo.get_by_type.return_value = _make_provider()
+        link_repo.get_by_provider_and_sub.return_value = _make_link()
+        user_repo.get.return_value = _make_user(status=UserStatus.active)
+        user_repo.update.side_effect = RepositoryConflictError("constraint")
+
+        result = await service.process_webhook_event(
+            event_type="user.deleted",
+            data={"user_id": "descope-user-123"},
+        )
+
+        assert result.is_error()
+        assert isinstance(result.error, Conflict)

@@ -7,6 +7,7 @@ All methods return Result[T, IdentityError]. OTel spans on every method.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 
 from expression import Error, Ok, Result
@@ -21,6 +22,11 @@ from app.repositories.user import RepositoryConflictError, UserRepository
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
+
+
+def _hash_email(email: str) -> str:
+    """One-way hash for OTel span attributes — avoids PII in traces."""
+    return hashlib.sha256(email.encode()).hexdigest()[:12]
 
 
 class InboundSyncService:
@@ -57,7 +63,7 @@ class InboundSyncService:
         """
         with tracer.start_as_current_span("InboundSyncService.sync_user_from_flow") as span:
             span.set_attribute("descope.user_id", user_id)
-            span.set_attribute("user.email", email)
+            span.set_attribute("user.email_hash", _hash_email(email))
 
             if not email:
                 return Error(ValidationError(message="Email is required for flow sync"))
@@ -99,8 +105,13 @@ class InboundSyncService:
                 except RepositoryConflictError:
                     return Error(Conflict(message=f"Email '{email}' conflicts with another user"))
 
-                await self._user_repo.commit()
-                logger.info("Flow sync: updated existing user %s (email=%s)", existing_user.id, email)
+                try:
+                    await self._user_repo.commit()
+                except Exception:
+                    logger.exception("Commit failed during flow sync update")
+                    return Error(Conflict(message="Failed to persist user update"))
+
+                logger.info("Flow sync: updated existing user %s", existing_user.id)
                 return Ok({"user": existing_user.model_dump(), "created": False})
 
             # Check for existing user by email (upsert)
@@ -135,9 +146,14 @@ class InboundSyncService:
             except RepositoryConflictError:
                 return Error(Conflict(message="IdP link already exists for provider/subject"))
 
-            await self._user_repo.commit()
+            try:
+                await self._user_repo.commit()
+            except Exception:
+                logger.exception("Commit failed during flow sync create/link")
+                return Error(Conflict(message="Failed to persist user and link"))
+
             action = "created" if created else "linked"
-            logger.info("Flow sync: %s user %s (email=%s)", action, existing_user.id, email)
+            logger.info("Flow sync: %s user %s", action, existing_user.id)
             return Ok({"user": existing_user.model_dump(), "created": created})
 
     async def process_webhook_event(
@@ -173,7 +189,7 @@ class InboundSyncService:
         external_sub = data.get("user_id", "")
 
         if not email or not external_sub:
-            logger.warning("user.created webhook missing email or user_id: %s", data)
+            logger.warning("user.created webhook missing email or user_id, keys=%s", list(data.keys()))
             return Ok({"status": "skipped", "reason": "missing required fields"})
 
         return await self.sync_user_from_flow(
@@ -188,7 +204,7 @@ class InboundSyncService:
         """Handle user.updated webhook — update user fields if linked."""
         external_sub = data.get("user_id", "")
         if not external_sub:
-            logger.warning("user.updated webhook missing user_id: %s", data)
+            logger.warning("user.updated webhook missing user_id, keys=%s", list(data.keys()))
             return Ok({"status": "skipped", "reason": "missing user_id"})
 
         provider = await self._provider_repo.get_by_type(ProviderType.descope)
@@ -224,7 +240,12 @@ class InboundSyncService:
         except RepositoryConflictError:
             return Error(Conflict(message="User update conflicts with existing data"))
 
-        await self._user_repo.commit()
+        try:
+            await self._user_repo.commit()
+        except Exception:
+            logger.exception("Commit failed during user.updated webhook")
+            return Error(Conflict(message="Failed to persist user update"))
+
         logger.info("Webhook: updated user %s from user.updated event", user.id)
         return Ok({"user": user.model_dump(), "created": False})
 
@@ -236,7 +257,7 @@ class InboundSyncService:
         """
         external_sub = data.get("user_id", "")
         if not external_sub:
-            logger.warning("user.deleted webhook missing user_id: %s", data)
+            logger.warning("user.deleted webhook missing user_id, keys=%s", list(data.keys()))
             return Ok({"status": "skipped", "reason": "missing user_id"})
 
         provider = await self._provider_repo.get_by_type(ProviderType.descope)
@@ -253,7 +274,16 @@ class InboundSyncService:
             return Error(NotFound(message="Linked user not found"))
 
         user.status = UserStatus.inactive
-        await self._user_repo.update(user)
-        await self._user_repo.commit()
+        try:
+            await self._user_repo.update(user)
+        except RepositoryConflictError:
+            return Error(Conflict(message="User deactivation conflicts with existing data"))
+
+        try:
+            await self._user_repo.commit()
+        except Exception:
+            logger.exception("Commit failed during user.deleted webhook")
+            return Error(Conflict(message="Failed to persist user deactivation"))
+
         logger.info("Webhook: deactivated user %s from user.deleted event", user.id)
         return Ok({"status": "deactivated", "user_id": str(user.id)})

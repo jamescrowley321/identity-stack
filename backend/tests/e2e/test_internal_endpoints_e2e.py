@@ -30,18 +30,21 @@ class TestInternalEndpointAuthBypass:
     def test_flow_sync_accessible_without_jwt(self, api_context: APIRequestContext, backend_url: str):
         """POST /api/internal/users/sync does not require Authorization header.
 
-        Without a provider row in DB, service returns a non-401 error.
-        The important assertion: it does NOT return 401 (JWT rejection).
+        Without X-Flow-Secret header, returns 422 (missing header) — NOT 401 from JWT.
+        This proves the internal prefix bypasses JWT auth.
         """
         resp = api_context.post(
             f"{backend_url}/api/internal/users/sync",
-            data={
-                "user_id": f"e2e-test-{uuid.uuid4().hex[:8]}",
-                "email": f"e2e-{uuid.uuid4().hex[:8]}@test.example.com",
-            },
+            data=json.dumps(
+                {
+                    "user_id": f"e2e-test-{uuid.uuid4().hex[:8]}",
+                    "email": f"e2e-{uuid.uuid4().hex[:8]}@test.example.com",
+                }
+            ),
+            headers={"Content-Type": "application/json"},
         )
-        # Must NOT be 401 — internal endpoints bypass JWT
-        assert resp.status != 401, "Internal endpoint should bypass JWT auth"
+        # 422 (missing X-Flow-Secret header) proves JWT was bypassed
+        assert resp.status == 422, f"Expected 422 (missing header), got {resp.status}"
 
     def test_webhook_accessible_without_jwt(self, api_context: APIRequestContext, backend_url: str):
         """POST /api/internal/webhooks/descope does not return JWT 401.
@@ -50,10 +53,11 @@ class TestInternalEndpointAuthBypass:
         """
         resp = api_context.post(
             f"{backend_url}/api/internal/webhooks/descope",
-            data={"event_type": "user.created", "data": {}},
+            data=json.dumps({"event_type": "user.created", "data": {}}),
+            headers={"Content-Type": "application/json"},
         )
-        # 422 (missing HMAC header) is expected, NOT 401 from JWT middleware
-        assert resp.status != 401 or "webhook" in resp.text().lower(), "Internal endpoint should bypass JWT auth"
+        # 422 (missing HMAC header) proves JWT was bypassed
+        assert resp.status == 422, f"Expected 422 (missing HMAC header), got {resp.status}"
 
 
 class TestWebhookHmacValidation:

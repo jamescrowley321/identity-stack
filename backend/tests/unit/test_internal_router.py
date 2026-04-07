@@ -1,10 +1,11 @@
 """Unit tests for the internal router (Story 3.1).
 
 Tests cover:
-- POST /api/internal/users/sync — flow connector endpoint
+- POST /api/internal/users/sync — flow connector endpoint (with shared secret)
 - POST /api/internal/webhooks/descope — webhook endpoint with HMAC
 - AC-3.1.3: HMAC validation (valid, invalid, missing secret)
 - AC-3.1.4: Internal endpoints bypass JWT auth
+- Flow sync shared secret validation
 - Error handling via result_to_response
 """
 
@@ -62,6 +63,7 @@ SAMPLE_USER_DICT = {
 }
 
 WEBHOOK_SECRET = "test-webhook-secret-key"
+FLOW_SECRET = "test-flow-sync-secret"
 
 
 def _compute_hmac(body: bytes, secret: str = WEBHOOK_SECRET) -> str:
@@ -72,21 +74,91 @@ def _compute_hmac(body: bytes, secret: str = WEBHOOK_SECRET) -> str:
 
 
 @pytest.mark.anyio
-async def test_flow_sync_no_auth_required(mock_sync_service, client):
-    """Internal endpoints excluded from JWT — no Authorization header needed."""
-    mock_sync_service.sync_user_from_flow.return_value = Ok({"user": SAMPLE_USER_DICT, "created": True})
+@patch.dict("os.environ", {"DESCOPE_FLOW_SYNC_SECRET": FLOW_SECRET})
+async def test_flow_sync_no_jwt_required(mock_sync_service, client):
+    """Internal endpoints excluded from JWT — needs X-Flow-Secret, not Authorization."""
+    # Reload module-level secret
+    import app.routers.internal as mod
 
+    mod._FLOW_SYNC_SECRET = FLOW_SECRET
+    try:
+        mock_sync_service.sync_user_from_flow.return_value = Ok({"user": SAMPLE_USER_DICT, "created": True})
+
+        response = await client.post(
+            "/api/internal/users/sync",
+            json={"user_id": "ext-1", "email": "alice@example.com"},
+            headers={"X-Flow-Secret": FLOW_SECRET},
+        )
+
+        # Should NOT get 401 from JWT middleware — internal endpoints bypass JWT auth
+        assert response.status_code == 201
+        mock_sync_service.sync_user_from_flow.assert_awaited_once()
+    finally:
+        mod._FLOW_SYNC_SECRET = ""
+
+
+# --- Flow sync shared secret validation ---
+
+
+@pytest.mark.anyio
+async def test_flow_sync_missing_secret_header_returns_422(client):
+    """Missing X-Flow-Secret header → 422 (FastAPI header validation)."""
     response = await client.post(
         "/api/internal/users/sync",
         json={"user_id": "ext-1", "email": "alice@example.com"},
     )
 
-    # Should NOT get 401 — internal endpoints bypass JWT auth
-    assert response.status_code == 201
-    mock_sync_service.sync_user_from_flow.assert_awaited_once()
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_flow_sync_invalid_secret_returns_401(client):
+    """Invalid X-Flow-Secret → 401."""
+    import app.routers.internal as mod
+
+    mod._FLOW_SYNC_SECRET = FLOW_SECRET
+    try:
+        response = await client.post(
+            "/api/internal/users/sync",
+            json={"user_id": "ext-1", "email": "alice@example.com"},
+            headers={"X-Flow-Secret": "wrong-secret"},
+        )
+
+        assert response.status_code == 401
+    finally:
+        mod._FLOW_SYNC_SECRET = ""
+
+
+@pytest.mark.anyio
+async def test_flow_sync_unconfigured_secret_returns_401(client):
+    """DESCOPE_FLOW_SYNC_SECRET empty → 401."""
+    import app.routers.internal as mod
+
+    mod._FLOW_SYNC_SECRET = ""
+
+    response = await client.post(
+        "/api/internal/users/sync",
+        json={"user_id": "ext-1", "email": "alice@example.com"},
+        headers={"X-Flow-Secret": "any-value"},
+    )
+
+    assert response.status_code == 401
 
 
 # --- AC-3.1.1: Flow sync endpoint ---
+
+
+def _flow_sync_headers():
+    return {"X-Flow-Secret": FLOW_SECRET}
+
+
+@pytest.fixture(autouse=True)
+def _set_flow_secret():
+    import app.routers.internal as mod
+
+    mod._FLOW_SYNC_SECRET = FLOW_SECRET
+    yield
+    mod._FLOW_SYNC_SECRET = ""
 
 
 @pytest.mark.anyio
@@ -96,6 +168,7 @@ async def test_flow_sync_new_user_returns_201(mock_sync_service, client):
     response = await client.post(
         "/api/internal/users/sync",
         json={"user_id": "ext-1", "email": "alice@example.com", "name": "Alice Smith"},
+        headers=_flow_sync_headers(),
     )
 
     assert response.status_code == 201
@@ -111,6 +184,7 @@ async def test_flow_sync_existing_user_returns_200(mock_sync_service, client):
     response = await client.post(
         "/api/internal/users/sync",
         json={"user_id": "ext-1", "email": "alice@example.com"},
+        headers=_flow_sync_headers(),
     )
 
     assert response.status_code == 200
@@ -123,6 +197,7 @@ async def test_flow_sync_conflict_returns_409(mock_sync_service, client):
     response = await client.post(
         "/api/internal/users/sync",
         json={"user_id": "ext-1", "email": "dup@example.com"},
+        headers=_flow_sync_headers(),
     )
 
     assert response.status_code == 409
@@ -137,6 +212,7 @@ async def test_flow_sync_not_found_returns_404(mock_sync_service, client):
     response = await client.post(
         "/api/internal/users/sync",
         json={"user_id": "ext-1", "email": "a@b.com"},
+        headers=_flow_sync_headers(),
     )
 
     assert response.status_code == 404
@@ -149,6 +225,7 @@ async def test_flow_sync_validation_error_returns_422(mock_sync_service, client)
     response = await client.post(
         "/api/internal/users/sync",
         json={"user_id": "ext-1", "email": "a@b.com"},
+        headers=_flow_sync_headers(),
     )
 
     assert response.status_code == 422
@@ -160,6 +237,7 @@ async def test_flow_sync_missing_required_field_returns_422(client):
     response = await client.post(
         "/api/internal/users/sync",
         json={"user_id": "ext-1"},
+        headers=_flow_sync_headers(),
     )
 
     assert response.status_code == 422
@@ -171,6 +249,7 @@ async def test_flow_sync_invalid_email_returns_422(client):
     response = await client.post(
         "/api/internal/users/sync",
         json={"user_id": "ext-1", "email": "not-an-email"},
+        headers=_flow_sync_headers(),
     )
 
     assert response.status_code == 422
@@ -180,43 +259,53 @@ async def test_flow_sync_invalid_email_returns_422(client):
 
 
 @pytest.mark.anyio
-@patch.dict("os.environ", {"DESCOPE_WEBHOOK_SECRET": WEBHOOK_SECRET})
 async def test_webhook_valid_hmac(mock_sync_service, client):
     """Valid HMAC signature → request processed."""
-    mock_sync_service.process_webhook_event.return_value = Ok({"status": "ignored", "event_type": "tenant.created"})
+    import app.routers.internal as mod
 
-    import json
+    mod._WEBHOOK_SECRET = WEBHOOK_SECRET
+    try:
+        mock_sync_service.process_webhook_event.return_value = Ok({"status": "ignored", "event_type": "tenant.created"})
 
-    body_bytes = json.dumps({"event_type": "tenant.created", "data": {}}).encode()
-    sig = _compute_hmac(body_bytes)
+        import json
 
-    response = await client.post(
-        "/api/internal/webhooks/descope",
-        content=body_bytes,
-        headers={
-            "Content-Type": "application/json",
-            "X-Descope-Webhook-S256": sig,
-        },
-    )
+        body_bytes = json.dumps({"event_type": "tenant.created", "data": {}}).encode()
+        sig = _compute_hmac(body_bytes)
 
-    assert response.status_code == 200
-    mock_sync_service.process_webhook_event.assert_awaited_once()
+        response = await client.post(
+            "/api/internal/webhooks/descope",
+            content=body_bytes,
+            headers={
+                "Content-Type": "application/json",
+                "X-Descope-Webhook-S256": sig,
+            },
+        )
+
+        assert response.status_code == 200
+        mock_sync_service.process_webhook_event.assert_awaited_once()
+    finally:
+        mod._WEBHOOK_SECRET = ""
 
 
 # --- AC-3.1.3: HMAC validation ---
 
 
 @pytest.mark.anyio
-@patch.dict("os.environ", {"DESCOPE_WEBHOOK_SECRET": WEBHOOK_SECRET})
 async def test_webhook_invalid_hmac_returns_401(client):
     """Invalid HMAC signature → 401."""
-    response = await client.post(
-        "/api/internal/webhooks/descope",
-        json={"event_type": "user.created", "data": {}},
-        headers={"X-Descope-Webhook-S256": "badbadbadbad"},
-    )
+    import app.routers.internal as mod
 
-    assert response.status_code == 401
+    mod._WEBHOOK_SECRET = WEBHOOK_SECRET
+    try:
+        response = await client.post(
+            "/api/internal/webhooks/descope",
+            json={"event_type": "user.created", "data": {}},
+            headers={"X-Descope-Webhook-S256": "badbadbadbad"},
+        )
+
+        assert response.status_code == 401
+    finally:
+        mod._WEBHOOK_SECRET = ""
 
 
 @pytest.mark.anyio
@@ -231,9 +320,12 @@ async def test_webhook_missing_hmac_header_returns_422(client):
 
 
 @pytest.mark.anyio
-@patch.dict("os.environ", {"DESCOPE_WEBHOOK_SECRET": ""}, clear=False)
 async def test_webhook_missing_secret_returns_401(client):
     """DESCOPE_WEBHOOK_SECRET empty → 401 (secret not configured)."""
+    import app.routers.internal as mod
+
+    mod._WEBHOOK_SECRET = ""
+
     response = await client.post(
         "/api/internal/webhooks/descope",
         json={"event_type": "user.created", "data": {}},

@@ -32,9 +32,20 @@ from app.telemetry import init_telemetry, shutdown_telemetry
 logger = logging.getLogger(__name__)
 
 
+def _warn_missing_secrets() -> None:
+    """Log warnings for internal endpoint secrets missing at startup."""
+    import os
+
+    if not os.getenv("DESCOPE_WEBHOOK_SECRET"):
+        logger.warning("DESCOPE_WEBHOOK_SECRET not set — webhook endpoint will reject all requests")
+    if not os.getenv("DESCOPE_FLOW_SYNC_SECRET"):
+        logger.warning("DESCOPE_FLOW_SYNC_SECRET not set — flow sync endpoint will reject all requests")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
+    _warn_missing_secrets()
     engine = get_engine()
 
     # Verify database connectivity before accepting requests
