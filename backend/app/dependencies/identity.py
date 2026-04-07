@@ -6,6 +6,7 @@ with DescopeSyncAdapter wrapping the singleton DescopeManagementClient.
 AC-3.1.1: get_inbound_sync_service() wires repositories for inbound sync.
 AC-3.2.1: get_reconciliation_service() wires repositories + Descope client for reconciliation.
 AC-4.1.3: get_idp_link_service(), get_provider_service() for IdP link/provider domain services.
+AC-4.3.1: get_identity_resolution_service() for identity resolution with Redis cache.
 """
 
 from __future__ import annotations
@@ -23,8 +24,9 @@ from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 from app.services.adapters.descope import DescopeSyncAdapter
-from app.services.cache_invalidation import get_cache_publisher
+from app.services.cache_invalidation import get_cache_publisher, get_redis_client
 from app.services.descope import get_descope_client
+from app.services.identity_resolution import IdentityResolutionService
 from app.services.idp_link import IdPLinkService
 from app.services.inbound_sync import InboundSyncService
 from app.services.permission import PermissionService
@@ -191,3 +193,29 @@ async def get_provider_service(
     """
     repository = ProviderRepository(session)
     return ProviderService(repository=repository)
+
+
+async def get_identity_resolution_service(
+    session: AsyncSession = Depends(get_async_session),
+) -> IdentityResolutionService:
+    """Build an IdentityResolutionService with its repositories and Redis client.
+
+    AC-4.3.1: Wiring: AsyncSession -> UserRepository + IdPLinkRepository + ProviderRepository
+               + UserTenantRoleRepository + RoleRepository + TenantRepository
+               + optional Redis client -> IdentityResolutionService
+    """
+    user_repository = UserRepository(session)
+    idp_link_repository = IdPLinkRepository(session)
+    provider_repository = ProviderRepository(session)
+    assignment_repository = UserTenantRoleRepository(session)
+    role_repository = RoleRepository(session)
+    tenant_repository = TenantRepository(session)
+    return IdentityResolutionService(
+        user_repository=user_repository,
+        idp_link_repository=idp_link_repository,
+        provider_repository=provider_repository,
+        assignment_repository=assignment_repository,
+        role_repository=role_repository,
+        tenant_repository=tenant_repository,
+        redis_client=get_redis_client(),
+    )

@@ -13,12 +13,13 @@ import hmac
 import logging
 import os
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, EmailStr
 
-from app.dependencies.identity import get_inbound_sync_service
+from app.dependencies.identity import get_identity_resolution_service, get_inbound_sync_service
 from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
+from app.services.identity_resolution import IdentityResolutionService
 from app.services.inbound_sync import InboundSyncService
 
 logger = logging.getLogger(__name__)
@@ -135,4 +136,21 @@ async def descope_webhook(
         event_type=body.event_type,
         data=body.data,
     )
+    return result_to_response(result, request)
+
+
+@router.get("/internal/identity")
+@limiter.limit(RATE_LIMIT_AUTH)
+async def resolve_identity(
+    request: Request,
+    sub: str = Query(..., description="External subject identifier from the IdP"),
+    provider: str = Query(..., description="Provider name (e.g. 'descope')"),
+    service: IdentityResolutionService = Depends(get_identity_resolution_service),
+):
+    """Resolve canonical identity from provider + external subject.
+
+    AC-4.3.1: Internal-only endpoint for identity resolution.
+    AC-4.3.4: No JWT auth required (internal prefix excluded in middleware).
+    """
+    result = await service.resolve(provider=provider, sub=sub)
     return result_to_response(result, request)

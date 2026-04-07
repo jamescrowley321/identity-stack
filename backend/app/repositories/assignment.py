@@ -54,6 +54,16 @@ class UserTenantRoleRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_by_user(self, user_id: uuid.UUID) -> list[UserTenantRole]:
+        """List all role assignments for a user across all tenants."""
+        stmt = (
+            sa.select(UserTenantRole)
+            .where(UserTenantRole.user_id == user_id)
+            .order_by(UserTenantRole.tenant_id, UserTenantRole.assigned_at.desc())
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def delete(self, user_id: uuid.UUID, tenant_id: uuid.UUID, role_id: uuid.UUID) -> bool:
         """Delete a role assignment. Returns True if deleted, False if not found."""
         stmt = sa.delete(UserTenantRole).where(
