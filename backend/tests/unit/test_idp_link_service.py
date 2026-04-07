@@ -185,23 +185,44 @@ class TestDeleteIdPLink:
 
     async def test_delete_success(self):
         service, repo, _user_repo, _provider_repo = _build_service()
+        user_id = uuid.uuid4()
         link_id = uuid.uuid4()
+        link = _make_idp_link(id=link_id, user_id=user_id)
+        repo.get.return_value = link
         repo.delete.return_value = True
 
-        result = await service.delete_idp_link(link_id=link_id)
+        result = await service.delete_idp_link(link_id=link_id, user_id=user_id)
 
         assert result.is_ok()
         assert result.ok["status"] == "deleted"
         assert result.ok["link_id"] == str(link_id)
+        repo.get.assert_awaited_once_with(link_id)
         repo.delete.assert_awaited_once_with(link_id)
         repo.commit.assert_awaited_once()
 
     async def test_delete_not_found(self):
         service, repo, _user_repo, _provider_repo = _build_service()
-        repo.delete.return_value = False
+        repo.get.return_value = None
 
-        result = await service.delete_idp_link(link_id=uuid.uuid4())
+        result = await service.delete_idp_link(link_id=uuid.uuid4(), user_id=uuid.uuid4())
 
         assert result.is_error()
         assert isinstance(result.error, NotFound)
+        repo.delete.assert_not_awaited()
+        repo.commit.assert_not_awaited()
+
+    async def test_delete_wrong_user(self):
+        """IDOR guard: delete scoped to owning user."""
+        service, repo, _user_repo, _provider_repo = _build_service()
+        owner_id = uuid.uuid4()
+        other_user_id = uuid.uuid4()
+        link_id = uuid.uuid4()
+        link = _make_idp_link(id=link_id, user_id=owner_id)
+        repo.get.return_value = link
+
+        result = await service.delete_idp_link(link_id=link_id, user_id=other_user_id)
+
+        assert result.is_error()
+        assert isinstance(result.error, NotFound)
+        repo.delete.assert_not_awaited()
         repo.commit.assert_not_awaited()

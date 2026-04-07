@@ -24,7 +24,7 @@ class RegisterProviderRequest(BaseModel):
 
 
 class DeactivateProviderRequest(BaseModel):
-    active: bool = False
+    active: bool
 
 
 def _parse_uuid(value: str, field_name: str) -> uuid.UUID:
@@ -37,8 +37,7 @@ def _parse_uuid(value: str, field_name: str) -> uuid.UUID:
 
 def _strip_config_ref(d: dict) -> dict:
     """Remove config_ref from a provider dict before returning to the client."""
-    d.pop("config_ref", None)
-    return d
+    return {k: v for k, v in d.items() if k != "config_ref"}
 
 
 @router.get("/providers")

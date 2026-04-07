@@ -103,18 +103,21 @@ class IdPLinkService:
         self,
         *,
         link_id: uuid.UUID,
+        user_id: uuid.UUID,
     ) -> Result[dict, IdentityError]:
-        """Delete an IdP link by ID.
+        """Delete an IdP link by ID, scoped to the owning user.
 
-        AC-4.1.1: returns NotFound if link does not exist.
+        AC-4.1.1: returns NotFound if link does not exist or belongs to another user.
         """
         with tracer.start_as_current_span("IdPLinkService.delete_idp_link") as span:
             span.set_attribute("link.id", str(link_id))
+            span.set_attribute("user.id", str(user_id))
 
-            deleted = await self._repository.delete(link_id)
-            if not deleted:
-                return Error(NotFound(message=f"IdP link '{link_id}' not found"))
+            link = await self._repository.get(link_id)
+            if link is None or link.user_id != user_id:
+                return Error(NotFound(message=f"IdP link '{link_id}' not found for user '{user_id}'"))
 
+            await self._repository.delete(link_id)
             await self._repository.commit()
 
             return Ok({"status": "deleted", "link_id": str(link_id)})
