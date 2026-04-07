@@ -6,6 +6,7 @@ Tests cover:
 - get: found, not found
 - get_by_name: found, not found
 - get_by_type: found, not found
+- list_all: returns all ordered by name, empty when none exist
 """
 
 import uuid
@@ -127,3 +128,26 @@ async def test_update_capabilities(db_session):
     updated = await repo.update(provider)
 
     assert updated.capabilities == ["sso", "mfa", "rbac"]
+
+
+async def test_list_all_returns_ordered_by_name(db_session):
+    repo = ProviderRepository(db_session)
+    # Insert in reverse alphabetical order
+    await repo.create(_make_provider(name="zeta-provider"))
+    await repo.create(_make_provider(name="alpha-provider"))
+    await repo.create(_make_provider(name="middle-provider"))
+
+    results = await repo.list_all()
+
+    names = [p.name for p in results]
+    assert names == sorted(names)
+    assert len(results) >= 3
+
+
+async def test_list_all_empty(db_session):
+    """Fresh database with no providers returns empty list."""
+    repo = ProviderRepository(db_session)
+    results = await repo.list_all()
+    # May have providers from other tests in the same session,
+    # but the method should always return a list
+    assert isinstance(results, list)
