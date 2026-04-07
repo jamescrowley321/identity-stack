@@ -24,10 +24,14 @@ class ProviderRepository:
         self._session = session
 
     async def get_by_type(self, provider_type: ProviderType) -> Provider | None:
-        """Fetch a provider by type. Returns None if not found."""
+        """Fetch a provider by type. Returns the first match or None.
+
+        Uses scalars().first() rather than scalar_one_or_none() to avoid
+        MultipleResultsFound if duplicate providers exist for a type.
+        """
         stmt = sa.select(Provider).where(Provider.type == provider_type)
         result = await self._session.execute(stmt)
-        return result.scalar_one_or_none()
+        return result.scalars().first()
 
     async def get_by_name(self, name: str) -> Provider | None:
         """Fetch a provider by name. Returns None if not found."""

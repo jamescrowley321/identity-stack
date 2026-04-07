@@ -2,39 +2,32 @@
 
 ### BLOCK (must fix before merge)
 
-None.
-
----
+- [CONFIRMED] `backend/app/routers/internal.py:75` + `backend/app/middleware/factory.py:74-76` — Flow sync endpoint (`POST /api/internal/users/sync`) has zero authentication: no JWT, no HMAC, no API key, no shared secret.
+  Attack scenario: An attacker who can reach the backend (any service on the Docker network, any localhost process, or the backend if port 8000 is exposed in production) sends `POST /api/internal/users/sync` with `{"user_id": "attacker-sub", "email": "victim@corp.com"}`. This creates a canonical user or hijacks an existing one by linking an attacker-controlled Descope identity to the victim's email. On subsequent legitimate syncs for that email, the existing user is found by email and a second IdP link is created, or the attacker's link is already present. The attacker can then trigger updates to the victim's profile via the same unauthenticated endpoint.
+  Impact: User account takeover / identity impersonation. An attacker can inject arbitrary user records and link them to any external identity, or modify existing users' emails and names. The comment says "network-level isolation" but the docker-compose.yml shows the backend on a shared Docker network with no ingress restrictions. In production, without a reverse proxy rule explicitly blocking `/api/internal/`, this endpoint is internet-facing.
 
 ### WARN (should fix)
 
-- [LIKELY] `backend/app/services/adapters/descope.py:171` — `sync_role_assignment` passes `role_id` (a canonical UUID) as the `roleNames` value to Descope's Management API, but Descope's `/v1/mgmt/user/update/role/add` endpoint expects role *names* (strings like `"admin"`), not internal UUIDs.
+- [LIKELY] `backend/app/routers/internal.py:75` — No rate limiting on flow sync endpoint.
+  Every other write endpoint in the codebase uses `@limiter.limit(RATE_LIMIT_AUTH)`. The internal endpoints have no rate limit at all, and since they also bypass JWT auth, the rate limiter's `get_rate_limit_key` will fall back to IP address. Without rate limiting, an attacker (or a misconfigured Descope flow) can flood the endpoint and create unbounded user rows.
+  Mitigation: Add `@limiter.limit(RATE_LIMIT_AUTH)` (or a custom internal limit) to both internal endpoints.
 
-  The docstring acknowledges this: *"Requires data dict with role_name for the Descope API call. Falls back to using role_id as string if role_name not provided."* The implementation only does the fallback — it never actually receives or uses a role name because the `sync_role_assignment` interface takes no `data` parameter.
+- [LIKELY] `backend/app/services/inbound_sync.py:176,191,239` — Webhook data dict logged at WARNING level when fields are missing (`logger.warning("user.created webhook missing email or user_id: %s", data)`). The `data` dict is an untyped `dict` from the webhook payload and could contain PII (email, name, phone) or unexpected fields. Logging the entire dict to application logs risks PII exposure in log aggregators.
+  Mitigation: Log only the keys present in `data` or specific non-sensitive identifiers, not the full dict. E.g., `logger.warning("user.created webhook missing email or user_id, keys=%s", list(data.keys()))`.
 
-  **Impact:** Every `assign_role_to_user` call will silently fail at the Descope sync step (the call will 4xx because a UUID is not a valid Descope role name). The canonical DB is updated, but Descope is never updated correctly. Since sync failures are swallowed and `Ok(...)` is returned, this creates a persistent divergence: the canonical store says the user has the role; Descope does not; JWT tokens issued by Descope will not carry the expected role claims, breaking `require_role()` enforcement for newly assigned roles.
-
-  **Mitigation:** Add a `data: dict` parameter to `sync_role_assignment` matching the pattern used by `sync_role`, `sync_permission`, and `sync_tenant`. Pass `{"role_name": role.name}` from `RoleService.assign_role_to_user` after fetching the role object (which is already fetched at line 805 of the diff). The existing `assign_roles` router endpoint in `roles.py` correctly passes role names — the adapter should mirror that contract.
-
----
+- [UNLIKELY] `backend/app/services/inbound_sync.py:59-60` — OTel span attributes include `user.email` in plaintext (`span.set_attribute("user.email", email)`). If OTel traces are exported to a shared dashboard (the docker-compose Aspire dashboard uses `Unsecured` auth mode), email addresses are visible to anyone who can access the dashboard.
+  Mitigation: Hash or omit the email from span attributes. Use `span.set_attribute("user.email_domain", email.split("@")[1])` if domain-level tracing suffices.
 
 ### INFO (acceptable risk)
 
-- `backend/app/services/role.py`, `permission.py`, `tenant.py` — Sync failures are intentionally swallowed (log at WARNING, return `Ok`). Acceptable architectural decision for write-through with tolerated divergence, provided the sync path sends correct data. See WARN above for the one case where it does not.
+- `backend/app/services/inbound_sync.py:207-209` — The `_handle_user_updated` path reads `email` from the untyped webhook `data` dict and writes it directly to the user model without email format validation (unlike the flow sync path which uses Pydantic `EmailStr`). However, the `User.email` column has a unique constraint and is a plain `sa.String`, so a malformed email would be stored but would not enable injection (SQLAlchemy ORM parameterizes all values). The risk is data quality degradation, not a security exploit.
 
-- `backend/app/repositories/assignment.py:140-155` — `list_by_user_tenant` requires both `user_id` and `tenant_id` from the service layer. No IDOR vector: callers always supply tenant scope from validated JWT context.
+- `backend/app/middleware/auth.py:43` — The `excluded_prefixes` implementation uses `str.startswith(tuple)`, which is correct and not vulnerable to path traversal. Paths like `/api/internal/../protected` are normalized by ASGI servers before reaching the middleware, so prefix bypass via path traversal is not exploitable.
 
-- `backend/app/repositories/tenant.py:447-460` — `get_users_with_roles` filters by explicit `tenant_id` parameter in the WHERE clause; no cross-tenant data leak.
+- `backend/app/routers/internal.py:60-63` — When `DESCOPE_WEBHOOK_SECRET` is empty/unset, the webhook endpoint rejects all requests with 401. This is correct fail-closed behavior.
 
-- `backend/app/services/adapters/descope.py:171` — Also passes `str(user_id)` (canonical UUID) as `loginId`, whereas Descope mutations require the `loginId` (email/phone). This compounds the WARN above but does not add an independent security impact beyond the sync divergence already described.
-
-- New dependency factories (`get_role_service`, `get_permission_service`, `get_tenant_service`) — Only reachable through the middleware-protected router stack via FastAPI `Depends(get_async_session)`. No bypass vector introduced. No new HTTP endpoints are added in this diff.
-
----
+- `backend/app/routers/internal.py:66-68` — HMAC validation uses `hmac.compare_digest` for timing-safe comparison. This is correct and prevents timing side-channel attacks on the signature.
 
 ### Summary
-
-- BLOCK: 0 | WARN: 1 | INFO: 4
-- Overall: **PASS** (with fix recommended)
-
-The WARN produces a security-relevant divergence (canonical RBAC and JWT-issuing IdP out of sync), but since Descope is the authoritative token issuer and `require_role()` enforces against live JWT claims, a user will not gain elevated access — they will lose access that was granted. No privilege escalation path. Fix before the sync path is relied upon in production.
+- BLOCK: 1 | WARN: 3 | INFO: 4
+- Overall: FAIL

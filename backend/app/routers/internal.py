@@ -18,11 +18,16 @@ from pydantic import BaseModel, EmailStr
 
 from app.dependencies.identity import get_inbound_sync_service
 from app.errors.problem_detail import result_to_response
+from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.inbound_sync import InboundSyncService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Internal"])
+
+# Read secrets once at import time; validated at startup in lifespan.
+_FLOW_SYNC_SECRET = os.getenv("DESCOPE_FLOW_SYNC_SECRET", "")
+_WEBHOOK_SECRET = os.getenv("DESCOPE_WEBHOOK_SECRET", "")
 
 
 # --- Request models ---
@@ -45,7 +50,26 @@ class WebhookPayload(BaseModel):
     data: dict
 
 
-# --- HMAC validation dependency ---
+# --- Auth dependency: shared secret for flow sync ---
+
+
+async def verify_flow_sync_secret(
+    x_flow_secret: str = Header(..., alias="X-Flow-Secret"),
+) -> None:
+    """Validate shared secret on flow sync requests.
+
+    Uses DESCOPE_FLOW_SYNC_SECRET env var with timing-safe comparison.
+    Missing/invalid secret → 401.
+    """
+    if not _FLOW_SYNC_SECRET:
+        logger.error("DESCOPE_FLOW_SYNC_SECRET not configured — rejecting flow sync")
+        raise HTTPException(status_code=401, detail="Flow sync secret not configured")
+
+    if not hmac.compare_digest(_FLOW_SYNC_SECRET, x_flow_secret):
+        raise HTTPException(status_code=401, detail="Invalid flow sync secret")
+
+
+# --- Auth dependency: HMAC for webhooks ---
 
 
 async def verify_hmac_signature(
@@ -57,13 +81,12 @@ async def verify_hmac_signature(
     AC-3.1.3: Uses DESCOPE_WEBHOOK_SECRET env var and timing-safe comparison.
     Invalid signature → 401 response.
     """
-    secret = os.getenv("DESCOPE_WEBHOOK_SECRET", "")
-    if not secret:
+    if not _WEBHOOK_SECRET:
         logger.error("DESCOPE_WEBHOOK_SECRET not configured — rejecting webhook")
         raise HTTPException(status_code=401, detail="Webhook secret not configured")
 
     body = await request.body()
-    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    expected = hmac.new(_WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
 
     if not hmac.compare_digest(expected, x_descope_webhook_s256):
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
@@ -72,7 +95,8 @@ async def verify_hmac_signature(
 # --- Routes ---
 
 
-@router.post("/internal/users/sync")
+@router.post("/internal/users/sync", dependencies=[Depends(verify_flow_sync_secret)])
+@limiter.limit(RATE_LIMIT_AUTH)
 async def flow_sync_user(
     request: Request,
     body: FlowSyncRequest,
@@ -96,6 +120,7 @@ async def flow_sync_user(
 
 
 @router.post("/internal/webhooks/descope", dependencies=[Depends(verify_hmac_signature)])
+@limiter.limit(RATE_LIMIT_AUTH)
 async def descope_webhook(
     request: Request,
     body: WebhookPayload,

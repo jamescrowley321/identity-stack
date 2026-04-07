@@ -38,12 +38,12 @@ class IdPLinkRepository:
         """Add a new IdP link to the session and flush to generate defaults.
 
         Raises RepositoryConflictError if a uniqueness constraint is violated.
+        Does NOT rollback — the caller (service layer) owns the transaction.
         """
         self._session.add(link)
         try:
             await self._session.flush()
         except IntegrityError as exc:
-            await self._session.rollback()
             raise RepositoryConflictError(str(exc)) from exc
         return link
 
