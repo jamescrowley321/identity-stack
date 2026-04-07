@@ -67,15 +67,23 @@ async def lifespan(app: FastAPI):
     redis_client = None
     redis_url = os.getenv("REDIS_URL")
     if redis_url:
-        try:
-            import redis.asyncio as aioredis
+        from urllib.parse import urlparse
 
-            redis_client = aioredis.from_url(redis_url)
-            await redis_client.ping()
-            logger.info("Redis connected for cache invalidation")
-        except Exception:
-            logger.warning("Redis connection failed — cache invalidation disabled", exc_info=True)
-            redis_client = None
+        parsed = urlparse(redis_url)
+        if parsed.scheme not in ("redis", "rediss"):
+            logger.warning("REDIS_URL has unsupported scheme '%s' — cache invalidation disabled", parsed.scheme)
+        else:
+            try:
+                import redis.asyncio as aioredis
+
+                redis_client = aioredis.from_url(redis_url)
+                await redis_client.ping()
+                logger.info("Redis connected for cache invalidation")
+            except Exception:
+                logger.warning("Redis connection failed — cache invalidation disabled", exc_info=True)
+                if redis_client is not None:
+                    await redis_client.aclose()
+                redis_client = None
     else:
         logger.info("REDIS_URL not set — cache invalidation disabled")
     init_cache_publisher(redis_client=redis_client)
@@ -85,6 +93,9 @@ async def lifespan(app: FastAPI):
     finally:
         try:
             shutdown_cache_publisher()
+        except Exception:
+            logger.warning("Cache publisher shutdown failed", exc_info=True)
+        try:
             if redis_client is not None:
                 await redis_client.aclose()
         except Exception:

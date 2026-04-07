@@ -16,6 +16,7 @@ from app.models.identity.role import Permission
 from app.repositories.permission import PermissionRepository
 from app.repositories.user import RepositoryConflictError
 from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.permission import PermissionService
 
 
@@ -267,3 +268,50 @@ class TestDeletePermission:
 
         assert result.is_ok()
         mock_logger.warning.assert_called_once()
+
+
+@pytest.mark.anyio
+class TestCacheInvalidationPublishing:
+    """AC-3.3.1: PermissionService publishes cache invalidation events after commit."""
+
+    async def test_create_permission_publishes_event(self):
+        publisher = AsyncMock(spec=CacheInvalidationPublisher)
+        repo = AsyncMock(spec=PermissionRepository)
+        adapter = AsyncMock(spec=IdentityProviderAdapter)
+        service = PermissionService(repository=repo, adapter=adapter, publisher=publisher)
+        repo.get_by_name.return_value = None
+        perm = _make_permission()
+        repo.create.return_value = perm
+        adapter.sync_permission.return_value = Ok(None)
+
+        result = await service.create_permission(name=perm.name)
+
+        assert result.is_ok()
+        publisher.publish.assert_awaited_once_with(entity_type="permission", entity_id=perm.id, operation="create")
+
+    async def test_delete_permission_publishes_event(self):
+        publisher = AsyncMock(spec=CacheInvalidationPublisher)
+        repo = AsyncMock(spec=PermissionRepository)
+        adapter = AsyncMock(spec=IdentityProviderAdapter)
+        service = PermissionService(repository=repo, adapter=adapter, publisher=publisher)
+        perm = _make_permission()
+        repo.get.return_value = perm
+        repo.delete.return_value = True
+        adapter.delete_permission.return_value = Ok(None)
+
+        result = await service.delete_permission(permission_id=perm.id)
+
+        assert result.is_ok()
+        publisher.publish.assert_awaited_once_with(entity_type="permission", entity_id=perm.id, operation="delete")
+
+    async def test_no_publish_on_failure(self):
+        publisher = AsyncMock(spec=CacheInvalidationPublisher)
+        repo = AsyncMock(spec=PermissionRepository)
+        adapter = AsyncMock(spec=IdentityProviderAdapter)
+        service = PermissionService(repository=repo, adapter=adapter, publisher=publisher)
+        repo.get.return_value = None  # Permission not found
+
+        result = await service.delete_permission(permission_id=uuid.uuid4())
+
+        assert result.is_error()
+        publisher.publish.assert_not_awaited()

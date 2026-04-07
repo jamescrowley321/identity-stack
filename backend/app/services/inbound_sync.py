@@ -115,7 +115,7 @@ class InboundSyncService:
                     return Error(Conflict(message="Failed to persist user update"))
 
                 if self._publisher:
-                    await self._publisher.publish(entity_type="user", entity_id=existing_user.id, operation="sync")
+                    await self._publisher.publish(entity_type="user", entity_id=existing_user.id, operation="update")
 
                 logger.info("Flow sync: updated existing user %s", existing_user.id)
                 return Ok({"user": existing_user.model_dump(), "created": False})
@@ -159,7 +159,11 @@ class InboundSyncService:
                 return Error(Conflict(message="Failed to persist user and link"))
 
             if self._publisher:
-                await self._publisher.publish(entity_type="user", entity_id=existing_user.id, operation="sync")
+                await self._publisher.publish(
+                    entity_type="user",
+                    entity_id=existing_user.id,
+                    operation="create" if created else "update",
+                )
 
             action = "created" if created else "linked"
             logger.info("Flow sync: %s user %s", action, existing_user.id)
@@ -261,7 +265,7 @@ class InboundSyncService:
             return Error(Conflict(message="Failed to persist user update"))
 
         if self._publisher:
-            await self._publisher.publish(entity_type="user", entity_id=user.id, operation="sync")
+            await self._publisher.publish(entity_type="user", entity_id=user.id, operation="update")
 
         logger.info("Webhook: updated user %s from user.updated event", user.id)
         return Ok({"user": user.model_dump(), "created": False})
@@ -303,7 +307,7 @@ class InboundSyncService:
             return Error(Conflict(message="Failed to persist user deactivation"))
 
         if self._publisher:
-            await self._publisher.publish(entity_type="user", entity_id=user.id, operation="sync")
+            await self._publisher.publish(entity_type="user", entity_id=user.id, operation="deactivate")
 
         logger.info("Webhook: deactivated user %s from user.deleted event", user.id)
         return Ok({"status": "deactivated", "user_id": str(user.id)})

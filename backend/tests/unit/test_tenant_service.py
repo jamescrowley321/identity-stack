@@ -17,6 +17,7 @@ from app.models.identity.tenant import Tenant
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import RepositoryConflictError
 from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.tenant import TenantService
 
 
@@ -230,3 +231,35 @@ class TestGetTenantUsersWithRoles:
 
         assert result.is_ok()
         assert result.ok == []
+
+
+@pytest.mark.anyio
+class TestCacheInvalidationPublishing:
+    """AC-3.3.1: TenantService publishes cache invalidation events after commit."""
+
+    async def test_create_tenant_publishes_event(self):
+        publisher = AsyncMock(spec=CacheInvalidationPublisher)
+        repo = AsyncMock(spec=TenantRepository)
+        adapter = AsyncMock(spec=IdentityProviderAdapter)
+        service = TenantService(repository=repo, adapter=adapter, publisher=publisher)
+        repo.get_by_name.return_value = None
+        tenant = _make_tenant()
+        repo.create.return_value = tenant
+        adapter.sync_tenant.return_value = Ok(None)
+
+        result = await service.create_tenant(name=tenant.name, domains=tenant.domains)
+
+        assert result.is_ok()
+        publisher.publish.assert_awaited_once_with(entity_type="tenant", entity_id=tenant.id, operation="create")
+
+    async def test_no_publish_on_failure(self):
+        publisher = AsyncMock(spec=CacheInvalidationPublisher)
+        repo = AsyncMock(spec=TenantRepository)
+        adapter = AsyncMock(spec=IdentityProviderAdapter)
+        service = TenantService(repository=repo, adapter=adapter, publisher=publisher)
+        repo.get_by_name.return_value = _make_tenant()  # Duplicate
+
+        result = await service.create_tenant(name="Acme Corp")
+
+        assert result.is_error()
+        publisher.publish.assert_not_awaited()

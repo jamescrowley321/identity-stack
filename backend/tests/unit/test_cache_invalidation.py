@@ -121,8 +121,13 @@ class TestPublishBatch:
 class TestSingletonLifecycle:
     """Module-level singleton functions: init, get, shutdown."""
 
+    def setup_method(self):
+        shutdown_cache_publisher()
+
+    def teardown_method(self):
+        shutdown_cache_publisher()
+
     def test_get_returns_noop_before_init(self):
-        shutdown_cache_publisher()  # Ensure clean state
         pub = get_cache_publisher()
         assert pub._redis is None
 
@@ -132,7 +137,6 @@ class TestSingletonLifecycle:
         retrieved = get_cache_publisher()
         assert retrieved is created
         assert retrieved._redis is redis
-        shutdown_cache_publisher()  # Clean up
 
     def test_shutdown_clears_singleton(self):
         init_cache_publisher(redis_client=AsyncMock())

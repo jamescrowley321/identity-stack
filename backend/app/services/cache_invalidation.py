@@ -76,14 +76,8 @@ class CacheInvalidationPublisher:
         """Publish a single batch event for reconciliation. Silent on failure."""
         if self._redis is None:
             return
-        event = {
-            "entity_type": "batch",
-            "entity_id": "reconciliation",
-            "operation": operation,
-            "tenant_id": None,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "stats": stats,
-        }
+        event = self._build_event("batch", "reconciliation", operation, None)
+        event["stats"] = stats
         try:
             await self._redis.publish(CHANNEL, json.dumps(event))
         except Exception:
@@ -109,6 +103,7 @@ class CacheInvalidationPublisher:
 # Module-level singleton (mirrors descope.py pattern)
 # ---------------------------------------------------------------------------
 _publisher: CacheInvalidationPublisher | None = None
+_NOOP_PUBLISHER = CacheInvalidationPublisher()
 
 
 def get_cache_publisher() -> CacheInvalidationPublisher:
@@ -119,12 +114,15 @@ def get_cache_publisher() -> CacheInvalidationPublisher:
     """
     if _publisher is not None:
         return _publisher
-    return CacheInvalidationPublisher()
+    logger.warning("get_cache_publisher() called before init_cache_publisher() — returning no-op")
+    return _NOOP_PUBLISHER
 
 
 def init_cache_publisher(redis_client: Redis | None = None) -> CacheInvalidationPublisher:
     """Initialise the singleton publisher during app lifespan."""
     global _publisher  # noqa: PLW0603
+    if _publisher is not None:
+        logger.warning("init_cache_publisher() called twice — replacing existing publisher")
     _publisher = CacheInvalidationPublisher(redis_client=redis_client)
     return _publisher
 

@@ -166,7 +166,9 @@ class RoleService:
             await self._repository.commit()
 
             if self._publisher:
-                await self._publisher.publish(entity_type="role", entity_id=role_id, operation="update")
+                await self._publisher.publish(
+                    entity_type="role", entity_id=role_id, operation="update", tenant_id=role.tenant_id
+                )
 
             self._log_sync_failure(
                 await self._adapter.sync_role(

@@ -283,7 +283,7 @@ class UserService:
 
             if self._publisher:
                 await self._publisher.publish(
-                    entity_type="user", entity_id=user_id, operation="update", tenant_id=tenant_id
+                    entity_type="user", entity_id=user_id, operation="unassign", tenant_id=tenant_id
                 )
 
             # Best-effort sync: notify IdP of membership removal

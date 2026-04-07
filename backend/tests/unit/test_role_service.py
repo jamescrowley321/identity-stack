@@ -21,6 +21,7 @@ from app.repositories.permission import PermissionRepository
 from app.repositories.role import RoleRepository
 from app.repositories.user import RepositoryConflictError
 from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.role import RoleService
 
 TENANT_ID = uuid.uuid4()
@@ -600,3 +601,78 @@ class TestUnassignRoleFromUser:
         assert result.is_ok()
         assign_repo.commit.assert_awaited_once()
         mock_logger.warning.assert_called_once()
+
+
+@pytest.mark.anyio
+class TestCacheInvalidationPublishing:
+    """AC-3.3.1: RoleService publishes cache invalidation events after commit."""
+
+    async def test_create_role_publishes_event(self):
+        publisher = AsyncMock(spec=CacheInvalidationPublisher)
+        repo = AsyncMock(spec=RoleRepository)
+        perm_repo = AsyncMock(spec=PermissionRepository)
+        assign_repo = AsyncMock(spec=UserTenantRoleRepository)
+        adapter = AsyncMock(spec=IdentityProviderAdapter)
+        service = RoleService(
+            repository=repo,
+            permission_repository=perm_repo,
+            assignment_repository=assign_repo,
+            adapter=adapter,
+            publisher=publisher,
+        )
+        repo.get_by_name.return_value = None
+        role = _make_role(tenant_id=TENANT_ID)
+        repo.create.return_value = role
+        adapter.sync_role.return_value = Ok(None)
+
+        result = await service.create_role(name=role.name, tenant_id=TENANT_ID)
+
+        assert result.is_ok()
+        publisher.publish.assert_awaited_once_with(
+            entity_type="role", entity_id=role.id, operation="create", tenant_id=TENANT_ID
+        )
+
+    async def test_delete_role_publishes_event(self):
+        publisher = AsyncMock(spec=CacheInvalidationPublisher)
+        repo = AsyncMock(spec=RoleRepository)
+        perm_repo = AsyncMock(spec=PermissionRepository)
+        assign_repo = AsyncMock(spec=UserTenantRoleRepository)
+        adapter = AsyncMock(spec=IdentityProviderAdapter)
+        service = RoleService(
+            repository=repo,
+            permission_repository=perm_repo,
+            assignment_repository=assign_repo,
+            adapter=adapter,
+            publisher=publisher,
+        )
+        role = _make_role(tenant_id=TENANT_ID)
+        repo.get.return_value = role
+        repo.delete.return_value = True
+        adapter.delete_role.return_value = Ok(None)
+
+        result = await service.delete_role(role_id=role.id)
+
+        assert result.is_ok()
+        publisher.publish.assert_awaited_once_with(
+            entity_type="role", entity_id=role.id, operation="delete", tenant_id=TENANT_ID
+        )
+
+    async def test_no_publish_on_failure(self):
+        publisher = AsyncMock(spec=CacheInvalidationPublisher)
+        repo = AsyncMock(spec=RoleRepository)
+        perm_repo = AsyncMock(spec=PermissionRepository)
+        assign_repo = AsyncMock(spec=UserTenantRoleRepository)
+        adapter = AsyncMock(spec=IdentityProviderAdapter)
+        service = RoleService(
+            repository=repo,
+            permission_repository=perm_repo,
+            assignment_repository=assign_repo,
+            adapter=adapter,
+            publisher=publisher,
+        )
+        repo.get.return_value = None  # Role not found
+
+        result = await service.delete_role(role_id=uuid.uuid4())
+
+        assert result.is_error()
+        publisher.publish.assert_not_awaited()
