@@ -1,0 +1,59 @@
+{
+  "name": "Identity Stack Backend",
+  "api_id": "saas-backend",
+  "slug": "api",
+  "x-description": "Tyk validates JWT token authenticity (signature, expiry, issuer) via OpenID Connect discovery. FastAPI checks tenant-scoped roles/permissions from the forwarded Authorization header. The Authorization header is NOT stripped — it is forwarded to the backend so FastAPI authorization logic can decode tenant claims. DESCOPE_PROJECT_ID must be substituted at deploy time via envsubst or Docker entrypoint script (Tyk does not support shell variable expansion in config files).",
+  "listen_path": "/api/",
+  "target_url": "http://backend:8000/api/",
+  "strip_listen_path": false,
+  "active": true,
+  "use_openid": true,
+  "openid_options": {
+    "providers": [
+      {
+        "issuer": "https://api.descope.com/${DESCOPE_PROJECT_ID}",
+        "client_ids": {
+          "${DESCOPE_PROJECT_ID}": "default-policy"
+        }
+      },
+      {
+        "issuer": "https://api.descope.com/v1/apps/${DESCOPE_PROJECT_ID}",
+        "client_ids": {
+          "${DESCOPE_PROJECT_ID}": "default-policy"
+        }
+      }
+    ],
+    "segregate_by_client": false
+  },
+  "jwt_identity_base_field": "sub",
+  "proxy": {
+    "preserve_host_header": true,
+    "listen_path": "/api/",
+    "target_url": "http://backend:8000/api/",
+    "strip_listen_path": false
+  },
+  "global_rate_limit": {
+    "rate": 60,
+    "per": 60
+  },
+  "version_data": {
+    "not_versioned": true,
+    "default_version": "",
+    "versions": {
+      "Default": {
+        "name": "Default",
+        "use_extended_paths": true,
+        "extended_paths": {
+          "rate_limit": [
+            {
+              "path": "/api/validate-id-token",
+              "method": "POST",
+              "rate": 10,
+              "per": 60
+            }
+          ]
+        }
+      }
+    }
+  }
+}
