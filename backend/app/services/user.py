@@ -50,6 +50,10 @@ class UserService:
         """Create a new user: persist via repo, then sync to IdP.
 
         AC-2.1.2: sync failure → log warning, still return Ok(user).
+
+        Note: tenant_id is recorded for tracing but does NOT create a
+        UserTenantRole association. Tenant membership is established
+        via role assignment (a separate operation).
         """
         with tracer.start_as_current_span("UserService.create_user") as span:
             span.set_attribute("tenant.id", str(tenant_id))
@@ -72,7 +76,12 @@ class UserService:
             result_dict = user.model_dump()
             sync_data = {"email": user.email, "status": user.status.value}
             user_id = user.id
-            await self._repository.commit()
+
+            try:
+                await self._repository.commit()
+            except Exception:
+                logger.exception("Commit failed for create_user %s", user_id)
+                return Error(Conflict(message="Failed to persist user"))
 
             self._log_sync_failure(
                 await self._adapter.sync_user(user_id=user_id, data=sync_data),
@@ -88,12 +97,12 @@ class UserService:
         tenant_id: uuid.UUID,
         user_id: uuid.UUID,
     ) -> Result[dict, IdentityError]:
-        """Retrieve a user by ID."""
+        """Retrieve a user by ID, scoped to the caller's tenant."""
         with tracer.start_as_current_span("UserService.get_user") as span:
             span.set_attribute("tenant.id", str(tenant_id))
             span.set_attribute("user.id", str(user_id))
 
-            user = await self._repository.get(user_id)
+            user = await self._repository.get_for_tenant(user_id, tenant_id)
             if user is None:
                 return Error(NotFound(message=f"User '{user_id}' not found"))
             return Ok(user.model_dump())
@@ -108,12 +117,12 @@ class UserService:
         given_name: str | None = None,
         family_name: str | None = None,
     ) -> Result[dict, IdentityError]:
-        """Update user fields, then sync to IdP."""
+        """Update user fields (tenant-scoped), then sync to IdP."""
         with tracer.start_as_current_span("UserService.update_user") as span:
             span.set_attribute("tenant.id", str(tenant_id))
             span.set_attribute("user.id", str(user_id))
 
-            user = await self._repository.get(user_id)
+            user = await self._repository.get_for_tenant(user_id, tenant_id)
             if user is None:
                 return Error(NotFound(message=f"User '{user_id}' not found"))
 
@@ -136,7 +145,12 @@ class UserService:
 
             result_dict = user.model_dump()
             sync_data = {"email": user.email, "status": user.status.value}
-            await self._repository.commit()
+
+            try:
+                await self._repository.commit()
+            except Exception:
+                logger.exception("Commit failed for update_user %s", user_id)
+                return Error(Conflict(message="Failed to persist user update"))
 
             self._log_sync_failure(
                 await self._adapter.sync_user(user_id=user.id, data=sync_data),
@@ -152,7 +166,7 @@ class UserService:
         tenant_id: uuid.UUID,
         user_id: uuid.UUID,
     ) -> Result[dict, IdentityError]:
-        """Set user status to inactive and sync to IdP.
+        """Set user status to inactive (tenant-scoped) and sync to IdP.
 
         AC-2.1.4: repo sets status=inactive, adapter sync attempted.
         """
@@ -160,16 +174,24 @@ class UserService:
             span.set_attribute("tenant.id", str(tenant_id))
             span.set_attribute("user.id", str(user_id))
 
-            user = await self._repository.get(user_id)
+            user = await self._repository.get_for_tenant(user_id, tenant_id)
             if user is None:
                 return Error(NotFound(message=f"User '{user_id}' not found"))
 
             user.status = UserStatus.inactive
-            user = await self._repository.update(user)
+            try:
+                user = await self._repository.update(user)
+            except RepositoryConflictError:
+                return Error(Conflict(message="Deactivation conflicts with existing data"))
 
             result_dict = user.model_dump()
             sync_data = {"email": user.email, "status": user.status.value}
-            await self._repository.commit()
+
+            try:
+                await self._repository.commit()
+            except Exception:
+                logger.exception("Commit failed for deactivate_user %s", user_id)
+                return Error(Conflict(message="Failed to persist user deactivation"))
 
             self._log_sync_failure(
                 await self._adapter.sync_user(user_id=user.id, data=sync_data),
