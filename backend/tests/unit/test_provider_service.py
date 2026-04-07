@@ -1,7 +1,8 @@
-"""Unit tests for ProviderService domain orchestration (Story 4.1).
+"""Unit tests for ProviderService domain orchestration (Stories 4.1 + 4.2).
 
 Tests cover:
 - register_provider: happy path, duplicate name → Conflict, integrity error → Conflict
+- list_providers: returns providers with config_ref stripped; empty list
 - deactivate_provider: found → deactivated; already-inactive → idempotent Ok; not found → NotFound
 - get_provider_capabilities: found → capabilities list; not found → NotFound
 """
@@ -115,6 +116,54 @@ class TestRegisterProvider:
         # Verify the Provider constructor received empty list
         created_arg = repo.create.call_args[0][0]
         assert created_arg.capabilities == []
+
+
+@pytest.mark.anyio
+class TestListProviders:
+    """AC-4.2.2: list_providers returns all providers with config_ref stripped."""
+
+    async def test_list_returns_providers_without_config_ref(self):
+        service, repo = _build_service()
+        providers = [
+            _make_provider(name="alpha-provider"),
+            _make_provider(name="beta-provider"),
+        ]
+        repo.list_all.return_value = providers
+
+        result = await service.list_providers()
+
+        assert result.is_ok()
+        assert len(result.ok) == 2
+        for d in result.ok:
+            assert "config_ref" not in d
+        repo.list_all.assert_awaited_once()
+
+    async def test_list_empty(self):
+        service, repo = _build_service()
+        repo.list_all.return_value = []
+
+        result = await service.list_providers()
+
+        assert result.is_ok()
+        assert result.ok == []
+
+    async def test_list_preserves_other_fields(self):
+        """All fields except config_ref are preserved in the response."""
+        service, repo = _build_service()
+        provider = _make_provider(
+            name="test-provider",
+            capabilities=["sso", "mfa"],
+            config_ref="infisical://secret",
+        )
+        repo.list_all.return_value = [provider]
+
+        result = await service.list_providers()
+
+        assert result.is_ok()
+        d = result.ok[0]
+        assert d["name"] == "test-provider"
+        assert d["capabilities"] == ["sso", "mfa"]
+        assert "config_ref" not in d
 
 
 @pytest.mark.anyio
