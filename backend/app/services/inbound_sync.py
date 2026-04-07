@@ -188,22 +188,26 @@ class InboundSyncService:
         email = data.get("email", "")
         external_sub = data.get("user_id", "")
 
-        if not email or not external_sub:
+        if not isinstance(email, str) or not isinstance(external_sub, str) or not email or not external_sub:
             logger.warning("user.created webhook missing email or user_id, keys=%s", list(data.keys()))
             return Ok({"status": "skipped", "reason": "missing required fields"})
+
+        name = data.get("name")
+        given_name = data.get("given_name")
+        family_name = data.get("family_name")
 
         return await self.sync_user_from_flow(
             user_id=external_sub,
             email=email,
-            name=data.get("name"),
-            given_name=data.get("given_name"),
-            family_name=data.get("family_name"),
+            name=name if isinstance(name, str) else None,
+            given_name=given_name if isinstance(given_name, str) else None,
+            family_name=family_name if isinstance(family_name, str) else None,
         )
 
     async def _handle_user_updated(self, data: dict) -> Result[dict, IdentityError]:
         """Handle user.updated webhook — update user fields if linked."""
         external_sub = data.get("user_id", "")
-        if not external_sub:
+        if not isinstance(external_sub, str) or not external_sub:
             logger.warning("user.updated webhook missing user_id, keys=%s", list(data.keys()))
             return Ok({"status": "skipped", "reason": "missing user_id"})
 
@@ -221,16 +225,17 @@ class InboundSyncService:
             return Error(NotFound(message="Linked user not found"))
 
         email = data.get("email")
-        if email:
+        if isinstance(email, str) and email:
             user.email = email
+            link.external_email = email
         name = data.get("name")
         given_name = data.get("given_name")
         family_name = data.get("family_name")
-        if given_name:
+        if isinstance(given_name, str) and given_name:
             user.given_name = given_name
-        if family_name:
+        if isinstance(family_name, str) and family_name:
             user.family_name = family_name
-        if not given_name and not family_name and name:
+        if not given_name and not family_name and isinstance(name, str) and name:
             parts = name.split(" ", 1)
             user.given_name = parts[0]
             user.family_name = parts[1] if len(parts) > 1 else ""
@@ -256,7 +261,7 @@ class InboundSyncService:
         FK cascade on idp_links will clean up links if the user is later hard-deleted.
         """
         external_sub = data.get("user_id", "")
-        if not external_sub:
+        if not isinstance(external_sub, str) or not external_sub:
             logger.warning("user.deleted webhook missing user_id, keys=%s", list(data.keys()))
             return Ok({"status": "skipped", "reason": "missing user_id"})
 
