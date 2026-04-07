@@ -12,18 +12,24 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.dependencies.identity import (
+    get_idp_link_service,
     get_permission_service,
+    get_provider_service,
     get_role_service,
     get_tenant_service,
     get_user_service,
 )
 from app.repositories.assignment import UserTenantRoleRepository
+from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.permission import PermissionRepository
+from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 from app.services.adapters.descope import DescopeSyncAdapter
+from app.services.idp_link import IdPLinkService
 from app.services.permission import PermissionService
+from app.services.provider import ProviderService
 from app.services.role import RoleService
 from app.services.tenant import TenantService
 from app.services.user import UserService
@@ -143,5 +149,50 @@ class TestGetTenantService:
         mock_get_client.return_value = AsyncMock()
 
         service = await get_tenant_service(session=mock_session)
+
+        assert service._repository._session is mock_session
+
+
+@pytest.mark.anyio
+class TestGetIdPLinkService:
+    """AC-4.1.3: get_idp_link_service() wires 3 repositories → IdPLinkService."""
+
+    async def test_returns_idp_link_service(self):
+        mock_session = AsyncMock()
+
+        service = await get_idp_link_service(session=mock_session)
+
+        assert isinstance(service, IdPLinkService)
+        assert isinstance(service._repository, IdPLinkRepository)
+        assert isinstance(service._user_repository, UserRepository)
+        assert isinstance(service._provider_repository, ProviderRepository)
+
+    async def test_all_repositories_share_session(self):
+        """All repositories must receive the same session for transactional consistency."""
+        mock_session = AsyncMock()
+
+        service = await get_idp_link_service(session=mock_session)
+
+        assert service._repository._session is mock_session
+        assert service._user_repository._session is mock_session
+        assert service._provider_repository._session is mock_session
+
+
+@pytest.mark.anyio
+class TestGetProviderService:
+    """AC-4.1.3: get_provider_service() wires ProviderRepository → ProviderService."""
+
+    async def test_returns_provider_service(self):
+        mock_session = AsyncMock()
+
+        service = await get_provider_service(session=mock_session)
+
+        assert isinstance(service, ProviderService)
+        assert isinstance(service._repository, ProviderRepository)
+
+    async def test_repository_receives_session(self):
+        mock_session = AsyncMock()
+
+        service = await get_provider_service(session=mock_session)
 
         assert service._repository._session is mock_session
