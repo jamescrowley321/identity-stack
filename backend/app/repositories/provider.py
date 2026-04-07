@@ -68,6 +68,12 @@ class ProviderRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def list_all(self) -> list[Provider]:
+        """Return all providers ordered by name."""
+        stmt = sa.select(Provider).order_by(Provider.name)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def get(self, provider_id: uuid.UUID) -> Provider | None:
         """Fetch a provider by primary key. Returns None if not found."""
         return await self._session.get(Provider, provider_id)
