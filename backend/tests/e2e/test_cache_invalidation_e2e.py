@@ -34,9 +34,7 @@ class TestCrudWithCacheInvalidation:
     500s instead of 2xx.
     """
 
-    def test_create_role_publishes_without_error(
-        self, admin_api_context: APIRequestContext, backend_url: str
-    ):
+    def test_create_role_publishes_without_error(self, admin_api_context: APIRequestContext, backend_url: str):
         name = _unique("role")
         resp = admin_api_context.post(
             f"{backend_url}/api/roles",
@@ -49,9 +47,7 @@ class TestCrudWithCacheInvalidation:
         # Cleanup
         admin_api_context.delete(f"{backend_url}/api/roles/{role_id}")
 
-    def test_create_permission_publishes_without_error(
-        self, admin_api_context: APIRequestContext, backend_url: str
-    ):
+    def test_create_permission_publishes_without_error(self, admin_api_context: APIRequestContext, backend_url: str):
         name = _unique("perm")
         resp = admin_api_context.post(
             f"{backend_url}/api/permissions",
@@ -64,9 +60,7 @@ class TestCrudWithCacheInvalidation:
         # Cleanup
         admin_api_context.delete(f"{backend_url}/api/permissions/{perm_id}")
 
-    def test_update_role_publishes_without_error(
-        self, admin_api_context: APIRequestContext, backend_url: str
-    ):
+    def test_update_role_publishes_without_error(self, admin_api_context: APIRequestContext, backend_url: str):
         name = _unique("role")
         resp = admin_api_context.post(
             f"{backend_url}/api/roles",
@@ -84,9 +78,7 @@ class TestCrudWithCacheInvalidation:
         # Cleanup
         admin_api_context.delete(f"{backend_url}/api/roles/{role_id}")
 
-    def test_delete_role_publishes_without_error(
-        self, admin_api_context: APIRequestContext, backend_url: str
-    ):
+    def test_delete_role_publishes_without_error(self, admin_api_context: APIRequestContext, backend_url: str):
         name = _unique("role")
         resp = admin_api_context.post(
             f"{backend_url}/api/roles",
@@ -98,9 +90,7 @@ class TestCrudWithCacheInvalidation:
         resp = admin_api_context.delete(f"{backend_url}/api/roles/{role_id}")
         assert resp.status == 200
 
-    def test_invite_member_publishes_without_error(
-        self, admin_api_context: APIRequestContext, backend_url: str
-    ):
+    def test_invite_member_publishes_without_error(self, admin_api_context: APIRequestContext, backend_url: str):
         """Create user via invite → triggers UserService.create_user → publish."""
         email = f"pubsub-e2e-{uuid.uuid4().hex[:6]}@test.example.com"
         resp = admin_api_context.post(
