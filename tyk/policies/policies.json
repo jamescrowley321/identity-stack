@@ -1,3 +1,17 @@
 {
-  "Data": {}
+  "Data": {
+    "default-policy": {
+      "rate": 60,
+      "per": 60,
+      "quota_max": -1,
+      "access_rights": {
+        "saas-backend": {
+          "api_id": "saas-backend",
+          "api_name": "Identity Stack Backend",
+          "versions": ["Default"]
+        }
+      },
+      "active": true
+    }
+  }
 }
