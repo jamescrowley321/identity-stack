@@ -27,6 +27,7 @@ from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import RepositoryConflictError, UserRepository
+from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.descope import DescopeManagementClient
 from app.services.reconciliation import ReconciliationService
 
@@ -806,3 +807,63 @@ class TestReconcileUsers:
         assert result.is_ok()
         assert result.ok["stats"]["users_created"] == 2
         assert result.ok["stats"]["links_created"] == 2
+
+
+@pytest.mark.anyio
+class TestCacheInvalidationPublishing:
+    """AC-3.3.1: ReconciliationService publishes batch event after successful run with changes."""
+
+    async def test_publish_batch_after_changes(self):
+        """Batch event published when reconciliation produces changes."""
+        publisher = AsyncMock(spec=CacheInvalidationPublisher)
+        service, mocks = _build_service()
+        service._publisher = publisher
+
+        _empty_canonical_state(mocks)
+        mocks["descope"].list_tenants.return_value = [{"name": "Acme", "selfProvisioningDomains": []}]
+        mocks["descope"].list_permissions.return_value = []
+        mocks["descope"].list_roles.return_value = []
+        mocks["descope"].search_all_users.return_value = []
+        mocks["tenant_repo"].get_by_name.return_value = None
+        tenant = _make_tenant(name="Acme")
+        mocks["tenant_repo"].create.return_value = tenant
+
+        result = await service.run()
+
+        assert result.is_ok()
+        publisher.publish_batch.assert_awaited_once()
+        call_kwargs = publisher.publish_batch.call_args[1]
+        assert call_kwargs["operation"] == "reconcile"
+        assert call_kwargs["stats"]["tenants_created"] == 1
+
+    async def test_no_publish_when_zero_changes(self):
+        """No batch event when reconciliation finds no drift."""
+        publisher = AsyncMock(spec=CacheInvalidationPublisher)
+        service, mocks = _build_service()
+        service._publisher = publisher
+
+        _empty_descope_state(mocks)
+        _empty_canonical_state(mocks)
+
+        result = await service.run()
+
+        assert result.is_ok()
+        publisher.publish_batch.assert_not_awaited()
+
+    async def test_no_publish_on_commit_failure(self):
+        """Publisher not called when commit fails."""
+        publisher = AsyncMock(spec=CacheInvalidationPublisher)
+        service, mocks = _build_service()
+        service._publisher = publisher
+
+        _empty_descope_state(mocks)
+        _empty_canonical_state(mocks)
+        mocks["descope"].list_tenants.return_value = [{"name": "Acme", "selfProvisioningDomains": []}]
+        mocks["tenant_repo"].get_by_name.return_value = None
+        mocks["tenant_repo"].create.return_value = _make_tenant(name="Acme")
+        mocks["session"].commit.side_effect = RuntimeError("db gone")
+
+        result = await service.run()
+
+        assert result.is_error()
+        publisher.publish_batch.assert_not_awaited()

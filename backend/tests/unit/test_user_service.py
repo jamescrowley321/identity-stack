@@ -19,6 +19,7 @@ from app.models.identity.user import User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.user import RepositoryConflictError, UserRepository
 from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.user import UserService
 
 TENANT_ID = uuid.uuid4()
@@ -471,3 +472,61 @@ class TestRemoveUserFromTenant:
         assert result.is_ok()
         assign_repo.commit.assert_awaited_once()
         mock_logger.warning.assert_called_once()
+
+
+@pytest.mark.anyio
+class TestCacheInvalidationPublishing:
+    """AC-3.3.1: UserService publishes cache invalidation events after commit."""
+
+    async def test_create_user_publishes_event(self):
+        publisher = AsyncMock(spec=CacheInvalidationPublisher)
+        repo = AsyncMock(spec=UserRepository)
+        adapter = AsyncMock(spec=IdentityProviderAdapter)
+        assign_repo = AsyncMock(spec=UserTenantRoleRepository)
+        repo.exists_in_tenant.return_value = True
+        service = UserService(repository=repo, adapter=adapter, assignment_repository=assign_repo, publisher=publisher)
+        repo.get_by_email.return_value = None
+        user = _make_user()
+        repo.create.return_value = user
+        adapter.sync_user.return_value = Ok(None)
+
+        result = await service.create_user(tenant_id=TENANT_ID, email=user.email, user_name=user.user_name)
+
+        assert result.is_ok()
+        publisher.publish.assert_awaited_once_with(
+            entity_type="user", entity_id=user.id, operation="create", tenant_id=TENANT_ID
+        )
+
+    async def test_deactivate_user_publishes_event(self):
+        publisher = AsyncMock(spec=CacheInvalidationPublisher)
+        repo = AsyncMock(spec=UserRepository)
+        adapter = AsyncMock(spec=IdentityProviderAdapter)
+        assign_repo = AsyncMock(spec=UserTenantRoleRepository)
+        repo.exists_in_tenant.return_value = True
+        service = UserService(repository=repo, adapter=adapter, assignment_repository=assign_repo, publisher=publisher)
+        user = _make_user()
+        repo.get.return_value = user
+        repo.update.return_value = user
+        adapter.sync_user.return_value = Ok(None)
+
+        result = await service.deactivate_user(tenant_id=TENANT_ID, user_id=user.id)
+
+        assert result.is_ok()
+        publisher.publish.assert_awaited_once_with(
+            entity_type="user", entity_id=user.id, operation="deactivate", tenant_id=TENANT_ID
+        )
+
+    async def test_no_publish_on_failure(self):
+        """Publisher is NOT called when the operation fails (e.g. not found)."""
+        publisher = AsyncMock(spec=CacheInvalidationPublisher)
+        repo = AsyncMock(spec=UserRepository)
+        adapter = AsyncMock(spec=IdentityProviderAdapter)
+        assign_repo = AsyncMock(spec=UserTenantRoleRepository)
+        repo.exists_in_tenant.return_value = True
+        service = UserService(repository=repo, adapter=adapter, assignment_repository=assign_repo, publisher=publisher)
+        repo.get.return_value = None  # User not found
+
+        result = await service.deactivate_user(tenant_id=TENANT_ID, user_id=uuid.uuid4())
+
+        assert result.is_error()
+        publisher.publish.assert_not_awaited()
