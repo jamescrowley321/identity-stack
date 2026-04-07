@@ -2,32 +2,44 @@
 
 ### BLOCK (must fix before merge)
 
-- [CONFIRMED] `backend/app/routers/internal.py:75` + `backend/app/middleware/factory.py:74-76` — Flow sync endpoint (`POST /api/internal/users/sync`) has zero authentication: no JWT, no HMAC, no API key, no shared secret.
-  Attack scenario: An attacker who can reach the backend (any service on the Docker network, any localhost process, or the backend if port 8000 is exposed in production) sends `POST /api/internal/users/sync` with `{"user_id": "attacker-sub", "email": "victim@corp.com"}`. This creates a canonical user or hijacks an existing one by linking an attacker-controlled Descope identity to the victim's email. On subsequent legitimate syncs for that email, the existing user is found by email and a second IdP link is created, or the attacker's link is already present. The attacker can then trigger updates to the victim's profile via the same unauthenticated endpoint.
-  Impact: User account takeover / identity impersonation. An attacker can inject arbitrary user records and link them to any external identity, or modify existing users' emails and names. The comment says "network-level isolation" but the docker-compose.yml shows the backend on a shared Docker network with no ingress restrictions. In production, without a reverse proxy rule explicitly blocking `/api/internal/`, this endpoint is internet-facing.
+- none
+
+The prior review's BLOCK (unauthenticated flow sync endpoint) has been fully remediated. The flow sync endpoint at `backend/app/routers/internal.py:98` now requires an `X-Flow-Secret` header validated via `verify_flow_sync_secret` dependency (line 56-69) using `hmac.compare_digest()` for timing-safe comparison against `DESCOPE_FLOW_SYNC_SECRET`. Missing or invalid secrets return 401. The webhook endpoint retains HMAC-SHA256 validation. Both endpoints are protected.
 
 ### WARN (should fix)
 
-- [LIKELY] `backend/app/routers/internal.py:75` — No rate limiting on flow sync endpoint.
-  Every other write endpoint in the codebase uses `@limiter.limit(RATE_LIMIT_AUTH)`. The internal endpoints have no rate limit at all, and since they also bypass JWT auth, the rate limiter's `get_rate_limit_key` will fall back to IP address. Without rate limiting, an attacker (or a misconfigured Descope flow) can flood the endpoint and create unbounded user rows.
-  Mitigation: Add `@limiter.limit(RATE_LIMIT_AUTH)` (or a custom internal limit) to both internal endpoints.
+- **W1** [`backend/app/routers/internal.py:50`] `WebhookPayload.data` is an unvalidated `dict` with no schema enforcement. Webhook handlers extract fields via `.get()` with empty-string defaults (`inbound_sync.py:188-189,205,223,226-228,258`). A malformed payload that is missing expected fields silently returns `Ok({"status": "skipped"})` rather than an error, making production debugging difficult. If Descope changes its payload shape, the endpoint silently stops processing events with no alerting. Consider adding per-event-type Pydantic models or at minimum a structured warning log when required fields are absent for known event types.
 
-- [LIKELY] `backend/app/services/inbound_sync.py:176,191,239` — Webhook data dict logged at WARNING level when fields are missing (`logger.warning("user.created webhook missing email or user_id: %s", data)`). The `data` dict is an untyped `dict` from the webhook payload and could contain PII (email, name, phone) or unexpected fields. Logging the entire dict to application logs risks PII exposure in log aggregators.
-  Mitigation: Log only the keys present in `data` or specific non-sensitive identifiers, not the full dict. E.g., `logger.warning("user.created webhook missing email or user_id, keys=%s", list(data.keys()))`.
+- **W2** [`backend/app/routers/internal.py:36-50`] No input length constraints on request model fields. `user_id` is a bare `str` with no `max_length`. `name`, `given_name`, `family_name` are similarly unconstrained. `WebhookPayload.data` is an unbounded `dict`. An attacker with the shared secret (or a compromised Descope instance) could submit arbitrarily large payloads that consume memory or fill database columns. The database columns use `sa.String` without length limits (`backend/app/models/identity/user.py:28-31`). Add `max_length` constraints on Pydantic fields (e.g., `user_id: str = Field(max_length=256)`) and consider a body size limit.
 
-- [UNLIKELY] `backend/app/services/inbound_sync.py:59-60` — OTel span attributes include `user.email` in plaintext (`span.set_attribute("user.email", email)`). If OTel traces are exported to a shared dashboard (the docker-compose Aspire dashboard uses `Unsecured` auth mode), email addresses are visible to anyone who can access the dashboard.
-  Mitigation: Hash or omit the email from span attributes. Use `span.set_attribute("user.email_domain", email.split("@")[1])` if domain-level tracing suffices.
+- **W3** [`backend/app/middleware/factory.py:79-80`] Gateway mode has no layered protection for internal endpoints. In gateway mode, `TokenValidationMiddleware` is not registered at all, so the `excluded_prefixes` mechanism is irrelevant. The flow sync shared secret and webhook HMAC still apply, which is correct. However, the comment at line 42-43 states "Network-level isolation or a shared gateway secret ensures only Tyk can reach the backend directly" -- until that network isolation is implemented, internal endpoints in gateway mode rely solely on the shared secrets with no additional defense. This should be documented as a deployment prerequisite and validated in gateway mode startup.
+
+- **W4** [`backend/app/services/inbound_sync.py:110-112,151-153,245-247,284-286`] Commit failures return `Conflict` error type regardless of cause. The bare `except Exception` blocks around `commit()` catch all exceptions (including network errors, connection timeouts, etc.) and map them to `Conflict` error responses. A database connectivity failure should not be presented to callers as a conflict. This could mask operational issues and mislead debugging. Consider distinguishing between constraint violations and infrastructure failures.
+
+- **W5** [`backend/app/services/inbound_sync.py:223-225`] The `_handle_user_updated` webhook path reads `email` from the untyped webhook `data` dict and writes it directly to the user model without email format validation (unlike the flow sync path which uses Pydantic `EmailStr`). A webhook event with a malformed email value (e.g., empty string that passes the truthy check, or a string without `@`) would be persisted to the database. While SQLAlchemy parameterizes all values (no injection risk), this creates data quality degradation that could break downstream email-dependent logic. Consider validating webhook email values before assignment.
 
 ### INFO (acceptable risk)
 
-- `backend/app/services/inbound_sync.py:207-209` — The `_handle_user_updated` path reads `email` from the untyped webhook `data` dict and writes it directly to the user model without email format validation (unlike the flow sync path which uses Pydantic `EmailStr`). However, the `User.email` column has a unique constraint and is a plain `sa.String`, so a malformed email would be stored but would not enable injection (SQLAlchemy ORM parameterizes all values). The risk is data quality degradation, not a security exploit.
+- **I1** PII handling in OTel traces is properly mitigated. The source code at `inbound_sync.py:27-29,66` uses `_hash_email(email)` (SHA-256 truncated to 12 hex chars) for the `user.email_hash` span attribute rather than raw email. The `descope.user_id` (an external IdP identifier, not PII by itself) is set as a span attribute, which is acceptable.
 
-- `backend/app/middleware/auth.py:43` — The `excluded_prefixes` implementation uses `str.startswith(tuple)`, which is correct and not vulnerable to path traversal. Paths like `/api/internal/../protected` are normalized by ASGI servers before reaching the middleware, so prefix bypass via path traversal is not exploitable.
+- **I2** PII in log messages is properly handled. Logger calls at `inbound_sync.py:114,156,249,288` include only `user.id` (a UUID, not PII). Skip-reason logs at lines `192,207-208,259-260` log `list(data.keys())` rather than raw data values, avoiding PII leakage from webhook payloads.
 
-- `backend/app/routers/internal.py:60-63` — When `DESCOPE_WEBHOOK_SECRET` is empty/unset, the webhook endpoint rejects all requests with 401. This is correct fail-closed behavior.
+- **I3** HMAC implementation is cryptographically correct. `verify_hmac_signature` (`internal.py:75-92`) uses `hmac.new()` with SHA-256 and `hmac.compare_digest()` for timing-safe comparison. The secret is read once at import time (not per-request from env). Missing header returns 422 before HMAC logic executes.
 
-- `backend/app/routers/internal.py:66-68` — HMAC validation uses `hmac.compare_digest` for timing-safe comparison. This is correct and prevents timing side-channel attacks on the signature.
+- **I4** Flow sync shared secret implementation is correct. `verify_flow_sync_secret` (`internal.py:56-69`) uses `hmac.compare_digest()` for timing-safe string comparison. Empty/missing secret configuration is rejected at the dependency level with 401, and startup logs a warning (`main.py:41-42`).
+
+- **I5** Rate limiting is applied to both internal endpoints. Flow sync uses `@limiter.limit(RATE_LIMIT_AUTH)` at line 99 and webhook at line 123 (default: 10/minute). In standalone mode, SlowAPI middleware is active. The rate limit key falls back to client IP for unauthenticated requests.
+
+- **I6** `excluded_prefixes` implementation is not vulnerable to path traversal. `backend/app/middleware/auth.py:43` uses `str.startswith(tuple)`. Paths like `/api/internal/../protected` are normalized by ASGI servers before reaching the middleware.
+
+- **I7** Fail-closed behavior on missing secrets. When `DESCOPE_WEBHOOK_SECRET` is empty/unset, the webhook endpoint rejects all requests with 401 (`internal.py:84-86`). Same for `DESCOPE_FLOW_SYNC_SECRET` (`internal.py:64-66`). Startup warnings at `main.py:39-42` alert operators.
+
+- **I8** No SQL injection risk. All data flows through SQLAlchemy ORM parameterized queries. User-supplied strings from request models and webhook data are used as ORM attribute assignments or `where()` clause parameters, both properly parameterized.
+
+- **I9** Secrets loaded at import time (`internal.py:29-30`) are not reloadable without restart. Acceptable for current deployment model but worth noting for secret rotation procedures.
+
+- **I10** IdPLinkRepository no longer calls `rollback()` on shared session. The actual source (`idp_link.py:42-47`) raises `RepositoryConflictError` on `IntegrityError` without rolling back, letting the service layer control transaction boundaries. This is correct.
 
 ### Summary
-- BLOCK: 1 | WARN: 3 | INFO: 4
-- Overall: FAIL
+- BLOCK: 0 | WARN: 5 | INFO: 10
+- Overall: PASS
