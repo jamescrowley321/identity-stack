@@ -299,12 +299,16 @@ async def test_delete_idp_link_clears_resolution(
     assert result.is_ok()
 
     # Resolution after delete returns NotFound (DB miss even if cached)
-    # Note: cache might still have old data — but since we deleted the link,
-    # a fresh DB-based resolution would fail. Clear cache to verify DB path.
+    # Clear cache first to force DB path, then verify NotFound.
     from urllib.parse import quote
 
     cache_key = f"identity:{quote(f'del-test-{suffix}', safe='')}:{quote(f'ext-del-{suffix}', safe='')}"
     await redis_client_or_skip(identity_resolution_service, cache_key)
+
+    # Re-resolve — link no longer exists, should return NotFound
+    result = await identity_resolution_service.resolve(provider=f"del-test-{suffix}", sub=f"ext-del-{suffix}")
+    assert result.is_error()
+    assert "found" in result.error.message.lower()
 
 
 @pytest.mark.asyncio
