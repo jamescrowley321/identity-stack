@@ -10,14 +10,13 @@
 set -euo pipefail
 
 TYK_URL="${TYK_URL:-http://localhost:8080}"
-BACKEND_URL="${BACKEND_URL:-http://localhost:8000}"
 PASS=0
 FAIL=0
 SKIP=0
 
-pass() { echo "  PASS: $1"; ((PASS++)); }
-fail() { echo "  FAIL: $1"; ((FAIL++)); }
-skip() { echo "  SKIP: $1"; ((SKIP++)); }
+pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
+fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
+skip() { echo "  SKIP: $1"; SKIP=$((SKIP + 1)); }
 
 header() { echo -e "\n=== $1 ==="; }
 
@@ -38,8 +37,11 @@ fi
 
 # ── AC1: Tyk proxies GET /api/health to backend ──
 header "AC1: Health endpoint proxy"
-HEALTH_RESPONSE=$(curl -sf "${TYK_URL}/api/health" 2>/dev/null || true)
-HEALTH_CODE=$(curl -s -o /dev/null -w '%{http_code}' "${TYK_URL}/api/health" 2>/dev/null)
+# Single curl call captures both body and status code atomically
+HEALTH_TMPFILE=$(mktemp)
+HEALTH_CODE=$(curl -s -w '%{http_code}' -o "$HEALTH_TMPFILE" "${TYK_URL}/api/health" 2>/dev/null || echo "000")
+HEALTH_RESPONSE=$(cat "$HEALTH_TMPFILE" 2>/dev/null || true)
+rm -f "$HEALTH_TMPFILE"
 
 if [ "$HEALTH_CODE" = "200" ]; then
     if echo "$HEALTH_RESPONSE" | grep -q '"status"'; then
@@ -56,6 +58,10 @@ else
 fi
 
 # ── AC2: Tyk sets proxy headers (X-Forwarded-For, X-Forwarded-Proto, X-Real-IP) ──
+# Config-based verification: Tyk automatically sets X-Forwarded-For, X-Forwarded-Proto,
+# and X-Real-IP for all proxied requests (built-in gateway behavior). We verify that
+# preserve_host_header is enabled in the API definition. Runtime header inspection
+# would require a debug/echo endpoint on the backend.
 header "AC2: Proxy header forwarding"
 # Verify Tyk config has preserve_host_header enabled
 if [ -f "tyk/apps/saas-backend.json" ]; then
@@ -74,8 +80,13 @@ echo "  INFO: X-Forwarded-For, X-Forwarded-Proto, X-Real-IP are set by Tyk autom
 pass "Tyk proxy header behavior confirmed via configuration"
 
 # ── AC3: Authorization header forwarded to backend ──
+# Config-based verification: Tyk's strip_auth_data=false ensures the original
+# Authorization: Bearer <token> header is forwarded to the backend. Runtime
+# verification requires a valid JWT in the test environment.
 header "AC3: Authorization header forwarding"
-if grep -q '"strip_auth_data": false' tyk/apps/saas-backend.json; then
+if [ ! -f "tyk/apps/saas-backend.json" ]; then
+    fail "Tyk API definition file not found at tyk/apps/saas-backend.json"
+elif grep -q '"strip_auth_data": false' tyk/apps/saas-backend.json; then
     pass "strip_auth_data is false — Authorization header forwarded to backend"
 else
     fail "strip_auth_data should be false to forward Authorization header"
