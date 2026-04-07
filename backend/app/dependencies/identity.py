@@ -4,6 +4,7 @@ AC-2.1.7: get_user_service() wires AsyncSession -> UserRepository -> UserService
 AC-2.2.6: get_role_service(), get_permission_service(), get_tenant_service()
 with DescopeSyncAdapter wrapping the singleton DescopeManagementClient.
 AC-3.1.1: get_inbound_sync_service() wires repositories for inbound sync.
+AC-3.2.1: get_reconciliation_service() wires repositories + Descope client for reconciliation.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from app.services.adapters.descope import DescopeSyncAdapter
 from app.services.descope import get_descope_client
 from app.services.inbound_sync import InboundSyncService
 from app.services.permission import PermissionService
+from app.services.reconciliation import ReconciliationService
 from app.services.role import RoleService
 from app.services.tenant import TenantService
 from app.services.user import UserService
@@ -105,6 +107,32 @@ async def get_inbound_sync_service(
     provider_repository = ProviderRepository(session)
     return InboundSyncService(
         user_repository=user_repository,
+        idp_link_repository=idp_link_repository,
+        provider_repository=provider_repository,
+    )
+
+
+async def get_reconciliation_service(
+    session: AsyncSession = Depends(get_async_session),
+) -> ReconciliationService:
+    """Build a ReconciliationService with all repositories and Descope client.
+
+    AC-3.2.1: Wiring: AsyncSession -> all identity repositories + DescopeManagementClient
+               -> ReconciliationService(session, descope_client, repositories...)
+    """
+    user_repository = UserRepository(session)
+    role_repository = RoleRepository(session)
+    permission_repository = PermissionRepository(session)
+    tenant_repository = TenantRepository(session)
+    idp_link_repository = IdPLinkRepository(session)
+    provider_repository = ProviderRepository(session)
+    return ReconciliationService(
+        session=session,
+        descope_client=get_descope_client(),
+        user_repository=user_repository,
+        role_repository=role_repository,
+        permission_repository=permission_repository,
+        tenant_repository=tenant_repository,
         idp_link_repository=idp_link_repository,
         provider_repository=provider_repository,
     )

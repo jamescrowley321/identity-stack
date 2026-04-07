@@ -22,6 +22,7 @@ from app.routers import (
     internal,
     permissions,
     protected,
+    reconciliation,
     roles,
     tenants,
     users,
@@ -104,6 +105,7 @@ app.include_router(users.router, prefix="/api")
 app.include_router(documents.router, prefix="/api")
 app.include_router(fga.router, prefix="/api")
 app.include_router(internal.router, prefix="/api")
+app.include_router(reconciliation.router, prefix="/api")
 
 
 @app.get("/docs", include_in_schema=False)
