@@ -175,6 +175,24 @@ class TestErrorHandling:
         resp = await client.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 401
 
+    @pytest.mark.anyio
+    async def test_non_dict_json_payload_returns_401(self, client):
+        """Token with valid JSON but non-dict payload (array) returns 401, not 500."""
+        payload_b64 = base64.urlsafe_b64encode(json.dumps([1, 2, 3]).encode()).decode().rstrip("=")
+        header_b64 = base64.urlsafe_b64encode(json.dumps({"alg": "none"}).encode()).decode().rstrip("=")
+        token = f"{header_b64}.{payload_b64}.sig"
+        resp = await client.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 401
+
+    @pytest.mark.anyio
+    async def test_string_json_payload_returns_401(self, client):
+        """Token with JSON string payload returns 401, not 500."""
+        payload_b64 = base64.urlsafe_b64encode(json.dumps("hello").encode()).decode().rstrip("=")
+        header_b64 = base64.urlsafe_b64encode(json.dumps({"alg": "none"}).encode()).decode().rstrip("=")
+        token = f"{header_b64}.{payload_b64}.sig"
+        resp = await client.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 401
+
 
 class TestRBACIntegration:
     """AC-5: RBAC works through gateway-mode ASGI stack with GatewayClaimsMiddleware."""
