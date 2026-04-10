@@ -7,4 +7,5 @@ paths = [
     '''frontend/src/test/''',
     '''backend/tests/''',
     '''scripts/test-gateway-proxy\.sh''',
+    '''scripts/test-integration-gateway\.sh''',
 ]
