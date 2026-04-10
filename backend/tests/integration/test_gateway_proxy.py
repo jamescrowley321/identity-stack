@@ -50,11 +50,18 @@ async def test_health_proxy(gateway_url):
 
 
 async def test_health_no_auth_via_gateway(gateway_url):
-    """AC2: Health endpoint returns 200 without any auth through the gateway."""
+    """AC2: Health endpoint returns 200 even with an invalid token — auth is truly ignored."""
     async with httpx.AsyncClient(base_url=gateway_url, timeout=10.0) as client:
-        # No Authorization header — should still succeed because /api/health is ignored
-        response = await client.get("/api/health")
-        assert response.status_code == 200, f"Expected 200 for unauthenticated /api/health, got {response.status_code}"
+        # Send a garbage Authorization header to prove auth is *ignored*, not just optional.
+        # If Tyk were merely allowing unauthenticated requests but still validating tokens
+        # when present, this would return 401. The ignored path skips validation entirely.
+        response = await client.get(
+            "/api/health",
+            headers={"Authorization": "Bearer garbage.not.a.jwt"},
+        )
+        assert response.status_code == 200, (
+            f"Expected 200 for /api/health even with invalid token (ignored path), got {response.status_code}"
+        )
 
 
 async def test_invalid_jwt_rejected(gateway_url):
