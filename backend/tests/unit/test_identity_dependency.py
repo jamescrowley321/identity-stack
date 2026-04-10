@@ -78,6 +78,16 @@ class TestGetUserService:
 
         assert service._adapter._client is mock_client
 
+    async def test_publisher_receives_cache_publisher(self):
+        """Publisher is wired from request.app.state.cache_publisher."""
+        mock_session = AsyncMock()
+        mock_publisher = AsyncMock()
+        mock_request = _make_mock_request(cache_publisher=mock_publisher)
+
+        service = await get_user_service(request=mock_request, session=mock_session)
+
+        assert service._publisher is mock_publisher
+
 
 @pytest.mark.anyio
 class TestGetRoleService:
@@ -106,6 +116,16 @@ class TestGetRoleService:
         assert service._permission_repository._session is mock_session
         assert service._assignment_repository._session is mock_session
 
+    async def test_publisher_receives_cache_publisher(self):
+        """Publisher is wired from request.app.state.cache_publisher."""
+        mock_session = AsyncMock()
+        mock_publisher = AsyncMock()
+        mock_request = _make_mock_request(cache_publisher=mock_publisher)
+
+        service = await get_role_service(request=mock_request, session=mock_session)
+
+        assert service._publisher is mock_publisher
+
 
 @pytest.mark.anyio
 class TestGetPermissionService:
@@ -129,6 +149,16 @@ class TestGetPermissionService:
 
         assert service._repository._session is mock_session
 
+    async def test_publisher_receives_cache_publisher(self):
+        """Publisher is wired from request.app.state.cache_publisher."""
+        mock_session = AsyncMock()
+        mock_publisher = AsyncMock()
+        mock_request = _make_mock_request(cache_publisher=mock_publisher)
+
+        service = await get_permission_service(request=mock_request, session=mock_session)
+
+        assert service._publisher is mock_publisher
+
 
 @pytest.mark.anyio
 class TestGetTenantService:
@@ -151,6 +181,16 @@ class TestGetTenantService:
         service = await get_tenant_service(request=mock_request, session=mock_session)
 
         assert service._repository._session is mock_session
+
+    async def test_publisher_receives_cache_publisher(self):
+        """Publisher is wired from request.app.state.cache_publisher."""
+        mock_session = AsyncMock()
+        mock_publisher = AsyncMock()
+        mock_request = _make_mock_request(cache_publisher=mock_publisher)
+
+        service = await get_tenant_service(request=mock_request, session=mock_session)
+
+        assert service._publisher is mock_publisher
 
 
 @pytest.mark.anyio
