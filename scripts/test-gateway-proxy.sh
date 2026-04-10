@@ -25,8 +25,8 @@ header() { echo -e "\n=== $1 ==="; }
 
 # ── Pre-flight: check gateway is reachable ──
 header "Pre-flight"
+# /api/health is auth-exempt (ignored path in Tyk config), so 200 means reachable
 if ! curl -sf -o /dev/null --connect-timeout 5 "${TYK_URL}/api/health" 2>/dev/null; then
-    # Gateway may require auth for /api/health — a 401 still means it's reachable
     HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 "${TYK_URL}/api/health" 2>/dev/null || echo "000")
     if [ "$HTTP_CODE" = "000" ]; then
         echo "ERROR: Tyk gateway not reachable at ${TYK_URL}"
@@ -38,9 +38,9 @@ else
     echo "Gateway reachable at ${TYK_URL}"
 fi
 
-# ── AC1: Tyk proxies GET /api/health to backend ──
-header "AC1: Health endpoint proxy"
-# Single curl call captures both body and status code atomically
+# ── AC1: Tyk proxies GET /api/health to backend (auth-exempt) ──
+header "AC1: Health endpoint proxy (no auth required)"
+# /api/health is an ignored path in Tyk config — bypasses JWT validation
 HEALTH_TMPFILE=$(mktemp)
 trap 'rm -f "$HEALTH_TMPFILE"' EXIT
 HEALTH_CODE=$(curl -s -w '%{http_code}' -o "$HEALTH_TMPFILE" "${TYK_URL}/api/health" 2>/dev/null || echo "000")
@@ -49,16 +49,12 @@ rm -f "$HEALTH_TMPFILE"
 
 if [ "$HEALTH_CODE" = "200" ]; then
     if echo "$HEALTH_RESPONSE" | grep -q '"status"'; then
-        pass "GET /api/health returns 200 with status field"
+        pass "GET /api/health returns 200 with status field (no auth required)"
     else
         fail "GET /api/health returned 200 but unexpected body: ${HEALTH_RESPONSE}"
     fi
-elif [ "$HEALTH_CODE" = "401" ]; then
-    # If Tyk enforces auth on /api/health, this is expected behavior — document it
-    echo "  INFO: /api/health requires authentication (Tyk OpenID policy covers /api/)"
-    skip "Cannot verify health proxy without valid JWT (auth required)"
 else
-    fail "GET /api/health returned HTTP ${HEALTH_CODE}"
+    fail "GET /api/health returned HTTP ${HEALTH_CODE} (expected 200 — path should be auth-exempt)"
 fi
 
 # ── AC2: Tyk sets proxy headers (X-Forwarded-For, X-Forwarded-Proto, X-Real-IP) ──
@@ -98,11 +94,12 @@ fi
 
 # ── AC4: Invalid/expired JWT rejected with 401 ──
 header "AC4: Invalid JWT rejection"
+# Test against /api/me (a protected endpoint) — /api/health is auth-exempt
 # nosemgrep: generic.secrets.security.detected-jwt-token.detected-jwt-token
 INVALID_JWT="eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0IiwiZXhwIjoxMDAwMDAwMDAwfQ.invalid-signature"
 INVALID_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
     -H "Authorization: Bearer ${INVALID_JWT}" \
-    "${TYK_URL}/api/health" 2>/dev/null || echo "000")
+    "${TYK_URL}/api/me" 2>/dev/null || echo "000")
 
 if [ "$INVALID_CODE" = "401" ] || [ "$INVALID_CODE" = "403" ]; then
     pass "Invalid JWT rejected with HTTP ${INVALID_CODE}"

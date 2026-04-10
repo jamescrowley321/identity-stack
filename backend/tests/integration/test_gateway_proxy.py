@@ -39,15 +39,22 @@ def tyk_api_def():
 
 
 async def test_health_proxy(gateway_url):
-    """AC1: Tyk proxies GET /api/health to the backend and returns correct response."""
+    """AC1: Tyk proxies GET /api/health to the backend without requiring auth."""
     async with httpx.AsyncClient(base_url=gateway_url, timeout=10.0) as client:
         response = await client.get("/api/health")
-        # If Tyk requires auth for /api/health (all /api/ paths), we accept 401
-        if response.status_code == 401:
-            pytest.skip("/api/health requires auth under Tyk OpenID policy")
-        assert response.status_code == 200
+        assert response.status_code == 200, (
+            f"Expected 200 for /api/health (auth-exempt ignored path), got {response.status_code}"
+        )
         data = response.json()
         assert data["status"] == "ok"
+
+
+async def test_health_no_auth_via_gateway(gateway_url):
+    """AC2: Health endpoint returns 200 without any auth through the gateway."""
+    async with httpx.AsyncClient(base_url=gateway_url, timeout=10.0) as client:
+        # No Authorization header — should still succeed because /api/health is ignored
+        response = await client.get("/api/health")
+        assert response.status_code == 200, f"Expected 200 for unauthenticated /api/health, got {response.status_code}"
 
 
 async def test_invalid_jwt_rejected(gateway_url):
@@ -55,7 +62,7 @@ async def test_invalid_jwt_rejected(gateway_url):
     invalid_jwt = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0IiwiZXhwIjoxMDAwMDAwMDAwfQ.invalid-signature"
     async with httpx.AsyncClient(base_url=gateway_url, timeout=10.0) as client:
         response = await client.get(
-            "/api/health",
+            "/api/me",
             headers={"Authorization": f"Bearer {invalid_jwt}"},
         )
         assert response.status_code in (401, 403), f"Expected 401/403 for invalid JWT, got {response.status_code}"
@@ -67,7 +74,7 @@ async def test_expired_jwt_rejected(gateway_url):
     expired_jwt = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0IiwiZXhwIjoxfQ.invalid-signature"
     async with httpx.AsyncClient(base_url=gateway_url, timeout=10.0) as client:
         response = await client.get(
-            "/api/health",
+            "/api/me",
             headers={"Authorization": f"Bearer {expired_jwt}"},
         )
         assert response.status_code in (401, 403), f"Expected 401/403 for expired JWT, got {response.status_code}"
@@ -98,6 +105,19 @@ async def test_malformed_bearer_rejected(gateway_url):
             headers={"Authorization": "Bearer not.a.real.token"},
         )
         assert response.status_code in (401, 403), f"Expected 401/403 for malformed bearer, got {response.status_code}"
+
+
+def test_tyk_config_health_ignored(tyk_api_def):
+    """AC1: Tyk config has /api/health in ignored paths to bypass JWT validation."""
+    extended_paths = (
+        tyk_api_def.get("version_data", {}).get("versions", {}).get("Default", {}).get("extended_paths", {})
+    )
+    ignored = extended_paths.get("ignored", [])
+    health_paths = [entry for entry in ignored if entry.get("path") == "/api/health"]
+    assert len(health_paths) == 1, "Expected exactly one ignored entry for /api/health"
+    method_actions = health_paths[0].get("method_actions", {})
+    assert "GET" in method_actions, "GET method must be in method_actions for /api/health"
+    assert method_actions["GET"].get("action") == "no_action"
 
 
 def test_tyk_config_strip_auth_data(tyk_api_def):

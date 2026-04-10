@@ -46,6 +46,16 @@
         "name": "Default",
         "use_extended_paths": true,
         "extended_paths": {
+          "ignored": [
+            {
+              "path": "/api/health",
+              "method_actions": {
+                "GET": {
+                  "action": "no_action"
+                }
+              }
+            }
+          ],
           "rate_limit": [
             {
               "path": "/api/validate-id-token",
