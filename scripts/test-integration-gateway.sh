@@ -52,13 +52,17 @@ echo "All required env vars present."
 
 # ── Startup ──
 header "Starting gateway profile"
-docker compose --profile gateway up -d --build --wait --wait-timeout "$MAX_WAIT"
+if ! docker compose --profile gateway up -d --build --wait --wait-timeout "$MAX_WAIT"; then
+    echo "ERROR: Compose up failed. Container logs:"
+    docker compose --profile gateway logs --tail=50 || true
+    exit 1
+fi
 echo "Compose up complete."
 
 # ── AC5: Container count ──
 header "AC5: Gateway container count"
 EXPECTED_COUNT=$(docker compose --profile gateway config --services | wc -l | tr -d ' ')
-RUNNING_COUNT=$(docker compose --profile gateway ps --status running --format json | grep -c '"Service"' || echo "0")
+RUNNING_COUNT=$(docker compose --profile gateway ps --status running -q | wc -l | tr -d ' ')
 if [ "$RUNNING_COUNT" -eq "$EXPECTED_COUNT" ]; then
     pass "Running containers (${RUNNING_COUNT}) matches expected (${EXPECTED_COUNT})"
 else

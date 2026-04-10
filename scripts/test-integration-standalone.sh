@@ -32,15 +32,37 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# ── Pre-flight: env vars ──
+header "Pre-flight"
+MISSING_VARS=()
+[ -z "${POSTGRES_PASSWORD:-}" ] && MISSING_VARS+=("POSTGRES_PASSWORD")
+
+if [ ${#MISSING_VARS[@]} -gt 0 ]; then
+    echo "Missing required env vars: ${MISSING_VARS[*]}"
+    echo "Source your .env file: set -a && source .env && set +a"
+    exit 1
+fi
+
+# Compose interpolates all services (including gateway-profiled ones).
+# Provide dummy values for gateway-only vars so standalone compose up succeeds.
+export TYK_GATEWAY_SECRET="${TYK_GATEWAY_SECRET:-unused}"
+export DESCOPE_PROJECT_ID="${DESCOPE_PROJECT_ID:-unused}"
+
+echo "All required env vars present."
+
 # ── Startup ──
 header "Starting standalone profile"
-docker compose up -d --build --wait --wait-timeout "$MAX_WAIT"
+if ! docker compose up -d --build --wait --wait-timeout "$MAX_WAIT"; then
+    echo "ERROR: Compose up failed. Container logs:"
+    docker compose logs --tail=50 || true
+    exit 1
+fi
 echo "Compose up complete."
 
 # ── AC4: Container count ──
 header "AC4: Standalone container count"
 EXPECTED_COUNT=$(docker compose config --services | wc -l | tr -d ' ')
-RUNNING_COUNT=$(docker compose ps --status running --format json | grep -c '"Service"' || echo "0")
+RUNNING_COUNT=$(docker compose ps --status running -q | wc -l | tr -d ' ')
 if [ "$RUNNING_COUNT" -eq "$EXPECTED_COUNT" ]; then
     pass "Running containers (${RUNNING_COUNT}) matches expected (${EXPECTED_COUNT})"
 else
@@ -51,7 +73,7 @@ fi
 header "AC1: Standalone health check"
 HEALTH_TMPFILE=$(mktemp)
 trap 'rm -f "$HEALTH_TMPFILE"; cleanup' EXIT
-HEALTH_CODE=$(curl -sf -w '%{http_code}' -o "$HEALTH_TMPFILE" --connect-timeout 5 "${BACKEND_URL}/api/health" 2>/dev/null || echo "000")
+HEALTH_CODE=$(curl -s -w '%{http_code}' -o "$HEALTH_TMPFILE" --connect-timeout 5 "${BACKEND_URL}/api/health" 2>/dev/null || echo "000")
 HEALTH_BODY=$(cat "$HEALTH_TMPFILE" 2>/dev/null || true)
 rm -f "$HEALTH_TMPFILE"
 
