@@ -71,6 +71,9 @@ def configure_middleware(app: FastAPI) -> None:
                 "/redoc",
                 "/openapi.json",
             },
+            excluded_prefixes={
+                "/api/internal/",
+            },
         )
         logger.info("Middleware included: TokenValidationMiddleware")
     else:

@@ -20,10 +20,17 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
     issuer check and validating manually against both known formats.
     """
 
-    def __init__(self, app, descope_project_id: str, excluded_paths: set[str] | None = None):
+    def __init__(
+        self,
+        app,
+        descope_project_id: str,
+        excluded_paths: set[str] | None = None,
+        excluded_prefixes: set[str] | None = None,
+    ):
         super().__init__(app)
         self.descope_project_id = descope_project_id
         self.excluded_paths = excluded_paths or set()
+        self.excluded_prefixes = tuple(excluded_prefixes) if excluded_prefixes else ()
         self.disco_address = f"https://api.descope.com/{descope_project_id}/.well-known/openid-configuration"
         self._accepted_issuers = frozenset(
             {
@@ -33,7 +40,7 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
         )
 
     async def dispatch(self, request: Request, call_next):
-        if request.url.path in self.excluded_paths:
+        if request.url.path in self.excluded_paths or request.url.path.startswith(self.excluded_prefixes):
             return await call_next(request)
 
         auth_header = request.headers.get("Authorization")

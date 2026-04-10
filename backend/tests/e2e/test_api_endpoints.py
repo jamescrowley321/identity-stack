@@ -53,6 +53,7 @@ class TestUnauthenticatedEndpoints:
             ("GET", "/api/permissions"),
             ("GET", "/api/keys"),
             ("GET", "/api/members"),
+            ("GET", "/api/providers"),
         ],
     )
     def test_protected_endpoints_return_401(
@@ -60,6 +61,24 @@ class TestUnauthenticatedEndpoints:
     ):
         """All protected endpoints return 401 without an auth token."""
         resp = api_context.get(f"{backend_url}{path}")
+        assert resp.status == 401, f"{method} {path} returned {resp.status}, expected 401"
+
+    @pytest.mark.parametrize(
+        "method,path",
+        [
+            ("POST", "/api/providers"),
+            ("GET", "/api/users/00000000-0000-0000-0000-000000000000/idp-links"),
+            ("POST", "/api/users/00000000-0000-0000-0000-000000000000/idp-links"),
+        ],
+    )
+    def test_new_write_endpoints_return_401(
+        self, api_context: APIRequestContext, backend_url: str, method: str, path: str
+    ):
+        """New write endpoints also require auth."""
+        if method == "POST":
+            resp = api_context.post(f"{backend_url}{path}", data="{}")
+        else:
+            resp = api_context.get(f"{backend_url}{path}")
         assert resp.status == 401, f"{method} {path} returned {resp.status}, expected 401"
 
 
@@ -137,6 +156,17 @@ class TestAdminEndpoints:
     def test_keys_list_responds(self, admin_api_context: APIRequestContext, backend_url: str):
         resp = admin_api_context.get(f"{backend_url}/api/keys")
         assert resp.status in (200, 403, 502), f"/api/keys returned {resp.status}"
+
+    def test_providers_list_responds(self, admin_api_context: APIRequestContext, backend_url: str):
+        """Providers endpoint responds (200/403 depending on token scope)."""
+        resp = admin_api_context.get(f"{backend_url}/api/providers")
+        assert resp.status in (200, 403), f"/api/providers returned {resp.status}"
+
+    def test_idp_links_responds(self, admin_api_context: APIRequestContext, backend_url: str):
+        """IdP links endpoint responds (200/403/404 depending on user existence)."""
+        fake_user = "00000000-0000-0000-0000-000000000000"
+        resp = admin_api_context.get(f"{backend_url}/api/users/{fake_user}/idp-links")
+        assert resp.status in (200, 403), f"/api/users/{{id}}/idp-links returned {resp.status}"
 
     def test_admin_endpoints_reject_non_admin_token(self, auth_api_context: APIRequestContext, backend_url: str):
         """Admin endpoints return 403 with a valid but non-admin token."""

@@ -33,8 +33,10 @@ infra/expired_token.txt
 *.swp
 *.swo
 
-# Claude
-.claude/task-state.md
+# Claude runtime state (skills are checked in)
+.claude/task-state*.md
+.claude/review-*.md
+.claude/review-*.patch
 
 # Ralph
 .ralph/
