@@ -170,8 +170,8 @@ class TestConfigureMiddlewareGateway:
             middleware_classes = [m.cls.__name__ for m in test_app.user_middleware if hasattr(m, "cls")]
             assert "ProxyHeadersMiddleware" in middleware_classes
 
-    def test_gateway_has_three_middleware(self):
-        """Gateway mode should have exactly 3 middleware (CORS, Security, Proxy)."""
+    def test_gateway_has_four_middleware(self):
+        """Gateway mode should have exactly 4 middleware (CORS, GatewayClaims, Security, Proxy)."""
         with patch.dict(os.environ, {"DEPLOYMENT_MODE": "gateway"}):
             import app.middleware.factory as factory
 
@@ -181,7 +181,33 @@ class TestConfigureMiddlewareGateway:
             factory.configure_middleware(test_app)
 
             middleware_with_cls = [m for m in test_app.user_middleware if hasattr(m, "cls")]
-            assert len(middleware_with_cls) == 3
+            assert len(middleware_with_cls) == 4
+
+    def test_gateway_includes_claims_extraction(self):
+        """Gateway mode includes GatewayClaimsMiddleware for JWT claims extraction."""
+        with patch.dict(os.environ, {"DEPLOYMENT_MODE": "gateway"}):
+            import app.middleware.factory as factory
+
+            factory = importlib.reload(factory)
+
+            test_app = FastAPI()
+            factory.configure_middleware(test_app)
+
+            middleware_classes = [m.cls.__name__ for m in test_app.user_middleware if hasattr(m, "cls")]
+            assert "GatewayClaimsMiddleware" in middleware_classes
+
+    def test_standalone_excludes_claims_extraction(self):
+        """Standalone mode does NOT include GatewayClaimsMiddleware."""
+        with patch.dict(os.environ, {"DEPLOYMENT_MODE": "standalone"}):
+            import app.middleware.factory as factory
+
+            factory = importlib.reload(factory)
+
+            test_app = FastAPI()
+            factory.configure_middleware(test_app)
+
+            middleware_classes = [m.cls.__name__ for m in test_app.user_middleware if hasattr(m, "cls")]
+            assert "GatewayClaimsMiddleware" not in middleware_classes
 
 
 class TestConfigureMiddlewareLogging:
@@ -213,7 +239,7 @@ class TestConfigureMiddlewareLogging:
             with caplog.at_level("INFO", logger="app.middleware.factory"):
                 factory.configure_middleware(test_app)
 
-            assert "Middleware excluded: TokenValidationMiddleware (gateway mode)" in caplog.text
+            assert "Middleware included: GatewayClaimsMiddleware" in caplog.text
             assert "Middleware excluded: SlowAPIMiddleware (gateway mode)" in caplog.text
             assert "Deployment mode: gateway" in caplog.text
 
