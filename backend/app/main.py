@@ -65,8 +65,14 @@ async def lifespan(app: FastAPI):
 
     init_telemetry(engine=engine)
     http_client = httpx.AsyncClient(timeout=30.0)
-    project_id = os.environ["DESCOPE_PROJECT_ID"]
-    management_key = os.environ["DESCOPE_MANAGEMENT_KEY"]
+    try:
+        project_id = os.environ["DESCOPE_PROJECT_ID"]
+        management_key = os.environ["DESCOPE_MANAGEMENT_KEY"]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"Required environment variable {exc} is not set — "
+            "ensure DESCOPE_PROJECT_ID and DESCOPE_MANAGEMENT_KEY are configured"
+        ) from exc
     base_url = os.getenv("DESCOPE_BASE_URL", "https://api.descope.com")
     app.state.descope_client = DescopeManagementClient(project_id, management_key, base_url, http_client=http_client)
 

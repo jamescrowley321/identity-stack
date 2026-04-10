@@ -48,7 +48,7 @@ class InboundSyncService:
         self._user_repo = user_repository
         self._link_repo = idp_link_repository
         self._provider_repo = provider_repository
-        self._publisher = publisher or CacheInvalidationPublisher()
+        self._publisher = CacheInvalidationPublisher() if publisher is None else publisher
 
     async def sync_user_from_flow(
         self,

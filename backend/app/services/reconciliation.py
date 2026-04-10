@@ -80,7 +80,7 @@ class ReconciliationService:
         self._tenant_repo = tenant_repository
         self._link_repo = idp_link_repository
         self._provider_repo = provider_repository
-        self._publisher = publisher or CacheInvalidationPublisher()
+        self._publisher = CacheInvalidationPublisher() if publisher is None else publisher
 
     async def run(self) -> Result[dict, IdentityError]:
         """Execute a full reconciliation pass.
