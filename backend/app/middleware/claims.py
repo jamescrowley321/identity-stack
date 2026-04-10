@@ -54,20 +54,23 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
 
             payload_bytes = base64.urlsafe_b64decode(payload_b64)
             claims = json.loads(payload_bytes)
-        except (ValueError, json.JSONDecodeError):
+
+            if not isinstance(claims, dict):
+                return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+
+            # For access key tokens: the exchange endpoint sets `tenants`
+            # but not `dct` (current tenant).  When there is exactly one
+            # tenant association, infer `dct` so downstream RBAC checks
+            # (require_role / require_permission) work.
+            if not claims.get("dct") and isinstance(claims.get("tenants"), dict):
+                tenants = claims["tenants"]
+                if len(tenants) == 1:
+                    claims["dct"] = next(iter(tenants))
+
+            request.state.claims = claims
+            request.state.principal = to_principal(claims, "Descope")
+            request.state.tenant_id = claims.get("dct")
+        except Exception:
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
-
-        # For access key tokens: the exchange endpoint sets `tenants`
-        # but not `dct` (current tenant).  When there is exactly one
-        # tenant association, infer `dct` so downstream RBAC checks
-        # (require_role / require_permission) work.
-        if not claims.get("dct") and isinstance(claims.get("tenants"), dict):
-            tenants = claims["tenants"]
-            if len(tenants) == 1:
-                claims["dct"] = next(iter(tenants))
-
-        request.state.claims = claims
-        request.state.principal = to_principal(claims, "Descope")
-        request.state.tenant_id = claims.get("dct")
 
         return await call_next(request)
