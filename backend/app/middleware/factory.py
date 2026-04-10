@@ -16,6 +16,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.middleware.auth import TokenValidationMiddleware
+from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.security import SecurityHeadersMiddleware
 
 logger = logging.getLogger(__name__)
@@ -32,17 +33,10 @@ def configure_middleware(app: FastAPI) -> None:
 
     Middleware is added innermost-first; the last call becomes the outermost layer.
 
-    In gateway mode, Tyk handles authentication (JWT) and rate limiting,
-    so TokenValidationMiddleware and SlowAPIMiddleware are skipped.
-
-    Gateway mode prerequisites (implemented in separate stories):
-    - Tyk forwards the original Authorization header to the backend (ADR-GW-7)
-    - TokenValidationMiddleware is replaced by a lightweight claim-extraction
-      middleware that reads the pre-validated JWT for tenant/role claims
-    - Network-level isolation or a shared gateway secret ensures only Tyk
-      can reach the backend directly
-    Until those stories land, gateway mode is fail-closed: all protected
-    endpoints return 401 because request.state.claims is never populated.
+    In gateway mode, Tyk handles authentication (JWT signature, expiry, issuer)
+    and rate limiting. TokenValidationMiddleware and SlowAPIMiddleware are replaced
+    by GatewayClaimsMiddleware, which base64-decodes the pre-validated JWT to
+    populate request.state.claims for downstream RBAC dependencies.
     """
     trusted_proxy_hosts = os.getenv("TRUSTED_PROXY_HOSTS", "127.0.0.1").split(",")
 
@@ -56,28 +50,34 @@ def configure_middleware(app: FastAPI) -> None:
     )
     logger.info("Middleware included: CORSMiddleware")
 
-    # 2. Token validation — standalone only (Tyk handles JWT in gateway mode).
-    #    Gateway mode is fail-closed: request.state.claims is never populated,
-    #    so require_role/require_permission return 401/403 until the claim-extraction
-    #    middleware is added in a subsequent story (Epic 2: Middleware Migration).
+    # 2. Token handling — mode-dependent.
+    #    Standalone: TokenValidationMiddleware validates JWT signatures via JWKS.
+    #    Gateway: GatewayClaimsMiddleware decodes pre-validated JWT (Tyk verified).
+    excluded_paths = {
+        "/api/health",
+        "/api/validate-id-token",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+    }
+    excluded_prefixes = {
+        "/api/internal/",
+    }
     if DEPLOYMENT_MODE == "standalone":
         app.add_middleware(
             TokenValidationMiddleware,
             descope_project_id=os.getenv("DESCOPE_PROJECT_ID", ""),
-            excluded_paths={
-                "/api/health",
-                "/api/validate-id-token",
-                "/docs",
-                "/redoc",
-                "/openapi.json",
-            },
-            excluded_prefixes={
-                "/api/internal/",
-            },
+            excluded_paths=excluded_paths,
+            excluded_prefixes=excluded_prefixes,
         )
         logger.info("Middleware included: TokenValidationMiddleware")
     else:
-        logger.info("Middleware excluded: TokenValidationMiddleware (gateway mode)")
+        app.add_middleware(
+            GatewayClaimsMiddleware,
+            excluded_paths=excluded_paths,
+            excluded_prefixes=excluded_prefixes,
+        )
+        logger.info("Middleware included: GatewayClaimsMiddleware")
 
     # 3. Rate limiting — standalone only (Tyk handles rate limiting in gateway mode)
     if DEPLOYMENT_MODE == "standalone":
