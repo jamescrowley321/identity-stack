@@ -51,19 +51,6 @@ class UserRepository:
         """Fetch a user by primary key. Returns None if not found."""
         return await self._session.get(User, user_id)
 
-    async def get_for_tenant(self, user_id: uuid.UUID, tenant_id: uuid.UUID) -> User | None:
-        """Fetch a user by ID, scoped to a tenant via UserTenantRole.
-
-        Returns None if the user does not exist or has no role in the tenant.
-        """
-        stmt = (
-            sa.select(User)
-            .join(UserTenantRole, UserTenantRole.user_id == User.id)
-            .where(User.id == user_id, UserTenantRole.tenant_id == tenant_id)
-        )
-        result = await self._session.execute(stmt)
-        return result.scalar_one_or_none()
-
     async def get_by_email(self, email: str) -> User | None:
         """Fetch a user by email address. Returns None if not found."""
         stmt = sa.select(User).where(User.email == email)
@@ -123,6 +110,23 @@ class UserRepository:
 
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def list_all(self) -> list[User]:
+        """List all users ordered by creation time."""
+        stmt = sa.select(User).order_by(User.created_at.desc())
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def exists_in_tenant(self, user_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
+        """Check if a user has any role assignment in the given tenant."""
+        stmt = sa.select(
+            sa.exists().where(
+                UserTenantRole.user_id == user_id,
+                UserTenantRole.tenant_id == tenant_id,
+            )
+        )
+        result = await self._session.execute(stmt)
+        return bool(result.scalar())
 
     async def commit(self) -> None:
         """Commit the current transaction."""

@@ -157,16 +157,78 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
         user_id: uuid.UUID,
         tenant_id: uuid.UUID,
         role_id: uuid.UUID,
+        data: dict | None = None,
     ) -> Result[None, SyncError]:
-        """Sync role assignment to Descope.
+        """Sync role assignment to Descope via assign_roles API.
 
-        Placeholder — full implementation in Story 2.2.
+        Expected data keys:
+            role_name: str — Descope role name (required for correct API call)
+            login_id: str — Descope loginId/email (optional, falls back to str(user_id))
         """
         with tracer.start_as_current_span("descope.sync_role_assignment") as span:
             span.set_attribute("user.id", str(user_id))
             span.set_attribute("tenant.id", str(tenant_id))
             span.set_attribute("role.id", str(role_id))
-            return Ok(None)
+            try:
+                data = data or {}
+                role_name = data.get("role_name", str(role_id))
+                login_id = data.get("login_id", str(user_id))
+                await self._client.assign_roles(login_id, str(tenant_id), [role_name])
+                return Ok(None)
+            except Exception as exc:
+                logger.warning(
+                    "Descope sync_role_assignment failed for user %s: %s",
+                    user_id,
+                    exc,
+                )
+                return Error(
+                    SyncError(
+                        message=str(exc),
+                        operation="sync_role_assignment",
+                        context={
+                            "user_id": str(user_id),
+                            "tenant_id": str(tenant_id),
+                            "role_id": str(role_id),
+                        },
+                    )
+                )
+
+    async def delete_role_assignment(
+        self,
+        *,
+        user_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        role_id: uuid.UUID,
+        data: dict | None = None,
+    ) -> Result[None, SyncError]:
+        """Remove a role assignment in Descope via remove_roles API."""
+        with tracer.start_as_current_span("descope.delete_role_assignment") as span:
+            span.set_attribute("user.id", str(user_id))
+            span.set_attribute("tenant.id", str(tenant_id))
+            span.set_attribute("role.id", str(role_id))
+            try:
+                data = data or {}
+                role_name = data.get("role_name", str(role_id))
+                login_id = data.get("login_id", str(user_id))
+                await self._client.remove_roles(login_id, str(tenant_id), [role_name])
+                return Ok(None)
+            except Exception as exc:
+                logger.warning(
+                    "Descope delete_role_assignment failed for user %s: %s",
+                    user_id,
+                    exc,
+                )
+                return Error(
+                    SyncError(
+                        message=str(exc),
+                        operation="delete_role_assignment",
+                        context={
+                            "user_id": str(user_id),
+                            "tenant_id": str(tenant_id),
+                            "role_id": str(role_id),
+                        },
+                    )
+                )
 
     async def delete_user(self, *, user_id: uuid.UUID) -> Result[None, SyncError]:
         """Disable user in Descope (canonical delete maps to Descope disable).

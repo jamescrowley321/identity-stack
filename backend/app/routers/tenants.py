@@ -1,17 +1,20 @@
 import logging
+import uuid
 
-import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from expression import Ok
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.dependencies.auth import get_claims
+from app.dependencies.identity import get_tenant_service
 from app.dependencies.tenant import get_tenant_claims, get_tenant_id
+from app.errors.problem_detail import result_to_response
 from app.models.database import get_async_session
 from app.models.tenant import TenantResource
-from app.services.descope import get_descope_client
+from app.services.tenant import TenantService
 
 logger = logging.getLogger(__name__)
 
@@ -43,14 +46,18 @@ class CreateResourceRequest(BaseModel):
 
 
 @router.post("/tenants")
-async def create_tenant(body: CreateTenantRequest, claims: dict = Depends(require_admin_role)):
-    """Create a new tenant via the Descope Management API. Requires admin/owner role."""
-    client = get_descope_client()
-    result = await client.create_tenant(
+async def create_tenant(
+    request: Request,
+    body: CreateTenantRequest,
+    claims: dict = Depends(require_admin_role),
+    tenant_service: TenantService = Depends(get_tenant_service),
+):
+    """Create a new tenant via the canonical identity service. Requires admin/owner role."""
+    result = await tenant_service.create_tenant(
         name=body.name,
-        self_provisioning_domains=body.self_provisioning_domains,
+        domains=body.self_provisioning_domains,
     )
-    return result
+    return result_to_response(result, request)
 
 
 @router.get("/tenants")
@@ -69,21 +76,19 @@ async def list_user_tenants(tenant_claims: dict = Depends(get_tenant_claims)):
 
 @router.get("/tenants/current")
 async def get_current_tenant(
+    request: Request,
     tenant_id: str = Depends(get_tenant_id),
+    tenant_service: TenantService = Depends(get_tenant_service),
 ):
     """Get the current tenant context from the JWT `dct` claim."""
     try:
-        client = get_descope_client()
-        tenant_info = await client.load_tenant(tenant_id)
-        return {"tenant_id": tenant_id, "tenant": tenant_info}
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            return {"tenant_id": tenant_id, "tenant": None}
-        logger.error("Descope API error loading tenant %s: %s", tenant_id, e)
-        raise HTTPException(status_code=502, detail="Failed to load tenant from Descope")
-    except httpx.RequestError as e:
-        logger.error("Network error loading tenant %s: %s", tenant_id, e)
-        raise HTTPException(status_code=502, detail="Failed to reach Descope API")
+        tenant_uuid = uuid.UUID(tenant_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid UUID for tenant_id: {tenant_id}")
+    result = await tenant_service.get_tenant(tenant_id=tenant_uuid)
+    if result.is_ok():
+        result = Ok({"tenant_id": tenant_id, "tenant": result.ok})
+    return result_to_response(result, request)
 
 
 @router.get("/tenants/{tenant_id}/resources")
