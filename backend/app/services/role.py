@@ -49,7 +49,7 @@ class RoleService:
         self._permission_repository = permission_repository
         self._assignment_repository = assignment_repository
         self._adapter = adapter
-        self._publisher = publisher or CacheInvalidationPublisher()
+        self._publisher = CacheInvalidationPublisher() if publisher is None else publisher
 
     async def create_role(
         self,

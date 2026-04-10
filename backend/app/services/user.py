@@ -42,7 +42,7 @@ class UserService:
         self._repository = repository
         self._adapter = adapter
         self._assignment_repository = assignment_repository
-        self._publisher = publisher or CacheInvalidationPublisher()
+        self._publisher = CacheInvalidationPublisher() if publisher is None else publisher
 
     async def create_user(
         self,
