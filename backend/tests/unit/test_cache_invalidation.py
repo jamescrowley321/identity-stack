@@ -3,7 +3,7 @@
 Tests cover:
 - publish: publishes JSON event to identity:changes channel (AC-3.3.1)
 - publish: no-op when redis client is None
-- publish: swallows Redis exceptions, logs warning (AC-3.3.2)
+- publish: swallows Redis exceptions, logs error (AC-3.3.2)
 - publish_batch: publishes batch event with stats
 - publish_batch: swallows exceptions like publish
 - Singleton lifecycle: init, get, shutdown
@@ -60,7 +60,7 @@ class TestPublish:
         await pub.publish(entity_type="user", entity_id=uuid.uuid4(), operation="create")
 
     async def test_publish_swallows_redis_exception(self):
-        """AC-3.3.2: Redis failure logged as warning, never raised."""
+        """AC-3.3.2: Redis failure logged as error, never raised."""
         redis = AsyncMock()
         redis.publish.side_effect = ConnectionError("Redis gone")
         pub = CacheInvalidationPublisher(redis_client=redis)
@@ -68,8 +68,8 @@ class TestPublish:
         with patch("app.services.cache_invalidation.logger") as mock_logger:
             await pub.publish(entity_type="user", entity_id=uuid.uuid4(), operation="update")
 
-        mock_logger.warning.assert_called_once()
-        assert "Redis publish failed" in mock_logger.warning.call_args[0][0]
+        mock_logger.error.assert_called_once()
+        assert "Redis publish failed" in mock_logger.error.call_args[0][0]
 
     async def test_publish_null_tenant_id(self):
         """Global entities (roles, permissions) have tenant_id=null."""
@@ -115,7 +115,7 @@ class TestPublishBatch:
         with patch("app.services.cache_invalidation.logger") as mock_logger:
             await pub.publish_batch(operation="reconcile", stats={})
 
-        mock_logger.warning.assert_called_once()
+        mock_logger.error.assert_called_once()
 
 
 class TestSingletonLifecycle:

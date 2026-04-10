@@ -1,7 +1,7 @@
 """CacheInvalidationPublisher — fire-and-forget Redis pub/sub for cache invalidation.
 
 Publishes change events to Redis so downstream caches can invalidate stale entries.
-All publish operations are best-effort: failures are logged as warnings and never
+All publish operations are best-effort: failures are logged as errors and never
 propagate to the caller (AC-3.3.2).
 
 Channel: ``identity:changes``
@@ -43,7 +43,7 @@ class CacheInvalidationPublisher:
     """Best-effort Redis pub/sub publisher for identity change events.
 
     AC-3.3.1: Called after every repo.commit() in write methods.
-    AC-3.3.2: All exceptions caught, logged as warnings, never raised.
+    AC-3.3.2: All exceptions caught, logged as errors, never raised.
     AC-3.3.3: Schema documented above; channel = ``identity:changes``.
     """
 
@@ -65,7 +65,7 @@ class CacheInvalidationPublisher:
         try:
             await self._redis.publish(CHANNEL, json.dumps(event))
         except Exception:
-            logger.warning("Redis publish failed for %s/%s", entity_type, entity_id, exc_info=True)
+            logger.error("Redis publish failed for %s/%s", entity_type, entity_id, exc_info=True)
 
     async def publish_batch(
         self,
@@ -81,7 +81,7 @@ class CacheInvalidationPublisher:
         try:
             await self._redis.publish(CHANNEL, json.dumps(event))
         except Exception:
-            logger.warning("Redis publish failed for batch/%s", operation, exc_info=True)
+            logger.error("Redis publish failed for batch/%s", operation, exc_info=True)
 
     @staticmethod
     def _build_event(
