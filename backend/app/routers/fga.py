@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
-from app.services.descope import get_descope_client
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +55,7 @@ def _sanitize_error_detail(response_text: str) -> str:
 
 @router.get("/fga/schema")
 async def get_fga_schema(
+    request: Request,
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
     """Get the current FGA schema. Requires owner or admin role.
@@ -63,7 +63,7 @@ async def get_fga_schema(
     Note: FGA schema is project-global and affects all tenants.
     """
     try:
-        client = get_descope_client()
+        client = request.app.state.descope_client
         result = await client.get_fga_schema() or {}
         return {"schema": result.get("schema") or ""}
     except httpx.HTTPStatusError as exc:
@@ -88,7 +88,7 @@ async def update_fga_schema(
     Note: FGA schema is project-global and affects all tenants.
     """
     try:
-        client = get_descope_client()
+        client = request.app.state.descope_client
         await client.update_fga_schema(body.schema_)
     except httpx.HTTPStatusError as exc:
         resp_body = exc.response.text[:500]
@@ -123,7 +123,7 @@ async def create_relation(
     """Create an FGA relation tuple. Requires owner or admin role."""
     prefixed_id = _prefix_resource_id(tenant_id, body.resource_id)
     try:
-        client = get_descope_client()
+        client = request.app.state.descope_client
         await client.create_relation(body.resource_type, prefixed_id, body.relation, body.target)
         return {
             "resource_type": body.resource_type,
@@ -152,7 +152,7 @@ async def delete_relation(
     """Delete an FGA relation tuple. Requires owner or admin role."""
     prefixed_id = _prefix_resource_id(tenant_id, body.resource_id)
     try:
-        client = get_descope_client()
+        client = request.app.state.descope_client
         await client.delete_relation(body.resource_type, prefixed_id, body.relation, body.target)
         return {"status": "deleted"}
     except httpx.HTTPStatusError as exc:
@@ -176,7 +176,7 @@ async def list_relations(
     """List FGA relation tuples for a resource. Requires owner or admin role."""
     prefixed_id = _prefix_resource_id(tenant_id, resource_id)
     try:
-        client = get_descope_client()
+        client = request.app.state.descope_client
         relations = await client.list_relations(resource_type, prefixed_id) or []
         # Strip tenant prefix from resource_id in response items
         for rel in relations:
@@ -206,7 +206,7 @@ async def check_permission(
     """Check an FGA permission. Requires owner or admin role. Fail-closed: errors deny access."""
     prefixed_id = _prefix_resource_id(tenant_id, body.resource_id)
     try:
-        client = get_descope_client()
+        client = request.app.state.descope_client
         allowed = bool(await client.check_permission(body.resource_type, prefixed_id, body.relation, body.target))
         return {"allowed": allowed}
     except httpx.HTTPStatusError as exc:

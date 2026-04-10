@@ -1,13 +1,12 @@
 import logging
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from app.dependencies.auth import get_claims
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
-from app.services.descope import get_descope_client
 
 logger = logging.getLogger(__name__)
 
@@ -29,14 +28,14 @@ class UpdateTenantSettingsRequest(BaseModel):
 
 
 @router.get("/profile")
-async def get_profile(claims: dict = Depends(get_claims)):
+async def get_profile(request: Request, claims: dict = Depends(get_claims)):
     """Load the current user's profile and custom attributes from Descope."""
     # Descope's sub claim is the userId (not loginId)
     user_id = claims.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="Missing user identity (sub claim)")
     try:
-        client = get_descope_client()
+        client = request.app.state.descope_client
         user = await client.load_user(user_id)
         return {
             "user_id": user_id,
@@ -58,6 +57,7 @@ async def get_profile(claims: dict = Depends(get_claims)):
 
 @router.patch("/profile")
 async def update_profile_attribute(
+    request: Request,
     body: UpdateAttributeRequest,
     claims: dict = Depends(get_claims),
 ):
@@ -69,7 +69,7 @@ async def update_profile_attribute(
     if body.key not in ALLOWED_USER_ATTRIBUTES:
         raise HTTPException(status_code=400, detail=f"Attribute '{body.key}' is not allowed")
     try:
-        client = get_descope_client()
+        client = request.app.state.descope_client
         login_id = await client.resolve_login_id(user_id)
         await client.update_user_custom_attribute(login_id, body.key, body.value)
         return {"status": "updated", "key": body.key, "value": body.value}
@@ -81,10 +81,10 @@ async def update_profile_attribute(
 
 
 @router.get("/tenants/current/settings")
-async def get_tenant_settings(tenant_id: str = Depends(get_tenant_id)):
+async def get_tenant_settings(request: Request, tenant_id: str = Depends(get_tenant_id)):
     """Load the current tenant's settings and custom attributes from Descope."""
     try:
-        client = get_descope_client()
+        client = request.app.state.descope_client
         tenant = await client.load_tenant(tenant_id)
         if not tenant:
             return {
@@ -110,6 +110,7 @@ async def get_tenant_settings(tenant_id: str = Depends(get_tenant_id)):
 
 @router.patch("/tenants/current/settings")
 async def update_tenant_settings(
+    request: Request,
     body: UpdateTenantSettingsRequest,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
@@ -122,7 +123,7 @@ async def update_tenant_settings(
             detail=f"Attribute(s) not allowed: {', '.join(sorted(disallowed))}",
         )
     try:
-        client = get_descope_client()
+        client = request.app.state.descope_client
         await client.update_tenant_custom_attributes(tenant_id, body.custom_attributes)
         return {"status": "updated", "tenant_id": tenant_id, "custom_attributes": body.custom_attributes}
     except httpx.HTTPStatusError as exc:

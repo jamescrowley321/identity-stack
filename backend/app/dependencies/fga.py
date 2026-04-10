@@ -3,8 +3,6 @@ import logging
 import httpx
 from fastapi import HTTPException, Request
 
-from app.services.descope import get_descope_client
-
 logger = logging.getLogger(__name__)
 
 
@@ -63,7 +61,7 @@ def require_fga(
             raise HTTPException(status_code=400, detail="Missing resource identifier")
         prefixed_id = f"{tenant_id}:{resource_id}"
         try:
-            client = get_descope_client()
+            client = request.app.state.descope_client
             allowed = await client.check_permission(resource_type, prefixed_id, relation, user_id)
         except httpx.HTTPStatusError as exc:
             logger.error(

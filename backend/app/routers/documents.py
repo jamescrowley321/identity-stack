@@ -12,7 +12,6 @@ from app.dependencies.tenant import get_tenant_id
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.models.database import get_async_session
 from app.models.document import Document
-from app.services.descope import get_descope_client
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +70,7 @@ async def create_document(
     # FGA relation FIRST — if this fails, no DB row is created
     prefixed_id = _prefix_resource_id(tenant_id, document.id)
     try:
-        client = get_descope_client()
+        client = request.app.state.descope_client
         await client.create_relation("document", prefixed_id, "owner", user_id)
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error(
@@ -113,7 +112,7 @@ async def list_documents(
     user_id = extract_user_id(request)
 
     try:
-        client = get_descope_client()
+        client = request.app.state.descope_client
         resources = await client.list_user_resources("document", "can_view", user_id)
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error(
@@ -219,7 +218,7 @@ async def delete_document(
 
     # FGA cleanup first — abort if it fails or if too many relations
     try:
-        client = get_descope_client()
+        client = request.app.state.descope_client
         relations = (await client.list_relations("document", prefixed_id)) or []
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error("FGA cleanup failed for doc %s: %s", document_id, type(exc).__name__)
@@ -290,7 +289,7 @@ async def share_document(
 
     # Verify target user exists and is in the same tenant
     try:
-        client = get_descope_client()
+        client = request.app.state.descope_client
         target_user = await client.load_user(body.user_id)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
@@ -354,7 +353,7 @@ async def revoke_share(
         raise HTTPException(status_code=404, detail="Document not found")
 
     try:
-        client = get_descope_client()
+        client = request.app.state.descope_client
     except Exception as exc:
         logger.error(
             "Failed to initialize client for revoke on doc %s: %s",

@@ -30,8 +30,8 @@ from app.routers import (
     tenants,
     users,
 )
-from app.services.cache_invalidation import init_cache_publisher, set_redis_client, shutdown_cache_publisher
-from app.services.descope import init_descope_client, shutdown_descope_client
+from app.services.cache_invalidation import CacheInvalidationPublisher
+from app.services.descope import DescopeManagementClient
 from app.telemetry import init_telemetry, shutdown_telemetry
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,10 @@ async def lifespan(app: FastAPI):
 
     init_telemetry(engine=engine)
     http_client = httpx.AsyncClient(timeout=30.0)
-    init_descope_client(http_client=http_client)
+    project_id = os.environ["DESCOPE_PROJECT_ID"]
+    management_key = os.environ["DESCOPE_MANAGEMENT_KEY"]
+    base_url = os.getenv("DESCOPE_BASE_URL", "https://api.descope.com")
+    app.state.descope_client = DescopeManagementClient(project_id, management_key, base_url, http_client=http_client)
 
     # Redis for cache invalidation pub/sub — optional, degrades gracefully
     redis_client = None
@@ -90,8 +93,8 @@ async def lifespan(app: FastAPI):
                 redis_client = None
     else:
         logger.info("REDIS_URL not set — cache invalidation disabled")
-    init_cache_publisher(redis_client=redis_client)
-    set_redis_client(redis_client)
+    app.state.cache_publisher = CacheInvalidationPublisher(redis_client=redis_client)
+    app.state.redis_client = redis_client
 
     # Start cache invalidation subscriber (AC-4.3.3) — background task
     subscriber_task = None
@@ -113,8 +116,8 @@ async def lifespan(app: FastAPI):
             except Exception:
                 logger.warning("Cache invalidation subscriber shutdown error", exc_info=True)
         try:
-            set_redis_client(None)
-            shutdown_cache_publisher()
+            app.state.redis_client = None
+            app.state.cache_publisher = None
         except Exception:
             logger.warning("Cache publisher shutdown failed", exc_info=True)
         try:
@@ -131,7 +134,7 @@ async def lifespan(app: FastAPI):
                 logger.warning("Telemetry shutdown failed", exc_info=True)
             finally:
                 try:
-                    shutdown_descope_client()
+                    app.state.descope_client = None
                 except Exception:
                     logger.warning("Descope client shutdown failed", exc_info=True)
                 finally:

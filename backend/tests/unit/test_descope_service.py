@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from app.services.descope import DescopeManagementClient, get_descope_client
+from app.services.descope import DescopeManagementClient
 
 
 @pytest.fixture
@@ -851,29 +851,3 @@ class TestDescopeManagementClient:
 
         result = await client.list_user_resources("document", "editor", "user:u1")
         assert result == []
-
-
-class TestGetDescopeClient:
-    def test_creates_client_from_env(self, monkeypatch):
-        monkeypatch.setenv("DESCOPE_PROJECT_ID", "proj-env")
-        monkeypatch.setenv("DESCOPE_MANAGEMENT_KEY", "key-env")
-        client = get_descope_client()
-        assert client._auth_header == "Bearer proj-env:key-env"
-
-    def test_uses_custom_base_url(self, monkeypatch):
-        monkeypatch.setenv("DESCOPE_PROJECT_ID", "proj-env")
-        monkeypatch.setenv("DESCOPE_MANAGEMENT_KEY", "key-env")
-        monkeypatch.setenv("DESCOPE_BASE_URL", "https://custom.api.com")
-        client = get_descope_client()
-        assert client.base_url == "https://custom.api.com"
-
-    def test_raises_without_project_id(self, monkeypatch):
-        monkeypatch.delenv("DESCOPE_PROJECT_ID", raising=False)
-        with pytest.raises(KeyError):
-            get_descope_client()
-
-    def test_raises_without_management_key(self, monkeypatch):
-        monkeypatch.setenv("DESCOPE_PROJECT_ID", "proj-env")
-        monkeypatch.delenv("DESCOPE_MANAGEMENT_KEY", raising=False)
-        with pytest.raises(KeyError):
-            get_descope_client()

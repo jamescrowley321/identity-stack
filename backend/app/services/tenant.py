@@ -40,7 +40,7 @@ class TenantService:
     ) -> None:
         self._repository = repository
         self._adapter = adapter
-        self._publisher = publisher
+        self._publisher = publisher or CacheInvalidationPublisher()
 
     async def create_tenant(
         self,
@@ -70,8 +70,7 @@ class TenantService:
             tenant_id = tenant.id
             await self._repository.commit()
 
-            if self._publisher:
-                await self._publisher.publish(entity_type="tenant", entity_id=tenant_id, operation="create")
+            await self._publisher.publish(entity_type="tenant", entity_id=tenant_id, operation="create")
 
             self._log_sync_failure(
                 await self._adapter.sync_tenant(

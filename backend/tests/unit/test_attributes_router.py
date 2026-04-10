@@ -63,9 +63,8 @@ async def test_profile_rejects_unauthenticated(client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.attributes.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_profile(mock_validate, mock_factory, client):
+async def test_get_profile(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.load_user.return_value = {
@@ -73,7 +72,7 @@ async def test_get_profile(mock_validate, mock_factory, client):
         "email": "test@example.com",
         "customAttributes": {"department": "Engineering", "job_title": "Developer"},
     }
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     response = await client.get("/api/profile", headers={"Authorization": "Bearer valid.token"})
     assert response.status_code == 200
@@ -83,13 +82,12 @@ async def test_get_profile(mock_validate, mock_factory, client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.attributes.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_profile_handles_api_failure(mock_validate, mock_factory, client):
+async def test_get_profile_handles_api_failure(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.load_user.side_effect = _make_http_status_error(500)
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     response = await client.get("/api/profile", headers={"Authorization": "Bearer valid.token"})
     assert response.status_code == 502
@@ -97,13 +95,12 @@ async def test_get_profile_handles_api_failure(mock_validate, mock_factory, clie
 
 
 @pytest.mark.anyio
-@patch("app.routers.attributes.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_profile_attribute(mock_validate, mock_factory, client):
+async def test_update_profile_attribute(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.resolve_login_id.return_value = "user123@example.com"
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     response = await client.patch(
         "/api/profile",
@@ -117,16 +114,15 @@ async def test_update_profile_attribute(mock_validate, mock_factory, client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.attributes.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_tenant_settings(mock_validate, mock_factory, client):
+async def test_get_tenant_settings(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.load_tenant.return_value = {
         "name": "Acme Corp",
         "customAttributes": {"plan_tier": "pro", "max_members": 50},
     }
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     response = await client.get("/api/tenants/current/settings", headers={"Authorization": "Bearer valid.token"})
     assert response.status_code == 200
@@ -144,12 +140,11 @@ async def test_get_tenant_settings_403_without_tenant(mock_validate, client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.attributes.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_tenant_settings_as_admin(mock_validate, mock_factory, client):
+async def test_update_tenant_settings_as_admin(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     response = await client.patch(
         "/api/tenants/current/settings",
@@ -182,13 +177,12 @@ async def test_update_profile_rejects_unauthenticated(client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.attributes.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_tenant_settings_handles_api_failure(mock_validate, mock_factory, client):
+async def test_get_tenant_settings_handles_api_failure(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.load_tenant.side_effect = _make_http_status_error(500)
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     response = await client.get("/api/tenants/current/settings", headers={"Authorization": "Bearer valid.token"})
     assert response.status_code == 502
@@ -224,15 +218,14 @@ async def test_update_profile_rejects_missing_sub(mock_validate, client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.attributes.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_profile_handles_api_failure(mock_validate, mock_factory, client):
+async def test_update_profile_handles_api_failure(mock_validate, client):
     """M3: update_profile_attribute should return 502 on Descope API error."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.resolve_login_id.return_value = "user123@example.com"
     mock_client.update_user_custom_attribute.side_effect = _make_http_status_error(500)
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     response = await client.patch(
         "/api/profile",
@@ -268,14 +261,13 @@ async def test_get_profile_rejects_missing_sub(mock_validate, client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.attributes.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_tenant_settings_handles_api_failure(mock_validate, mock_factory, client):
+async def test_update_tenant_settings_handles_api_failure(mock_validate, client):
     """Tenant settings update should return 502 on Descope API error."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.update_tenant_custom_attributes.side_effect = _make_http_status_error(500)
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     response = await client.patch(
         "/api/tenants/current/settings",
