@@ -6,7 +6,6 @@ Tests cover:
 - publish: swallows Redis exceptions, logs error (AC-3.3.2)
 - publish_batch: publishes batch event with stats
 - publish_batch: swallows exceptions like publish
-- Singleton lifecycle: init, get, shutdown
 - Event schema correctness (AC-3.3.3)
 """
 
@@ -19,9 +18,6 @@ import pytest
 from app.services.cache_invalidation import (
     CHANNEL,
     CacheInvalidationPublisher,
-    get_cache_publisher,
-    init_cache_publisher,
-    shutdown_cache_publisher,
 )
 
 
@@ -116,30 +112,3 @@ class TestPublishBatch:
             await pub.publish_batch(operation="reconcile", stats={})
 
         mock_logger.error.assert_called_once()
-
-
-class TestSingletonLifecycle:
-    """Module-level singleton functions: init, get, shutdown."""
-
-    def setup_method(self):
-        shutdown_cache_publisher()
-
-    def teardown_method(self):
-        shutdown_cache_publisher()
-
-    def test_get_returns_noop_before_init(self):
-        pub = get_cache_publisher()
-        assert pub._redis is None
-
-    def test_init_and_get_returns_same_instance(self):
-        redis = AsyncMock()
-        created = init_cache_publisher(redis_client=redis)
-        retrieved = get_cache_publisher()
-        assert retrieved is created
-        assert retrieved._redis is redis
-
-    def test_shutdown_clears_singleton(self):
-        init_cache_publisher(redis_client=AsyncMock())
-        shutdown_cache_publisher()
-        pub = get_cache_publisher()
-        assert pub._redis is None

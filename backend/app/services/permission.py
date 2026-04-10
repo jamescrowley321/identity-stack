@@ -40,7 +40,7 @@ class PermissionService:
     ) -> None:
         self._repository = repository
         self._adapter = adapter
-        self._publisher = publisher
+        self._publisher = publisher or CacheInvalidationPublisher()
 
     async def create_permission(
         self,
@@ -71,8 +71,7 @@ class PermissionService:
             permission_id = permission.id
             await self._repository.commit()
 
-            if self._publisher:
-                await self._publisher.publish(entity_type="permission", entity_id=permission_id, operation="create")
+            await self._publisher.publish(entity_type="permission", entity_id=permission_id, operation="create")
 
             self._log_sync_failure(
                 await self._adapter.sync_permission(
@@ -137,8 +136,7 @@ class PermissionService:
             result_dict = permission.model_dump()
             await self._repository.commit()
 
-            if self._publisher:
-                await self._publisher.publish(entity_type="permission", entity_id=permission.id, operation="update")
+            await self._publisher.publish(entity_type="permission", entity_id=permission.id, operation="update")
 
             self._log_sync_failure(
                 await self._adapter.sync_permission(
@@ -171,8 +169,7 @@ class PermissionService:
 
             await self._repository.commit()
 
-            if self._publisher:
-                await self._publisher.publish(entity_type="permission", entity_id=permission_id, operation="delete")
+            await self._publisher.publish(entity_type="permission", entity_id=permission_id, operation="delete")
 
             self._log_sync_failure(
                 await self._adapter.delete_permission(permission_id=permission_id),

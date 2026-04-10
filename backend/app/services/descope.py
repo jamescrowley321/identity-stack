@@ -1,4 +1,3 @@
-import os
 import re
 from typing import Literal
 
@@ -377,38 +376,3 @@ class DescopeManagementClient:
         """Close the underlying HTTP client if we own it."""
         if self._http_client is not None and not self._owns_client:
             await self._http_client.aclose()
-
-
-# Module-level singleton for shared client
-_descope_client: DescopeManagementClient | None = None
-
-
-def get_descope_client() -> DescopeManagementClient:
-    """Return the module-level DescopeManagementClient singleton.
-
-    Must be initialized via init_descope_client() during app lifespan.
-    Falls back to creating a per-call client if not initialized (e.g. in tests).
-    """
-    if _descope_client is not None:
-        return _descope_client
-    # Fallback for tests or scripts — no shared HTTP client
-    project_id = os.environ["DESCOPE_PROJECT_ID"]
-    management_key = os.environ["DESCOPE_MANAGEMENT_KEY"]
-    base_url = os.getenv("DESCOPE_BASE_URL", "https://api.descope.com")
-    return DescopeManagementClient(project_id, management_key, base_url)
-
-
-def init_descope_client(http_client: httpx.AsyncClient | None = None) -> DescopeManagementClient:
-    """Initialize the module-level singleton. Called from app lifespan."""
-    global _descope_client
-    project_id = os.environ["DESCOPE_PROJECT_ID"]
-    management_key = os.environ["DESCOPE_MANAGEMENT_KEY"]
-    base_url = os.getenv("DESCOPE_BASE_URL", "https://api.descope.com")
-    _descope_client = DescopeManagementClient(project_id, management_key, base_url, http_client=http_client)
-    return _descope_client
-
-
-def shutdown_descope_client() -> None:
-    """Clear the module-level singleton. Called from app lifespan."""
-    global _descope_client
-    _descope_client = None

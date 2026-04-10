@@ -42,7 +42,7 @@ class UserService:
         self._repository = repository
         self._adapter = adapter
         self._assignment_repository = assignment_repository
-        self._publisher = publisher
+        self._publisher = publisher or CacheInvalidationPublisher()
 
     async def create_user(
         self,
@@ -84,10 +84,9 @@ class UserService:
                 logger.exception("Commit failed for create_user %s", user_id)
                 return Error(Conflict(message="Failed to persist user"))
 
-            if self._publisher:
-                await self._publisher.publish(
-                    entity_type="user", entity_id=user_id, operation="create", tenant_id=tenant_id
-                )
+            await self._publisher.publish(
+                entity_type="user", entity_id=user_id, operation="create", tenant_id=tenant_id
+            )
 
             self._log_sync_failure(
                 await self._adapter.sync_user(user_id=user_id, data=sync_data),
@@ -162,10 +161,9 @@ class UserService:
             sync_data = {"email": user.email, "status": user.status.value}
             await self._repository.commit()
 
-            if self._publisher:
-                await self._publisher.publish(
-                    entity_type="user", entity_id=user.id, operation="update", tenant_id=tenant_id
-                )
+            await self._publisher.publish(
+                entity_type="user", entity_id=user.id, operation="update", tenant_id=tenant_id
+            )
 
             self._log_sync_failure(
                 await self._adapter.sync_user(user_id=user.id, data=sync_data),
@@ -213,10 +211,9 @@ class UserService:
             sync_data = {"email": user.email, "status": user.status.value}
             await self._repository.commit()
 
-            if self._publisher:
-                await self._publisher.publish(
-                    entity_type="user", entity_id=user.id, operation="deactivate", tenant_id=tenant_id
-                )
+            await self._publisher.publish(
+                entity_type="user", entity_id=user.id, operation="deactivate", tenant_id=tenant_id
+            )
 
             self._log_sync_failure(
                 await self._adapter.sync_user(user_id=user.id, data=sync_data),
@@ -258,10 +255,9 @@ class UserService:
             sync_data = {"email": user.email, "status": user.status.value}
             await self._repository.commit()
 
-            if self._publisher:
-                await self._publisher.publish(
-                    entity_type="user", entity_id=user.id, operation="activate", tenant_id=tenant_id
-                )
+            await self._publisher.publish(
+                entity_type="user", entity_id=user.id, operation="activate", tenant_id=tenant_id
+            )
 
             self._log_sync_failure(
                 await self._adapter.sync_user(user_id=user.id, data=sync_data),
@@ -300,10 +296,9 @@ class UserService:
 
             await self._assignment_repository.commit()
 
-            if self._publisher:
-                await self._publisher.publish(
-                    entity_type="user", entity_id=user_id, operation="unassign", tenant_id=tenant_id
-                )
+            await self._publisher.publish(
+                entity_type="user", entity_id=user_id, operation="unassign", tenant_id=tenant_id
+            )
 
             # Best-effort sync: notify IdP of membership removal
             self._log_sync_failure(

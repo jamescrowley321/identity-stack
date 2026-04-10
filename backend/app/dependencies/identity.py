@@ -11,7 +11,7 @@ AC-4.3.1: get_identity_resolution_service() for identity resolution with Redis c
 
 from __future__ import annotations
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,8 +24,6 @@ from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 from app.services.adapters.descope import DescopeSyncAdapter
-from app.services.cache_invalidation import get_cache_publisher, get_redis_client
-from app.services.descope import get_descope_client
 from app.services.identity_resolution import IdentityResolutionService
 from app.services.idp_link import IdPLinkService
 from app.services.inbound_sync import InboundSyncService
@@ -41,6 +39,7 @@ _RECONCILIATION_LOCK_ID = 73_82_69_67  # "RECON" in digits
 
 
 async def get_user_service(
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
 ) -> UserService:
     """Build a UserService with its repository and sync adapter.
@@ -51,16 +50,17 @@ async def get_user_service(
     """
     repository = UserRepository(session)
     assignment_repository = UserTenantRoleRepository(session)
-    adapter = DescopeSyncAdapter(client=get_descope_client())
+    adapter = DescopeSyncAdapter(client=request.app.state.descope_client)
     return UserService(
         repository=repository,
         adapter=adapter,
         assignment_repository=assignment_repository,
-        publisher=get_cache_publisher(),
+        publisher=request.app.state.cache_publisher,
     )
 
 
 async def get_role_service(
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
 ) -> RoleService:
     """Build a RoleService with its repositories and sync adapter.
@@ -72,17 +72,18 @@ async def get_role_service(
     repository = RoleRepository(session)
     permission_repository = PermissionRepository(session)
     assignment_repository = UserTenantRoleRepository(session)
-    adapter = DescopeSyncAdapter(client=get_descope_client())
+    adapter = DescopeSyncAdapter(client=request.app.state.descope_client)
     return RoleService(
         repository=repository,
         permission_repository=permission_repository,
         assignment_repository=assignment_repository,
         adapter=adapter,
-        publisher=get_cache_publisher(),
+        publisher=request.app.state.cache_publisher,
     )
 
 
 async def get_permission_service(
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
 ) -> PermissionService:
     """Build a PermissionService with its repository and sync adapter.
@@ -92,11 +93,12 @@ async def get_permission_service(
             -> PermissionService(repository, adapter)
     """
     repository = PermissionRepository(session)
-    adapter = DescopeSyncAdapter(client=get_descope_client())
-    return PermissionService(repository=repository, adapter=adapter, publisher=get_cache_publisher())
+    adapter = DescopeSyncAdapter(client=request.app.state.descope_client)
+    return PermissionService(repository=repository, adapter=adapter, publisher=request.app.state.cache_publisher)
 
 
 async def get_tenant_service(
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
 ) -> TenantService:
     """Build a TenantService with its repository and sync adapter.
@@ -106,11 +108,12 @@ async def get_tenant_service(
             -> TenantService(repository, adapter)
     """
     repository = TenantRepository(session)
-    adapter = DescopeSyncAdapter(client=get_descope_client())
-    return TenantService(repository=repository, adapter=adapter, publisher=get_cache_publisher())
+    adapter = DescopeSyncAdapter(client=request.app.state.descope_client)
+    return TenantService(repository=repository, adapter=adapter, publisher=request.app.state.cache_publisher)
 
 
 async def get_inbound_sync_service(
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
 ) -> InboundSyncService:
     """Build an InboundSyncService with its repositories.
@@ -125,11 +128,12 @@ async def get_inbound_sync_service(
         user_repository=user_repository,
         idp_link_repository=idp_link_repository,
         provider_repository=provider_repository,
-        publisher=get_cache_publisher(),
+        publisher=request.app.state.cache_publisher,
     )
 
 
 async def get_reconciliation_service(
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
 ) -> ReconciliationService:
     """Build a ReconciliationService with all repositories and Descope client.
@@ -154,14 +158,14 @@ async def get_reconciliation_service(
     return ReconciliationService(
         session=session,
         acquire_lock=_acquire_lock,
-        descope_client=get_descope_client(),
+        descope_client=request.app.state.descope_client,
         user_repository=user_repository,
         role_repository=role_repository,
         permission_repository=permission_repository,
         tenant_repository=tenant_repository,
         idp_link_repository=idp_link_repository,
         provider_repository=provider_repository,
-        publisher=get_cache_publisher(),
+        publisher=request.app.state.cache_publisher,
     )
 
 
@@ -196,6 +200,7 @@ async def get_provider_service(
 
 
 async def get_identity_resolution_service(
+    request: Request,
     session: AsyncSession = Depends(get_async_session),
 ) -> IdentityResolutionService:
     """Build an IdentityResolutionService with its repositories and Redis client.
@@ -217,5 +222,5 @@ async def get_identity_resolution_service(
         assignment_repository=assignment_repository,
         role_repository=role_repository,
         tenant_repository=tenant_repository,
-        redis_client=get_redis_client(),
+        redis_client=request.app.state.redis_client,
     )

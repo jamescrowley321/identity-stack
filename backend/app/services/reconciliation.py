@@ -80,7 +80,7 @@ class ReconciliationService:
         self._tenant_repo = tenant_repository
         self._link_repo = idp_link_repository
         self._provider_repo = provider_repository
-        self._publisher = publisher
+        self._publisher = publisher or CacheInvalidationPublisher()
 
     async def run(self) -> Result[dict, IdentityError]:
         """Execute a full reconciliation pass.
@@ -156,7 +156,7 @@ class ReconciliationService:
             span.set_attribute("reconciliation.status", "completed")
             span.set_attribute("reconciliation.total_changes", total_changes)
 
-            if self._publisher and total_changes > 0:
+            if total_changes > 0:
                 await self._publisher.publish_batch(operation="reconcile", stats=stats)
 
             logger.info("Reconciliation completed: %s", stats)

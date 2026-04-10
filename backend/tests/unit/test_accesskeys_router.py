@@ -61,13 +61,12 @@ async def test_list_keys_rejected_for_viewer(mock_validate, client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.accesskeys.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_list_keys_as_admin(mock_validate, mock_factory, client):
+async def test_list_keys_as_admin(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.search_access_keys.return_value = [KEY_IN_TENANT]
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     response = await client.get("/api/keys", headers={"Authorization": "Bearer valid.token"})
     assert response.status_code == 200
@@ -76,16 +75,15 @@ async def test_list_keys_as_admin(mock_validate, mock_factory, client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.accesskeys.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_key(mock_validate, mock_factory, client):
+async def test_create_key(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.create_access_key.return_value = {
         "key": {"id": "new-key-id", "name": "My API Key"},
         "cleartext": "secret-key-value-shown-once",
     }
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     response = await client.post(
         "/api/keys",
@@ -98,13 +96,12 @@ async def test_create_key(mock_validate, mock_factory, client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.accesskeys.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_key_with_options(mock_validate, mock_factory, client):
+async def test_create_key_with_options(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.create_access_key.return_value = {"key": {"id": "k1"}, "cleartext": "secret"}
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     response = await client.post(
         "/api/keys",
@@ -127,13 +124,12 @@ async def test_create_key_rejected_for_viewer(mock_validate, client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.accesskeys.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_key(mock_validate, mock_factory, client):
+async def test_get_key(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.load_access_key.return_value = KEY_IN_TENANT
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     response = await client.get("/api/keys/key123", headers={"Authorization": "Bearer valid.token"})
     assert response.status_code == 200
@@ -141,27 +137,25 @@ async def test_get_key(mock_validate, mock_factory, client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.accesskeys.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_key_cross_tenant_rejected(mock_validate, mock_factory, client):
+async def test_get_key_cross_tenant_rejected(mock_validate, client):
     """Loading a key from another tenant should be rejected."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.load_access_key.return_value = KEY_OTHER_TENANT
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     response = await client.get("/api/keys/key999", headers={"Authorization": "Bearer valid.token"})
     assert response.status_code == 403
 
 
 @pytest.mark.anyio
-@patch("app.routers.accesskeys.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_deactivate_key(mock_validate, mock_factory, client):
+async def test_deactivate_key(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.load_access_key.return_value = KEY_IN_TENANT
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     response = await client.post("/api/keys/key123/deactivate", headers={"Authorization": "Bearer valid.token"})
     assert response.status_code == 200
@@ -170,27 +164,25 @@ async def test_deactivate_key(mock_validate, mock_factory, client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.accesskeys.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_deactivate_key_cross_tenant_rejected(mock_validate, mock_factory, client):
+async def test_deactivate_key_cross_tenant_rejected(mock_validate, client):
     """Deactivating a key from another tenant should be rejected."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.load_access_key.return_value = KEY_OTHER_TENANT
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     response = await client.post("/api/keys/key999/deactivate", headers={"Authorization": "Bearer valid.token"})
     assert response.status_code == 403
 
 
 @pytest.mark.anyio
-@patch("app.routers.accesskeys.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_activate_key(mock_validate, mock_factory, client):
+async def test_activate_key(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.load_access_key.return_value = KEY_IN_TENANT
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     response = await client.post("/api/keys/key123/activate", headers={"Authorization": "Bearer valid.token"})
     assert response.status_code == 200
@@ -198,13 +190,12 @@ async def test_activate_key(mock_validate, mock_factory, client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.accesskeys.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_delete_key(mock_validate, mock_factory, client):
+async def test_delete_key(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
     mock_client.load_access_key.return_value = KEY_IN_TENANT
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     response = await client.delete("/api/keys/key123", headers={"Authorization": "Bearer valid.token"})
     assert response.status_code == 200

@@ -49,7 +49,7 @@ class RoleService:
         self._permission_repository = permission_repository
         self._assignment_repository = assignment_repository
         self._adapter = adapter
-        self._publisher = publisher
+        self._publisher = publisher or CacheInvalidationPublisher()
 
     async def create_role(
         self,
@@ -98,10 +98,9 @@ class RoleService:
             role_id = role.id
             await self._repository.commit()
 
-            if self._publisher:
-                await self._publisher.publish(
-                    entity_type="role", entity_id=role_id, operation="create", tenant_id=tenant_id
-                )
+            await self._publisher.publish(
+                entity_type="role", entity_id=role_id, operation="create", tenant_id=tenant_id
+            )
 
             sync_data: dict = {"name": role.name, "description": role.description}
             if resolved_permission_names:
@@ -165,10 +164,9 @@ class RoleService:
             permission_names = [p.name for p in permissions]
             await self._repository.commit()
 
-            if self._publisher:
-                await self._publisher.publish(
-                    entity_type="role", entity_id=role_id, operation="update", tenant_id=role.tenant_id
-                )
+            await self._publisher.publish(
+                entity_type="role", entity_id=role_id, operation="update", tenant_id=role.tenant_id
+            )
 
             self._log_sync_failure(
                 await self._adapter.sync_role(
@@ -231,10 +229,9 @@ class RoleService:
             }
             await self._assignment_repository.commit()
 
-            if self._publisher:
-                await self._publisher.publish(
-                    entity_type="role", entity_id=role_id, operation="assign", tenant_id=tenant_id
-                )
+            await self._publisher.publish(
+                entity_type="role", entity_id=role_id, operation="assign", tenant_id=tenant_id
+            )
 
             self._log_sync_failure(
                 await self._adapter.sync_role_assignment(
@@ -298,10 +295,9 @@ class RoleService:
                 sync_data["permission_names"] = permission_names
             await self._repository.commit()
 
-            if self._publisher:
-                await self._publisher.publish(
-                    entity_type="role", entity_id=role.id, operation="update", tenant_id=role.tenant_id
-                )
+            await self._publisher.publish(
+                entity_type="role", entity_id=role.id, operation="update", tenant_id=role.tenant_id
+            )
 
             self._log_sync_failure(
                 await self._adapter.sync_role(role_id=role.id, data=sync_data),
@@ -331,10 +327,9 @@ class RoleService:
 
             await self._repository.commit()
 
-            if self._publisher:
-                await self._publisher.publish(
-                    entity_type="role", entity_id=role_id, operation="delete", tenant_id=role.tenant_id
-                )
+            await self._publisher.publish(
+                entity_type="role", entity_id=role_id, operation="delete", tenant_id=role.tenant_id
+            )
 
             self._log_sync_failure(
                 await self._adapter.delete_role(role_id=role_id),
@@ -367,10 +362,9 @@ class RoleService:
 
             await self._assignment_repository.commit()
 
-            if self._publisher:
-                await self._publisher.publish(
-                    entity_type="role", entity_id=role_id, operation="unassign", tenant_id=tenant_id
-                )
+            await self._publisher.publish(
+                entity_type="role", entity_id=role_id, operation="unassign", tenant_id=tenant_id
+            )
 
             self._log_sync_failure(
                 await self._adapter.delete_role_assignment(

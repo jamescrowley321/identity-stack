@@ -148,12 +148,11 @@ async def test_create_document_no_sub(mock_validate, client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_document_success(mock_validate, mock_factory, client):
+async def test_create_document_success(mock_validate, client):
     mock_validate.return_value = AUTHED_CLAIMS
     mock_client = AsyncMock()
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.post(
         "/api/documents",
@@ -172,13 +171,12 @@ async def test_create_document_success(mock_validate, mock_factory, client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_document_default_content(mock_validate, mock_factory, client):
+async def test_create_document_default_content(mock_validate, client):
     """Content defaults to empty string if not provided."""
     mock_validate.return_value = AUTHED_CLAIMS
     mock_client = AsyncMock()
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.post("/api/documents", headers=AUTH_HEADER, json={"title": "My Doc"})
     assert resp.status_code == 201
@@ -186,26 +184,24 @@ async def test_create_document_default_content(mock_validate, mock_factory, clie
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_document_fga_http_error(mock_validate, mock_factory, client):
+async def test_create_document_fga_http_error(mock_validate, client):
     mock_validate.return_value = AUTHED_CLAIMS
     mock_client = AsyncMock()
     mock_client.create_relation.side_effect = _make_http_error(500)
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.post("/api/documents", headers=AUTH_HEADER, json={"title": "Doc"})
     assert resp.status_code == 502
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_document_fga_network_error(mock_validate, mock_factory, client):
+async def test_create_document_fga_network_error(mock_validate, client):
     mock_validate.return_value = AUTHED_CLAIMS
     mock_client = AsyncMock()
     mock_client.create_relation.side_effect = _make_network_error()
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.post("/api/documents", headers=AUTH_HEADER, json={"title": "Doc"})
     assert resp.status_code == 502
@@ -220,13 +216,12 @@ async def test_create_document_empty_title_rejected(mock_validate, client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_document_db_failure_compensates_fga(mock_validate, mock_factory, client):
+async def test_create_document_db_failure_compensates_fga(mock_validate, client):
     """DB commit failure -> FGA relation is compensated (deleted)."""
     mock_validate.return_value = AUTHED_CLAIMS
     mock_client = AsyncMock()
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     async def _failing_session():
         mock_session = MagicMock()
@@ -244,14 +239,13 @@ async def test_create_document_db_failure_compensates_fga(mock_validate, mock_fa
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_document_db_failure_compensation_also_fails(mock_validate, mock_factory, client):
+async def test_create_document_db_failure_compensation_also_fails(mock_validate, client):
     """DB commit failure + FGA compensation failure -> still returns 500."""
     mock_validate.return_value = AUTHED_CLAIMS
     mock_client = AsyncMock()
     mock_client.delete_relation.side_effect = Exception("Compensation failed")
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     async def _failing_session():
         mock_session = MagicMock()
@@ -272,9 +266,8 @@ async def test_create_document_db_failure_compensation_also_fails(mock_validate,
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_list_documents_success(mock_validate, mock_factory, client, test_db):
+async def test_list_documents_success(mock_validate, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
     await _seed_doc(test_db, doc_id=DOC_UUID_2)
@@ -285,7 +278,7 @@ async def test_list_documents_success(mock_validate, mock_factory, client, test_
         {"resource": f"tenant-abc:{DOC_UUID_1}"},
         {"resource": f"tenant-abc:{DOC_UUID_2}"},
     ]
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.get("/api/documents", headers=AUTH_HEADER)
     assert resp.status_code == 200
@@ -295,13 +288,12 @@ async def test_list_documents_success(mock_validate, mock_factory, client, test_
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_list_documents_empty(mock_validate, mock_factory, client):
+async def test_list_documents_empty(mock_validate, client):
     mock_validate.return_value = AUTHED_CLAIMS
     mock_client = AsyncMock()
     mock_client.list_user_resources.return_value = []
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.get("/api/documents", headers=AUTH_HEADER)
     assert resp.status_code == 200
@@ -309,22 +301,20 @@ async def test_list_documents_empty(mock_validate, mock_factory, client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_list_documents_fga_error(mock_validate, mock_factory, client):
+async def test_list_documents_fga_error(mock_validate, client):
     mock_validate.return_value = AUTHED_CLAIMS
     mock_client = AsyncMock()
     mock_client.list_user_resources.side_effect = _make_http_error(500)
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.get("/api/documents", headers=AUTH_HEADER)
     assert resp.status_code == 502
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_list_documents_cross_tenant_filtered(mock_validate, mock_factory, client, test_db):
+async def test_list_documents_cross_tenant_filtered(mock_validate, client, test_db):
     """Docs from other tenants are filtered out — FGA resources with different tenant prefix are ignored."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1, tenant_id="tenant-abc")
@@ -336,7 +326,7 @@ async def test_list_documents_cross_tenant_filtered(mock_validate, mock_factory,
         {"resource": f"tenant-abc:{DOC_UUID_1}"},
         {"resource": f"tenant-xyz:{DOC_UUID_OTHER}"},
     ]
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.get("/api/documents", headers=AUTH_HEADER)
     assert resp.status_code == 200
@@ -351,15 +341,14 @@ async def test_list_documents_cross_tenant_filtered(mock_validate, mock_factory,
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_document_success(mock_validate, mock_fga_factory, client, test_db):
+async def test_get_document_success(mock_validate, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.get(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
     assert resp.status_code == 200
@@ -370,70 +359,65 @@ async def test_get_document_success(mock_validate, mock_fga_factory, client, tes
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_document_not_found(mock_validate, mock_fga_factory, client):
+async def test_get_document_not_found(mock_validate, client):
     mock_validate.return_value = AUTHED_CLAIMS
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.get(f"/api/documents/{NONEXISTENT_UUID}", headers=AUTH_HEADER)
     assert resp.status_code == 404
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_document_cross_tenant(mock_validate, mock_fga_factory, client, test_db):
+async def test_get_document_cross_tenant(mock_validate, client, test_db):
     """Doc exists but belongs to different tenant -> 404 (not 403, prevents IDOR)."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1, tenant_id="tenant-xyz")
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.get(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
     assert resp.status_code == 404
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_document_fga_denied(mock_validate, mock_fga_factory, client):
+async def test_get_document_fga_denied(mock_validate, client):
     mock_validate.return_value = AUTHED_CLAIMS
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = False
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.get(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
     assert resp.status_code == 403
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_document_fga_error_fail_closed(mock_validate, mock_fga_factory, client):
+async def test_get_document_fga_error_fail_closed(mock_validate, client):
     """FGA API error -> 502, never fail-open."""
     mock_validate.return_value = AUTHED_CLAIMS
     mock_client = AsyncMock()
     mock_client.check_permission.side_effect = _make_http_error(500)
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.get(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
     assert resp.status_code == 502
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_document_invalid_uuid_rejected(mock_validate, mock_fga_factory, client):
+async def test_get_document_invalid_uuid_rejected(mock_validate, client):
     """Non-UUID document_id -> 422 validation error."""
     mock_validate.return_value = AUTHED_CLAIMS
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.get("/api/documents/not-a-uuid", headers=AUTH_HEADER)
     assert resp.status_code == 422
@@ -445,15 +429,14 @@ async def test_get_document_invalid_uuid_rejected(mock_validate, mock_fga_factor
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_document_success(mock_validate, mock_fga_factory, client, test_db):
+async def test_update_document_success(mock_validate, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.put(
         f"/api/documents/{DOC_UUID_1}",
@@ -466,15 +449,14 @@ async def test_update_document_success(mock_validate, mock_fga_factory, client, 
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_document_partial_title(mock_validate, mock_fga_factory, client, test_db):
+async def test_update_document_partial_title(mock_validate, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1, content="Original")
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.put(
         f"/api/documents/{DOC_UUID_1}",
@@ -487,13 +469,12 @@ async def test_update_document_partial_title(mock_validate, mock_fga_factory, cl
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_document_not_found(mock_validate, mock_fga_factory, client):
+async def test_update_document_not_found(mock_validate, client):
     mock_validate.return_value = AUTHED_CLAIMS
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.put(
         f"/api/documents/{NONEXISTENT_UUID}",
@@ -504,15 +485,14 @@ async def test_update_document_not_found(mock_validate, mock_fga_factory, client
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_document_cross_tenant(mock_validate, mock_fga_factory, client, test_db):
+async def test_update_document_cross_tenant(mock_validate, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1, tenant_id="tenant-xyz")
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.put(
         f"/api/documents/{DOC_UUID_1}",
@@ -523,15 +503,14 @@ async def test_update_document_cross_tenant(mock_validate, mock_fga_factory, cli
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_document_fga_denied(mock_validate, mock_fga_factory, client):
+async def test_update_document_fga_denied(mock_validate, client):
     """PUT: FGA denies can_edit → 403. No DB seed needed — FGA dep short-circuits."""
     mock_validate.return_value = AUTHED_CLAIMS
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = False
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.put(
         "/api/documents/doc-1",
@@ -544,15 +523,14 @@ async def test_update_document_fga_denied(mock_validate, mock_fga_factory, clien
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_document_fga_error_fail_closed(mock_validate, mock_fga_factory, client):
+async def test_update_document_fga_error_fail_closed(mock_validate, client):
     """PUT: FGA API error → 502, never fail-open. No DB seed — FGA dep short-circuits."""
     mock_validate.return_value = AUTHED_CLAIMS
 
     mock_client = AsyncMock()
     mock_client.check_permission.side_effect = _make_http_error(500)
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.put(
         "/api/documents/doc-1",
@@ -570,10 +548,8 @@ async def test_update_document_fga_error_fail_closed(mock_validate, mock_fga_fac
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_delete_document_success(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
+async def test_delete_document_success(mock_validate, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
@@ -583,8 +559,7 @@ async def test_delete_document_success(mock_validate, mock_fga_factory, mock_rou
         {"relationDefinition": "owner", "target": "user-1"},
         {"relationDefinition": "viewer", "target": "user-2"},
     ]
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.delete(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
     assert resp.status_code == 200
@@ -600,23 +575,20 @@ async def test_delete_document_success(mock_validate, mock_fga_factory, mock_rou
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_delete_document_not_found(mock_validate, mock_fga_factory, client):
+async def test_delete_document_not_found(mock_validate, client):
     mock_validate.return_value = AUTHED_CLAIMS
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.delete(f"/api/documents/{NONEXISTENT_UUID}", headers=AUTH_HEADER)
     assert resp.status_code == 404
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_delete_document_fga_cleanup_fails(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
+async def test_delete_document_fga_cleanup_fails(mock_validate, client, test_db):
     """FGA cleanup failure -> 502, doc NOT deleted from DB."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
@@ -624,8 +596,7 @@ async def test_delete_document_fga_cleanup_fails(mock_validate, mock_fga_factory
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
     mock_client.list_relations.side_effect = _make_http_error(500)
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.delete(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
     assert resp.status_code == 502
@@ -636,12 +607,8 @@ async def test_delete_document_fga_cleanup_fails(mock_validate, mock_fga_factory
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_delete_document_too_many_relations_aborts(
-    mock_validate, mock_fga_factory, mock_router_factory, client, test_db
-):
+async def test_delete_document_too_many_relations_aborts(mock_validate, client, test_db):
     """Document with >100 relations -> 409, no deletion attempted."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
@@ -652,8 +619,7 @@ async def test_delete_document_too_many_relations_aborts(
     mock_client.list_relations.return_value = [
         {"relationDefinition": "viewer", "target": f"user-{i}"} for i in range(101)
     ]
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.delete(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
     assert resp.status_code == 409
@@ -669,10 +635,8 @@ async def test_delete_document_too_many_relations_aborts(
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_delete_document_db_failure_compensates_fga(mock_validate, mock_fga_factory, mock_router_factory, client):
+async def test_delete_document_db_failure_compensates_fga(mock_validate, client):
     """DB delete fails after FGA cleanup -> relations are re-created (compensation)."""
     mock_validate.return_value = AUTHED_CLAIMS
 
@@ -682,8 +646,7 @@ async def test_delete_document_db_failure_compensates_fga(mock_validate, mock_fg
         {"relationDefinition": "owner", "target": "user-1"},
         {"relationDefinition": "viewer", "target": "user-2"},
     ]
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     async def _failing_session():
         mock_session = MagicMock()
@@ -723,12 +686,8 @@ async def test_delete_document_db_failure_compensates_fga(mock_validate, mock_fg
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_delete_document_db_failure_compensation_also_fails(
-    mock_validate, mock_fga_factory, mock_router_factory, client
-):
+async def test_delete_document_db_failure_compensation_also_fails(mock_validate, client):
     """DB delete fails + FGA compensation fails -> still returns 500 (best-effort)."""
     mock_validate.return_value = AUTHED_CLAIMS
 
@@ -739,8 +698,7 @@ async def test_delete_document_db_failure_compensation_also_fails(
     ]
     # delete_relation succeeds, but create_relation (compensation) fails
     mock_client.create_relation.side_effect = Exception("Compensation failed")
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     async def _failing_session():
         mock_session = MagicMock()
@@ -772,10 +730,8 @@ async def test_delete_document_db_failure_compensation_also_fails(
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_share_document_viewer_success(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
+async def test_share_document_viewer_success(mock_validate, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
@@ -785,8 +741,7 @@ async def test_share_document_viewer_success(mock_validate, mock_fga_factory, mo
         "userId": "user-2",
         "userTenants": [{"tenantId": "tenant-abc"}],
     }
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.post(
         f"/api/documents/{DOC_UUID_1}/share",
@@ -802,10 +757,8 @@ async def test_share_document_viewer_success(mock_validate, mock_fga_factory, mo
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_share_document_editor_success(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
+async def test_share_document_editor_success(mock_validate, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
@@ -815,8 +768,7 @@ async def test_share_document_editor_success(mock_validate, mock_fga_factory, mo
         "userId": "user-2",
         "userTenants": [{"tenantId": "tenant-abc"}],
     }
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.post(
         f"/api/documents/{DOC_UUID_1}/share",
@@ -828,18 +780,15 @@ async def test_share_document_editor_success(mock_validate, mock_fga_factory, mo
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_share_document_target_not_found(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
+async def test_share_document_target_not_found(mock_validate, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
     mock_client.load_user.side_effect = _make_http_error(404)
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.post(
         f"/api/documents/{DOC_UUID_1}/share",
@@ -850,12 +799,8 @@ async def test_share_document_target_not_found(mock_validate, mock_fga_factory, 
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_share_document_target_different_tenant(
-    mock_validate, mock_fga_factory, mock_router_factory, client, test_db
-):
+async def test_share_document_target_different_tenant(mock_validate, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
@@ -865,8 +810,7 @@ async def test_share_document_target_different_tenant(
         "userId": "user-2",
         "userTenants": [{"tenantId": "tenant-xyz"}],
     }
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.post(
         f"/api/documents/{DOC_UUID_1}/share",
@@ -878,10 +822,8 @@ async def test_share_document_target_different_tenant(
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_share_document_fga_create_fails(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
+async def test_share_document_fga_create_fails(mock_validate, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
@@ -892,8 +834,7 @@ async def test_share_document_fga_create_fails(mock_validate, mock_fga_factory, 
         "userTenants": [{"tenantId": "tenant-abc"}],
     }
     mock_client.create_relation.side_effect = _make_http_error(500)
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.post(
         f"/api/documents/{DOC_UUID_1}/share",
@@ -904,20 +845,15 @@ async def test_share_document_fga_create_fails(mock_validate, mock_fga_factory, 
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_share_document_load_user_network_error(
-    mock_validate, mock_fga_factory, mock_router_factory, client, test_db
-):
+async def test_share_document_load_user_network_error(mock_validate, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
     mock_client.load_user.side_effect = _make_network_error()
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.post(
         f"/api/documents/{DOC_UUID_1}/share",
@@ -928,13 +864,12 @@ async def test_share_document_load_user_network_error(
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_share_document_not_found(mock_validate, mock_fga_factory, client):
+async def test_share_document_not_found(mock_validate, client):
     mock_validate.return_value = AUTHED_CLAIMS
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.post(
         f"/api/documents/{NONEXISTENT_UUID}/share",
@@ -945,14 +880,13 @@ async def test_share_document_not_found(mock_validate, mock_fga_factory, client)
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_share_document_invalid_relation(mock_validate, mock_fga_factory, client):
+async def test_share_document_invalid_relation(mock_validate, client):
     """Only 'viewer' and 'editor' are valid share relations."""
     mock_validate.return_value = AUTHED_CLAIMS
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.post(
         f"/api/documents/{DOC_UUID_1}/share",
@@ -968,10 +902,8 @@ async def test_share_document_invalid_relation(mock_validate, mock_fga_factory, 
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_revoke_share_success(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
+async def test_revoke_share_success(mock_validate, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
@@ -981,8 +913,7 @@ async def test_revoke_share_success(mock_validate, mock_fga_factory, mock_router
         "userId": "user-2",
         "userTenants": [{"tenantId": "tenant-abc"}],
     }
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.delete(f"/api/documents/{DOC_UUID_1}/share/user-2", headers=AUTH_HEADER)
     assert resp.status_code == 200
@@ -994,12 +925,8 @@ async def test_revoke_share_success(mock_validate, mock_fga_factory, mock_router
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_revoke_share_does_not_delete_owner(
-    mock_validate, mock_fga_factory, mock_router_factory, client, test_db
-):
+async def test_revoke_share_does_not_delete_owner(mock_validate, client, test_db):
     """Revoking a share deletes viewer and editor relations but NOT owner."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
@@ -1010,8 +937,7 @@ async def test_revoke_share_does_not_delete_owner(
         "userId": "user-2",
         "userTenants": [{"tenantId": "tenant-abc"}],
     }
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.delete(f"/api/documents/{DOC_UUID_1}/share/user-2", headers=AUTH_HEADER)
     assert resp.status_code == 200
@@ -1024,10 +950,8 @@ async def test_revoke_share_does_not_delete_owner(
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_revoke_share_tolerates_400_404(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
+async def test_revoke_share_tolerates_400_404(mock_validate, client, test_db):
     """400/404 from delete_relation is tolerated (relation may not exist)."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
@@ -1039,18 +963,15 @@ async def test_revoke_share_tolerates_400_404(mock_validate, mock_fga_factory, m
         "userTenants": [{"tenantId": "tenant-abc"}],
     }
     mock_client.delete_relation.side_effect = _make_http_error(400)
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.delete(f"/api/documents/{DOC_UUID_1}/share/user-2", headers=AUTH_HEADER)
     assert resp.status_code == 200
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_revoke_share_http_error_502(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
+async def test_revoke_share_http_error_502(mock_validate, client, test_db):
     """Non-400/404 HTTP error on revoke -> 502."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
@@ -1062,18 +983,15 @@ async def test_revoke_share_http_error_502(mock_validate, mock_fga_factory, mock
         "userTenants": [{"tenantId": "tenant-abc"}],
     }
     mock_client.delete_relation.side_effect = _make_http_error(500)
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.delete(f"/api/documents/{DOC_UUID_1}/share/user-2", headers=AUTH_HEADER)
     assert resp.status_code == 502
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_revoke_share_network_error(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
+async def test_revoke_share_network_error(mock_validate, client, test_db):
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
@@ -1084,51 +1002,42 @@ async def test_revoke_share_network_error(mock_validate, mock_fga_factory, mock_
         "userTenants": [{"tenantId": "tenant-abc"}],
     }
     mock_client.delete_relation.side_effect = _make_network_error()
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.delete(f"/api/documents/{DOC_UUID_1}/share/user-2", headers=AUTH_HEADER)
     assert resp.status_code == 502
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_revoke_share_doc_not_found(mock_validate, mock_fga_factory, client):
+async def test_revoke_share_doc_not_found(mock_validate, client):
     mock_validate.return_value = AUTHED_CLAIMS
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.delete(f"/api/documents/{NONEXISTENT_UUID}/share/user-2", headers=AUTH_HEADER)
     assert resp.status_code == 404
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_revoke_share_cross_tenant(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
+async def test_revoke_share_cross_tenant(mock_validate, client, test_db):
     """Doc belongs to different tenant -> 404."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1, tenant_id="tenant-xyz")
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.delete(f"/api/documents/{DOC_UUID_1}/share/user-2", headers=AUTH_HEADER)
     assert resp.status_code == 404
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_revoke_share_target_different_tenant(
-    mock_validate, mock_fga_factory, mock_router_factory, client, test_db
-):
+async def test_revoke_share_target_different_tenant(mock_validate, client, test_db):
     """Target user is in a different tenant -> 403."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
@@ -1139,8 +1048,7 @@ async def test_revoke_share_target_different_tenant(
         "userId": "user-2",
         "userTenants": [{"tenantId": "tenant-xyz"}],
     }
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.delete(f"/api/documents/{DOC_UUID_1}/share/user-2", headers=AUTH_HEADER)
     assert resp.status_code == 403
@@ -1150,10 +1058,8 @@ async def test_revoke_share_target_different_tenant(
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_revoke_share_target_not_found(mock_validate, mock_fga_factory, mock_router_factory, client, test_db):
+async def test_revoke_share_target_not_found(mock_validate, client, test_db):
     """Target user does not exist -> 404."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
@@ -1161,20 +1067,15 @@ async def test_revoke_share_target_not_found(mock_validate, mock_fga_factory, mo
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
     mock_client.load_user.side_effect = _make_http_error(404)
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.delete(f"/api/documents/{DOC_UUID_1}/share/nonexistent-user", headers=AUTH_HEADER)
     assert resp.status_code == 404
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_revoke_share_load_user_network_error(
-    mock_validate, mock_fga_factory, mock_router_factory, client, test_db
-):
+async def test_revoke_share_load_user_network_error(mock_validate, client, test_db):
     """Network error verifying target user -> 502."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
@@ -1182,8 +1083,7 @@ async def test_revoke_share_load_user_network_error(
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
     mock_client.load_user.side_effect = _make_network_error()
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.delete(f"/api/documents/{DOC_UUID_1}/share/user-2", headers=AUTH_HEADER)
     assert resp.status_code == 502
@@ -1195,14 +1095,13 @@ async def test_revoke_share_load_user_network_error(
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_list_documents_fga_returns_none(mock_validate, mock_factory, client):
+async def test_list_documents_fga_returns_none(mock_validate, client):
     """list_user_resources returns None -> treated as empty list."""
     mock_validate.return_value = AUTHED_CLAIMS
     mock_client = AsyncMock()
     mock_client.list_user_resources.return_value = None
-    mock_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.get("/api/documents", headers=AUTH_HEADER)
     assert resp.status_code == 200
@@ -1210,20 +1109,15 @@ async def test_list_documents_fga_returns_none(mock_validate, mock_factory, clie
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_share_document_self_sharing_rejected(
-    mock_validate, mock_fga_factory, mock_router_factory, client, test_db
-):
+async def test_share_document_self_sharing_rejected(mock_validate, client, test_db):
     """Owner cannot share document with themselves."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.post(
         f"/api/documents/{DOC_UUID_1}/share",
@@ -1235,12 +1129,8 @@ async def test_share_document_self_sharing_rejected(
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_share_document_load_user_returns_none(
-    mock_validate, mock_fga_factory, mock_router_factory, client, test_db
-):
+async def test_share_document_load_user_returns_none(mock_validate, client, test_db):
     """load_user returns None -> 404."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
@@ -1248,8 +1138,7 @@ async def test_share_document_load_user_returns_none(
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
     mock_client.load_user.return_value = None
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.post(
         f"/api/documents/{DOC_UUID_1}/share",
@@ -1260,16 +1149,15 @@ async def test_share_document_load_user_returns_none(
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_document_no_changes(mock_validate, mock_fga_factory, client, test_db):
+async def test_update_document_no_changes(mock_validate, client, test_db):
     """PUT with no title or content -> returns doc unchanged."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.put(
         f"/api/documents/{DOC_UUID_1}",
@@ -1282,12 +1170,8 @@ async def test_update_document_no_changes(mock_validate, mock_fga_factory, clien
 
 
 @pytest.mark.anyio
-@patch("app.routers.documents.get_descope_client")
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_delete_document_fga_relations_none(
-    mock_validate, mock_fga_factory, mock_router_factory, client, test_db
-):
+async def test_delete_document_fga_relations_none(mock_validate, client, test_db):
     """list_relations returns None -> treated as empty, delete succeeds."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
@@ -1295,8 +1179,7 @@ async def test_delete_document_fga_relations_none(
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
     mock_client.list_relations.return_value = None
-    mock_fga_factory.return_value = mock_client
-    mock_router_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.delete(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
     assert resp.status_code == 200
@@ -1310,16 +1193,15 @@ async def test_delete_document_fga_relations_none(
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_document_checks_can_view(mock_validate, mock_fga_factory, client, test_db):
+async def test_get_document_checks_can_view(mock_validate, client, test_db):
     """AC5: GET /documents/{id} checks can_view relation (derived from owner/editor)."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.get(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
     assert resp.status_code == 200
@@ -1329,16 +1211,15 @@ async def test_get_document_checks_can_view(mock_validate, mock_fga_factory, cli
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_update_document_checks_can_edit(mock_validate, mock_fga_factory, client, test_db):
+async def test_update_document_checks_can_edit(mock_validate, client, test_db):
     """AC5: PUT /documents/{id} checks can_edit relation (derived from owner)."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
     resp = await client.put(
         f"/api/documents/{DOC_UUID_1}",
@@ -1352,9 +1233,8 @@ async def test_update_document_checks_can_edit(mock_validate, mock_fga_factory, 
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_delete_document_checks_can_delete(mock_validate, mock_fga_factory, client, test_db):
+async def test_delete_document_checks_can_delete(mock_validate, client, test_db):
     """AC5: DELETE /documents/{id} checks can_delete relation."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
@@ -1362,11 +1242,9 @@ async def test_delete_document_checks_can_delete(mock_validate, mock_fga_factory
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
     mock_client.list_relations.return_value = []
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
-    # Need to also mock router-level get_descope_client for delete endpoint
-    with patch("app.routers.documents.get_descope_client", return_value=mock_client):
-        resp = await client.delete(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
+    resp = await client.delete(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
     assert resp.status_code == 200
     mock_client.check_permission.assert_called_once_with(
         "document", f"tenant-abc:{DOC_UUID_1}", "can_delete", AUTHED_CLAIMS["sub"]
@@ -1374,9 +1252,8 @@ async def test_delete_document_checks_can_delete(mock_validate, mock_fga_factory
 
 
 @pytest.mark.anyio
-@patch("app.dependencies.fga.get_descope_client")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_share_document_checks_owner(mock_validate, mock_fga_factory, client, test_db):
+async def test_share_document_checks_owner(mock_validate, client, test_db):
     """AC5: POST /documents/{id}/share checks owner relation."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
@@ -1387,14 +1264,13 @@ async def test_share_document_checks_owner(mock_validate, mock_fga_factory, clie
         "userId": "user-2",
         "userTenants": [{"tenantId": "tenant-abc"}],
     }
-    mock_fga_factory.return_value = mock_client
+    app.state.descope_client = mock_client
 
-    with patch("app.routers.documents.get_descope_client", return_value=mock_client):
-        resp = await client.post(
-            f"/api/documents/{DOC_UUID_1}/share",
-            headers=AUTH_HEADER,
-            json={"user_id": "user-2", "relation": "viewer"},
-        )
+    resp = await client.post(
+        f"/api/documents/{DOC_UUID_1}/share",
+        headers=AUTH_HEADER,
+        json={"user_id": "user-2", "relation": "viewer"},
+    )
     assert resp.status_code == 200
     mock_client.check_permission.assert_called_once_with(
         "document", f"tenant-abc:{DOC_UUID_1}", "owner", AUTHED_CLAIMS["sub"]
@@ -1404,18 +1280,13 @@ async def test_share_document_checks_owner(mock_validate, mock_fga_factory, clie
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_list_documents_checks_can_view_relation(mock_validate, client):
-    """AC5: GET /documents uses can_view derived relation for list_user_resources.
-
-    Note: list endpoint calls get_descope_client directly in the route handler
-    (not via require_fga dependency), so we patch at the router level instead
-    of the dependency level.
-    """
+    """AC5: GET /documents uses can_view derived relation for list_user_resources."""
     mock_validate.return_value = AUTHED_CLAIMS
 
     mock_client = AsyncMock()
     mock_client.list_user_resources.return_value = []
+    app.state.descope_client = mock_client
 
-    with patch("app.routers.documents.get_descope_client", return_value=mock_client):
-        resp = await client.get("/api/documents", headers=AUTH_HEADER)
+    resp = await client.get("/api/documents", headers=AUTH_HEADER)
     assert resp.status_code == 200
     mock_client.list_user_resources.assert_called_once_with("document", "can_view", AUTHED_CLAIMS["sub"])
