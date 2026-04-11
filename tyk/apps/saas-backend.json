@@ -3,9 +3,9 @@
   "api_id": "saas-backend",
   "slug": "api",
   "org_id": "",
-  "x-description": "Tyk validates JWT token authenticity (signature, expiry, issuer) via OpenID Connect discovery. FastAPI checks tenant-scoped roles/permissions from the forwarded Authorization header. The Authorization header is NOT stripped — it is forwarded to the backend so FastAPI authorization logic can decode tenant claims. DESCOPE_PROJECT_ID must be substituted at deploy time via envsubst or Docker entrypoint script (Tyk does not support shell variable expansion in config files).",
+  "x-description": "Tyk validates JWT token authenticity (signature, expiry, issuer) via OpenID Connect discovery. FastAPI checks tenant-scoped roles/permissions from the forwarded Authorization header. The Authorization header is NOT stripped — it is forwarded to the backend so FastAPI authorization logic can decode tenant claims. DESCOPE_PROJECT_ID is substituted at deploy time by the tyk-init sidecar service defined in docker-compose.yml, which writes processed API definitions into the tyk-apps named volume that tyk-gateway mounts read-only at /opt/tyk-gateway/apps (Tyk does not support shell variable expansion in config files).",
   "listen_path": "/api/",
-  "target_url": "http://backend:8000/api/",
+  "target_url": "http://backend:8000/",
   "strip_listen_path": false,
   "active": true,
   "use_openid": true,
@@ -31,7 +31,7 @@
   "proxy": {
     "preserve_host_header": true,
     "listen_path": "/api/",
-    "target_url": "http://backend:8000/api/",
+    "target_url": "http://backend:8000/",
     "strip_listen_path": false
   },
   "global_rate_limit": {

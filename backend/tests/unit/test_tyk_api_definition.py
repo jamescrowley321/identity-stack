@@ -46,7 +46,12 @@ class TestApiDefinitionJsonValidity:
 
 
 class TestAC1ProxyRouting:
-    """AC1: listen_path /api/ -> backend:8000/api/, strip_listen_path false, preserve_host_header true."""
+    """AC1: listen_path /api/ -> backend root, strip_listen_path false, preserve_host_header true.
+
+    With strip_listen_path=false Tyk forwards the full incoming path (including
+    /api/) to the target, so target_url must be the backend root. Setting it to
+    http://backend:8000/api/ would duplicate the prefix to /api/api/<path>.
+    """
 
     def test_listen_path(self):
         api_def = _load_api_def()
@@ -54,7 +59,7 @@ class TestAC1ProxyRouting:
 
     def test_target_url(self):
         api_def = _load_api_def()
-        assert api_def["target_url"] == "http://backend:8000/api/"
+        assert api_def["target_url"] == "http://backend:8000/"
 
     def test_strip_listen_path_false(self):
         api_def = _load_api_def()

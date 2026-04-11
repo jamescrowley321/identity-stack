@@ -160,7 +160,12 @@ def test_tyk_config_openid_enabled(tyk_api_def):
 
 
 def test_tyk_config_listen_path(tyk_api_def):
-    """AC1: Tyk listens on /api/ and proxies to backend /api/."""
+    """AC1: Tyk listens on /api/ and proxies to backend root.
+
+    With strip_listen_path=false, Tyk appends the full request path (including
+    the /api/ prefix) to the target URL. So target_url must be the backend
+    root — otherwise /api/foo forwards to /api/api/foo and 404s.
+    """
     assert tyk_api_def.get("listen_path") == "/api/"
-    assert tyk_api_def.get("proxy", {}).get("target_url") == "http://backend:8000/api/"
+    assert tyk_api_def.get("proxy", {}).get("target_url") == "http://backend:8000/"
     assert tyk_api_def.get("strip_listen_path") is False
