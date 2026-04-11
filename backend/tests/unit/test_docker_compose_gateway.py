@@ -238,6 +238,53 @@ class TestDeploymentModeWiring:
         )
 
 
+class TestFrontendApiBaseUrlBuildArg:
+    """Story 4.2: VITE_API_BASE_URL is wired through compose -> Dockerfile.
+
+    Standalone default is empty (relative URLs, nginx proxy). Gateway
+    override sets it to http://localhost:8080 (browser → Tyk direct).
+    Vite inlines this at build time so each mode needs its own image.
+    """
+
+    def test_base_compose_passes_vite_api_base_url_arg(self):
+        compose = _load_compose()
+        args = compose["services"]["frontend"]["build"]["args"]
+        # Build args may be a dict or list of "KEY=VAL" strings depending on the
+        # compose version; handle both.
+        if isinstance(args, dict):
+            assert "VITE_API_BASE_URL" in args, "frontend must declare VITE_API_BASE_URL build arg"
+            value = args["VITE_API_BASE_URL"]
+        else:
+            entries = [a for a in args if str(a).startswith("VITE_API_BASE_URL")]
+            assert entries, "frontend must declare VITE_API_BASE_URL build arg"
+            value = str(entries[0])
+        # Standalone default must NOT hardcode http://localhost:8000 — that
+        # would bypass nginx and break the same-origin model. The default
+        # should be empty so the frontend uses relative URLs.
+        assert "localhost:8000" not in str(value), (
+            "VITE_API_BASE_URL standalone default must be empty (use relative URLs + nginx proxy), "
+            "not http://localhost:8000 — that would bypass the same-origin nginx proxy"
+        )
+
+    def test_gateway_override_sets_vite_api_base_url_to_tyk(self):
+        override = yaml.safe_load((REPO_ROOT / "docker-compose.gateway.yml").read_text())
+        args = override["services"]["frontend"]["build"]["args"]
+        if isinstance(args, dict):
+            value = args.get("VITE_API_BASE_URL", "")
+        else:
+            entries = [a for a in args if str(a).startswith("VITE_API_BASE_URL")]
+            value = str(entries[0]) if entries else ""
+        assert "localhost:8080" in str(value), (
+            "Gateway override must set VITE_API_BASE_URL to http://localhost:8080 so the browser hits Tyk"
+        )
+
+    def test_dockerfile_declares_vite_api_base_url_arg(self):
+        dockerfile = (REPO_ROOT / "frontend" / "Dockerfile").read_text()
+        assert "ARG VITE_API_BASE_URL" in dockerfile, (
+            "frontend/Dockerfile must declare ARG VITE_API_BASE_URL so Vite can inline it at build time"
+        )
+
+
 class TestInfraProfile:
     """Story 4.1: redis + aspire-dashboard are opt-in via --profile infra."""
 

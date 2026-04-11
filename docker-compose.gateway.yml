@@ -17,3 +17,13 @@ services:
   backend:
     environment:
       - DEPLOYMENT_MODE=gateway
+
+  frontend:
+    build:
+      args:
+        # Story 4.2: in gateway mode the browser sends API requests
+        # directly to Tyk on :8080 instead of going through nginx's
+        # `/api/` proxy. VITE_API_BASE_URL is consumed at frontend
+        # build time (Vite inlines it as a string literal), so this
+        # override forces a rebuild whenever the value changes.
+        VITE_API_BASE_URL: http://localhost:8080
