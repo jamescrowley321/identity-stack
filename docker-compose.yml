@@ -44,6 +44,13 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD:-changeme}@redis:6379/0
       - DESCOPE_PROJECT_ID=${DESCOPE_PROJECT_ID:-}
       - DESCOPE_MANAGEMENT_KEY=${DESCOPE_MANAGEMENT_KEY:-}
+      # DEPLOYMENT_MODE selects whether the backend runs its own JWT
+      # validation + rate limiting (standalone) or trusts Tyk to have
+      # done it (gateway). Default is standalone; gateway mode is
+      # opt-in via the docker-compose.gateway.yml override (story 3.2)
+      # which `make dev-gateway` and `make test-integration-gateway`
+      # both wrap automatically.
+      - DEPLOYMENT_MODE=standalone
     healthcheck:
       test:
         - CMD

@@ -1,0 +1,19 @@
+# Gateway-mode override (story 3.2).
+#
+# Layered on top of docker-compose.yml to flip the backend into gateway
+# mode (DEPLOYMENT_MODE=gateway), which causes the middleware factory to
+# replace TokenValidationMiddleware with GatewayClaimsMiddleware (story
+# 2.4) and skip SlowAPIMiddleware. Tyk is the primary enforcement layer
+# in this mode; GatewayClaimsMiddleware enforces exp/iss/aud as defense
+# in depth (issue #240).
+#
+# Activation: prefer `make dev-gateway` and `make test-integration-gateway`
+# which wrap the multi-file invocation. Direct CLI form:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gateway.yml \
+#     --profile gateway up --build
+
+services:
+  backend:
+    environment:
+      - DEPLOYMENT_MODE=gateway
