@@ -74,6 +74,7 @@ def configure_middleware(app: FastAPI) -> None:
     else:
         app.add_middleware(
             GatewayClaimsMiddleware,
+            descope_project_id=os.getenv("DESCOPE_PROJECT_ID", ""),
             excluded_paths=excluded_paths,
             excluded_prefixes=excluded_prefixes,
         )
