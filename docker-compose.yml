@@ -1,3 +1,21 @@
+# Deployment profiles:
+#
+#   default (no flag):  frontend + backend + postgres (3 containers)
+#                       Minimum functional dev stack — backend lifespan
+#                       requires postgres for the SELECT 1 connectivity
+#                       check, so postgres stays in the default set.
+#                       docker compose up --build
+#
+#   gateway:            default + tyk-init + tyk-gateway + tyk-redis (6 containers)
+#                       docker compose --profile gateway up --build
+#
+#   full:               same as gateway (placeholder for future services)
+#                       docker compose --profile full up --build
+#
+#   infra:              redis + aspire-dashboard (observability/cache, opt-in)
+#                       docker compose --profile infra up --build
+#                       docker compose --profile gateway --profile infra up --build
+
 services:
   frontend:
     build:
@@ -66,12 +84,16 @@ services:
       # inject or read traces. Acceptable for local dev; for shared environments,
       # switch to ApiKey mode. See: https://learn.microsoft.com/dotnet/aspire/fundamentals/dashboard/configuration
       - DASHBOARD__OTLP__AUTHMODE=Unsecured
+    profiles:
+      - infra
 
   redis:
     image: redis:7-alpine
     ports:
       - "127.0.0.1:6379:6379"
     command: redis-server --requirepass ${REDIS_PASSWORD:-changeme}
+    profiles:
+      - infra
 
   # Init sidecar: substitutes ${DESCOPE_PROJECT_ID} in Tyk API definition
   # templates and writes the processed files into the tyk-apps named volume.
