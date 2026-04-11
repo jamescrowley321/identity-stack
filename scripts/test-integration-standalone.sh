@@ -25,7 +25,12 @@ fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 header() { echo -e "\n=== $1 ==="; }
 
 cleanup() {
+    local exit_code=$?
     header "Teardown"
+    if [ "$exit_code" -ne 0 ] || [ "${FAIL:-0}" -gt 0 ]; then
+        echo "Test run failed — dumping container logs before teardown:"
+        docker compose logs --tail=200 2>&1 || true
+    fi
     echo "Stopping standalone profile..."
     docker compose down -v --timeout 10 2>&1 || true
     echo "Teardown complete."
@@ -72,9 +77,23 @@ fi
 # ── AC1: Health check ──
 header "AC1: Standalone health check"
 HEALTH_TMPFILE=$(mktemp)
-trap 'rm -f "$HEALTH_TMPFILE"; cleanup' EXIT
-HEALTH_CODE=$(curl -s -w '%{http_code}' -o "$HEALTH_TMPFILE" --connect-timeout 5 "${BACKEND_URL}/api/health" 2>/dev/null || echo "000")
-HEALTH_BODY=$(cat "$HEALTH_TMPFILE" 2>/dev/null || true)
+HEALTH_CODE=""
+HEALTH_BODY=""
+# `docker compose up --wait` only waits for the container to be running; with a
+# backend healthcheck defined in compose it waits for healthy, but we still
+# retry here as defense-in-depth for slow uvicorn cold starts.
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    set +e
+    HEALTH_CODE=$(curl -s -o "$HEALTH_TMPFILE" -w '%{http_code}' --connect-timeout 5 --max-time 10 "${BACKEND_URL}/api/health" 2>/dev/null)
+    set -e
+    HEALTH_CODE="${HEALTH_CODE:-000}"
+    HEALTH_BODY=$(cat "$HEALTH_TMPFILE" 2>/dev/null || true)
+    if [ "$HEALTH_CODE" = "200" ]; then
+        break
+    fi
+    echo "  attempt ${attempt}: HTTP ${HEALTH_CODE} — retrying in 2s..."
+    sleep 2
+done
 rm -f "$HEALTH_TMPFILE"
 
 if [ "$HEALTH_CODE" = "200" ]; then
