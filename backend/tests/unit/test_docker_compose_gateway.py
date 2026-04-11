@@ -204,6 +204,40 @@ class TestDefaultComposeMinimumFunctional:
         assert len(default_services) == 3
 
 
+class TestDeploymentModeWiring:
+    """Story 3.2: DEPLOYMENT_MODE is wired through docker compose.
+
+    The base file sets standalone; the gateway override flips it to gateway.
+    Both `make dev-gateway` and `make test-integration-gateway` use the
+    multi-file invocation so backend lands in gateway mode whenever Tyk is
+    in front of it.
+    """
+
+    def test_base_compose_sets_standalone_default(self):
+        compose = _load_compose()
+        env = compose["services"]["backend"]["environment"]
+        assert any("DEPLOYMENT_MODE=standalone" in str(e) for e in env), (
+            "backend service must declare DEPLOYMENT_MODE=standalone in the base compose file"
+        )
+
+    def test_gateway_override_file_exists(self):
+        override = REPO_ROOT / "docker-compose.gateway.yml"
+        assert override.exists(), "docker-compose.gateway.yml override file must exist"
+
+    def test_gateway_override_flips_deployment_mode(self):
+        override = yaml.safe_load((REPO_ROOT / "docker-compose.gateway.yml").read_text())
+        env = override["services"]["backend"]["environment"]
+        assert any("DEPLOYMENT_MODE=gateway" in str(e) for e in env), (
+            "docker-compose.gateway.yml must override DEPLOYMENT_MODE=gateway"
+        )
+
+    def test_makefile_dev_gateway_uses_override(self):
+        makefile = (REPO_ROOT / "Makefile").read_text()
+        assert "docker-compose.gateway.yml" in makefile, (
+            "Makefile must reference docker-compose.gateway.yml so dev-gateway flips DEPLOYMENT_MODE"
+        )
+
+
 class TestInfraProfile:
     """Story 4.1: redis + aspire-dashboard are opt-in via --profile infra."""
 

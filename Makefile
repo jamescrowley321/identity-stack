@@ -43,7 +43,7 @@ test-integration-standalone: ## run standalone profile integration tests (manage
 	./scripts/test-integration-standalone.sh
 
 test-integration-gateway: ## run gateway profile integration tests (manages compose lifecycle, requires env vars)
-	./scripts/test-integration-gateway.sh
+	COMPOSE_GATEWAY_OVERRIDE="-f docker-compose.yml -f docker-compose.gateway.yml" ./scripts/test-integration-gateway.sh
 
-dev-gateway: ## start full stack with gateway profile
-	docker compose --profile gateway up --build
+dev-gateway: ## start full stack with gateway profile (DEPLOYMENT_MODE=gateway via override)
+	docker compose -f docker-compose.yml -f docker-compose.gateway.yml --profile gateway up --build

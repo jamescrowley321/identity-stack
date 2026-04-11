@@ -33,10 +33,10 @@ cleanup() {
     header "Teardown"
     if [ "$exit_code" -ne 0 ] || [ "${FAIL:-0}" -gt 0 ]; then
         echo "Test run failed — dumping container logs before teardown:"
-        docker compose --profile gateway logs --tail=200 2>&1 || true
+        docker compose ${COMPOSE_GATEWAY_OVERRIDE:-} --profile gateway logs --tail=200 2>&1 || true
     fi
     echo "Stopping gateway profile..."
-    docker compose --profile gateway down -v --timeout 10 2>&1 || true
+    docker compose ${COMPOSE_GATEWAY_OVERRIDE:-} --profile gateway down -v --timeout 10 2>&1 || true
     echo "Teardown complete."
 }
 trap cleanup EXIT
@@ -57,20 +57,31 @@ echo "All required env vars present."
 
 # ── Startup ──
 header "Starting gateway profile"
-if ! docker compose --profile gateway up -d --build --wait --wait-timeout "$MAX_WAIT"; then
+if ! docker compose ${COMPOSE_GATEWAY_OVERRIDE:-} --profile gateway up -d --build --wait --wait-timeout "$MAX_WAIT"; then
     echo "ERROR: Compose up failed. Container logs:"
-    docker compose --profile gateway logs --tail=50 || true
+    docker compose ${COMPOSE_GATEWAY_OVERRIDE:-} --profile gateway logs --tail=50 || true
     exit 1
 fi
 echo "Compose up complete."
+
+# ── AC: Backend DEPLOYMENT_MODE is gateway (story 3.2 wiring) ──
+header "AC: Backend DEPLOYMENT_MODE is gateway"
+set +e
+ACTUAL_MODE=$(docker compose ${COMPOSE_GATEWAY_OVERRIDE:-} --profile gateway exec -T backend printenv DEPLOYMENT_MODE 2>/dev/null | tr -d '\r\n')
+set -e
+if [ "$ACTUAL_MODE" = "gateway" ]; then
+    pass "Backend container has DEPLOYMENT_MODE=gateway"
+else
+    fail "Backend container has DEPLOYMENT_MODE='${ACTUAL_MODE}', expected 'gateway' — override file not loaded?"
+fi
 
 # ── AC5: Container count ──
 header "AC5: Gateway container count"
 # Count all containers compose started (including successfully-exited init
 # sidecars like tyk-init, which use service_completed_successfully and are
 # therefore not in "running" state once they finish their substitution work).
-EXPECTED_COUNT=$(docker compose --profile gateway config --services | wc -l | tr -d ' ')
-ACTUAL_COUNT=$(docker compose --profile gateway ps --all -q | wc -l | tr -d ' ')
+EXPECTED_COUNT=$(docker compose ${COMPOSE_GATEWAY_OVERRIDE:-} --profile gateway config --services | wc -l | tr -d ' ')
+ACTUAL_COUNT=$(docker compose ${COMPOSE_GATEWAY_OVERRIDE:-} --profile gateway ps --all -q | wc -l | tr -d ' ')
 if [ "$ACTUAL_COUNT" -eq "$EXPECTED_COUNT" ]; then
     pass "Container count (${ACTUAL_COUNT}) matches expected (${EXPECTED_COUNT})"
 else

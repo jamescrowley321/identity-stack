@@ -64,6 +64,17 @@ if ! docker compose up -d --build --wait --wait-timeout "$MAX_WAIT"; then
 fi
 echo "Compose up complete."
 
+# ── AC: Backend DEPLOYMENT_MODE is standalone (story 3.2 wiring) ──
+header "AC: Backend DEPLOYMENT_MODE is standalone"
+set +e
+ACTUAL_MODE=$(docker compose exec -T backend printenv DEPLOYMENT_MODE 2>/dev/null | tr -d '\r\n')
+set -e
+if [ "$ACTUAL_MODE" = "standalone" ]; then
+    pass "Backend container has DEPLOYMENT_MODE=standalone"
+else
+    fail "Backend container has DEPLOYMENT_MODE='${ACTUAL_MODE}', expected 'standalone'"
+fi
+
 # ── AC4: Container count ──
 header "AC4: Standalone container count"
 EXPECTED_COUNT=$(docker compose config --services | wc -l | tr -d ' ')
