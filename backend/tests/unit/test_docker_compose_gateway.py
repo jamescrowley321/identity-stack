@@ -238,6 +238,71 @@ class TestDeploymentModeWiring:
         )
 
 
+class TestTykReadme:
+    """Story 3.3: tyk/README.md must describe the post-#229 init-sidecar
+    setup, not the deleted entrypoint.sh."""
+
+    def test_readme_exists(self):
+        readme = TYK_DIR / "README.md"
+        assert readme.exists(), "tyk/README.md must exist (story 3.3 deployment-mode docs)"
+
+    def test_readme_describes_init_sidecar(self):
+        text = (TYK_DIR / "README.md").read_text()
+        assert "tyk-init" in text, (
+            "tyk/README.md must describe the tyk-init sidecar (the post-#229 substitution mechanism)"
+        )
+
+    def test_readme_does_not_describe_deleted_entrypoint_script_as_current(self):
+        text = (TYK_DIR / "README.md").read_text()
+        # The old approach used a tyk/entrypoint.sh shell script that
+        # could not exec inside the scratch tyk image. #229 deleted it.
+        # Allow historical references inside the section that explains
+        # the substitution history, but the file must not be listed as
+        # part of the current layout.
+        layout_section = text.split("## How env-var substitution works")[0]
+        assert "entrypoint.sh" not in layout_section, (
+            "tyk/README.md layout section must not list entrypoint.sh — it was deleted in #229"
+        )
+
+    def test_readme_documents_target_url_at_backend_root(self):
+        text = (TYK_DIR / "README.md").read_text()
+        assert "http://backend:8000/" in text, (
+            "tyk/README.md must document target_url=http://backend:8000/ "
+            "(the post-#229 fix for the duplicated /api/ prefix)"
+        )
+
+
+class TestFactoryDocstring:
+    """Story 3.3: factory.py module docstring must honestly describe both
+    deployment modes — including the gateway-mode middleware stack that
+    actually exists post-#230, and the defense-in-depth checks added in
+    response to #240."""
+
+    def test_module_docstring_describes_both_modes(self):
+        from app.middleware import factory
+
+        doc = factory.__doc__ or ""
+        assert "standalone" in doc.lower(), "module docstring must describe standalone mode"
+        assert "gateway" in doc.lower(), "module docstring must describe gateway mode"
+
+    def test_module_docstring_documents_gatewayclaims_middleware(self):
+        from app.middleware import factory
+
+        doc = factory.__doc__ or ""
+        assert "GatewayClaimsMiddleware" in doc, (
+            "module docstring must document GatewayClaimsMiddleware now that it exists (added by #230)"
+        )
+
+    def test_module_docstring_documents_240_defense_in_depth(self):
+        from app.middleware import factory
+
+        doc = factory.__doc__ or ""
+        assert "#240" in doc or "240" in doc, (
+            "module docstring must reference issue #240 — the operational lesson the defense-in-depth "
+            "checks were built to catch"
+        )
+
+
 class TestFrontendApiBaseUrlBuildArg:
     """Story 4.2: VITE_API_BASE_URL is wired through compose -> Dockerfile.
 
