@@ -66,12 +66,15 @@ echo "Compose up complete."
 
 # ── AC5: Container count ──
 header "AC5: Gateway container count"
+# Count all containers compose started (including successfully-exited init
+# sidecars like tyk-init, which use service_completed_successfully and are
+# therefore not in "running" state once they finish their substitution work).
 EXPECTED_COUNT=$(docker compose --profile gateway config --services | wc -l | tr -d ' ')
-RUNNING_COUNT=$(docker compose --profile gateway ps --status running -q | wc -l | tr -d ' ')
-if [ "$RUNNING_COUNT" -eq "$EXPECTED_COUNT" ]; then
-    pass "Running containers (${RUNNING_COUNT}) matches expected (${EXPECTED_COUNT})"
+ACTUAL_COUNT=$(docker compose --profile gateway ps --all -q | wc -l | tr -d ' ')
+if [ "$ACTUAL_COUNT" -eq "$EXPECTED_COUNT" ]; then
+    pass "Container count (${ACTUAL_COUNT}) matches expected (${EXPECTED_COUNT})"
 else
-    fail "Running containers (${RUNNING_COUNT}) does not match expected (${EXPECTED_COUNT})"
+    fail "Container count (${ACTUAL_COUNT}) does not match expected (${EXPECTED_COUNT})"
 fi
 
 # ── AC2: Health check through Tyk ──
