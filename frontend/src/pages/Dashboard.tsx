@@ -1,7 +1,7 @@
 import { useAuth } from "react-oidc-context";
 import { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
-import { useApiClient } from "@/hooks/useApiClient";
+import { useApiClient, apiUrl } from "@/hooks/useApiClient";
 import { useTenants } from "@/hooks/useTenants";
 import { useRBAC } from "@/hooks/useRBAC";
 import { RequirePermission } from "@/components/auth/RequirePermission";
@@ -39,7 +39,7 @@ export default function Dashboard() {
   const idToken = auth.user?.id_token;
 
   useEffect(() => {
-    fetch("/api/health")
+    fetch(apiUrl("/api/health"))
       .then((res) => res.json())
       .then((data) => setHealth(data.status))
       .catch(() => setHealth("unreachable"));
@@ -68,7 +68,7 @@ export default function Dashboard() {
   useEffect(() => {
     if (!idToken || !auth.user?.access_token) return;
 
-    fetch("/api/validate-id-token", {
+    fetch(apiUrl("/api/validate-id-token"), {
       method: "POST",
       headers: { Authorization: `Bearer ${idToken}` },
     })

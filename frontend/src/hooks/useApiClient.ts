@@ -3,9 +3,37 @@ import { useCallback, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 
 /**
+ * Absolute base URL the browser uses for API calls.
+ *
+ * Empty string (the standalone default) means callers pass `/api/...`
+ * paths directly to fetch, which the browser resolves against the
+ * current origin — nginx then proxies `/api/` to the backend.
+ *
+ * In gateway mode, docker-compose.gateway.yml sets VITE_API_BASE_URL
+ * to `http://localhost:8080`, so the browser sends requests directly
+ * to Tyk. Vite inlines this constant at build time.
+ *
+ * Trailing slash is stripped so callers can always pass `/api/foo`
+ * without producing `//api/foo`.
+ */
+export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
+
+/**
+ * Build a full request URL by prepending API_BASE_URL to a relative
+ * path. Exported for use by raw fetch call sites that don't go through
+ * the apiFetch hook (e.g. unauthenticated /api/health probes).
+ */
+export function apiUrl(path: string): string {
+  return `${API_BASE_URL}${path}`;
+}
+
+/**
  * Hook that provides an authenticated fetch wrapper.
  *
  * - Attaches the current access token as a Bearer header.
+ * - Prepends API_BASE_URL to the request path so the same call site
+ *   works in both standalone (relative URL → nginx proxy) and gateway
+ *   (absolute URL → Tyk) modes.
  * - On a 401 response, attempts a silent token renewal and retries once.
  * - If renewal fails, clears the session and navigates to /login.
  */
@@ -31,8 +59,10 @@ export function useApiClient() {
         return Promise.reject(new Error("No access token"));
       }
 
+      const url = apiUrl(path);
+
       const makeRequest = (t: string) =>
-        fetch(path, {
+        fetch(url, {
           ...options,
           headers: { ...options.headers, Authorization: `Bearer ${t}` },
         });
