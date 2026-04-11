@@ -100,7 +100,7 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
                 logger.warning("GatewayClaims rejected: exp claim missing or non-numeric")
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
             if exp <= time.time() - _EXP_LEEWAY_SECONDS:
-                logger.warning("GatewayClaims rejected: token expired (exp=%s)", exp)
+                logger.warning("GatewayClaims rejected: exp claim past leeway (exp=%s)", exp)
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
             # Defense in depth: enforce issuer allow-list when a project
