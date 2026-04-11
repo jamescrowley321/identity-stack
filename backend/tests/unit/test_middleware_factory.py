@@ -101,6 +101,27 @@ class TestConfigureMiddlewareStandalone:
             # ProxyHeaders is outermost (added last) → lower index than CORS (innermost)
             assert proxy_idx < cors_idx
 
+    def test_standalone_exact_middleware_stack(self):
+        """Standalone mode has exactly 5 middleware in the documented order
+        (outermost first). Story 2.5 — codifies the stack so an accidental
+        reorder or insertion is caught immediately."""
+        with patch.dict(os.environ, {"DEPLOYMENT_MODE": "standalone"}):
+            import app.middleware.factory as factory
+
+            factory = importlib.reload(factory)
+
+            test_app = FastAPI()
+            factory.configure_middleware(test_app)
+
+            middleware_names = [m.cls.__name__ for m in test_app.user_middleware if hasattr(m, "cls")]
+            assert middleware_names == [
+                "ProxyHeadersMiddleware",
+                "SecurityHeadersMiddleware",
+                "SlowAPIMiddleware",
+                "TokenValidationMiddleware",
+                "CORSMiddleware",
+            ]
+
 
 class TestConfigureMiddlewareGateway:
     """Test middleware stack in gateway mode."""

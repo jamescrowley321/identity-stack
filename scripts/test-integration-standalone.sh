@@ -117,6 +117,51 @@ else
     fail "GET /api/health returned HTTP ${HEALTH_CODE} (expected 200)"
 fi
 
+# ── Story 2.5 regression: forged Tyk headers must NOT bypass auth ──
+header "Story 2.5: forged gateway headers don't bypass standalone auth"
+_curl_status() {
+    set +e
+    local code
+    code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 "$@" 2>/dev/null)
+    set -e
+    echo "${code:-000}"
+}
+
+NOAUTH_CODE=$(_curl_status "${BACKEND_URL}/api/me")
+if [ "$NOAUTH_CODE" = "401" ]; then
+    pass "Missing Authorization header → 401"
+else
+    fail "Missing Authorization header → HTTP ${NOAUTH_CODE} (expected 401)"
+fi
+
+# nosemgrep: generic.secrets.security.detected-jwt-token.detected-jwt-token
+INVALID_TOKEN="invalid.token.here"
+INVALID_CODE=$(_curl_status -H "Authorization: Bearer ${INVALID_TOKEN}" "${BACKEND_URL}/api/me")
+if [ "$INVALID_CODE" = "401" ]; then
+    pass "Invalid Bearer credential → 401"
+else
+    fail "Invalid Bearer credential → HTTP ${INVALID_CODE} (expected 401)"
+fi
+
+FORGED_CODE=$(_curl_status -H "X-Tyk-Request-ID: forged-request-id-12345" "${BACKEND_URL}/api/me")
+if [ "$FORGED_CODE" = "401" ]; then
+    pass "Forged X-Tyk-Request-ID without auth → 401 (header does not bypass middleware)"
+else
+    fail "Forged X-Tyk-Request-ID without auth → HTTP ${FORGED_CODE} (expected 401)"
+fi
+
+FORGED_INVALID_CODE=$(_curl_status \
+    -H "X-Tyk-Request-ID: forged-request-id-12345" \
+    -H "X-Forwarded-For: 10.0.0.1" \
+    -H "X-Forwarded-Proto: https" \
+    -H "Authorization: Bearer ${INVALID_TOKEN}" \
+    "${BACKEND_URL}/api/me")
+if [ "$FORGED_INVALID_CODE" = "401" ]; then
+    pass "Forged gateway headers + invalid credential → 401"
+else
+    fail "Forged gateway headers + invalid credential → HTTP ${FORGED_INVALID_CODE} (expected 401)"
+fi
+
 # ── Summary ──
 header "Results"
 echo "  ${PASS} passed, ${FAIL} failed"
