@@ -22,6 +22,12 @@ services:
       context: ./frontend
       args:
         VITE_DESCOPE_PROJECT_ID: ${DESCOPE_PROJECT_ID}
+        # VITE_API_BASE_URL controls where the browser sends API requests.
+        # Default is empty so the frontend uses RELATIVE URLs (`/api/...`)
+        # and nginx's `/api/` proxy forwards them to backend:8000 — same
+        # origin as the page. The gateway override (story 4.2) flips this
+        # to http://localhost:8080 so the browser hits Tyk directly.
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
     ports:
       - "3000:8080"
     depends_on:
