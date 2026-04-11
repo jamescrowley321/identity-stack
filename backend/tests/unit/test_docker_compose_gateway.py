@@ -126,14 +126,21 @@ class TestGatewayProfiles:
         svc = _load_compose()["services"]["tyk-redis"]
         assert "full" in svc.get("profiles", [])
 
-    def test_existing_services_have_no_profile(self):
-        """Default services (frontend, backend, postgres, etc.) have no profiles."""
+    def test_default_services_have_no_profile(self):
+        """Minimum-functional default services (frontend, backend, postgres) have no profiles.
+
+        postgres stays in the default set because backend's lifespan does a
+        SELECT 1 connectivity check at startup and crashes if the database
+        is unreachable. redis and aspire-dashboard moved to the infra
+        profile in story 4.1 because backend degrades gracefully without
+        them.
+        """
         compose = _load_compose()
-        default_services = ["frontend", "backend", "postgres", "aspire-dashboard", "redis"]
+        default_services = ["frontend", "backend", "postgres"]
         for name in default_services:
             svc = compose["services"].get(name)
-            if svc is not None:
-                assert "profiles" not in svc, f"Service '{name}' should not have profiles"
+            assert svc is not None, f"Service '{name}' must exist"
+            assert "profiles" not in svc, f"Service '{name}' must be in the default profile"
 
 
 class TestTykGatewaySecret:
@@ -178,19 +185,55 @@ class TestEnvExample:
         assert "TYK_GATEWAY_SECRET" in content
 
 
-class TestDefaultComposeUnchanged:
-    """AC7: Default compose (no profile) starts only original services."""
+class TestDefaultComposeMinimumFunctional:
+    """Story 4.1: Default compose (no profile) starts only the minimum
+    functional services. redis and aspire-dashboard are gated behind
+    --profile infra; tyk-* services are gated behind --profile gateway."""
 
     def test_only_default_services_without_profile(self):
-        """Services without profiles are the 'default' set."""
+        """Services without profiles are exactly the minimum-functional set."""
         compose = _load_compose()
-        default_services = []
-        for name, svc in compose["services"].items():
-            if "profiles" not in svc:
-                default_services.append(name)
-        # Original set: frontend, backend, postgres, aspire-dashboard, redis
-        expected = {"frontend", "backend", "postgres", "aspire-dashboard", "redis"}
-        assert set(default_services) == expected
+        default_services = {name for name, svc in compose["services"].items() if "profiles" not in svc}
+        expected = {"frontend", "backend", "postgres"}
+        assert default_services == expected
+
+    def test_exactly_three_default_services(self):
+        """Default profile starts exactly 3 containers — the minimum functional dev stack."""
+        compose = _load_compose()
+        default_services = [name for name, svc in compose["services"].items() if "profiles" not in svc]
+        assert len(default_services) == 3
+
+
+class TestInfraProfile:
+    """Story 4.1: redis + aspire-dashboard are opt-in via --profile infra."""
+
+    def test_redis_in_infra_profile(self):
+        svc = _load_compose()["services"]["redis"]
+        assert "infra" in svc.get("profiles", []), "redis must be in the infra profile"
+
+    def test_aspire_dashboard_in_infra_profile(self):
+        svc = _load_compose()["services"]["aspire-dashboard"]
+        assert "infra" in svc.get("profiles", []), "aspire-dashboard must be in the infra profile"
+
+    def test_postgres_NOT_in_infra_profile(self):
+        """postgres stays in the default profile because backend lifespan
+        requires it for the SELECT 1 connectivity check at startup."""
+        svc = _load_compose()["services"]["postgres"]
+        assert "profiles" not in svc, "postgres must remain in the default profile (backend requires it)"
+
+    def test_postgres_password_fail_fast_guard_preserved(self):
+        """POSTGRES_PASSWORD must still use :? syntax to prevent silent
+        defaults in production. Story 4.1's first iteration weakened this
+        to :- changeme — explicitly reverted because it's a security
+        regression for any non-dev deployment."""
+        compose = _load_compose()
+        env = compose["services"]["postgres"]["environment"]
+        if isinstance(env, dict):
+            password_value = env.get("POSTGRES_PASSWORD", "")
+        else:
+            entries = [e for e in env if "POSTGRES_PASSWORD" in str(e)]
+            password_value = str(entries[0]) if entries else ""
+        assert ":?" in password_value, "POSTGRES_PASSWORD must use :? guard, not :- default"
 
 
 class TestTykConfigJsonValidity:
