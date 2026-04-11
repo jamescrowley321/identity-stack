@@ -2,6 +2,7 @@
 
 import base64
 import json
+import time
 
 import pytest
 from fastapi import Depends, FastAPI, Request
@@ -12,14 +13,29 @@ from app.dependencies.rbac import require_role
 from app.middleware.claims import GatewayClaimsMiddleware
 
 
-def _make_token(payload: dict) -> str:
-    """Build an unsigned JWT with the given payload."""
+def _future_exp(seconds_ahead: int = 3600) -> int:
+    return int(time.time()) + seconds_ahead
+
+
+def _make_token(payload: dict, *, auto_exp: bool = True) -> str:
+    """Build an unsigned JWT with the given payload.
+
+    By default a valid future ``exp`` is injected if the caller did not
+    supply one — most tests don't care about the exp check and just want
+    a payload that flows through the middleware.
+    """
+    if auto_exp and "exp" not in payload:
+        payload = {**payload, "exp": _future_exp()}
     header = base64.urlsafe_b64encode(json.dumps({"alg": "RS256", "typ": "JWT"}).encode()).decode().rstrip("=")
     body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
     return f"{header}.{body}.fakesig"
 
 
-def _build_app(excluded_paths: set[str] | None = None, excluded_prefixes: set[str] | None = None) -> FastAPI:
+def _build_app(
+    excluded_paths: set[str] | None = None,
+    excluded_prefixes: set[str] | None = None,
+    descope_project_id: str = "",
+) -> FastAPI:
     """Build a minimal FastAPI app with GatewayClaimsMiddleware."""
     app = FastAPI()
 
@@ -39,6 +55,7 @@ def _build_app(excluded_paths: set[str] | None = None, excluded_prefixes: set[st
 
     app.add_middleware(
         GatewayClaimsMiddleware,
+        descope_project_id=descope_project_id,
         excluded_paths=excluded_paths or {"/api/health"},
         excluded_prefixes=excluded_prefixes,
     )
@@ -192,6 +209,168 @@ class TestErrorHandling:
         token = f"{header_b64}.{payload_b64}.sig"
         resp = await client.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 401
+
+
+class TestDefenseInDepth:
+    """Defense-in-depth claim validation for the 'Tyk silently not in front' case.
+
+    Closes the gap exposed by issue #240, where tyk/entrypoint.sh was
+    silently broken for four days and nobody caught it. If gateway mode
+    is configured but Tyk is not actually validating tokens, these checks
+    prevent forged or expired payloads from being trusted.
+    """
+
+    @pytest.mark.anyio
+    async def test_missing_exp_returns_401(self, client):
+        """JWT without an ``exp`` claim is rejected."""
+        token = _make_token({"sub": "user1", "dct": "t1", "tenants": {"t1": {}}}, auto_exp=False)
+        resp = await client.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 401
+
+    @pytest.mark.anyio
+    async def test_expired_exp_returns_401(self, client):
+        """JWT with ``exp`` in the past (beyond leeway) is rejected."""
+        token = _make_token({"sub": "user1", "dct": "t1", "tenants": {"t1": {}}, "exp": int(time.time()) - 3600})
+        resp = await client.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 401
+
+    @pytest.mark.anyio
+    async def test_string_exp_returns_401(self, client):
+        """JWT with a non-numeric ``exp`` value is rejected."""
+        token = _make_token({"sub": "user1", "dct": "t1", "tenants": {"t1": {}}, "exp": "never"})
+        resp = await client.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 401
+
+    @pytest.mark.anyio
+    async def test_bool_exp_returns_401(self, client):
+        """JWT with a bool ``exp`` value is rejected (bool is a subclass of int)."""
+        token = _make_token({"sub": "user1", "dct": "t1", "tenants": {"t1": {}}, "exp": True})
+        resp = await client.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 401
+
+    @pytest.mark.anyio
+    async def test_exp_within_leeway_accepted(self, client):
+        """JWT with ``exp`` just past current time but inside the 30s leeway is accepted."""
+        token = _make_token({"sub": "user1", "dct": "t1", "tenants": {"t1": {}}, "exp": int(time.time()) - 10})
+        resp = await client.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 200
+
+    @pytest.mark.anyio
+    async def test_missing_iss_with_project_id_returns_401(self):
+        """With descope_project_id configured, JWT missing ``iss`` is rejected."""
+        app = _build_app(descope_project_id="P123")
+        token = _make_token({"sub": "user1", "dct": "t1", "tenants": {"t1": {}}})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+            assert resp.status_code == 401
+
+    @pytest.mark.anyio
+    async def test_wrong_iss_with_project_id_returns_401(self):
+        """With descope_project_id configured, JWT with unknown ``iss`` is rejected."""
+        app = _build_app(descope_project_id="P123")
+        token = _make_token(
+            {
+                "sub": "user1",
+                "dct": "t1",
+                "tenants": {"t1": {}},
+                "iss": "https://api.descope.com/P456",  # wrong project id
+            }
+        )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+            assert resp.status_code == 401
+
+    @pytest.mark.anyio
+    async def test_non_string_iss_with_project_id_returns_401(self):
+        """With descope_project_id configured, JWT with non-string ``iss`` is rejected."""
+        app = _build_app(descope_project_id="P123")
+        token = _make_token({"sub": "user1", "dct": "t1", "tenants": {"t1": {}}, "iss": 42})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+            assert resp.status_code == 401
+
+    @pytest.mark.anyio
+    async def test_oidc_iss_accepted(self):
+        """OIDC-format issuer https://api.descope.com/<project> is accepted."""
+        app = _build_app(descope_project_id="P123")
+        token = _make_token(
+            {
+                "sub": "user1",
+                "dct": "t1",
+                "tenants": {"t1": {}},
+                "iss": "https://api.descope.com/P123",
+            }
+        )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+            assert resp.status_code == 200
+
+    @pytest.mark.anyio
+    async def test_session_token_iss_accepted(self):
+        """Session-token issuer https://api.descope.com/v1/apps/<project> is accepted."""
+        app = _build_app(descope_project_id="P123")
+        token = _make_token(
+            {
+                "sub": "user1",
+                "dct": "t1",
+                "tenants": {"t1": {}},
+                "iss": "https://api.descope.com/v1/apps/P123",
+            }
+        )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+            assert resp.status_code == 200
+
+    @pytest.mark.anyio
+    async def test_aud_mismatch_returns_401(self):
+        """With descope_project_id set and an ``aud`` present, a mismatch is rejected."""
+        app = _build_app(descope_project_id="P123")
+        token = _make_token(
+            {
+                "sub": "user1",
+                "dct": "t1",
+                "tenants": {"t1": {}},
+                "iss": "https://api.descope.com/P123",
+                "aud": "P456",  # wrong project id
+            }
+        )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+            assert resp.status_code == 401
+
+    @pytest.mark.anyio
+    async def test_aud_list_containing_project_id_accepted(self):
+        """With ``aud`` as a list containing the project id, the token is accepted."""
+        app = _build_app(descope_project_id="P123")
+        token = _make_token(
+            {
+                "sub": "user1",
+                "dct": "t1",
+                "tenants": {"t1": {}},
+                "iss": "https://api.descope.com/P123",
+                "aud": ["P123", "other"],
+            }
+        )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+            assert resp.status_code == 200
+
+    @pytest.mark.anyio
+    async def test_missing_aud_with_project_id_accepted(self):
+        """Descope session tokens omit aud entirely — that must still be accepted."""
+        app = _build_app(descope_project_id="P123")
+        token = _make_token(
+            {
+                "sub": "user1",
+                "dct": "t1",
+                "tenants": {"t1": {}},
+                "iss": "https://api.descope.com/v1/apps/P123",
+                # intentionally no aud
+            }
+        )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+            assert resp.status_code == 200
 
 
 class TestRBACIntegration:
