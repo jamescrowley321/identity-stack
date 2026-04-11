@@ -73,15 +73,52 @@ services:
       - "127.0.0.1:6379:6379"
     command: redis-server --requirepass ${REDIS_PASSWORD:-changeme}
 
+  # Init sidecar: substitutes ${DESCOPE_PROJECT_ID} in Tyk API definition
+  # templates and writes the processed files into the tyk-apps named volume.
+  # Required because tykio/tyk-gateway:v5.3 is a scratch image with no shell,
+  # so substitution cannot run inside the gateway container. tyk-gateway
+  # waits on this via depends_on: service_completed_successfully.
+  tyk-init:
+    image: alpine:3.20
+    environment:
+      - DESCOPE_PROJECT_ID=${DESCOPE_PROJECT_ID:?Set DESCOPE_PROJECT_ID in .env}
+    volumes:
+      - ./tyk/apps:/in:ro
+      - tyk-apps:/out
+    entrypoint:
+      - /bin/sh
+      - -eu
+      - -c
+      - |
+        # Validate DESCOPE_PROJECT_ID contains only safe characters
+        case "$$DESCOPE_PROJECT_ID" in
+          *[!A-Za-z0-9_-]*)
+            echo "FATAL: DESCOPE_PROJECT_ID contains invalid characters (expected alphanumeric, hyphens, underscores)" >&2
+            exit 1
+            ;;
+        esac
+        # Re-substitute from scratch on every run so stale entries from a
+        # previous project id don't leak into the gateway.
+        rm -f /out/*.json 2>/dev/null || true
+        count=0
+        for f in /in/*.json; do
+          [ -f "$$f" ] || continue
+          outfile="/out/$$(basename "$$f")"
+          sed "s|\$${DESCOPE_PROJECT_ID}|$$DESCOPE_PROJECT_ID|g" "$$f" > "$$outfile"
+          count=$$((count + 1))
+        done
+        echo "tyk-init: substituted $$count API definition(s) into tyk-apps volume"
+    profiles:
+      - gateway
+      - full
+
   tyk-gateway:
     image: tykio/tyk-gateway:v5.3
-    entrypoint: ["/opt/tyk-gateway/entrypoint.sh"]
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
-      - ./tyk/entrypoint.sh:/opt/tyk-gateway/entrypoint.sh:ro
       - ./tyk/tyk.conf:/opt/tyk-gateway/tyk.conf
-      - ./tyk/apps:/opt/tyk-gateway/apps-templates:ro
+      - tyk-apps:/opt/tyk-gateway/apps:ro
       - ./tyk/middleware:/opt/tyk-gateway/middleware
       - ./tyk/policies:/opt/tyk-gateway/policies
     environment:
@@ -89,10 +126,13 @@ services:
       - TYK_GW_STORAGE_HOST=tyk-redis
       - TYK_GW_STORAGE_PORT=6379
       - TYK_GW_STORAGE_PASSWORD=${TYK_REDIS_PASSWORD:-changeme}
-      - DESCOPE_PROJECT_ID=${DESCOPE_PROJECT_ID:?Set DESCOPE_PROJECT_ID in .env}
     depends_on:
-      - tyk-redis
-      - backend
+      tyk-init:
+        condition: service_completed_successfully
+      tyk-redis:
+        condition: service_started
+      backend:
+        condition: service_started
     restart: unless-stopped
     profiles:
       - gateway
@@ -111,3 +151,4 @@ services:
 volumes:
   pgdata:
   tyk-redis-data:
+  tyk-apps:

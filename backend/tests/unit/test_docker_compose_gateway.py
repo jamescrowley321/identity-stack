@@ -48,10 +48,13 @@ class TestTykGatewayService:
         volumes = svc["volumes"]
         assert any("tyk/tyk.conf" in v for v in volumes)
 
-    def test_tyk_gateway_volume_apps(self):
+    def test_tyk_gateway_mounts_apps_volume(self):
+        """tyk-gateway mounts the tyk-apps named volume (populated by tyk-init
+        sidecar) at /opt/tyk-gateway/apps. It does NOT bind-mount tyk/apps
+        directly — the tykio image has no shell for envsubst."""
         svc = _load_compose()["services"]["tyk-gateway"]
         volumes = svc["volumes"]
-        assert any("tyk/apps" in v for v in volumes)
+        assert any("tyk-apps:/opt/tyk-gateway/apps" in v for v in volumes)
 
     def test_tyk_gateway_volume_middleware(self):
         svc = _load_compose()["services"]["tyk-gateway"]
@@ -212,7 +215,10 @@ class TestTykConfigJsonValidity:
         api_def = json.loads((TYK_DIR / "apps" / "saas-backend.json").read_text())
         assert api_def["api_id"] == "saas-backend"
         assert api_def["use_openid"] is True
-        assert api_def["target_url"] == "http://backend:8000/api/"
+        # target_url is the backend root (not /api/) so the full incoming
+        # path /api/<x> — which Tyk forwards verbatim with strip_listen_path
+        # = false — does not get duplicated to /api/api/<x>.
+        assert api_def["target_url"] == "http://backend:8000/"
         assert api_def["active"] is True
 
 
