@@ -23,7 +23,7 @@ dependencies = [
     "opentelemetry-instrumentation-httpx>=0.41b0",
     "opentelemetry-instrumentation-sqlalchemy>=0.62b0",
     "opentelemetry-instrumentation-logging>=0.62b0",
-    "redis[hiredis]>=5.0,<8",
+    "redis[hiredis]>=7.4.0,<8",
 ]
 
 [project.optional-dependencies]
