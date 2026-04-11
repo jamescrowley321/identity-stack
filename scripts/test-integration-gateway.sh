@@ -29,7 +29,12 @@ skip() { echo "  SKIP: $1"; SKIP=$((SKIP + 1)); }
 header() { echo -e "\n=== $1 ==="; }
 
 cleanup() {
+    local exit_code=$?
     header "Teardown"
+    if [ "$exit_code" -ne 0 ] || [ "${FAIL:-0}" -gt 0 ]; then
+        echo "Test run failed — dumping container logs before teardown:"
+        docker compose --profile gateway logs --tail=200 2>&1 || true
+    fi
     echo "Stopping gateway profile..."
     docker compose --profile gateway down -v --timeout 10 2>&1 || true
     echo "Teardown complete."
@@ -72,9 +77,20 @@ fi
 # ── AC2: Health check through Tyk ──
 header "AC2: Gateway health check through Tyk"
 HEALTH_TMPFILE=$(mktemp)
-trap 'rm -f "$HEALTH_TMPFILE"; cleanup' EXIT
-HEALTH_CODE=$(curl -s -w '%{http_code}' -o "$HEALTH_TMPFILE" --connect-timeout 5 "${TYK_URL}/api/health" 2>/dev/null || echo "000")
-HEALTH_BODY=$(cat "$HEALTH_TMPFILE" 2>/dev/null || true)
+HEALTH_CODE=""
+HEALTH_BODY=""
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    set +e
+    HEALTH_CODE=$(curl -s -o "$HEALTH_TMPFILE" -w '%{http_code}' --connect-timeout 5 --max-time 10 "${TYK_URL}/api/health" 2>/dev/null)
+    set -e
+    HEALTH_CODE="${HEALTH_CODE:-000}"
+    HEALTH_BODY=$(cat "$HEALTH_TMPFILE" 2>/dev/null || true)
+    if [ "$HEALTH_CODE" = "200" ] || [ "$HEALTH_CODE" = "401" ]; then
+        break
+    fi
+    echo "  attempt ${attempt}: HTTP ${HEALTH_CODE} — retrying in 2s..."
+    sleep 2
+done
 rm -f "$HEALTH_TMPFILE"
 
 if [ "$HEALTH_CODE" = "200" ]; then
@@ -87,7 +103,10 @@ elif [ "$HEALTH_CODE" = "401" ]; then
     # Tyk OpenID policy covers all /api/ paths — auth required is expected behavior
     echo "  INFO: Tyk requires auth for /api/health (OpenID policy covers /api/)"
     # Verify backend is reachable directly to confirm the stack is healthy
-    DIRECT_CODE=$(curl -sf -w '%{http_code}' -o /dev/null --connect-timeout 5 "${BACKEND_URL}/api/health" 2>/dev/null || echo "000")
+    set +e
+    DIRECT_CODE=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 "${BACKEND_URL}/api/health" 2>/dev/null)
+    set -e
+    DIRECT_CODE="${DIRECT_CODE:-000}"
     if [ "$DIRECT_CODE" = "200" ]; then
         pass "Tyk proxy is active (401 for unauthenticated /api/health); backend healthy directly"
     else
@@ -101,9 +120,13 @@ fi
 header "AC3: Expired JWT rejection through Tyk"
 # nosemgrep: generic.secrets.security.detected-jwt-token.detected-jwt-token
 EXPIRED_JWT="eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0IiwiZXhwIjoxMDAwMDAwMDAwfQ.invalid-signature"
+set +e
 EXPIRED_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+    --connect-timeout 5 --max-time 10 \
     -H "Authorization: Bearer ${EXPIRED_JWT}" \
-    "${TYK_URL}/api/tenants" 2>/dev/null || echo "000")
+    "${TYK_URL}/api/tenants" 2>/dev/null)
+set -e
+EXPIRED_CODE="${EXPIRED_CODE:-000}"
 
 if [ "$EXPIRED_CODE" = "401" ] || [ "$EXPIRED_CODE" = "403" ]; then
     pass "Expired/invalid JWT rejected by Tyk with HTTP ${EXPIRED_CODE} — not reaching FastAPI"

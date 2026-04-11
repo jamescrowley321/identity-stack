@@ -13,16 +13,29 @@ services:
     build: ./backend
     ports:
       - "127.0.0.1:8000:8000"
-    # Note: env_file loads .env first, then environment: block overrides specific
-    # values. If your .env contains DATABASE_URL, the value below takes precedence.
+    # env_file loads .env first (required: false → skipped when absent, e.g. in
+    # CI), then environment: block overrides / supplies defaults via host env.
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       - FRONTEND_URL=http://localhost:3000
       - DATABASE_URL=postgresql+asyncpg://identity:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/identity
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://aspire-dashboard:18889
       - OTEL_SERVICE_NAME=identity-stack-backend
       - REDIS_URL=redis://:${REDIS_PASSWORD:-changeme}@redis:6379/0
+      - DESCOPE_PROJECT_ID=${DESCOPE_PROJECT_ID:-}
+      - DESCOPE_MANAGEMENT_KEY=${DESCOPE_MANAGEMENT_KEY:-}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=2).read()"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
     depends_on:
       postgres:
         condition: service_healthy
