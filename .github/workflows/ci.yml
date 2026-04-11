@@ -174,3 +174,36 @@ jobs:
           DESCOPE_PROJECT_ID: "test-project-id"
           POSTGRES_PASSWORD: "ci-build-only"
           TYK_GATEWAY_SECRET: "ci-build-only"
+
+  profile-integration-tests:
+    name: Profile Integration Tests
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_PASSWORD: ci-integration
+      DESCOPE_PROJECT_ID: ci-test-project
+      TYK_GATEWAY_SECRET: ci-integration-secret
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Create .env for compose env_file
+        run: |
+          cat > .env <<EOF
+          POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+          DESCOPE_PROJECT_ID=${DESCOPE_PROJECT_ID}
+          TYK_GATEWAY_SECRET=${TYK_GATEWAY_SECRET}
+          DESCOPE_MANAGEMENT_KEY=ci-integration
+          EOF
+
+      - name: Run standalone profile integration tests
+        run: make test-integration-standalone
+
+      - name: Dump standalone compose logs on failure
+        if: failure()
+        run: docker compose logs --tail=200 || true
+
+      - name: Run gateway profile integration tests
+        run: make test-integration-gateway
+
+      - name: Dump gateway compose logs on failure
+        if: failure()
+        run: docker compose --profile gateway logs --tail=200 || true
