@@ -194,6 +194,6 @@ jobs:
       # image is scratch-based and ships only the `tyk` binary, with no shell
       # interpreter available to handle the `#!/bin/sh` shebang. The script
       # has been silently broken since commit a7c52d9 (2026-04-07). Tracked
-      # as a follow-up fix in a later gateway PR. Until that lands, the
+      # as #240; fix will land in a later gateway PR. Until that merges, the
       # gateway Make target stays available for local iteration but is not
       # CI-gated.
