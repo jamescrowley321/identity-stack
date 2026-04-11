@@ -1,27 +1,58 @@
 version: 2
+
+# Groups are split by update-type so dependabot creates separate PRs for
+# safe (patch), usually-safe (minor), and risky (major) bumps. This was
+# split out of one wildcard group after #236, where 8 major-version bumps
+# (typescript 5→6, vite 6→8, eslint 9→10, etc.) were silently mixed in
+# with 9 patch/minor bumps in a single PR — too dangerous to merge as a
+# blob, too tedious to split by hand. Now patches/minors flow through
+# normally and majors get their own focused PR with no surprises.
+
 updates:
   - package-ecosystem: "pip"
     directory: "/backend"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 10
     groups:
-      python-deps:
+      python-deps-patch:
         patterns: ["*"]
-    open-pull-requests-limit: 5
+        update-types: ["patch"]
+      python-deps-minor:
+        patterns: ["*"]
+        update-types: ["minor"]
+      python-deps-major:
+        patterns: ["*"]
+        update-types: ["major"]
 
   - package-ecosystem: "npm"
     directory: "/frontend"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 10
     groups:
-      npm-deps:
+      npm-deps-patch:
         patterns: ["*"]
-    open-pull-requests-limit: 5
+        update-types: ["patch"]
+      npm-deps-minor:
+        patterns: ["*"]
+        update-types: ["minor"]
+      npm-deps-major:
+        patterns: ["*"]
+        update-types: ["major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 10
     groups:
-      actions:
+      actions-patch:
         patterns: ["*"]
+        update-types: ["patch"]
+      actions-minor:
+        patterns: ["*"]
+        update-types: ["minor"]
+      actions-major:
+        patterns: ["*"]
+        update-types: ["major"]
