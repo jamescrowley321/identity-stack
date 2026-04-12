@@ -171,16 +171,16 @@ class TestDescopeManagementClient:
         mock_http.post.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
-            json=MagicMock(return_value={"user": {"name": "Test", "customAttributes": {"dept": "Eng"}}}),
+            json=MagicMock(return_value={"users": [{"name": "Test", "customAttributes": {"dept": "Eng"}}]}),
         )
 
         result = await client.load_user("user1")
         assert result["name"] == "Test"
         assert result["customAttributes"]["dept"] == "Eng"
         mock_http.post.assert_called_once_with(
-            "https://api.descope.com/v1/mgmt/user/load",
+            "https://api.descope.com/v1/mgmt/user/search",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
-            json={"userId": "user1"},
+            json={"userIds": ["user1"], "limit": 1},
         )
 
     @pytest.mark.anyio
@@ -227,7 +227,7 @@ class TestDescopeManagementClient:
         mock_http.post.assert_called_once_with(
             "https://api.descope.com/v1/mgmt/accesskey/create",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
-            json={"name": "Test Key", "tenantId": "t1", "roleNames": ["viewer"]},
+            json={"name": "Test Key", "keyTenants": [{"tenantId": "t1", "roleNames": ["viewer"]}]},
         )
 
     @pytest.mark.anyio

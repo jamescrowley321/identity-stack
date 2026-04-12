@@ -129,9 +129,15 @@ class DescopeManagementClient:
         )
 
     async def load_user(self, user_id: str) -> dict:
-        """Load a user by userId (from JWT sub claim). Returns user object including customAttributes."""
-        resp = await self._request("/v1/mgmt/user/load", {"userId": user_id})
-        return resp.json().get("user", {})
+        """Load a user by userId (from JWT sub claim). Returns user object including customAttributes.
+
+        Uses the search endpoint with a userIds filter because the
+        ``/v1/mgmt/user/load`` endpoint does not exist in the current
+        Descope API version (returns 404).
+        """
+        resp = await self._request("/v1/mgmt/user/search", {"userIds": [user_id], "limit": 1})
+        users = resp.json().get("users", [])
+        return users[0] if users else {}
 
     async def resolve_login_id(self, user_id: str) -> str:
         """Resolve a userId (JWT sub) to the primary loginId required by mutation endpoints.
@@ -171,12 +177,18 @@ class DescopeManagementClient:
         expire_time: int | None = None,
         role_names: list[str] | None = None,
     ) -> dict:
-        """Create an access key scoped to a tenant."""
-        body: dict = {"name": name, "tenantId": tenant_id}
+        """Create an access key scoped to a tenant.
+
+        Uses ``keyTenants`` (not ``tenantId``) to associate the key with
+        a tenant and its roles. Without this, the key is created but has
+        no tenant associations and won't appear in tenant-scoped searches.
+        """
+        key_tenant: dict = {"tenantId": tenant_id}
+        if role_names:
+            key_tenant["roleNames"] = role_names
+        body: dict = {"name": name, "keyTenants": [key_tenant]}
         if expire_time is not None:
             body["expireTime"] = expire_time
-        if role_names:
-            body["roleNames"] = role_names
         resp = await self._request("/v1/mgmt/accesskey/create", body)
         return resp.json()
 
