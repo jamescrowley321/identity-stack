@@ -29,6 +29,7 @@ _backend_dir = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__f
 if _backend_dir not in sys.path:
     sys.path.insert(0, _backend_dir)
 
+from sqlalchemy import func  # noqa: E402
 from sqlmodel import select  # noqa: E402
 
 from app.models.database import get_session_factory  # noqa: E402
@@ -258,8 +259,8 @@ async def main() -> None:
             TenantResource,
             Document,
         ]:
-            result = await session.execute(select(model_cls))
-            counts[model_cls.__tablename__] = len(result.scalars().all())
+            result = await session.execute(select(func.count()).select_from(model_cls))
+            counts[model_cls.__tablename__] = result.scalar_one()
 
         print("\n  Database contents:")
         for table, count in counts.items():
