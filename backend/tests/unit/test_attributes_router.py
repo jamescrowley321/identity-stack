@@ -90,8 +90,12 @@ async def test_get_profile_handles_api_failure(mock_validate, client):
     app.state.descope_client = mock_client
 
     response = await client.get("/api/profile", headers={"Authorization": "Bearer valid.token"})
-    assert response.status_code == 502
-    assert "identity provider" in response.json()["detail"]
+    # Profile degrades gracefully on Descope API errors — returns 200
+    # with empty data rather than 502, since profile is informational.
+    assert response.status_code == 200
+    data = response.json()
+    assert data["name"] == ""
+    assert data["email"] == ""
 
 
 @pytest.mark.anyio
