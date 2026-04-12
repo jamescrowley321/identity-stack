@@ -60,6 +60,24 @@ class DescopeManagementClient:
             if self._owns_client or self._http_client is None:
                 await client.aclose()
 
+    async def _get(self, path: str) -> httpx.Response:
+        """Send a GET request to the Descope Management API.
+
+        Some Descope endpoints (notably /v1/mgmt/permission/all) only
+        accept GET, unlike the majority which use POST.
+        """
+        client = self._get_client()
+        try:
+            resp = await client.get(
+                f"{self.base_url}{path}",
+                headers=self._headers(),
+            )
+            resp.raise_for_status()
+            return resp
+        finally:
+            if self._owns_client or self._http_client is None:
+                await client.aclose()
+
     async def create_tenant(
         self,
         name: str,
@@ -74,7 +92,7 @@ class DescopeManagementClient:
 
     async def list_tenants(self) -> list[dict]:
         """List all tenants in the Descope project."""
-        resp = await self._request("/v1/mgmt/tenant/all", {})
+        resp = await self._request("/v1/mgmt/tenant/search", {})
         return resp.json().get("tenants", [])
 
     async def load_tenant(self, tenant_id: str) -> dict:
@@ -185,8 +203,12 @@ class DescopeManagementClient:
         await self._request("/v1/mgmt/accesskey/delete", {"id": key_id})
 
     async def list_permissions(self) -> list[dict]:
-        """List all permission definitions in the Descope project."""
-        resp = await self._request("/v1/mgmt/permission/all", {})
+        """List all permission definitions in the Descope project.
+
+        Unlike tenants and roles whose ``/search`` endpoint accepts POST,
+        permissions only expose a ``/all`` endpoint that requires GET.
+        """
+        resp = await self._get("/v1/mgmt/permission/all")
         return resp.json().get("permissions", [])
 
     async def create_permission(self, name: str, description: str = "") -> None:
@@ -205,7 +227,7 @@ class DescopeManagementClient:
 
     async def list_roles(self) -> list[dict]:
         """List all role definitions in the Descope project."""
-        resp = await self._request("/v1/mgmt/role/all", {})
+        resp = await self._request("/v1/mgmt/role/search", {})
         return resp.json().get("roles") or []
 
     async def create_role(self, name: str, description: str = "", permission_names: list[str] | None = None) -> None:

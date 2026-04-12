@@ -388,7 +388,7 @@ class TestDescopeManagementClient:
     async def test_list_permissions(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
-        mock_http.post.return_value = MagicMock(
+        mock_http.get.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
             json=MagicMock(return_value={"permissions": [{"name": "reports.read", "description": "View reports"}]}),
@@ -396,10 +396,9 @@ class TestDescopeManagementClient:
 
         result = await client.list_permissions()
         assert result == [{"name": "reports.read", "description": "View reports"}]
-        mock_http.post.assert_called_once_with(
+        mock_http.get.assert_called_once_with(
             "https://api.descope.com/v1/mgmt/permission/all",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
-            json={},
         )
 
     @pytest.mark.anyio
@@ -458,7 +457,7 @@ class TestDescopeManagementClient:
         result = await client.list_roles()
         assert result == [{"name": "admin", "description": "Admin role"}]
         mock_http.post.assert_called_once_with(
-            "https://api.descope.com/v1/mgmt/role/all",
+            "https://api.descope.com/v1/mgmt/role/search",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={},
         )
