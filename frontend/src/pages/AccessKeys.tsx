@@ -66,7 +66,10 @@ export default function AccessKeys() {
         setName("");
         setCopied(false);
         toast.success("Access key created");
-        loadKeys();
+        // Brief delay before refresh — the Descope search index needs a
+        // moment to include the newly created key, otherwise loadKeys()
+        // returns stale results and the list appears not to update.
+        setTimeout(loadKeys, 1500);
       } else {
         const err = await res.json();
         toast.error(err.detail || "Failed to create key");

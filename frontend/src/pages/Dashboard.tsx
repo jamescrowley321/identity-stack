@@ -35,6 +35,7 @@ export default function Dashboard() {
   const [resources, setResources] = useState<TenantResource[]>([]);
   const [newResourceName, setNewResourceName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [tenantName, setTenantName] = useState<string | null>(null);
 
   const idToken = auth.user?.id_token;
 
@@ -44,6 +45,18 @@ export default function Dashboard() {
       .then((data) => setHealth(data.status))
       .catch(() => setHealth("unreachable"));
   }, []);
+
+  // Fetch tenant name for display (avoids showing raw Descope IDs)
+  useEffect(() => {
+    if (!auth.user?.access_token || !currentTenantId) return;
+    apiFetch("/api/tenants")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        const match = data?.tenants?.find((t: { id: string }) => t.id === currentTenantId);
+        if (match?.name) setTenantName(match.name);
+      })
+      .catch(() => {});
+  }, [auth.user?.access_token, currentTenantId, apiFetch]);
 
   useEffect(() => {
     if (!auth.user?.access_token) return;
@@ -153,7 +166,7 @@ export default function Dashboard() {
                 {currentTenantId && (
                   <div className="flex items-center gap-2">
                     <span className="text-sm text-muted-foreground">Tenant:</span>
-                    <Badge variant="outline">{currentTenantId}</Badge>
+                    <Badge variant="outline">{tenantName || currentTenantId}</Badge>
                   </div>
                 )}
                 {roles.length > 0 && (
@@ -169,7 +182,7 @@ export default function Dashboard() {
                 {tenants.length > 0 && (
                   <div className="flex items-center gap-2">
                     <span className="text-sm text-muted-foreground">Memberships:</span>
-                    <span className="text-sm">{tenants.map((t) => t.id).join(", ")}</span>
+                    <span className="text-sm">{tenantName || tenants.map((t) => t.id).join(", ")}</span>
                   </div>
                 )}
               </CardContent>
@@ -181,7 +194,7 @@ export default function Dashboard() {
               <Card>
                 <CardHeader>
                   <CardTitle>Tenant Resources</CardTitle>
-                  <CardDescription>Scoped to {currentTenantId}</CardDescription>
+                  <CardDescription>Scoped to {tenantName || currentTenantId}</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <RequirePermission permission="documents.write">
