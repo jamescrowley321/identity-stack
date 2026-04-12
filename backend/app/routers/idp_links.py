@@ -18,14 +18,14 @@ router = APIRouter(tags=["IdP Links"])
 
 class CreateIdPLinkRequest(BaseModel):
     provider_id: uuid.UUID
-    external_sub: str = Field(min_length=1, max_length=255)
-    external_email: str = Field(default="", max_length=320)
+    external_sub: str = Field(min_length=1, max_length=255)  # OIDC `sub` has no spec max; 255 is the practical limit used by most IdPs (Descope subs are ~28 chars)
+    external_email: str = Field(default="", max_length=320)  # RFC 5321 §4.5.3.1.3: 64 local-part + @ + 255 domain = 320 max
     metadata: dict[str, str] | None = None
 
     @field_validator("metadata")
     @classmethod
     def validate_metadata_size(cls, v: dict[str, str] | None) -> dict[str, str] | None:
-        if v is not None and len(v) > 20:
+        if v is not None and len(v) > 20:  # Prevent abuse of arbitrary metadata dictionaries; 20 keys is generous for any real use case
             raise ValueError("metadata must have at most 20 keys")
         return v
 

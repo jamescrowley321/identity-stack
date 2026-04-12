@@ -15,12 +15,12 @@ router = APIRouter(tags=["Permissions"])
 
 
 class CreatePermissionRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
+    name: str = Field(min_length=1, max_length=255)  # Descope permission names accept up to 255 chars; standardized across all routers
     description: str = ""
 
 
 class UpdatePermissionRequest(BaseModel):
-    new_name: str = Field(min_length=1, max_length=200)
+    new_name: str = Field(min_length=1, max_length=255)  # Descope permission names accept up to 255 chars; standardized across all routers
     description: str = ""
 
 
