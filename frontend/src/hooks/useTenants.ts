@@ -4,6 +4,7 @@ import { jwtDecode } from "../utils/jwt";
 
 export interface TenantInfo {
   id: string;
+  name: string;
   roles: string[];
   permissions: string[];
 }
@@ -32,6 +33,7 @@ export function useTenants() {
       const tenantsMap = claims.tenants ?? {};
       const tenants: TenantInfo[] = Object.entries(tenantsMap).map(([id, info]) => ({
         id,
+        name: id,  // default to ID, updated by fetchTenantNames
         roles: info.roles ?? [],
         permissions: info.permissions ?? [],
       }));

@@ -1,7 +1,5 @@
 import logging
-import uuid
 
-from expression import Ok
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
@@ -61,16 +59,30 @@ async def create_tenant(
 
 
 @router.get("/tenants")
-async def list_user_tenants(tenant_claims: dict = Depends(get_tenant_claims)):
-    """List all tenants the current user belongs to (from JWT claims)."""
-    tenants = [
-        {
+async def list_user_tenants(
+    request: Request,
+    tenant_claims: dict = Depends(get_tenant_claims),
+):
+    """List all tenants the current user belongs to, with names from Descope."""
+    client = getattr(request.app.state, "descope_client", None)
+    # Build base list from JWT claims
+    tenants = []
+    for tenant_id, info in tenant_claims.items():
+        entry = {
             "id": tenant_id,
+            "name": tenant_id,  # fallback to ID
             "roles": info.get("roles", []) if isinstance(info, dict) else [],
             "permissions": info.get("permissions", []) if isinstance(info, dict) else [],
         }
-        for tenant_id, info in tenant_claims.items()
-    ]
+        # Try to load the tenant name from Descope
+        if client:
+            try:
+                tenant_data = await client.load_tenant(tenant_id)
+                if tenant_data:
+                    entry["name"] = tenant_data.get("name", tenant_id)
+            except Exception:  # noqa: S110
+                pass  # keep the ID as fallback — non-critical for listing
+        tenants.append(entry)
     return {"tenants": tenants}
 
 
@@ -78,17 +90,21 @@ async def list_user_tenants(tenant_claims: dict = Depends(get_tenant_claims)):
 async def get_current_tenant(
     request: Request,
     tenant_id: str = Depends(get_tenant_id),
-    tenant_service: TenantService = Depends(get_tenant_service),
 ):
-    """Get the current tenant context from the JWT `dct` claim."""
+    """Get the current tenant context from the Descope Management API."""
+    client = getattr(request.app.state, "descope_client", None)
+    if client is None:
+        raise HTTPException(status_code=503, detail="Descope client not initialized")
     try:
-        tenant_uuid = uuid.UUID(tenant_id)
-    except ValueError:
-        raise HTTPException(status_code=422, detail=f"Invalid UUID for tenant_id: {tenant_id}")
-    result = await tenant_service.get_tenant(tenant_id=tenant_uuid)
-    if result.is_ok():
-        result = Ok({"tenant_id": tenant_id, "tenant": result.ok})
-    return result_to_response(result, request)
+        tenant_data = await client.load_tenant(tenant_id)
+        if not tenant_data:
+            raise HTTPException(status_code=404, detail=f"Tenant {tenant_id} not found")
+        return {"tenant_id": tenant_id, "tenant": tenant_data}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Failed to load tenant %s from Descope: %s", tenant_id, exc)
+        raise HTTPException(status_code=502, detail="Failed to load tenant from Descope") from exc
 
 
 @router.get("/tenants/{tenant_id}/resources")
