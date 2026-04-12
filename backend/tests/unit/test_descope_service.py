@@ -590,7 +590,7 @@ class TestDescopeManagementClient:
 
         await client.create_relation("document", "doc-123", "editor", "user:u1")
         mock_http.post.assert_called_once_with(
-            "https://api.descope.com/v1/mgmt/authz/re/save",
+            "https://api.descope.com/v1/mgmt/authz/re/create",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={
                 "resourceType": "document",
