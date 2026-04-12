@@ -64,8 +64,11 @@ async def get_fga_schema(
     """
     try:
         client = request.app.state.descope_client
-        result = await client.get_fga_schema() or {}
-        return {"schema": result.get("schema") or ""}
+        schema = await client.get_fga_schema() or {}
+        # get_fga_schema() already extracts .schema from the API response,
+        # so `schema` is the schema dict itself (with .namespaces etc.),
+        # not a wrapper around it.
+        return {"schema": schema}
     except httpx.HTTPStatusError as exc:
         logger.warning("Descope API error loading FGA schema: %s %s", exc.response.status_code, exc.response.text[:500])
         if exc.response.status_code == 400:
