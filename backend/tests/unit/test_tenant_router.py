@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlmodel import SQLModel
 
 from app.dependencies.identity import get_tenant_service
-from app.errors.identity import NotFound, SyncFailed
+from app.errors.identity import SyncFailed
 from app.main import app
 from app.models.database import get_async_session
 from app.services.tenant import TenantService
@@ -121,6 +121,11 @@ async def test_list_user_tenants_empty(mock_validate, client):
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_list_user_tenants(mock_validate, client):
     mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
+    # Set up mock descope client for tenant name resolution
+    mock_descope = AsyncMock()
+    mock_descope.load_tenant.side_effect = lambda tid: {"name": f"Tenant {tid}"}
+    app.state.descope_client = mock_descope
+
     response = await client.get("/api/tenants", headers=AUTH_HEADER)
     assert response.status_code == 200
     data = response.json()
@@ -128,6 +133,10 @@ async def test_list_user_tenants(mock_validate, client):
     ids = {t["id"] for t in data["tenants"]}
     assert TENANT_UUID in ids
     assert TENANT_UUID_2 in ids
+    # Verify names were loaded from Descope
+    for t in data["tenants"]:
+        assert "name" in t
+        assert t["name"] == f"Tenant {t['id']}"
 
 
 # --- create_tenant (via TenantService) ---
@@ -200,10 +209,12 @@ async def test_create_tenant_rejects_empty_name(mock_validate, client):
 
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_current_tenant(mock_validate, mock_tenant_service, client):
+async def test_get_current_tenant(mock_validate, client):
     mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
-    tenant_dict = {"id": TENANT_UUID, "name": "Acme Corp", "domains": []}
-    mock_tenant_service.get_tenant.return_value = Ok(tenant_dict)
+    # get_current_tenant now calls client.load_tenant() directly
+    mock_descope = AsyncMock()
+    mock_descope.load_tenant.return_value = {"id": TENANT_UUID, "name": "Acme Corp", "domains": []}
+    app.state.descope_client = mock_descope
 
     response = await client.get("/api/tenants/current", headers=AUTH_HEADER)
     assert response.status_code == 200
@@ -222,10 +233,13 @@ async def test_get_current_tenant_returns_403_without_dct(mock_validate, client)
 
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_current_tenant_not_found(mock_validate, mock_tenant_service, client):
-    """Tenant not found in canonical DB → 404."""
+async def test_get_current_tenant_not_found(mock_validate, client):
+    """Tenant not found via Descope client -> 404."""
     mock_validate.return_value = MOCK_CLAIMS_WITH_TENANT
-    mock_tenant_service.get_tenant.return_value = Error(NotFound(message="Tenant 'tenant-abc' not found"))
+    # load_tenant returns None when tenant doesn't exist
+    mock_descope = AsyncMock()
+    mock_descope.load_tenant.return_value = None
+    app.state.descope_client = mock_descope
 
     response = await client.get("/api/tenants/current", headers=AUTH_HEADER)
     assert response.status_code == 404

@@ -49,11 +49,13 @@ describe("useTenants", () => {
     expect(result.current.tenants).toHaveLength(2);
     expect(result.current.tenants[0]).toEqual({
       id: "t1",
+      name: "t1",
       roles: ["admin", "member"],
       permissions: ["docs.read", "docs.write"],
     });
     expect(result.current.tenants[1]).toEqual({
       id: "t2",
+      name: "t2",
       roles: ["viewer"],
       permissions: ["docs.read"],
     });
