@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup lint test-unit test-frontend test-integration test-e2e test-all security dev-backend dev-frontend dev test-gateway-proxy dev-gateway test-integration-standalone test-integration-gateway
+.PHONY: help setup lint test-unit test-frontend test-integration test-e2e test-all security dev-backend dev-frontend dev test-gateway-proxy dev-gateway test-integration-standalone test-integration-gateway seed
 
 help: ## show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -47,3 +47,7 @@ test-integration-gateway: ## run gateway profile integration tests (manages comp
 
 dev-gateway: ## start full stack with gateway profile (DEPLOYMENT_MODE=gateway via override)
 	docker compose -f docker-compose.yml -f docker-compose.gateway.yml --profile gateway up --build
+
+seed: ## seed all resources from Descope + create demo data (requires running stack)
+	docker compose exec backend alembic upgrade head
+	docker compose exec backend python -m scripts.seed_all

@@ -284,7 +284,7 @@ class DescopeManagementClient:
         self._validate_fga_param(relation, "relation")
         self._validate_fga_param(target, "target")
         await self._request(
-            "/v1/mgmt/authz/re/save",
+            "/v1/mgmt/authz/re/create",
             {
                 "resourceType": resource_type,
                 "resource": resource_id,
