@@ -23,14 +23,18 @@ class RoleAssignmentRequest(BaseModel):
 
 
 class CreateRoleRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
+    # Descope accepts up to 255 chars; standardized across all routers
+    name: str = Field(min_length=1, max_length=255)
     description: str = Field(default="", max_length=1000)
+    # Up to 100 permissions per role — generous but bounded
     permission_names: list[Annotated[str, Field(min_length=1)]] = Field(default_factory=list, max_length=100)
 
 
 class UpdateRoleRequest(BaseModel):
-    new_name: str | None = Field(default=None, min_length=1, max_length=200)
+    # Descope accepts up to 255 chars; standardized across all routers
+    new_name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = Field(default=None, max_length=1000)
+    # Up to 100 permissions per role — generous but bounded
     permission_names: list[Annotated[str, Field(min_length=1)]] | None = Field(default=None, max_length=100)
 
 

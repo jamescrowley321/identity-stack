@@ -15,11 +15,15 @@ router = APIRouter(tags=["Providers"])
 
 
 class RegisterProviderRequest(BaseModel):
+    # Descope accepts up to 255 chars; standardized across all routers
     name: str = Field(min_length=1, max_length=255)
     type: ProviderType
+    # De facto URL limit per RFC 7230 (2048 is the practical standard)
     issuer_url: str = Field(default="", max_length=2048)
     base_url: str = Field(default="", max_length=2048)
+    # Bounded list of short capability identifiers; 20 items × 50 chars
     capabilities: list[Annotated[str, Field(max_length=50)]] = Field(default_factory=list, max_length=20)
+    # File path, URI, or JSON pointer — 1024 covers all practical cases
     config_ref: str = Field(default="", max_length=1024)
 
 

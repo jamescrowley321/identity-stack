@@ -163,8 +163,18 @@ async def descope_webhook(
 @limiter.limit(RATE_LIMIT_AUTH)
 async def resolve_identity(
     request: Request,
-    sub: str = Query(..., min_length=1, max_length=255, description="External subject identifier from the IdP"),
-    provider: str = Query(..., min_length=1, max_length=255, description="Provider name (e.g. 'descope')"),
+    sub: str = Query(
+        ...,
+        min_length=1,
+        max_length=255,
+        description="External subject identifier from the IdP",
+    ),
+    provider: str = Query(
+        ...,
+        min_length=1,
+        max_length=255,
+        description="Provider name (e.g. 'descope')",
+    ),
     service: IdentityResolutionService = Depends(get_identity_resolution_service),
 ):
     """Resolve canonical identity from provider + external subject.

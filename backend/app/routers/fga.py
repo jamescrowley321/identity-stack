@@ -14,12 +14,14 @@ router = APIRouter(tags=["fga"])
 
 
 class UpdateSchemaRequest(BaseModel):
+    # Generous limit for FGA schema bodies; prevents abuse without restricting real usage
     schema_: str = Field(alias="schema", min_length=1, max_length=50000)
 
     model_config = {"populate_by_name": True}
 
 
 class RelationRequest(BaseModel):
+    # FGA identifiers; Descope uses short names/IDs — 200 is generous
     resource_type: str = Field(min_length=1, max_length=200)
     resource_id: str = Field(min_length=1, max_length=200)
     relation: str = Field(min_length=1, max_length=200)
@@ -171,6 +173,7 @@ async def delete_relation(
 @router.get("/fga/relations")
 async def list_relations(
     request: Request,
+    # FGA identifiers; Descope uses short names/IDs — 200 is generous
     resource_type: str = Query(min_length=1, max_length=200),
     resource_id: str = Query(min_length=1, max_length=200),
     tenant_id: str = Depends(get_tenant_id),

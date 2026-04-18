@@ -34,12 +34,14 @@ def _verify_tenant_membership(tenant_id: str, tenant_claims: dict) -> None:
 
 
 class CreateTenantRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=256)
+    # Descope accepts up to 255 chars; standardized across all routers
+    name: str = Field(min_length=1, max_length=255)
     self_provisioning_domains: list[str] | None = None
 
 
 class CreateResourceRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=256)
+    # Descope accepts up to 255 chars; standardized across all routers
+    name: str = Field(min_length=1, max_length=255)
     description: str = ""
 
 

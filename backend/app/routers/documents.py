@@ -35,16 +35,21 @@ def _prefix_resource_id(tenant_id: str, resource_id: str) -> str:
 
 
 class CreateDocumentRequest(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
+    # Standardized name/title limit; matches Descope's 255-char identifier limit
+    title: str = Field(min_length=1, max_length=255)
+    # Generous limit for document bodies; prevents abuse without restricting real usage
     content: str = Field(default="", max_length=50000)
 
 
 class UpdateDocumentRequest(BaseModel):
-    title: str | None = Field(default=None, min_length=1, max_length=200)
+    # Standardized name/title limit; matches Descope's 255-char identifier limit
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    # Generous limit for document bodies; prevents abuse without restricting real usage
     content: str | None = Field(default=None, max_length=50000)
 
 
 class ShareDocumentRequest(BaseModel):
+    # Descope user IDs are ~28 chars; 200 is generous for future format changes
     user_id: str = Field(min_length=1, max_length=200)
     relation: Literal["viewer", "editor"]
 
