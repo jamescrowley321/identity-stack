@@ -14,16 +14,18 @@ router = APIRouter(tags=["fga"])
 
 
 class UpdateSchemaRequest(BaseModel):
-    schema_: str = Field(alias="schema", min_length=1, max_length=50000)  # Generous limit for FGA schema bodies; prevents abuse without restricting real usage
+    # Generous limit for FGA schema bodies; prevents abuse without restricting real usage
+    schema_: str = Field(alias="schema", min_length=1, max_length=50000)
 
     model_config = {"populate_by_name": True}
 
 
 class RelationRequest(BaseModel):
-    resource_type: str = Field(min_length=1, max_length=200)  # FGA identifier; Descope uses short resource type names — 200 is generous
-    resource_id: str = Field(min_length=1, max_length=200)  # FGA identifier; 200 covers all practical resource ID formats
-    relation: str = Field(min_length=1, max_length=200)  # FGA relation name; Descope FGA uses short identifiers — 200 is generous
-    target: str = Field(min_length=1, max_length=200)  # FGA target (user ID or resource); Descope subs are ~28 chars — 200 is generous
+    # FGA identifiers; Descope uses short names/IDs — 200 is generous
+    resource_type: str = Field(min_length=1, max_length=200)
+    resource_id: str = Field(min_length=1, max_length=200)
+    relation: str = Field(min_length=1, max_length=200)
+    target: str = Field(min_length=1, max_length=200)
 
 
 def _prefix_resource_id(tenant_id: str, resource_id: str) -> str:
@@ -171,8 +173,9 @@ async def delete_relation(
 @router.get("/fga/relations")
 async def list_relations(
     request: Request,
-    resource_type: str = Query(min_length=1, max_length=200),  # FGA identifier; Descope uses short resource type names — 200 is generous
-    resource_id: str = Query(min_length=1, max_length=200),  # FGA identifier; 200 covers all practical resource ID formats
+    # FGA identifiers; Descope uses short names/IDs — 200 is generous
+    resource_type: str = Query(min_length=1, max_length=200),
+    resource_id: str = Query(min_length=1, max_length=200),
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
