@@ -114,22 +114,30 @@ export default function RoleManagement() {
   }, [apiFetch]);
 
   useEffect(() => {
-    if (isAdmin) {
-      loadRoles();
-      loadPermissions();
-    }
-  }, [isAdmin, loadRoles, loadPermissions]);
+    if (!isAdmin) return;
+    let cancelled = false;
+    // Inline initial fetch to avoid synchronous setState in effect (via loadRoles/loadPermissions)
+    apiFetch("/api/roles")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data?.roles && Array.isArray(data.roles)) setRoleDefinitions(data.roles);
+      })
+      .catch(() => { if (!cancelled) toast.error("Failed to load roles"); })
+      .finally(() => { if (!cancelled) setRolesLoading(false); });
+    apiFetch("/api/permissions")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data?.permissions && Array.isArray(data.permissions)) setPermissionDefinitions(data.permissions);
+      })
+      .catch(() => { if (!cancelled) toast.error("Failed to load permissions"); })
+      .finally(() => { if (!cancelled) setPermissionsLoading(false); });
+    return () => { cancelled = true; };
+  }, [isAdmin, apiFetch]);
 
-  // Set default selected role when role definitions load, or reset if selected role was deleted
-  useEffect(() => {
-    if (roleDefinitions.length > 0) {
-      if (!selectedRole || !roleDefinitions.find((r) => r.name === selectedRole)) {
-        setSelectedRole(roleDefinitions[0].name);
-      }
-    } else {
-      setSelectedRole("");
-    }
-  }, [roleDefinitions, selectedRole]);
+  // Derive effective selected role: fall back to first role if current selection is invalid
+  const effectiveSelectedRole = roleDefinitions.length > 0
+    ? (selectedRole && roleDefinitions.find((r) => r.name === selectedRole) ? selectedRole : roleDefinitions[0].name)
+    : "";
 
   // --- Role assignment handlers ---
 
@@ -139,10 +147,10 @@ export default function RoleManagement() {
       const res = await apiFetch("/api/roles/assign", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: userId.trim(), tenant_id: currentTenantId, role_names: [selectedRole] }),
+        body: JSON.stringify({ user_id: userId.trim(), tenant_id: currentTenantId, role_names: [effectiveSelectedRole] }),
       });
       if (res.ok) {
-        toast.success(`Assigned "${selectedRole}" to ${userId.trim()}`);
+        toast.success(`Assigned "${effectiveSelectedRole}" to ${userId.trim()}`);
         setUserId("");
       } else {
         const detail = await parseErrorDetail(res);
@@ -151,7 +159,7 @@ export default function RoleManagement() {
     } catch {
       toast.error("Failed to assign role");
     }
-  }, [userId, selectedRole, currentTenantId, apiFetch]);
+  }, [userId, effectiveSelectedRole, currentTenantId, apiFetch]);
 
   const handleRemove = useCallback(async () => {
     if (!userId.trim() || !currentTenantId) return;
@@ -159,10 +167,10 @@ export default function RoleManagement() {
       const res = await apiFetch("/api/roles/remove", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: userId.trim(), tenant_id: currentTenantId, role_names: [selectedRole] }),
+        body: JSON.stringify({ user_id: userId.trim(), tenant_id: currentTenantId, role_names: [effectiveSelectedRole] }),
       });
       if (res.ok) {
-        toast.success(`Removed "${selectedRole}" from ${userId.trim()}`);
+        toast.success(`Removed "${effectiveSelectedRole}" from ${userId.trim()}`);
         setUserId("");
       } else {
         const detail = await parseErrorDetail(res);
@@ -171,7 +179,7 @@ export default function RoleManagement() {
     } catch {
       toast.error("Failed to remove role");
     }
-  }, [userId, selectedRole, currentTenantId, apiFetch]);
+  }, [userId, effectiveSelectedRole, currentTenantId, apiFetch]);
 
   // --- Role CRUD handlers ---
 
@@ -540,7 +548,7 @@ export default function RoleManagement() {
                     onChange={(e) => setUserId(e.target.value)}
                     className="max-w-xs"
                   />
-                  <Select value={selectedRole} onValueChange={setSelectedRole}>
+                  <Select value={effectiveSelectedRole} onValueChange={setSelectedRole}>
                     <SelectTrigger className="w-32">
                       <SelectValue />
                     </SelectTrigger>
@@ -550,8 +558,8 @@ export default function RoleManagement() {
                       ))}
                     </SelectContent>
                   </Select>
-                  <Button onClick={handleAssign} disabled={!userId.trim() || !selectedRole}>Assign</Button>
-                  <Button variant="outline" onClick={handleRemove} disabled={!userId.trim() || !selectedRole}>Remove</Button>
+                  <Button onClick={handleAssign} disabled={!userId.trim() || !effectiveSelectedRole}>Assign</Button>
+                  <Button variant="outline" onClick={handleRemove} disabled={!userId.trim() || !effectiveSelectedRole}>Remove</Button>
                 </div>
               </CardContent>
             </Card>
