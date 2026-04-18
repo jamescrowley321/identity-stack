@@ -12,13 +12,13 @@ export function usePlanTier() {
   const { apiFetch } = useApiClient();
   const { currentTenantId } = useRBAC();
   const [planTier, setPlanTier] = useState<string>("free");
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => Boolean(currentTenantId));
 
   useEffect(() => {
     if (!currentTenantId) {
-      setLoading(false);
       return;
     }
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- standard data-fetching pattern: signal loading before async work
     setLoading(true);
     apiFetch("/api/tenants/current/settings")
       .then((res) => (res.ok ? res.json() : null))
