@@ -61,30 +61,30 @@ export default function FGAManagement() {
   const [creating, setCreating] = useState(false);
   const [checking, setChecking] = useState(false);
 
-  // Load schema
-  const loadSchema = useCallback(async () => {
-    setSchemaLoading(true);
-    try {
-      const res = await apiFetch("/api/fga/schema");
-      if (!res.ok) {
-        toast.error("Failed to load FGA schema");
-        return;
-      }
-      const data = await res.json();
-      const rawSchema = data.schema;
-      setSchema(typeof rawSchema === 'object' ? JSON.stringify(rawSchema, null, 2) : (rawSchema || ""));
-    } catch {
-      toast.error("Failed to load FGA schema");
-    } finally {
-      setSchemaLoading(false);
-    }
-  }, [apiFetch]);
-
+  // Load schema on mount
   useEffect(() => {
-    if (isAdmin) {
-      loadSchema();
-    }
-  }, [isAdmin, loadSchema]);
+    if (!isAdmin) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch("/api/fga/schema");
+        if (cancelled) return;
+        if (!res.ok) {
+          toast.error("Failed to load FGA schema");
+          return;
+        }
+        const data = await res.json();
+        if (cancelled) return;
+        const rawSchema = data.schema;
+        setSchema(typeof rawSchema === 'object' ? JSON.stringify(rawSchema, null, 2) : (rawSchema || ""));
+      } catch {
+        if (!cancelled) toast.error("Failed to load FGA schema");
+      } finally {
+        if (!cancelled) setSchemaLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isAdmin, apiFetch]);
 
   // Browse relations
   const handleBrowseRelations = useCallback(async () => {

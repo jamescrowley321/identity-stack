@@ -1,6 +1,9 @@
 import { useTenants } from "./useTenants";
 import { useMemo, useCallback } from "react";
 
+const EMPTY_ROLES: string[] = [];
+const EMPTY_PERMISSIONS: string[] = [];
+
 /**
  * RBAC hook for the current tenant context.
  *
@@ -15,8 +18,14 @@ export function useRBAC() {
     [currentTenantId, tenants],
   );
 
-  const roles = currentTenant?.roles ?? [];
-  const permissions = currentTenant?.permissions ?? [];
+  const roles = useMemo(
+    () => currentTenant?.roles ?? EMPTY_ROLES,
+    [currentTenant?.roles],
+  );
+  const permissions = useMemo(
+    () => currentTenant?.permissions ?? EMPTY_PERMISSIONS,
+    [currentTenant?.permissions],
+  );
 
   const hasRole = useCallback((role: string) => roles.includes(role), [roles]);
   const hasPermission = useCallback((perm: string) => permissions.includes(perm), [permissions]);
