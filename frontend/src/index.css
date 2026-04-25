@@ -2,12 +2,14 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
 
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
     --font-heading: var(--font-sans);
     --font-sans: 'Geist Variable', sans-serif;
+    --font-mono: 'Geist Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
     --color-ink-foreground: var(--ink-foreground);
     --color-ink: var(--ink);
     --color-brand-soft-foreground: var(--brand-soft-foreground);
@@ -105,6 +107,13 @@
     --control-h-lg: 48px;
     --header-h:     60px;
     --page-pad:     32px;
+    --text-xs:   0.8125rem;
+    --text-sm:   0.9375rem;
+    --text-base: 1rem;
+    --text-lg:   1.125rem;
+    --text-xl:   1.375rem;
+    --text-2xl:  1.75rem;
+    --text-3xl:  2.25rem;
     --sidebar: oklch(0.985 0.005 285);
     --sidebar-foreground: oklch(0.145 0 0);
     --sidebar-primary: var(--brand);
@@ -164,8 +173,19 @@
     }
   body {
     @apply bg-background text-foreground;
+    font-size: var(--text-sm);
+    line-height: 1.55;
     }
   html {
     @apply font-sans;
     }
+  h1, .h1 { font-family: var(--font-heading); font-size: var(--text-2xl); font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; margin: 0; }
+  h2, .h2 { font-family: var(--font-heading); font-size: var(--text-xl); font-weight: 600; letter-spacing: -0.01em; line-height: 1.25; margin: 0; }
+  h3, .h3 { font-family: var(--font-heading); font-size: var(--text-lg); font-weight: 500; line-height: 1.35; margin: 0; }
+  h4, .h4 { font-family: var(--font-heading); font-size: var(--text-base); font-weight: 500; line-height: 1.4; margin: 0; }
+  p { font-size: var(--text-sm); line-height: 1.55; }
+  small, .small { font-size: var(--text-xs); color: var(--muted-foreground); }
+  code, .mono { font-family: var(--font-mono); font-size: 0.88em; }
+  .label { font-size: var(--text-sm); font-weight: 500; line-height: 1; }
+  .muted { color: var(--muted-foreground); }
 }
