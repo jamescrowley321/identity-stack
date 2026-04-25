@@ -72,14 +72,10 @@ function SidebarProvider({
 
   // This is the internal state of the sidebar.
   // We use openProp and setOpenProp for control from outside the component.
-  const [_open, _setOpen] = React.useState(defaultOpen)
-
-  // Auto-collapse to icon mode on tablet
-  React.useEffect(() => {
-    if (isTablet) {
-      _setOpen(false)
-    }
-  }, [isTablet])
+  // Initialize collapsed when mounting at tablet width to avoid flash.
+  const [_open, _setOpen] = React.useState(() =>
+    isTablet ? false : defaultOpen
+  )
   const open = openProp ?? _open
   const setOpen = React.useCallback(
     (value: boolean | ((value: boolean) => boolean)) => {
@@ -95,6 +91,17 @@ function SidebarProvider({
     },
     [setOpenProp, open]
   )
+
+  // Auto-collapse to icon mode when transitioning to tablet width.
+  // Uses setOpen (not _setOpen) so controlled consumers are notified.
+  // Only fires on transition, not on mount (initial state handles that).
+  const prevIsTablet = React.useRef(isTablet)
+  React.useEffect(() => {
+    if (isTablet && !prevIsTablet.current) {
+      setOpen(false)
+    }
+    prevIsTablet.current = isTablet
+  }, [isTablet, setOpen])
 
   // Helper to toggle the sidebar.
   const toggleSidebar = React.useCallback(() => {

@@ -66,6 +66,7 @@ function setWidth(w: number) {
 describe("useBreakpoint", () => {
   it("returns 'desktop' above 1024px", async () => {
     setWidth(1280);
+    vi.resetModules();
     const { useBreakpoint } = await import("../use-mobile");
     const { result } = renderHook(() => useBreakpoint());
     expect(result.current).toBe("desktop");
