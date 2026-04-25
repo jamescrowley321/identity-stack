@@ -10,6 +10,11 @@ const routeLabels: Record<string, string> = {
   "/members": "Members",
   "/roles": "Roles",
   "/keys": "Access Keys",
+  "/fga": "FGA",
+  "/providers": "Providers",
+  "/sync": "Sync Dashboard",
+  "/events": "Events",
+  "/provisional": "Provisional Users",
   "/settings": "Tenant Settings",
   "/profile": "Profile",
 }
