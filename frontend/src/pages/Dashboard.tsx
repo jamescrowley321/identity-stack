@@ -137,7 +137,7 @@ export default function Dashboard() {
   return (
     <>
       <PageHeader title={`Welcome, ${displayName}`} />
-      <div className="p-6">
+      <div className="p-8">
         {error && (
           <Alert variant="destructive" className="mb-6">
             <AlertDescription>{error}</AlertDescription>
