@@ -31,8 +31,8 @@ describe("KpiStrip", () => {
       <KpiStrip items={[{ label: "Users", value: 10, delta: "+5%", trend: "up" }]} />
     );
     const delta = container.querySelector('[data-slot="kpi-delta"]');
-    expect(delta).toBeInTheDocument();
-    expect(delta!.className).toContain("text-success");
+    expect(delta).not.toBeNull();
+    expect(delta).toHaveClass("text-success");
     expect(delta).toHaveTextContent("+5%");
   });
 
@@ -41,7 +41,8 @@ describe("KpiStrip", () => {
       <KpiStrip items={[{ label: "Errors", value: 3, delta: "-8%", trend: "down" }]} />
     );
     const delta = container.querySelector('[data-slot="kpi-delta"]');
-    expect(delta!.className).toContain("text-destructive");
+    expect(delta).not.toBeNull();
+    expect(delta).toHaveClass("text-destructive");
   });
 
   it("renders neutral delta with muted color", () => {
@@ -49,7 +50,8 @@ describe("KpiStrip", () => {
       <KpiStrip items={[{ label: "Latency", value: "120ms", delta: "0%", trend: "neutral" }]} />
     );
     const delta = container.querySelector('[data-slot="kpi-delta"]');
-    expect(delta!.className).toContain("text-muted-foreground");
+    expect(delta).not.toBeNull();
+    expect(delta).toHaveClass("text-muted-foreground");
   });
 
   it("uses muted color when trend is omitted", () => {
@@ -57,7 +59,8 @@ describe("KpiStrip", () => {
       <KpiStrip items={[{ label: "Latency", value: "120ms", delta: "0%" }]} />
     );
     const delta = container.querySelector('[data-slot="kpi-delta"]');
-    expect(delta!.className).toContain("text-muted-foreground");
+    expect(delta).not.toBeNull();
+    expect(delta).toHaveClass("text-muted-foreground");
   });
 
   it("omits delta element when delta is not provided", () => {
@@ -70,8 +73,8 @@ describe("KpiStrip", () => {
   it("renders empty container for empty items", () => {
     const { container } = render(<KpiStrip items={[]} />);
     const strip = container.querySelector('[data-slot="kpi-strip"]');
-    expect(strip).toBeInTheDocument();
-    expect(strip!.children).toHaveLength(0);
+    expect(strip).not.toBeNull();
+    expect(strip?.children).toHaveLength(0);
   });
 
   it("merges custom className", () => {
@@ -79,6 +82,7 @@ describe("KpiStrip", () => {
       <KpiStrip items={baseItems} className="custom-class" />
     );
     const strip = container.querySelector('[data-slot="kpi-strip"]');
-    expect(strip!.className).toContain("custom-class");
+    expect(strip).not.toBeNull();
+    expect(strip).toHaveClass("custom-class");
   });
 });
