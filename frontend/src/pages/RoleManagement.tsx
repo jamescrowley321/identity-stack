@@ -374,7 +374,7 @@ export default function RoleManagement() {
   return (
     <>
       <PageHeader title="Role Management" description="View and manage roles and permissions" />
-      <div className="p-6 space-y-6">
+      <div className="p-8 space-y-6">
         {/* Your Roles Card */}
         <Card>
           <CardHeader>

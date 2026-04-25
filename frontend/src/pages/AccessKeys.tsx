@@ -129,7 +129,7 @@ export default function AccessKeys() {
   return (
     <>
       <PageHeader title="Access Keys" description="Create and manage API access keys" />
-      <div className="p-6 space-y-6">
+      <div className="p-8 space-y-6">
         <Card>
           <CardHeader>
             <CardTitle>Create Key</CardTitle>
