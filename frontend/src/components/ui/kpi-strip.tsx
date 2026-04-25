@@ -26,13 +26,17 @@ function KpiStrip({
     <div
       data-slot="kpi-strip"
       className={cn(
-        "grid grid-cols-2 overflow-hidden rounded-xl border border-border bg-card md:grid-cols-[repeat(auto-fit,minmax(180px,1fr))]",
+        "grid grid-cols-1 overflow-hidden rounded-xl border border-border bg-card sm:grid-cols-2 lg:grid-cols-4",
         className,
       )}
       {...props}
     >
       {items.map((item, i) => (
-        <KpiItemCell key={i} item={item} isLast={i === items.length - 1} />
+        <KpiItemCell
+          key={item.label}
+          item={item}
+          isLast={i === items.length - 1}
+        />
       ))}
     </div>
   )
@@ -50,7 +54,8 @@ function KpiItemCell({
       data-slot="kpi-item"
       className={cn(
         "px-5 py-4",
-        !isLast && "border-r border-border max-md:[&:nth-child(2n)]:border-r-0",
+        !isLast &&
+          "border-border sm:border-r sm:[&:nth-child(2n)]:border-r-0 lg:[&:nth-child(2n)]:border-r lg:[&:nth-child(4n)]:border-r-0",
       )}
     >
       <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
