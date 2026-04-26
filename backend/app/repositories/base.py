@@ -7,20 +7,17 @@ methods that every concrete repository previously implemented individually.
 from __future__ import annotations
 
 import uuid
-from typing import Generic, TypeVar
 
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-
-T = TypeVar("T")
 
 
 class RepositoryConflictError(Exception):
     """Raised when a database constraint violation indicates a conflict."""
 
 
-class BaseRepository(Generic[T]):
+class BaseRepository[T]:
     """Base repository with shared CRUD and transaction operations.
 
     Subclasses set ``_model`` class attribute to their SQLAlchemy model.
