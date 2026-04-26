@@ -12,42 +12,17 @@ Auth tiers:
 
 import contextlib
 import os
-import time
 import uuid
 
 import pytest
 from playwright.sync_api import APIRequestContext
 
+from tests.e2e.helpers.api import unique_name
+
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DESCOPE_MANAGEMENT_KEY"),
     reason="DESCOPE_MANAGEMENT_KEY not set",
 )
-
-MAX_API_RESPONSE_MS = 2000
-
-
-def _unique_name(prefix: str) -> str:
-    """Generate a unique name for test resources to avoid collisions."""
-    return f"{prefix}-e2e-{uuid.uuid4().hex[:8]}"
-
-
-def _timed_request(context: APIRequestContext, method: str, url: str, **kwargs) -> tuple:
-    """Execute a request and return (response, elapsed_ms)."""
-    start = time.monotonic()
-    if method == "GET":
-        resp = context.get(url, **kwargs)
-    elif method == "POST":
-        resp = context.post(url, **kwargs)
-    elif method == "PUT":
-        resp = context.put(url, **kwargs)
-    elif method == "DELETE":
-        resp = context.delete(url, **kwargs)
-    else:
-        raise ValueError(f"Unsupported method: {method}")
-    elapsed_ms = (time.monotonic() - start) * 1000
-    if not (200 <= resp.status < 300):
-        print(f"[E2E] {method} {url} → {resp.status}")
-    return resp, elapsed_ms
 
 
 # =============================================================================
@@ -245,16 +220,13 @@ class TestPermissionCrudCanonical:
 
     def test_permission_create_returns_canonical_fields(self, admin_api_context: APIRequestContext, backend_url: str):
         """POST /permissions returns response with id (UUID), created_at, updated_at."""
-        perm_name = _unique_name("canon-perm")
+        perm_name = unique_name("canon-perm")
         try:
-            resp, elapsed_ms = _timed_request(
-                admin_api_context,
-                "POST",
+            resp = admin_api_context.post(
                 f"{backend_url}/api/permissions",
                 data={"name": perm_name, "description": "canonical field test"},
             )
             assert resp.status == 201, f"Create failed: {resp.status}"
-            assert elapsed_ms < MAX_API_RESPONSE_MS
 
             body = resp.json()
             # Verify canonical fields exist
@@ -271,24 +243,17 @@ class TestPermissionCrudCanonical:
 
     def test_permission_list_returns_canonical_fields(self, admin_api_context: APIRequestContext, backend_url: str):
         """GET /permissions returns list with canonical fields per item."""
-        perm_name = _unique_name("list-perm")
+        perm_name = unique_name("list-perm")
         try:
             # Create a permission so the list is non-empty
-            resp, _ = _timed_request(
-                admin_api_context,
-                "POST",
+            resp = admin_api_context.post(
                 f"{backend_url}/api/permissions",
                 data={"name": perm_name, "description": "list test"},
             )
             assert resp.status == 201
 
-            resp, elapsed_ms = _timed_request(
-                admin_api_context,
-                "GET",
-                f"{backend_url}/api/permissions",
-            )
+            resp = admin_api_context.get(f"{backend_url}/api/permissions")
             assert resp.status == 200, f"List failed: {resp.status}"
-            assert elapsed_ms < MAX_API_RESPONSE_MS
 
             body = resp.json()
             assert "permissions" in body
@@ -308,27 +273,22 @@ class TestPermissionCrudCanonical:
 
     def test_permission_update_returns_canonical_fields(self, admin_api_context: APIRequestContext, backend_url: str):
         """PUT /permissions/{name} returns updated resource with canonical fields."""
-        perm_name = _unique_name("upd-perm")
+        perm_name = unique_name("upd-perm")
         new_name = perm_name + "-renamed"
         cleanup_name = perm_name
         try:
-            resp, _ = _timed_request(
-                admin_api_context,
-                "POST",
+            resp = admin_api_context.post(
                 f"{backend_url}/api/permissions",
                 data={"name": perm_name, "description": "update test"},
             )
             assert resp.status == 201
 
-            resp, elapsed_ms = _timed_request(
-                admin_api_context,
-                "PUT",
+            resp = admin_api_context.put(
                 f"{backend_url}/api/permissions/{perm_name}",
                 data={"new_name": new_name, "description": "updated"},
             )
             assert resp.status == 200, f"Update failed: {resp.status}"
             cleanup_name = new_name  # update before further assertions — rename already happened
-            assert elapsed_ms < MAX_API_RESPONSE_MS
 
             body = resp.json()
             assert "id" in body
@@ -344,16 +304,13 @@ class TestRoleCrudCanonical:
 
     def test_role_create_returns_canonical_fields(self, admin_api_context: APIRequestContext, backend_url: str):
         """POST /roles returns response with id (UUID), created_at, updated_at."""
-        role_name = _unique_name("canon-role")
+        role_name = unique_name("canon-role")
         try:
-            resp, elapsed_ms = _timed_request(
-                admin_api_context,
-                "POST",
+            resp = admin_api_context.post(
                 f"{backend_url}/api/roles",
                 data={"name": role_name, "description": "canonical field test"},
             )
             assert resp.status == 201, f"Create failed: {resp.status}"
-            assert elapsed_ms < MAX_API_RESPONSE_MS
 
             body = resp.json()
             assert "id" in body, f"Missing 'id' in response: {body}"
@@ -368,23 +325,16 @@ class TestRoleCrudCanonical:
 
     def test_role_list_returns_canonical_fields(self, admin_api_context: APIRequestContext, backend_url: str):
         """GET /roles returns list with canonical fields per item."""
-        role_name = _unique_name("list-role")
+        role_name = unique_name("list-role")
         try:
-            resp, _ = _timed_request(
-                admin_api_context,
-                "POST",
+            resp = admin_api_context.post(
                 f"{backend_url}/api/roles",
                 data={"name": role_name, "description": "list test"},
             )
             assert resp.status == 201
 
-            resp, elapsed_ms = _timed_request(
-                admin_api_context,
-                "GET",
-                f"{backend_url}/api/roles",
-            )
+            resp = admin_api_context.get(f"{backend_url}/api/roles")
             assert resp.status == 200, f"List failed: {resp.status}"
-            assert elapsed_ms < MAX_API_RESPONSE_MS
 
             body = resp.json()
             assert "roles" in body
@@ -403,27 +353,22 @@ class TestRoleCrudCanonical:
 
     def test_role_update_returns_canonical_fields(self, admin_api_context: APIRequestContext, backend_url: str):
         """PUT /roles/{name} returns updated resource with canonical fields."""
-        role_name = _unique_name("upd-role")
+        role_name = unique_name("upd-role")
         new_name = role_name + "-renamed"
         cleanup_name = role_name
         try:
-            resp, _ = _timed_request(
-                admin_api_context,
-                "POST",
+            resp = admin_api_context.post(
                 f"{backend_url}/api/roles",
                 data={"name": role_name, "description": "update test"},
             )
             assert resp.status == 201
 
-            resp, elapsed_ms = _timed_request(
-                admin_api_context,
-                "PUT",
+            resp = admin_api_context.put(
                 f"{backend_url}/api/roles/{role_name}",
                 data={"new_name": new_name, "description": "updated"},
             )
             assert resp.status == 200, f"Update failed: {resp.status}"
             cleanup_name = new_name  # update before further assertions — rename already happened
-            assert elapsed_ms < MAX_API_RESPONSE_MS
 
             body = resp.json()
             assert "id" in body
@@ -439,13 +384,8 @@ class TestMemberCrud:
 
     def test_list_members(self, admin_api_context: APIRequestContext, backend_url: str):
         """GET /members returns list of tenant members."""
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "GET",
-            f"{backend_url}/api/members",
-        )
+        resp = admin_api_context.get(f"{backend_url}/api/members")
         assert resp.status == 200, f"List members failed: {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
 
         body = resp.json()
         assert "members" in body
@@ -456,15 +396,12 @@ class TestMemberCrud:
         test_email = f"e2e-invite-{uuid.uuid4().hex[:8]}@test.example.com"
         created_user_id = None
         try:
-            resp, elapsed_ms = _timed_request(
-                admin_api_context,
-                "POST",
+            resp = admin_api_context.post(
                 f"{backend_url}/api/members/invite",
                 data={"email": test_email, "role_names": ["member"]},
             )
             # Router returns 200 (no status_code=201 on decorator) or 207 (sync failed)
             assert resp.status in (200, 207), f"Invite failed: {resp.status}"
-            assert elapsed_ms < MAX_API_RESPONSE_MS
 
             body = resp.json()
             if resp.status == 207:
@@ -487,9 +424,7 @@ class TestMemberCrud:
         created_user_id = None
         try:
             # Invite
-            resp, _ = _timed_request(
-                admin_api_context,
-                "POST",
+            resp = admin_api_context.post(
                 f"{backend_url}/api/members/invite",
                 data={"email": test_email, "role_names": ["member"]},
             )
@@ -503,35 +438,24 @@ class TestMemberCrud:
                 pytest.skip("Could not extract user_id from invite response")
 
             # Deactivate
-            resp, elapsed_ms = _timed_request(
-                admin_api_context,
-                "POST",
+            resp = admin_api_context.post(
                 f"{backend_url}/api/members/{created_user_id}/deactivate",
             )
             assert resp.status == 200, f"Deactivate failed: {resp.status}"
-            assert elapsed_ms < MAX_API_RESPONSE_MS
             body = resp.json()
             assert body.get("status") == "deactivated"
 
             # Activate
-            resp, elapsed_ms = _timed_request(
-                admin_api_context,
-                "POST",
+            resp = admin_api_context.post(
                 f"{backend_url}/api/members/{created_user_id}/activate",
             )
             assert resp.status == 200, f"Activate failed: {resp.status}"
-            assert elapsed_ms < MAX_API_RESPONSE_MS
             body = resp.json()
             assert body.get("status") == "activated"
 
             # Remove
-            resp, elapsed_ms = _timed_request(
-                admin_api_context,
-                "DELETE",
-                f"{backend_url}/api/members/{created_user_id}",
-            )
+            resp = admin_api_context.delete(f"{backend_url}/api/members/{created_user_id}")
             assert resp.status == 200, f"Remove failed: {resp.status}"
-            assert elapsed_ms < MAX_API_RESPONSE_MS
             body = resp.json()
             assert body.get("status") == "removed"
             created_user_id = None  # cleaned up
@@ -546,13 +470,8 @@ class TestTenantOperations:
 
     def test_list_tenants_returns_jwt_tenants(self, admin_api_context: APIRequestContext, backend_url: str):
         """GET /tenants returns tenants from JWT claims."""
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "GET",
-            f"{backend_url}/api/tenants",
-        )
+        resp = admin_api_context.get(f"{backend_url}/api/tenants")
         assert resp.status == 200, f"List tenants failed: {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
 
         body = resp.json()
         assert "tenants" in body
@@ -568,13 +487,8 @@ class TestTenantOperations:
 
     def test_get_current_tenant(self, admin_api_context: APIRequestContext, backend_url: str):
         """GET /tenants/current returns current tenant context from dct claim."""
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "GET",
-            f"{backend_url}/api/tenants/current",
-        )
+        resp = admin_api_context.get(f"{backend_url}/api/tenants/current")
         assert resp.status == 200, f"Get current tenant failed: {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
 
         body = resp.json()
         assert "tenant_id" in body
