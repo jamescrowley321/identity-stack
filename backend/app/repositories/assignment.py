@@ -9,33 +9,18 @@ from __future__ import annotations
 import uuid
 
 import sqlalchemy as sa
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.identity.assignment import UserTenantRole
-from app.repositories.user import RepositoryConflictError
+from app.repositories.base import BaseRepository
 
 
-class UserTenantRoleRepository:
+class UserTenantRoleRepository(BaseRepository[UserTenantRole]):
     """Repository for UserTenantRole table operations.
 
     Takes AsyncSession via constructor injection (inner layer of onion architecture).
     """
 
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-
-    async def create(self, assignment: UserTenantRole) -> UserTenantRole:
-        """Add a new role assignment and flush.
-
-        Raises RepositoryConflictError if the assignment already exists.
-        """
-        self._session.add(assignment)
-        try:
-            await self._session.flush()
-        except IntegrityError as exc:
-            raise RepositoryConflictError(str(exc)) from exc
-        return assignment
+    _model = UserTenantRole
 
     async def get(self, user_id: uuid.UUID, tenant_id: uuid.UUID, role_id: uuid.UUID) -> UserTenantRole | None:
         """Fetch an assignment by composite primary key. Returns None if not found."""
@@ -84,11 +69,3 @@ class UserTenantRoleRepository:
         result = await self._session.execute(stmt)
         await self._session.flush()
         return result.rowcount
-
-    async def commit(self) -> None:
-        """Commit the current transaction."""
-        await self._session.commit()
-
-    async def rollback(self) -> None:
-        """Roll back the current transaction."""
-        await self._session.rollback()

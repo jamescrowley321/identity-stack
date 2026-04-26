@@ -17,7 +17,8 @@ from expression import Error, Ok
 from app.errors.identity import Conflict, Forbidden, NotFound
 from app.models.identity.user import User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
-from app.repositories.user import RepositoryConflictError, UserRepository
+from app.repositories.base import RepositoryConflictError
+from app.repositories.user import UserRepository
 from app.services.adapters.base import IdentityProviderAdapter, SyncError
 from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.user import UserService
