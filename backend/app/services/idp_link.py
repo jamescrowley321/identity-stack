@@ -15,9 +15,10 @@ from opentelemetry import trace
 
 from app.errors.identity import Conflict, IdentityError, NotFound
 from app.models.identity.user import IdPLink
+from app.repositories.base import RepositoryConflictError
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
-from app.repositories.user import RepositoryConflictError, UserRepository
+from app.repositories.user import UserRepository
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)

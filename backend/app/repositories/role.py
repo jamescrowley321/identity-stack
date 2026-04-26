@@ -10,36 +10,18 @@ import uuid
 
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.identity.role import Permission, Role, RolePermission
-from app.repositories.user import RepositoryConflictError
+from app.repositories.base import BaseRepository, RepositoryConflictError
 
 
-class RoleRepository:
+class RoleRepository(BaseRepository[Role]):
     """Repository for Role table operations.
 
     Takes AsyncSession via constructor injection (inner layer of onion architecture).
     """
 
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-
-    async def create(self, role: Role) -> Role:
-        """Add a new role to the session and flush to generate defaults.
-
-        Raises RepositoryConflictError if a uniqueness constraint is violated.
-        """
-        self._session.add(role)
-        try:
-            await self._session.flush()
-        except IntegrityError as exc:
-            raise RepositoryConflictError(str(exc)) from exc
-        return role
-
-    async def get(self, role_id: uuid.UUID) -> Role | None:
-        """Fetch a role by primary key. Returns None if not found."""
-        return await self._session.get(Role, role_id)
+    _model = Role
 
     async def get_by_name(self, name: str, tenant_id: uuid.UUID | None = None) -> Role | None:
         """Fetch a role by name within a tenant scope. Returns None if not found."""
@@ -61,17 +43,6 @@ class RoleRepository:
         stmt = stmt.order_by(Role.created_at.desc())
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
-
-    async def update(self, role: Role) -> Role:
-        """Flush updated role state.
-
-        Raises RepositoryConflictError if a uniqueness constraint is violated.
-        """
-        try:
-            await self._session.flush()
-        except IntegrityError as exc:
-            raise RepositoryConflictError(str(exc)) from exc
-        return role
 
     async def add_permission(self, role_id: uuid.UUID, permission_id: uuid.UUID) -> RolePermission:
         """Create a role-permission mapping.
@@ -109,18 +80,3 @@ class RoleRepository:
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
-
-    async def delete(self, role_id: uuid.UUID) -> bool:
-        """Delete a role by ID. Returns True if deleted, False if not found."""
-        stmt = sa.delete(Role).where(Role.id == role_id)
-        result = await self._session.execute(stmt)
-        await self._session.flush()
-        return result.rowcount > 0
-
-    async def commit(self) -> None:
-        """Commit the current transaction."""
-        await self._session.commit()
-
-    async def rollback(self) -> None:
-        """Roll back the current transaction."""
-        await self._session.rollback()

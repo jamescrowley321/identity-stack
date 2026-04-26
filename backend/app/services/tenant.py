@@ -15,8 +15,8 @@ from opentelemetry import trace
 
 from app.errors.identity import Conflict, IdentityError, NotFound
 from app.models.identity.tenant import Tenant
+from app.repositories.base import RepositoryConflictError
 from app.repositories.tenant import TenantRepository
-from app.repositories.user import RepositoryConflictError
 from app.services.adapters.base import IdentityProviderAdapter, SyncError
 from app.services.cache_invalidation import CacheInvalidationPublisher
 

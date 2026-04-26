@@ -13,8 +13,8 @@ from expression import Error, Ok
 
 from app.errors.identity import Conflict, NotFound
 from app.models.identity.role import Permission
+from app.repositories.base import RepositoryConflictError
 from app.repositories.permission import PermissionRepository
-from app.repositories.user import RepositoryConflictError
 from app.services.adapters.base import IdentityProviderAdapter, SyncError
 from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.permission import PermissionService

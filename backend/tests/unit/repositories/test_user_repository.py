@@ -17,7 +17,8 @@ from app.models.identity.assignment import UserTenantRole
 from app.models.identity.role import Role
 from app.models.identity.tenant import Tenant
 from app.models.identity.user import User, UserStatus
-from app.repositories.user import RepositoryConflictError, UserRepository
+from app.repositories.base import RepositoryConflictError
+from app.repositories.user import UserRepository
 
 pytestmark = pytest.mark.asyncio
 

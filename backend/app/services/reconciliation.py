@@ -25,12 +25,13 @@ from app.models.identity.provider import ProviderType
 from app.models.identity.role import Permission, Role
 from app.models.identity.tenant import Tenant, TenantStatus
 from app.models.identity.user import IdPLink, User, UserStatus
+from app.repositories.base import RepositoryConflictError
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.permission import PermissionRepository
 from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
-from app.repositories.user import RepositoryConflictError, UserRepository
+from app.repositories.user import UserRepository
 from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.descope import DescopeManagementClient
 
