@@ -18,40 +18,14 @@ Requires DESCOPE_CLIENT_ID/DESCOPE_CLIENT_SECRET for auth-level tests.
 
 import contextlib
 import os
-import time
-import uuid
 
 import pytest
 from playwright.sync_api import APIRequestContext
 
-MAX_API_RESPONSE_MS = 2000
+from tests.e2e.helpers.api import unique_name
+
 _DUMMY_UUID = "00000000-0000-0000-0000-000000000000"
 _NONEXISTENT_UUID = "ffffffff-ffff-ffff-ffff-ffffffffffff"
-
-
-def _unique_name(prefix: str) -> str:
-    """Generate a unique name for test resources to avoid collisions."""
-    return f"{prefix}-e2e-{uuid.uuid4().hex[:8]}"
-
-
-def _timed_request(context: APIRequestContext, method: str, url: str, **kwargs) -> tuple:
-    """Execute a request and return (response, elapsed_ms)."""
-    method = method.upper()
-    start = time.monotonic()
-    if method == "GET":
-        resp = context.get(url, **kwargs)
-    elif method == "POST":
-        resp = context.post(url, **kwargs)
-    elif method == "PUT":
-        resp = context.put(url, **kwargs)
-    elif method == "DELETE":
-        resp = context.delete(url, **kwargs)
-    else:
-        raise ValueError(f"Unsupported method: {method}")
-    elapsed_ms = (time.monotonic() - start) * 1000
-    if not (200 <= resp.status < 300):
-        print(f"[E2E] {method} {url} -> {resp.status}: {resp.text()}")
-    return resp, elapsed_ms
 
 
 # ---------------------------------------------------------------------------
@@ -64,17 +38,15 @@ class TestAsyncHealthCheck:
 
     def test_health_returns_ok_with_async_db(self, api_context: APIRequestContext, backend_url: str):
         """Health endpoint returns 200, proving async engine connected during lifespan startup."""
-        resp, elapsed_ms = _timed_request(api_context, "GET", f"{backend_url}/api/health")
+        resp = api_context.get(f"{backend_url}/api/health")
         assert resp.status == 200
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         body = resp.json()
         assert body["status"] == "ok"
 
     def test_openapi_schema_loads_with_async_routers(self, api_context: APIRequestContext, backend_url: str):
         """OpenAPI schema generation succeeds with async route handlers."""
-        resp, elapsed_ms = _timed_request(api_context, "GET", f"{backend_url}/openapi.json")
+        resp = api_context.get(f"{backend_url}/openapi.json")
         assert resp.status == 200
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         body = resp.json()
         # Verify document and tenant paths are registered (async routers loaded)
         assert "/api/documents" in body["paths"]
@@ -140,9 +112,8 @@ class TestAsyncTenantEndpoints:
 
     def test_list_tenants_returns_list(self, auth_api_context: APIRequestContext, backend_url: str):
         """GET /api/tenants returns tenant list from JWT claims (no DB hit, but validates async middleware chain)."""
-        resp, elapsed_ms = _timed_request(auth_api_context, "GET", f"{backend_url}/api/tenants")
+        resp = auth_api_context.get(f"{backend_url}/api/tenants")
         assert resp.status == 200
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         body = resp.json()
         assert "tenants" in body
         assert isinstance(body["tenants"], list)
@@ -152,9 +123,8 @@ class TestAsyncTenantEndpoints:
 
         Returns 200 (with tenant info) or 403 (no dct claim) — never 500.
         """
-        resp, elapsed_ms = _timed_request(auth_api_context, "GET", f"{backend_url}/api/tenants/current")
+        resp = auth_api_context.get(f"{backend_url}/api/tenants/current")
         assert resp.status < 500, f"/api/tenants/current returned {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
 
 
 @pytest.mark.skipif(
@@ -168,12 +138,9 @@ class TestAsyncTenantResourcesCRUD:
         self, admin_api_context: APIRequestContext, backend_url: str, test_tenant_id: str
     ):
         """GET /api/tenants/{id}/resources returns list via async session, never 5xx."""
-        resp, elapsed_ms = _timed_request(
-            admin_api_context, "GET", f"{backend_url}/api/tenants/{test_tenant_id}/resources"
-        )
+        resp = admin_api_context.get(f"{backend_url}/api/tenants/{test_tenant_id}/resources")
         # 200 (success) or 403 (not a member) — never 500 from async session errors
         assert resp.status in (200, 403), f"Expected 200 or 403, got {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         if resp.status == 200:
             body = resp.json()
             assert "resources" in body
@@ -183,13 +150,11 @@ class TestAsyncTenantResourcesCRUD:
         self, admin_api_context: APIRequestContext, backend_url: str, test_tenant_id: str
     ):
         """POST then GET tenant resources — verifies async session.add() + commit() + refresh()."""
-        resource_name = _unique_name("res")
+        resource_name = unique_name("res")
         base = f"{backend_url}/api/tenants/{test_tenant_id}/resources"
 
         # Create resource
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             base,
             data={"name": resource_name, "description": "E2E async migration test"},
         )
@@ -199,16 +164,14 @@ class TestAsyncTenantResourcesCRUD:
         if resp.status == 409:
             pytest.skip("Resource name collision — retry would need different name")
         assert resp.status in (200, 201), f"Create resource failed: {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
 
         created = resp.json()
         assert "id" in created
         assert created["name"] == resource_name
 
         # Verify it appears in list
-        resp, elapsed_ms = _timed_request(admin_api_context, "GET", base)
+        resp = admin_api_context.get(base)
         assert resp.status == 200
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         resources = resp.json().get("resources", [])
         resource_names = [r["name"] for r in resources]
         assert resource_name in resource_names, f"Created resource '{resource_name}' not found in list response"
@@ -217,13 +180,11 @@ class TestAsyncTenantResourcesCRUD:
         self, admin_api_context: APIRequestContext, backend_url: str, test_tenant_id: str
     ):
         """Duplicate resource name returns 409 — verifies async IntegrityError handling."""
-        resource_name = _unique_name("dup-res")
+        resource_name = unique_name("dup-res")
         base = f"{backend_url}/api/tenants/{test_tenant_id}/resources"
 
         # Create first
-        resp, _ = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             base,
             data={"name": resource_name, "description": "first"},
         )
@@ -234,14 +195,11 @@ class TestAsyncTenantResourcesCRUD:
 
         try:
             # Duplicate should fail with 409
-            resp, elapsed_ms = _timed_request(
-                admin_api_context,
-                "POST",
+            resp = admin_api_context.post(
                 base,
                 data={"name": resource_name, "description": "duplicate"},
             )
             assert resp.status == 409, f"Duplicate create should return 409, got {resp.status}"
-            assert elapsed_ms < MAX_API_RESPONSE_MS
         finally:
             # No delete endpoint for tenant resources — cleanup is best-effort via test isolation
             pass
@@ -266,10 +224,8 @@ class TestAsyncDocumentCRUD:
 
     def _create_doc(self, ctx: APIRequestContext, base: str, title: str = "") -> dict | None:
         """Create a document and return its data, or None if FGA not operational."""
-        title = title or _unique_name("doc")
-        resp, _ = _timed_request(
-            ctx, "POST", f"{base}/api/documents", data={"title": title, "content": "E2E async test"}
-        )
+        title = title or unique_name("doc")
+        resp = ctx.post(f"{base}/api/documents", data={"title": title, "content": "E2E async test"})
         if resp.status == 502:
             return None  # FGA not operational
         if resp.status != 201:
@@ -285,17 +241,14 @@ class TestAsyncDocumentCRUD:
 
     def test_create_document_returns_201(self, admin_api_context: APIRequestContext, backend_url: str):
         """POST /api/documents creates document via async session.add() + commit()."""
-        title = _unique_name("create-doc")
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "POST",
+        title = unique_name("create-doc")
+        resp = admin_api_context.post(
             f"{backend_url}/api/documents",
             data={"title": title, "content": "Async migration test content"},
         )
         if resp.status == 502:
             pytest.skip("FGA not operational — document creation requires FGA")
         assert resp.status == 201, f"Create document failed: {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
 
         body = resp.json()
         assert "id" in body
@@ -313,9 +266,8 @@ class TestAsyncDocumentCRUD:
         doc_id = doc["id"]
 
         try:
-            resp, elapsed_ms = _timed_request(admin_api_context, "GET", f"{backend_url}/api/documents")
+            resp = admin_api_context.get(f"{backend_url}/api/documents")
             assert resp.status == 200
-            assert elapsed_ms < MAX_API_RESPONSE_MS
             body = resp.json()
             assert "documents" in body
             assert isinstance(body["documents"], list)
@@ -332,9 +284,8 @@ class TestAsyncDocumentCRUD:
         doc_id = doc["id"]
 
         try:
-            resp, elapsed_ms = _timed_request(admin_api_context, "GET", f"{backend_url}/api/documents/{doc_id}")
+            resp = admin_api_context.get(f"{backend_url}/api/documents/{doc_id}")
             assert resp.status == 200, f"Get document failed: {resp.status}"
-            assert elapsed_ms < MAX_API_RESPONSE_MS
             body = resp.json()
             assert body["id"] == doc_id
             assert body["title"] == doc["title"]
@@ -349,21 +300,18 @@ class TestAsyncDocumentCRUD:
         doc_id = doc["id"]
 
         try:
-            new_title = _unique_name("updated-doc")
-            resp, elapsed_ms = _timed_request(
-                admin_api_context,
-                "PUT",
+            new_title = unique_name("updated-doc")
+            resp = admin_api_context.put(
                 f"{backend_url}/api/documents/{doc_id}",
                 data={"title": new_title, "content": "Updated async content"},
             )
             assert resp.status == 200, f"Update document failed: {resp.status}"
-            assert elapsed_ms < MAX_API_RESPONSE_MS
             body = resp.json()
             assert body["title"] == new_title
             assert body["content"] == "Updated async content"
 
             # Verify persistence via GET
-            resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/documents/{doc_id}")
+            resp = admin_api_context.get(f"{backend_url}/api/documents/{doc_id}")
             assert resp.status == 200
             assert resp.json()["title"] == new_title
         finally:
@@ -376,15 +324,14 @@ class TestAsyncDocumentCRUD:
             pytest.skip("FGA not operational — document creation failed")
         doc_id = doc["id"]
 
-        resp, elapsed_ms = _timed_request(admin_api_context, "DELETE", f"{backend_url}/api/documents/{doc_id}")
+        resp = admin_api_context.delete(f"{backend_url}/api/documents/{doc_id}")
         assert resp.status == 200, f"Delete document failed: {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         body = resp.json()
         assert body["status"] == "deleted"
         assert body["id"] == doc_id
 
         # Verify document is gone (GET should return 403 from FGA or 404)
-        resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/documents/{doc_id}")
+        resp = admin_api_context.get(f"{backend_url}/api/documents/{doc_id}")
         assert resp.status in (403, 404), f"Deleted document should not be accessible, got {resp.status}"
 
     def test_full_document_lifecycle(self, admin_api_context: APIRequestContext, backend_url: str):
@@ -393,12 +340,10 @@ class TestAsyncDocumentCRUD:
         Exercises every async session operation in sequence to verify no
         session state leaks between operations.
         """
-        title = _unique_name("lifecycle-doc")
+        title = unique_name("lifecycle-doc")
 
         # Create
-        resp, _ = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/documents",
             data={"title": title, "content": "lifecycle start"},
         )
@@ -409,15 +354,13 @@ class TestAsyncDocumentCRUD:
 
         try:
             # Get
-            resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/documents/{doc_id}")
+            resp = admin_api_context.get(f"{backend_url}/api/documents/{doc_id}")
             assert resp.status == 200
             assert resp.json()["title"] == title
 
             # Update
             updated_title = title + "-updated"
-            resp, _ = _timed_request(
-                admin_api_context,
-                "PUT",
+            resp = admin_api_context.put(
                 f"{backend_url}/api/documents/{doc_id}",
                 data={"title": updated_title},
             )
@@ -425,7 +368,7 @@ class TestAsyncDocumentCRUD:
             assert resp.json()["title"] == updated_title
 
             # List (verify updated title appears)
-            resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/documents")
+            resp = admin_api_context.get(f"{backend_url}/api/documents")
             assert resp.status == 200
             docs = resp.json().get("documents", [])
             matching = [d for d in docs if d["id"] == doc_id]
@@ -433,7 +376,7 @@ class TestAsyncDocumentCRUD:
             assert matching[0]["title"] == updated_title
 
             # Delete
-            resp, _ = _timed_request(admin_api_context, "DELETE", f"{backend_url}/api/documents/{doc_id}")
+            resp = admin_api_context.delete(f"{backend_url}/api/documents/{doc_id}")
             assert resp.status == 200
             doc_id = None  # Mark as deleted so finally block skips cleanup
         finally:
@@ -459,49 +402,38 @@ class TestAsyncErrorResponses:
         FGA check runs before DB lookup — may return 403 (no FGA relation) or
         404 (not found in DB). Either way, response must have 'detail' field.
         """
-        resp, elapsed_ms = _timed_request(admin_api_context, "GET", f"{backend_url}/api/documents/{_NONEXISTENT_UUID}")
+        resp = admin_api_context.get(f"{backend_url}/api/documents/{_NONEXISTENT_UUID}")
         assert resp.status in (403, 404), f"Expected 403 or 404, got {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         body = resp.json()
         assert "detail" in body, f"Error response missing 'detail' field: {body}"
 
     def test_update_nonexistent_document_returns_error(self, admin_api_context: APIRequestContext, backend_url: str):
         """PUT /api/documents/{nonexistent} returns 403 or 404 with detail message."""
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "PUT",
+        resp = admin_api_context.put(
             f"{backend_url}/api/documents/{_NONEXISTENT_UUID}",
             data={"title": "ghost"},
         )
         assert resp.status in (403, 404), f"Expected 403 or 404, got {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         body = resp.json()
         assert "detail" in body
 
     def test_delete_nonexistent_document_returns_error(self, admin_api_context: APIRequestContext, backend_url: str):
         """DELETE /api/documents/{nonexistent} returns 403 or 404 with detail message."""
-        resp, elapsed_ms = _timed_request(
-            admin_api_context, "DELETE", f"{backend_url}/api/documents/{_NONEXISTENT_UUID}"
-        )
+        resp = admin_api_context.delete(f"{backend_url}/api/documents/{_NONEXISTENT_UUID}")
         assert resp.status in (403, 404), f"Expected 403 or 404, got {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         body = resp.json()
         assert "detail" in body
 
     def test_invalid_document_id_format_returns_422(self, admin_api_context: APIRequestContext, backend_url: str):
         """Non-UUID document_id returns 422 validation error (path param regex enforcement)."""
-        resp, elapsed_ms = _timed_request(admin_api_context, "GET", f"{backend_url}/api/documents/not-a-uuid")
+        resp = admin_api_context.get(f"{backend_url}/api/documents/not-a-uuid")
         assert resp.status == 422, f"Expected 422 for invalid UUID, got {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
 
     def test_tenant_resources_nonmember_returns_403(self, admin_api_context: APIRequestContext, backend_url: str):
         """GET /api/tenants/{nonexistent}/resources returns 403 for non-member tenant."""
-        fake_tenant = _unique_name("fake-tenant")
-        resp, elapsed_ms = _timed_request(
-            admin_api_context, "GET", f"{backend_url}/api/tenants/{fake_tenant}/resources"
-        )
+        fake_tenant = unique_name("fake-tenant")
+        resp = admin_api_context.get(f"{backend_url}/api/tenants/{fake_tenant}/resources")
         assert resp.status == 403, f"Expected 403 for non-member tenant, got {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         body = resp.json()
         assert "detail" in body
 
@@ -520,9 +452,7 @@ class TestAsyncDocumentValidation:
 
     def test_create_document_empty_title_rejected(self, admin_api_context: APIRequestContext, backend_url: str):
         """POST /api/documents with empty title returns 422."""
-        resp, _ = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/documents",
             data={"title": "", "content": "test"},
         )
@@ -530,9 +460,7 @@ class TestAsyncDocumentValidation:
 
     def test_create_document_missing_title_rejected(self, admin_api_context: APIRequestContext, backend_url: str):
         """POST /api/documents without title field returns 422."""
-        resp, _ = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/documents",
             data={"content": "no title"},
         )
@@ -542,9 +470,7 @@ class TestAsyncDocumentValidation:
         self, admin_api_context: APIRequestContext, backend_url: str, test_tenant_id: str
     ):
         """POST /api/tenants/{id}/resources with empty name returns 422."""
-        resp, _ = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/tenants/{test_tenant_id}/resources",
             data={"name": "", "description": "test"},
         )

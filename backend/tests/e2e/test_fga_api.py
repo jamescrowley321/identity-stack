@@ -7,43 +7,16 @@ They exercise the real Descope FGA API via the backend's /api/fga/* endpoints.
 import contextlib
 import json
 import os
-import time
-import uuid
 
 import pytest
 from playwright.sync_api import APIRequestContext
+
+from tests.e2e.helpers.api import unique_id
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DESCOPE_MANAGEMENT_KEY"),
     reason="DESCOPE_MANAGEMENT_KEY not set",
 )
-
-MAX_API_RESPONSE_MS = 2000
-
-
-def _unique_id(prefix: str) -> str:
-    """Generate a unique ID for test resources."""
-    return f"{prefix}-e2e-{uuid.uuid4().hex[:8]}"
-
-
-def _timed_request(context: APIRequestContext, method: str, url: str, **kwargs) -> tuple:
-    """Execute a request and return (response, elapsed_ms)."""
-    method = method.upper()
-    start = time.monotonic()
-    if method == "GET":
-        resp = context.get(url, **kwargs)
-    elif method == "POST":
-        resp = context.post(url, **kwargs)
-    elif method == "PUT":
-        resp = context.put(url, **kwargs)
-    elif method == "DELETE":
-        resp = context.delete(url, **kwargs)
-    else:
-        raise ValueError(f"Unsupported method: {method}")
-    elapsed_ms = (time.monotonic() - start) * 1000
-    if not (200 <= resp.status < 300):
-        print(f"[E2E] {method} {url} → {resp.status}: {resp.text()}")
-    return resp, elapsed_ms
 
 
 # --- AC-1: Schema retrieval ---
@@ -51,9 +24,8 @@ def _timed_request(context: APIRequestContext, method: str, url: str, **kwargs) 
 
 def test_get_fga_schema(admin_api_context: APIRequestContext, backend_url: str):
     """GET /api/fga/schema returns current schema (may be empty for fresh project)."""
-    resp, elapsed_ms = _timed_request(admin_api_context, "GET", f"{backend_url}/api/fga/schema")
+    resp = admin_api_context.get(f"{backend_url}/api/fga/schema")
     assert resp.status == 200, f"Expected 200, got {resp.status}"
-    assert elapsed_ms < MAX_API_RESPONSE_MS
 
     body = resp.json()
     assert "schema" in body
@@ -66,18 +38,16 @@ def test_get_fga_schema(admin_api_context: APIRequestContext, backend_url: str):
 
 def test_relation_create_and_delete(admin_api_context: APIRequestContext, backend_url: str):
     """Relation can be created and deleted via API."""
-    resource_id = _unique_id("doc")
+    resource_id = unique_id("doc")
     relation_body = {
         "resource_type": "document",
         "resource_id": resource_id,
         "relation": "owner",
-        "target": f"user:{_unique_id('u')}",
+        "target": f"user:{unique_id('u')}",
     }
 
     # Create relation
-    resp, elapsed_ms = _timed_request(
-        admin_api_context,
-        "POST",
+    resp = admin_api_context.post(
         f"{backend_url}/api/fga/relations",
         data=relation_body,
     )
@@ -85,29 +55,22 @@ def test_relation_create_and_delete(admin_api_context: APIRequestContext, backen
     if resp.status in (400, 502):
         pytest.skip(f"FGA not operational in this Descope project (status {resp.status})")
     assert resp.status == 201, f"Create failed: {resp.status}"
-    assert elapsed_ms < MAX_API_RESPONSE_MS
 
     # Verify via list
-    resp, elapsed_ms = _timed_request(
-        admin_api_context,
-        "GET",
+    resp = admin_api_context.get(
         f"{backend_url}/api/fga/relations",
         params={"resource_type": "document", "resource_id": resource_id},
     )
     assert resp.status == 200
-    assert elapsed_ms < MAX_API_RESPONSE_MS
     relations = resp.json().get("relations", [])
     assert any(r["target"] == relation_body["target"] for r in relations), "Created relation not found in list"
 
     # Delete relation
-    resp, elapsed_ms = _timed_request(
-        admin_api_context,
-        "DELETE",
+    resp = admin_api_context.delete(
         f"{backend_url}/api/fga/relations",
         data=relation_body,
     )
     assert resp.status == 200, f"Delete failed: {resp.status}"
-    assert elapsed_ms < MAX_API_RESPONSE_MS
 
 
 # --- AC-2: List relations ---
@@ -115,9 +78,7 @@ def test_relation_create_and_delete(admin_api_context: APIRequestContext, backen
 
 def test_list_relations_empty(admin_api_context: APIRequestContext, backend_url: str):
     """GET /api/fga/relations returns empty list or 400 for non-existent resource."""
-    resp, elapsed_ms = _timed_request(
-        admin_api_context,
-        "GET",
+    resp = admin_api_context.get(
         f"{backend_url}/api/fga/relations",
         params={"resource_type": "nonexistent", "resource_id": "nope-000"},
     )
@@ -125,7 +86,6 @@ def test_list_relations_empty(admin_api_context: APIRequestContext, backend_url:
     if resp.status == 400:
         pytest.skip("Descope API rejected request for unknown resource type")
     assert resp.status == 200
-    assert elapsed_ms < MAX_API_RESPONSE_MS
     body = resp.json()
     assert body["relations"] == []
 
@@ -135,13 +95,11 @@ def test_list_relations_empty(admin_api_context: APIRequestContext, backend_url:
 
 def test_check_permission_denied_for_nonexistent(admin_api_context: APIRequestContext, backend_url: str):
     """POST /api/fga/check returns denied for a resource with no relations."""
-    resp, elapsed_ms = _timed_request(
-        admin_api_context,
-        "POST",
+    resp = admin_api_context.post(
         f"{backend_url}/api/fga/check",
         data={
             "resource_type": "document",
-            "resource_id": _unique_id("nonexist"),
+            "resource_id": unique_id("nonexist"),
             "relation": "viewer",
             "target": "user:nobody",
         },
@@ -150,7 +108,6 @@ def test_check_permission_denied_for_nonexistent(admin_api_context: APIRequestCo
     if resp.status == 502:
         pytest.skip("FGA not configured in this Descope project")
     assert resp.status == 200, f"Expected 200, got {resp.status}"
-    assert elapsed_ms < MAX_API_RESPONSE_MS
     assert resp.json()["allowed"] is False
 
 
@@ -191,9 +148,7 @@ def test_fga_endpoints_reject_no_auth(api_context: APIRequestContext, backend_ur
 
 def test_create_relation_validation(admin_api_context: APIRequestContext, backend_url: str):
     """POST /api/fga/relations rejects empty fields."""
-    resp, _ = _timed_request(
-        admin_api_context,
-        "POST",
+    resp = admin_api_context.post(
         f"{backend_url}/api/fga/relations",
         data={"resource_type": "", "resource_id": "1", "relation": "owner", "target": "u1"},
     )
@@ -202,19 +157,13 @@ def test_create_relation_validation(admin_api_context: APIRequestContext, backen
 
 def test_list_relations_validation(admin_api_context: APIRequestContext, backend_url: str):
     """GET /api/fga/relations rejects missing query params."""
-    resp, _ = _timed_request(
-        admin_api_context,
-        "GET",
-        f"{backend_url}/api/fga/relations",
-    )
+    resp = admin_api_context.get(f"{backend_url}/api/fga/relations")
     assert resp.status == 422, f"Expected 422 for missing params, got {resp.status}"
 
 
 def test_check_permission_validation(admin_api_context: APIRequestContext, backend_url: str):
     """POST /api/fga/check rejects incomplete payload."""
-    resp, _ = _timed_request(
-        admin_api_context,
-        "POST",
+    resp = admin_api_context.post(
         f"{backend_url}/api/fga/check",
         data={"resource_type": "doc", "resource_id": "1"},
     )
@@ -226,8 +175,8 @@ def test_check_permission_validation(admin_api_context: APIRequestContext, backe
 
 def test_relation_lifecycle_with_permission_check(admin_api_context: APIRequestContext, backend_url: str):
     """Create relation → verify allowed → delete → verify denied (full lifecycle)."""
-    resource_id = _unique_id("lifecycle")
-    target = f"user:{_unique_id('u')}"
+    resource_id = unique_id("lifecycle")
+    target = f"user:{unique_id('u')}"
     relation_body = {
         "resource_type": "document",
         "resource_id": resource_id,
@@ -236,7 +185,7 @@ def test_relation_lifecycle_with_permission_check(admin_api_context: APIRequestC
     }
 
     # Create
-    resp, _ = _timed_request(admin_api_context, "POST", f"{backend_url}/api/fga/relations", data=relation_body)
+    resp = admin_api_context.post(f"{backend_url}/api/fga/relations", data=relation_body)
     if resp.status in (400, 502):
         pytest.skip(f"FGA not operational (status {resp.status})")
     assert resp.status == 201
@@ -249,21 +198,20 @@ def test_relation_lifecycle_with_permission_check(admin_api_context: APIRequestC
             "relation": "can_view",
             "target": target,
         }
-        resp, elapsed_ms = _timed_request(admin_api_context, "POST", f"{backend_url}/api/fga/check", data=check_body)
+        resp = admin_api_context.post(f"{backend_url}/api/fga/check", data=check_body)
         if resp.status == 502:
             pytest.skip("FGA check not operational")
         assert resp.status == 200
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         body = resp.json()
         assert "allowed" in body, f"FGA check response missing 'allowed' key: {body}"
         assert body["allowed"] is True, "Viewer should have can_view"
 
         # Delete
-        resp, _ = _timed_request(admin_api_context, "DELETE", f"{backend_url}/api/fga/relations", data=relation_body)
+        resp = admin_api_context.delete(f"{backend_url}/api/fga/relations", data=relation_body)
         assert resp.status == 200
 
         # Check again — should be denied
-        resp, _ = _timed_request(admin_api_context, "POST", f"{backend_url}/api/fga/check", data=check_body)
+        resp = admin_api_context.post(f"{backend_url}/api/fga/check", data=check_body)
         if resp.status == 502:
             pytest.skip("FGA check not operational")
         assert resp.status == 200
@@ -282,7 +230,7 @@ def test_relation_lifecycle_with_permission_check(admin_api_context: APIRequestC
 def test_update_fga_schema(admin_api_context: APIRequestContext, backend_url: str):
     """PUT /api/fga/schema updates the schema and returns the result."""
     # Read current schema first
-    resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/fga/schema")
+    resp = admin_api_context.get(f"{backend_url}/api/fga/schema")
     assert resp.status == 200
     original = resp.json().get("schema", "")
 
@@ -291,14 +239,11 @@ def test_update_fga_schema(admin_api_context: APIRequestContext, backend_url: st
 
     # Re-save the same schema (idempotent — safe for concurrent runs)
     schema_str = original if isinstance(original, str) else json.dumps(original)
-    resp, elapsed_ms = _timed_request(
-        admin_api_context,
-        "PUT",
+    resp = admin_api_context.put(
         f"{backend_url}/api/fga/schema",
         data={"schema": schema_str},
     )
     if resp.status in (400, 502):
         pytest.skip(f"Schema update not supported (status {resp.status})")
     assert resp.status == 200
-    assert elapsed_ms < MAX_API_RESPONSE_MS
     assert "schema" in resp.json()

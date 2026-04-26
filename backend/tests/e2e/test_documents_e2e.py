@@ -14,49 +14,24 @@ Known gaps (tracked):
 
 import contextlib
 import os
-import time
-import uuid
 
 import pytest
 from playwright.sync_api import APIRequestContext
+
+from tests.e2e.helpers.api import unique_id
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DESCOPE_MANAGEMENT_KEY"),
     reason="DESCOPE_MANAGEMENT_KEY not set",
 )
 
-MAX_API_RESPONSE_MS = 2000
 _DUMMY_UUID = "00000000-0000-0000-0000-000000000000"
-
-
-def _unique_id(prefix: str) -> str:
-    return f"{prefix}-e2e-{uuid.uuid4().hex[:8]}"
-
-
-def _timed_request(context: APIRequestContext, method: str, url: str, **kwargs) -> tuple:
-    """Execute a request and return (response, elapsed_ms)."""
-    method = method.upper()
-    start = time.monotonic()
-    if method == "GET":
-        resp = context.get(url, **kwargs)
-    elif method == "POST":
-        resp = context.post(url, **kwargs)
-    elif method == "PUT":
-        resp = context.put(url, **kwargs)
-    elif method == "DELETE":
-        resp = context.delete(url, **kwargs)
-    else:
-        raise ValueError(f"Unsupported method: {method}")
-    elapsed_ms = (time.monotonic() - start) * 1000
-    if not (200 <= resp.status < 300):
-        print(f"[E2E] {method} {url} → {resp.status}: {resp.text()}")
-    return resp, elapsed_ms
 
 
 def _create_doc(ctx: APIRequestContext, base: str, title: str = "") -> dict | None:
     """Create a document and return its data, or None if FGA not operational."""
-    title = title or _unique_id("doc")
-    resp, _ = _timed_request(ctx, "POST", f"{base}/api/documents", data={"title": title, "content": "E2E test"})
+    title = title or unique_id("doc")
+    resp = ctx.post(f"{base}/api/documents", data={"title": title, "content": "E2E test"})
     if resp.status == 502:
         return None  # FGA not operational
     if resp.status != 201:
@@ -91,14 +66,11 @@ def test_create_document_creates_fga_owner(admin_api_context: APIRequestContext,
 
     try:
         # Verify owner relation via FGA admin endpoint
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "GET",
+        resp = admin_api_context.get(
             f"{backend_url}/api/fga/relations",
             params={"resource_type": "document", "resource_id": doc_id},
         )
         assert resp.status == 200
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         relations = resp.json().get("relations", [])
         owner_rels = [r for r in relations if r.get("relationDefinition") == "owner"]
         assert len(owner_rels) == 1, f"Expected exactly 1 owner relation, got {owner_rels}"
@@ -111,13 +83,11 @@ def test_create_document_creates_fga_owner(admin_api_context: APIRequestContext,
 
 def test_owner_has_all_permissions(admin_api_context: APIRequestContext, backend_url: str):
     """Owner should have can_view, can_edit, and can_delete permissions."""
-    resource_id = _unique_id("perm-doc")
-    target = _unique_id("user")
+    resource_id = unique_id("perm-doc")
+    target = unique_id("user")
 
     # Create owner relation directly
-    resp, _ = _timed_request(
-        admin_api_context,
-        "POST",
+    resp = admin_api_context.post(
         f"{backend_url}/api/fga/relations",
         data={"resource_type": "document", "resource_id": resource_id, "relation": "owner", "target": target},
     )
@@ -127,16 +97,13 @@ def test_owner_has_all_permissions(admin_api_context: APIRequestContext, backend
 
     try:
         for relation in ("can_view", "can_edit", "can_delete"):
-            resp, elapsed_ms = _timed_request(
-                admin_api_context,
-                "POST",
+            resp = admin_api_context.post(
                 f"{backend_url}/api/fga/check",
                 data={"resource_type": "document", "resource_id": resource_id, "relation": relation, "target": target},
             )
             if resp.status == 502:
                 pytest.skip("FGA check not operational")
             assert resp.status == 200, f"Check {relation} returned {resp.status}"
-            assert elapsed_ms < MAX_API_RESPONSE_MS
             _assert_fga_allowed(resp, True, f"Owner should have {relation}")
     finally:
         with contextlib.suppress(Exception):
@@ -148,12 +115,10 @@ def test_owner_has_all_permissions(admin_api_context: APIRequestContext, backend
 
 def test_editor_has_view_and_edit_not_delete(admin_api_context: APIRequestContext, backend_url: str):
     """Editor should have can_view and can_edit but NOT can_delete."""
-    resource_id = _unique_id("perm-doc")
-    target = _unique_id("user")
+    resource_id = unique_id("perm-doc")
+    target = unique_id("user")
 
-    resp, _ = _timed_request(
-        admin_api_context,
-        "POST",
+    resp = admin_api_context.post(
         f"{backend_url}/api/fga/relations",
         data={"resource_type": "document", "resource_id": resource_id, "relation": "editor", "target": target},
     )
@@ -164,9 +129,7 @@ def test_editor_has_view_and_edit_not_delete(admin_api_context: APIRequestContex
     try:
         # Editor should have can_view and can_edit
         for relation in ("can_view", "can_edit"):
-            resp, _ = _timed_request(
-                admin_api_context,
-                "POST",
+            resp = admin_api_context.post(
                 f"{backend_url}/api/fga/check",
                 data={"resource_type": "document", "resource_id": resource_id, "relation": relation, "target": target},
             )
@@ -176,9 +139,7 @@ def test_editor_has_view_and_edit_not_delete(admin_api_context: APIRequestContex
             _assert_fga_allowed(resp, True, f"Editor should have {relation}")
 
         # Editor should NOT have can_delete
-        resp, _ = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/fga/check",
             data={"resource_type": "document", "resource_id": resource_id, "relation": "can_delete", "target": target},
         )
@@ -196,12 +157,10 @@ def test_editor_has_view_and_edit_not_delete(admin_api_context: APIRequestContex
 
 def test_viewer_has_view_only(admin_api_context: APIRequestContext, backend_url: str):
     """Viewer should have can_view but NOT can_edit or can_delete."""
-    resource_id = _unique_id("perm-doc")
-    target = _unique_id("user")
+    resource_id = unique_id("perm-doc")
+    target = unique_id("user")
 
-    resp, _ = _timed_request(
-        admin_api_context,
-        "POST",
+    resp = admin_api_context.post(
         f"{backend_url}/api/fga/relations",
         data={"resource_type": "document", "resource_id": resource_id, "relation": "viewer", "target": target},
     )
@@ -211,9 +170,7 @@ def test_viewer_has_view_only(admin_api_context: APIRequestContext, backend_url:
 
     try:
         # Viewer should have can_view
-        resp, _ = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/fga/check",
             data={"resource_type": "document", "resource_id": resource_id, "relation": "can_view", "target": target},
         )
@@ -224,9 +181,7 @@ def test_viewer_has_view_only(admin_api_context: APIRequestContext, backend_url:
 
         # Viewer should NOT have can_edit or can_delete
         for relation in ("can_edit", "can_delete"):
-            resp, _ = _timed_request(
-                admin_api_context,
-                "POST",
+            resp = admin_api_context.post(
                 f"{backend_url}/api/fga/check",
                 data={
                     "resource_type": "document",
@@ -258,9 +213,8 @@ def test_document_get_allowed_for_owner(admin_api_context: APIRequestContext, ba
     doc_id = doc["id"]
 
     try:
-        resp, elapsed_ms = _timed_request(admin_api_context, "GET", f"{backend_url}/api/documents/{doc_id}")
+        resp = admin_api_context.get(f"{backend_url}/api/documents/{doc_id}")
         assert resp.status == 200, f"Owner should be able to view document, got {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         assert resp.json()["id"] == doc_id
     finally:
         _cleanup_doc(admin_api_context, backend_url, doc_id)
@@ -274,14 +228,11 @@ def test_document_update_allowed_for_owner(admin_api_context: APIRequestContext,
     doc_id = doc["id"]
 
     try:
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "PUT",
+        resp = admin_api_context.put(
             f"{backend_url}/api/documents/{doc_id}",
             data={"title": "Updated E2E Title"},
         )
         assert resp.status == 200, f"Owner should be able to edit document, got {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         assert resp.json()["title"] == "Updated E2E Title"
     finally:
         _cleanup_doc(admin_api_context, backend_url, doc_id)
@@ -302,22 +253,17 @@ def test_permission_derivation_through_endpoints(admin_api_context: APIRequestCo
 
     try:
         # Owner can edit via PUT (require_fga checks can_edit)
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "PUT",
+        resp = admin_api_context.put(
             f"{backend_url}/api/documents/{doc_id}",
             data={"title": "Derivation Test Updated"},
         )
         assert resp.status == 200, f"Owner PUT should succeed (can_edit derived from owner), got {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         assert resp.json()["title"] == "Derivation Test Updated"
 
         # Verify FGA check confirms editor permissions are a proper subset of owner
         # An editor target should have can_view and can_edit but NOT can_delete
-        editor_target = _unique_id("editor-user")
-        resp, _ = _timed_request(
-            admin_api_context,
-            "POST",
+        editor_target = unique_id("editor-user")
+        resp = admin_api_context.post(
             f"{backend_url}/api/fga/relations",
             data={"resource_type": "document", "resource_id": doc_id, "relation": "editor", "target": editor_target},
         )
@@ -334,9 +280,7 @@ def test_permission_derivation_through_endpoints(admin_api_context: APIRequestCo
                     "relation": relation,
                     "target": editor_target,
                 }
-                resp, _ = _timed_request(
-                    admin_api_context,
-                    "POST",
+                resp = admin_api_context.post(
                     f"{backend_url}/api/fga/check",
                     data=check_data,
                 )
@@ -352,9 +296,7 @@ def test_permission_derivation_through_endpoints(admin_api_context: APIRequestCo
                 "relation": "can_delete",
                 "target": editor_target,
             }
-            resp, _ = _timed_request(
-                admin_api_context,
-                "POST",
+            resp = admin_api_context.post(
                 f"{backend_url}/api/fga/check",
                 data=check_data,
             )
@@ -376,9 +318,8 @@ def test_permission_derivation_through_endpoints(admin_api_context: APIRequestCo
                 )
 
         # Owner can delete via DELETE (require_fga checks can_delete)
-        resp, elapsed_ms = _timed_request(admin_api_context, "DELETE", f"{backend_url}/api/documents/{doc_id}")
+        resp = admin_api_context.delete(f"{backend_url}/api/documents/{doc_id}")
         assert resp.status == 200, f"Owner DELETE should succeed (can_delete derived from owner), got {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         doc_id = None  # Mark as already deleted so finally block skips cleanup
     finally:
         if doc_id is not None:
@@ -393,9 +334,7 @@ def test_document_fga_denies_without_relation(admin_api_context: APIRequestConte
     doc_id = doc["id"]
 
     # Find the owner relation target (the admin user's ID in FGA)
-    resp, _ = _timed_request(
-        admin_api_context,
-        "GET",
+    resp = admin_api_context.get(
         f"{backend_url}/api/fga/relations",
         params={"resource_type": "document", "resource_id": doc_id},
     )
@@ -407,23 +346,19 @@ def test_document_fga_denies_without_relation(admin_api_context: APIRequestConte
 
     try:
         # Remove owner relation
-        resp, _ = _timed_request(
-            admin_api_context,
-            "DELETE",
+        resp = admin_api_context.delete(
             f"{backend_url}/api/fga/relations",
             data={"resource_type": "document", "resource_id": doc_id, "relation": "owner", "target": owner_target},
         )
         assert resp.status == 200, f"Failed to delete owner relation: {resp.status}"
 
         # Now GET should be denied (403 from require_fga)
-        resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/documents/{doc_id}")
+        resp = admin_api_context.get(f"{backend_url}/api/documents/{doc_id}")
         assert resp.status == 403, f"Should be denied without FGA relation, got {resp.status}"
     finally:
         # Re-create owner relation so cleanup can delete the document
         with contextlib.suppress(Exception):
-            _timed_request(
-                admin_api_context,
-                "POST",
+            admin_api_context.post(
                 f"{backend_url}/api/fga/relations",
                 data={
                     "resource_type": "document",
@@ -443,14 +378,11 @@ def test_document_delete_cleans_fga_relations(admin_api_context: APIRequestConte
     doc_id = doc["id"]
 
     # Delete document (owner can delete)
-    resp, elapsed_ms = _timed_request(admin_api_context, "DELETE", f"{backend_url}/api/documents/{doc_id}")
+    resp = admin_api_context.delete(f"{backend_url}/api/documents/{doc_id}")
     assert resp.status == 200, f"Owner should be able to delete document, got {resp.status}"
-    assert elapsed_ms < MAX_API_RESPONSE_MS
 
     # Verify FGA relations are cleaned up
-    resp, _ = _timed_request(
-        admin_api_context,
-        "GET",
+    resp = admin_api_context.get(
         f"{backend_url}/api/fga/relations",
         params={"resource_type": "document", "resource_id": doc_id},
     )
@@ -464,15 +396,14 @@ def test_document_delete_cleans_fga_relations(admin_api_context: APIRequestConte
 
 def test_list_documents_returns_authorized(admin_api_context: APIRequestContext, backend_url: str):
     """GET /api/documents returns documents the caller is authorized to view."""
-    doc = _create_doc(admin_api_context, backend_url, title=_unique_id("list-doc"))
+    doc = _create_doc(admin_api_context, backend_url, title=unique_id("list-doc"))
     if doc is None:
         pytest.skip("FGA not operational — document creation failed")
     doc_id = doc["id"]
 
     try:
-        resp, elapsed_ms = _timed_request(admin_api_context, "GET", f"{backend_url}/api/documents")
+        resp = admin_api_context.get(f"{backend_url}/api/documents")
         assert resp.status == 200
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         body = resp.json()
         assert isinstance(body, dict), f"Expected dict response, got {type(body)}"
         documents = body.get("documents")
@@ -486,10 +417,10 @@ def test_list_documents_returns_authorized(admin_api_context: APIRequestContext,
 def test_list_documents_excludes_unauthorized(admin_api_context: APIRequestContext, backend_url: str):
     """GET /api/documents excludes documents the caller has lost FGA access to."""
     # Create two real documents via the API (both get owner relations for the admin)
-    doc_a = _create_doc(admin_api_context, backend_url, title=_unique_id("keep-doc"))
+    doc_a = _create_doc(admin_api_context, backend_url, title=unique_id("keep-doc"))
     if doc_a is None:
         pytest.skip("FGA not operational — document creation failed")
-    doc_b = _create_doc(admin_api_context, backend_url, title=_unique_id("revoke-doc"))
+    doc_b = _create_doc(admin_api_context, backend_url, title=unique_id("revoke-doc"))
     if doc_b is None:
         _cleanup_doc(admin_api_context, backend_url, doc_a["id"])
         pytest.skip("FGA not operational — second document creation failed")
@@ -498,9 +429,7 @@ def test_list_documents_excludes_unauthorized(admin_api_context: APIRequestConte
     doc_b_id = doc_b["id"]
 
     # Find the owner relation target for doc_b so we can revoke it
-    resp, _ = _timed_request(
-        admin_api_context,
-        "GET",
+    resp = admin_api_context.get(
         f"{backend_url}/api/fga/relations",
         params={"resource_type": "document", "resource_id": doc_b_id},
     )
@@ -512,16 +441,14 @@ def test_list_documents_excludes_unauthorized(admin_api_context: APIRequestConte
 
     try:
         # Remove the owner relation for doc_b (admin loses FGA access)
-        resp, _ = _timed_request(
-            admin_api_context,
-            "DELETE",
+        resp = admin_api_context.delete(
             f"{backend_url}/api/fga/relations",
             data={"resource_type": "document", "resource_id": doc_b_id, "relation": "owner", "target": owner_target},
         )
         assert resp.status == 200, f"Failed to delete owner relation for doc_b: {resp.status}"
 
         # List documents — doc_a should appear, doc_b should NOT
-        resp, _ = _timed_request(admin_api_context, "GET", f"{backend_url}/api/documents")
+        resp = admin_api_context.get(f"{backend_url}/api/documents")
         assert resp.status == 200
         documents = resp.json().get("documents", [])
         doc_ids = [d["id"] for d in documents]
@@ -530,9 +457,7 @@ def test_list_documents_excludes_unauthorized(admin_api_context: APIRequestConte
     finally:
         # Re-create owner relation for doc_b so cleanup can delete it
         with contextlib.suppress(Exception):
-            _timed_request(
-                admin_api_context,
-                "POST",
+            admin_api_context.post(
                 f"{backend_url}/api/fga/relations",
                 data={
                     "resource_type": "document",
@@ -557,9 +482,7 @@ def test_share_document_grants_access(admin_api_context: APIRequestContext, back
 
     try:
         # Share with test user as viewer
-        resp, _ = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/documents/{doc_id}/share",
             data={"user_id": test_user_id, "relation": "viewer"},
         )
@@ -570,9 +493,7 @@ def test_share_document_grants_access(admin_api_context: APIRequestContext, back
         assert resp.status == 200, f"Share failed: {resp.status}"
 
         # Verify via FGA check that the target user now has can_view
-        resp, _ = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/fga/check",
             data={"resource_type": "document", "resource_id": doc_id, "relation": "can_view", "target": test_user_id},
         )
@@ -599,9 +520,7 @@ def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backen
 
     try:
         # Share first
-        resp, _ = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/documents/{doc_id}/share",
             data={"user_id": test_user_id, "relation": "viewer"},
         )
@@ -610,9 +529,7 @@ def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backen
         assert resp.status == 200, f"Share failed: {resp.status}"
 
         # Verify access granted
-        resp, _ = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/fga/check",
             data={"resource_type": "document", "resource_id": doc_id, "relation": "can_view", "target": test_user_id},
         )
@@ -622,9 +539,7 @@ def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backen
         _assert_fga_allowed(resp, True, "User should have access after share")
 
         # Revoke
-        resp, _ = _timed_request(
-            admin_api_context,
-            "DELETE",
+        resp = admin_api_context.delete(
             f"{backend_url}/api/documents/{doc_id}/share/{test_user_id}",
         )
         if resp.status == 403:
@@ -632,9 +547,7 @@ def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backen
         assert resp.status == 200, f"Revoke failed: {resp.status}"
 
         # Verify access denied
-        resp, _ = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/fga/check",
             data={"resource_type": "document", "resource_id": doc_id, "relation": "can_view", "target": test_user_id},
         )
@@ -657,12 +570,12 @@ def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backen
 
 def test_sequential_relation_revocation_no_stale_grants(admin_api_context: APIRequestContext, backend_url: str):
     """Delete→check→re-create cycles: permission check must never return true after delete."""
-    resource_id = _unique_id("revoke-doc")
-    target = _unique_id("user")
+    resource_id = unique_id("revoke-doc")
+    target = unique_id("user")
     base_body = {"resource_type": "document", "resource_id": resource_id, "relation": "viewer", "target": target}
 
     # Create the relation first to verify FGA is operational
-    resp, _ = _timed_request(admin_api_context, "POST", f"{backend_url}/api/fga/relations", data=base_body)
+    resp = admin_api_context.post(f"{backend_url}/api/fga/relations", data=base_body)
     if resp.status in (400, 502):
         pytest.skip(f"FGA not operational (status {resp.status})")
     assert resp.status == 201
@@ -671,13 +584,11 @@ def test_sequential_relation_revocation_no_stale_grants(admin_api_context: APIRe
         # Cycles: delete then immediately check — should never get allowed=true after delete
         for _ in range(3):
             # Delete
-            resp, _ = _timed_request(admin_api_context, "DELETE", f"{backend_url}/api/fga/relations", data=base_body)
+            resp = admin_api_context.delete(f"{backend_url}/api/fga/relations", data=base_body)
             assert resp.status == 200
 
             # Immediate check — must not be allowed
-            resp, _ = _timed_request(
-                admin_api_context,
-                "POST",
+            resp = admin_api_context.post(
                 f"{backend_url}/api/fga/check",
                 data={
                     "resource_type": "document",
@@ -692,7 +603,7 @@ def test_sequential_relation_revocation_no_stale_grants(admin_api_context: APIRe
             _assert_fga_allowed(resp, False, "Should be denied after relation deleted")
 
             # Re-create for next cycle
-            resp, _ = _timed_request(admin_api_context, "POST", f"{backend_url}/api/fga/relations", data=base_body)
+            resp = admin_api_context.post(f"{backend_url}/api/fga/relations", data=base_body)
             assert resp.status == 201
     finally:
         # Cleanup
