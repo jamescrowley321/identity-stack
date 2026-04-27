@@ -89,7 +89,7 @@ export default function MemberManagement() {
   return (
     <>
       <PageHeader title="Members" description="Invite and manage team members" />
-      <div className="p-6 space-y-6">
+      <div className="p-8 space-y-6">
         <Card>
           <CardHeader>
             <CardTitle>Invite Member</CardTitle>

@@ -57,7 +57,7 @@ export default function UserProfile() {
     return (
       <>
         <PageHeader title="User Profile" />
-        <div className="p-6 space-y-6">
+        <div className="p-8 space-y-6">
           <Skeleton className="h-32 w-full" />
           <Skeleton className="h-48 w-full" />
         </div>
@@ -68,7 +68,7 @@ export default function UserProfile() {
   return (
     <>
       <PageHeader title="User Profile" description={profile.email || undefined} />
-      <div className="p-6 space-y-6">
+      <div className="p-8 space-y-6">
         <Card>
           <CardHeader>
             <CardTitle>Profile</CardTitle>

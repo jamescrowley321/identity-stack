@@ -79,7 +79,7 @@ export default function TenantSettings() {
     return (
       <>
         <PageHeader title="Tenant Settings" />
-        <div className="p-6 space-y-6">
+        <div className="p-8 space-y-6">
           <Skeleton className="h-32 w-full" />
         </div>
       </>
@@ -91,7 +91,7 @@ export default function TenantSettings() {
   return (
     <>
       <PageHeader title="Tenant Settings" description={settings.name || settings.tenant_id} />
-      <div className="p-6 space-y-6">
+      <div className="p-8 space-y-6">
         <Card>
           <CardHeader>
             <CardTitle>Current Settings</CardTitle>
