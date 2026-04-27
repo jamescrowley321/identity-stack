@@ -18,7 +18,7 @@ import os
 import pytest
 from playwright.sync_api import APIRequestContext
 
-from tests.e2e.helpers.api import unique_id
+from tests.e2e.helpers.api import unique_name
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DESCOPE_MANAGEMENT_KEY"),
@@ -30,7 +30,7 @@ _DUMMY_UUID = "00000000-0000-0000-0000-000000000000"
 
 def _create_doc(ctx: APIRequestContext, base: str, title: str = "") -> dict | None:
     """Create a document and return its data, or None if FGA not operational."""
-    title = title or unique_id("doc")
+    title = title or unique_name("doc")
     resp = ctx.post(f"{base}/api/documents", data={"title": title, "content": "E2E test"})
     if resp.status == 502:
         return None  # FGA not operational
@@ -83,8 +83,8 @@ def test_create_document_creates_fga_owner(admin_api_context: APIRequestContext,
 
 def test_owner_has_all_permissions(admin_api_context: APIRequestContext, backend_url: str):
     """Owner should have can_view, can_edit, and can_delete permissions."""
-    resource_id = unique_id("perm-doc")
-    target = unique_id("user")
+    resource_id = unique_name("perm-doc")
+    target = unique_name("user")
 
     # Create owner relation directly
     resp = admin_api_context.post(
@@ -115,8 +115,8 @@ def test_owner_has_all_permissions(admin_api_context: APIRequestContext, backend
 
 def test_editor_has_view_and_edit_not_delete(admin_api_context: APIRequestContext, backend_url: str):
     """Editor should have can_view and can_edit but NOT can_delete."""
-    resource_id = unique_id("perm-doc")
-    target = unique_id("user")
+    resource_id = unique_name("perm-doc")
+    target = unique_name("user")
 
     resp = admin_api_context.post(
         f"{backend_url}/api/fga/relations",
@@ -157,8 +157,8 @@ def test_editor_has_view_and_edit_not_delete(admin_api_context: APIRequestContex
 
 def test_viewer_has_view_only(admin_api_context: APIRequestContext, backend_url: str):
     """Viewer should have can_view but NOT can_edit or can_delete."""
-    resource_id = unique_id("perm-doc")
-    target = unique_id("user")
+    resource_id = unique_name("perm-doc")
+    target = unique_name("user")
 
     resp = admin_api_context.post(
         f"{backend_url}/api/fga/relations",
@@ -262,7 +262,7 @@ def test_permission_derivation_through_endpoints(admin_api_context: APIRequestCo
 
         # Verify FGA check confirms editor permissions are a proper subset of owner
         # An editor target should have can_view and can_edit but NOT can_delete
-        editor_target = unique_id("editor-user")
+        editor_target = unique_name("editor-user")
         resp = admin_api_context.post(
             f"{backend_url}/api/fga/relations",
             data={"resource_type": "document", "resource_id": doc_id, "relation": "editor", "target": editor_target},
@@ -396,7 +396,7 @@ def test_document_delete_cleans_fga_relations(admin_api_context: APIRequestConte
 
 def test_list_documents_returns_authorized(admin_api_context: APIRequestContext, backend_url: str):
     """GET /api/documents returns documents the caller is authorized to view."""
-    doc = _create_doc(admin_api_context, backend_url, title=unique_id("list-doc"))
+    doc = _create_doc(admin_api_context, backend_url, title=unique_name("list-doc"))
     if doc is None:
         pytest.skip("FGA not operational — document creation failed")
     doc_id = doc["id"]
@@ -417,10 +417,10 @@ def test_list_documents_returns_authorized(admin_api_context: APIRequestContext,
 def test_list_documents_excludes_unauthorized(admin_api_context: APIRequestContext, backend_url: str):
     """GET /api/documents excludes documents the caller has lost FGA access to."""
     # Create two real documents via the API (both get owner relations for the admin)
-    doc_a = _create_doc(admin_api_context, backend_url, title=unique_id("keep-doc"))
+    doc_a = _create_doc(admin_api_context, backend_url, title=unique_name("keep-doc"))
     if doc_a is None:
         pytest.skip("FGA not operational — document creation failed")
-    doc_b = _create_doc(admin_api_context, backend_url, title=unique_id("revoke-doc"))
+    doc_b = _create_doc(admin_api_context, backend_url, title=unique_name("revoke-doc"))
     if doc_b is None:
         _cleanup_doc(admin_api_context, backend_url, doc_a["id"])
         pytest.skip("FGA not operational — second document creation failed")
@@ -570,8 +570,8 @@ def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backen
 
 def test_sequential_relation_revocation_no_stale_grants(admin_api_context: APIRequestContext, backend_url: str):
     """Delete→check→re-create cycles: permission check must never return true after delete."""
-    resource_id = unique_id("revoke-doc")
-    target = unique_id("user")
+    resource_id = unique_name("revoke-doc")
+    target = unique_name("user")
     base_body = {"resource_type": "document", "resource_id": resource_id, "relation": "viewer", "target": target}
 
     # Create the relation first to verify FGA is operational
