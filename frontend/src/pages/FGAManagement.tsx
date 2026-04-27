@@ -219,7 +219,7 @@ export default function FGAManagement() {
   return (
     <>
       <PageHeader title="FGA Management" description="Fine-Grained Authorization schema, relations, and permission checks" />
-      <div className="p-6 space-y-6">
+      <div className="p-8 space-y-6">
         {isAdmin ? (
           <>
             {/* Schema Viewer */}
