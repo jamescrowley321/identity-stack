@@ -11,7 +11,7 @@ import os
 import pytest
 from playwright.sync_api import APIRequestContext
 
-from tests.e2e.helpers.api import unique_id
+from tests.e2e.helpers.api import unique_name
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DESCOPE_MANAGEMENT_KEY"),
@@ -38,12 +38,12 @@ def test_get_fga_schema(admin_api_context: APIRequestContext, backend_url: str):
 
 def test_relation_create_and_delete(admin_api_context: APIRequestContext, backend_url: str):
     """Relation can be created and deleted via API."""
-    resource_id = unique_id("doc")
+    resource_id = unique_name("doc")
     relation_body = {
         "resource_type": "document",
         "resource_id": resource_id,
         "relation": "owner",
-        "target": f"user:{unique_id('u')}",
+        "target": f"user:{unique_name('u')}",
     }
 
     # Create relation
@@ -99,7 +99,7 @@ def test_check_permission_denied_for_nonexistent(admin_api_context: APIRequestCo
         f"{backend_url}/api/fga/check",
         data={
             "resource_type": "document",
-            "resource_id": unique_id("nonexist"),
+            "resource_id": unique_name("nonexist"),
             "relation": "viewer",
             "target": "user:nobody",
         },
@@ -175,8 +175,8 @@ def test_check_permission_validation(admin_api_context: APIRequestContext, backe
 
 def test_relation_lifecycle_with_permission_check(admin_api_context: APIRequestContext, backend_url: str):
     """Create relation → verify allowed → delete → verify denied (full lifecycle)."""
-    resource_id = unique_id("lifecycle")
-    target = f"user:{unique_id('u')}"
+    resource_id = unique_name("lifecycle")
+    target = f"user:{unique_name('u')}"
     relation_body = {
         "resource_type": "document",
         "resource_id": resource_id,
