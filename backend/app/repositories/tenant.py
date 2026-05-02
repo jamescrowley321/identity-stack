@@ -9,40 +9,21 @@ from __future__ import annotations
 import uuid
 
 import sqlalchemy as sa
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.role import Role
 from app.models.identity.tenant import Tenant
 from app.models.identity.user import User
-from app.repositories.user import RepositoryConflictError
+from app.repositories.base import BaseRepository
 
 
-class TenantRepository:
+class TenantRepository(BaseRepository[Tenant]):
     """Repository for Tenant table operations.
 
     Takes AsyncSession via constructor injection (inner layer of onion architecture).
     """
 
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-
-    async def create(self, tenant: Tenant) -> Tenant:
-        """Add a new tenant to the session and flush to generate defaults.
-
-        Raises RepositoryConflictError if a uniqueness constraint is violated.
-        """
-        self._session.add(tenant)
-        try:
-            await self._session.flush()
-        except IntegrityError as exc:
-            raise RepositoryConflictError(str(exc)) from exc
-        return tenant
-
-    async def get(self, tenant_id: uuid.UUID) -> Tenant | None:
-        """Fetch a tenant by primary key. Returns None if not found."""
-        return await self._session.get(Tenant, tenant_id)
+    _model = Tenant
 
     async def get_by_name(self, name: str) -> Tenant | None:
         """Fetch a tenant by name. Returns None if not found."""
@@ -55,17 +36,6 @@ class TenantRepository:
         stmt = sa.select(Tenant).order_by(Tenant.created_at.desc())
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
-
-    async def update(self, tenant: Tenant) -> Tenant:
-        """Flush updated tenant state.
-
-        Raises RepositoryConflictError if a uniqueness constraint is violated.
-        """
-        try:
-            await self._session.flush()
-        except IntegrityError as exc:
-            raise RepositoryConflictError(str(exc)) from exc
-        return tenant
 
     async def get_users_with_roles(self, tenant_id: uuid.UUID) -> list[tuple]:
         """Get all users and their roles for a tenant via 3-way JOIN.
@@ -81,11 +51,3 @@ class TenantRepository:
         )
         result = await self._session.execute(stmt)
         return list(result.all())
-
-    async def commit(self) -> None:
-        """Commit the current transaction."""
-        await self._session.commit()
-
-    async def rollback(self) -> None:
-        """Roll back the current transaction."""
-        await self._session.rollback()

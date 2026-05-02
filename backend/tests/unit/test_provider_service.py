@@ -14,8 +14,8 @@ import pytest
 
 from app.errors.identity import Conflict, NotFound
 from app.models.identity.provider import Provider, ProviderType
+from app.repositories.base import RepositoryConflictError
 from app.repositories.provider import ProviderRepository
-from app.repositories.user import RepositoryConflictError
 from app.services.provider import ProviderService
 
 

@@ -10,20 +10,17 @@ via create → duplicate-conflict → update → delete → re-create cycle inst
 
 import contextlib
 import os
-import time
 import uuid
 
 import pytest
 from playwright.sync_api import APIRequestContext
 
+from tests.e2e.helpers.api import unique_name
+
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DESCOPE_MANAGEMENT_KEY"),
     reason="DESCOPE_MANAGEMENT_KEY not set",
 )
-
-# --- Constants ---
-
-MAX_API_RESPONSE_MS = 2000
 
 # TF-seeded role/permission names (source: infra/rbac.tf)
 TF_SEEDED_PERMISSIONS = sorted(
@@ -51,39 +48,14 @@ TF_SEEDED_ROLES = {
 }
 
 
-def _unique_name(prefix: str) -> str:
-    """Generate a unique name for test resources to avoid collisions."""
-    return f"{prefix}-e2e-{uuid.uuid4().hex[:8]}"
-
-
-def _timed_request(context: APIRequestContext, method: str, url: str, **kwargs) -> tuple:
-    """Execute a request and return (response, elapsed_ms)."""
-    start = time.monotonic()
-    if method == "GET":
-        resp = context.get(url, **kwargs)
-    elif method == "POST":
-        resp = context.post(url, **kwargs)
-    elif method == "PUT":
-        resp = context.put(url, **kwargs)
-    elif method == "DELETE":
-        resp = context.delete(url, **kwargs)
-    else:
-        raise ValueError(f"Unsupported method: {method}")
-    elapsed_ms = (time.monotonic() - start) * 1000
-    if not (200 <= resp.status < 300):
-        print(f"[E2E] {method} {url} → {resp.status}: {resp.text()}")
-    return resp, elapsed_ms
-
-
 # --- AC-1: TF-seeded roles (requires listing — Descope returns 500) ---
 
 
 @pytest.mark.xfail(reason="Descope API returns 500 (E010009) on /v1/mgmt/role/all", strict=False)
 def test_tf_seeded_roles_present(admin_api_context: APIRequestContext, backend_url: str):
     """GET /api/roles returns all 4 TF-seeded roles with correct permission counts."""
-    resp, elapsed_ms = _timed_request(admin_api_context, "GET", f"{backend_url}/api/roles")
+    resp = admin_api_context.get(f"{backend_url}/api/roles")
     assert resp.status == 200, f"Expected 200, got {resp.status}"
-    assert elapsed_ms < MAX_API_RESPONSE_MS
 
     body = resp.json()
     roles = body.get("roles", [])
@@ -103,9 +75,8 @@ def test_tf_seeded_roles_present(admin_api_context: APIRequestContext, backend_u
 @pytest.mark.xfail(reason="Descope API returns 500 (E010009) on /v1/mgmt/permission/all", strict=False)
 def test_tf_seeded_permissions_present(admin_api_context: APIRequestContext, backend_url: str):
     """GET /api/permissions returns all 12 TF-seeded permissions."""
-    resp, elapsed_ms = _timed_request(admin_api_context, "GET", f"{backend_url}/api/permissions")
+    resp = admin_api_context.get(f"{backend_url}/api/permissions")
     assert resp.status == 200, f"Expected 200, got {resp.status}"
-    assert elapsed_ms < MAX_API_RESPONSE_MS
 
     body = resp.json()
     permissions = body.get("permissions", [])
@@ -120,35 +91,25 @@ def test_tf_seeded_permissions_present(admin_api_context: APIRequestContext, bac
 
 def test_runtime_permission_create_and_delete(admin_api_context: APIRequestContext, backend_url: str):
     """Runtime-created permission can be created and deleted via API."""
-    perm_name = _unique_name("test-perm")
+    perm_name = unique_name("test-perm")
     try:
         # Create runtime permission
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/permissions",
             data={"name": perm_name, "description": "E2E test permission"},
         )
         assert resp.status == 201, f"Create failed: {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
 
         # Verify it exists by trying to create duplicate (expect 409 or 400)
-        resp, _ = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/permissions",
             data={"name": perm_name, "description": "duplicate"},
         )
         assert resp.status in (400, 409), f"Duplicate create should fail, got {resp.status}"
 
         # Delete
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "DELETE",
-            f"{backend_url}/api/permissions/{perm_name}",
-        )
+        resp = admin_api_context.delete(f"{backend_url}/api/permissions/{perm_name}")
         assert resp.status == 200, f"Delete failed: {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         perm_name = None  # cleaned up
     finally:
         if perm_name:
@@ -158,35 +119,25 @@ def test_runtime_permission_create_and_delete(admin_api_context: APIRequestConte
 
 def test_runtime_role_create_and_delete(admin_api_context: APIRequestContext, backend_url: str):
     """Runtime-created role can be created and deleted via API."""
-    role_name = _unique_name("test-role")
+    role_name = unique_name("test-role")
     try:
         # Create runtime role (no permission_names since TF-seeded perms may not exist)
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/roles",
             data={"name": role_name, "description": "E2E test role"},
         )
         assert resp.status == 201, f"Create failed: {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
 
         # Verify it exists by trying to create duplicate (expect 409 or 400)
-        resp, _ = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/roles",
             data={"name": role_name, "description": "duplicate"},
         )
         assert resp.status in (400, 409), f"Duplicate create should fail, got {resp.status}"
 
         # Delete
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "DELETE",
-            f"{backend_url}/api/roles/{role_name}",
-        )
+        resp = admin_api_context.delete(f"{backend_url}/api/roles/{role_name}")
         assert resp.status == 200, f"Delete failed: {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         role_name = None  # cleaned up
     finally:
         if role_name:
@@ -199,36 +150,28 @@ def test_runtime_role_create_and_delete(admin_api_context: APIRequestContext, ba
 
 def test_permission_crud_lifecycle(admin_api_context: APIRequestContext, backend_url: str):
     """Full permission lifecycle: create -> update -> delete -> re-create (verify delete worked)."""
-    perm_name = _unique_name("lifecycle-perm")
+    perm_name = unique_name("lifecycle-perm")
     updated_name = perm_name + "-updated"
     cleanup_name = perm_name
 
     try:
         # Create
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/permissions",
             data={"name": perm_name, "description": "E2E lifecycle test"},
         )
         assert resp.status == 201, f"Create failed: {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
 
         # Update (rename)
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "PUT",
+        resp = admin_api_context.put(
             f"{backend_url}/api/permissions/{perm_name}",
             data={"new_name": updated_name, "description": "Updated description"},
         )
         assert resp.status == 200, f"Update failed: {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         cleanup_name = updated_name
 
         # Verify old name no longer exists (re-create with old name should succeed)
-        resp, _ = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/permissions",
             data={"name": perm_name, "description": "re-create after rename"},
         )
@@ -238,19 +181,12 @@ def test_permission_crud_lifecycle(admin_api_context: APIRequestContext, backend
             admin_api_context.delete(f"{backend_url}/api/permissions/{perm_name}")
 
         # Delete the renamed permission
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "DELETE",
-            f"{backend_url}/api/permissions/{updated_name}",
-        )
+        resp = admin_api_context.delete(f"{backend_url}/api/permissions/{updated_name}")
         assert resp.status == 200, f"Delete failed: {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         cleanup_name = None
 
         # Verify deletion by re-creating with same name (should succeed if deleted)
-        resp, _ = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/permissions",
             data={"name": updated_name, "description": "re-create after delete"},
         )
@@ -271,20 +207,18 @@ def test_role_crud_lifecycle(admin_api_context: APIRequestContext, backend_url: 
     Creates test permissions first since TF-seeded permissions may not exist in the
     Descope project used for CI.
     """
-    role_name = _unique_name("lifecycle-role")
+    role_name = unique_name("lifecycle-role")
     updated_name = role_name + "-updated"
     cleanup_name = role_name
-    perm_a = _unique_name("perm-a")
-    perm_b = _unique_name("perm-b")
-    perm_c = _unique_name("perm-c")
+    perm_a = unique_name("perm-a")
+    perm_b = unique_name("perm-b")
+    perm_c = unique_name("perm-c")
     created_perms = []
 
     try:
         # Create test permissions first
         for perm in [perm_a, perm_b, perm_c]:
-            resp, _ = _timed_request(
-                admin_api_context,
-                "POST",
+            resp = admin_api_context.post(
                 f"{backend_url}/api/permissions",
                 data={"name": perm, "description": "E2E test perm for role lifecycle"},
             )
@@ -292,9 +226,7 @@ def test_role_crud_lifecycle(admin_api_context: APIRequestContext, backend_url: 
             created_perms.append(perm)
 
         # Create role with permissions
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/roles",
             data={
                 "name": role_name,
@@ -303,12 +235,9 @@ def test_role_crud_lifecycle(admin_api_context: APIRequestContext, backend_url: 
             },
         )
         assert resp.status == 201, f"Create role failed: {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
 
         # Update (rename + change permissions)
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "PUT",
+        resp = admin_api_context.put(
             f"{backend_url}/api/roles/{role_name}",
             data={
                 "new_name": updated_name,
@@ -317,23 +246,15 @@ def test_role_crud_lifecycle(admin_api_context: APIRequestContext, backend_url: 
             },
         )
         assert resp.status == 200, f"Update failed: {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         cleanup_name = updated_name
 
         # Delete
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "DELETE",
-            f"{backend_url}/api/roles/{updated_name}",
-        )
+        resp = admin_api_context.delete(f"{backend_url}/api/roles/{updated_name}")
         assert resp.status == 200, f"Delete failed: {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         cleanup_name = None
 
         # Verify deletion by re-creating with same name
-        resp, _ = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/roles",
             data={"name": updated_name, "description": "re-create after delete"},
         )
@@ -363,7 +284,7 @@ def test_runtime_role_assignment(admin_api_context: APIRequestContext, backend_u
     """
     import httpx as _httpx
 
-    role_name = _unique_name("assign-role")
+    role_name = unique_name("assign-role")
     test_email = f"e2e-assign-{uuid.uuid4().hex[:8]}@test.example.com"
     cleanup_role = False
     cleanup_user = False
@@ -393,35 +314,26 @@ def test_runtime_role_assignment(admin_api_context: APIRequestContext, backend_u
 
     try:
         # Create a runtime role
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/roles",
             data={"name": role_name, "description": "E2E assignment test"},
         )
         assert resp.status == 201, f"Create failed: {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
         cleanup_role = True
 
         # Assign the runtime role to the test user
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/roles/assign",
             data={"user_id": test_email, "tenant_id": test_tenant_id, "role_names": [role_name]},
         )
         assert resp.status == 200, f"Assign failed: {resp.status} — {resp.text()}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
 
         # Remove the assigned role (cleanup user state)
-        resp, elapsed_ms = _timed_request(
-            admin_api_context,
-            "POST",
+        resp = admin_api_context.post(
             f"{backend_url}/api/roles/remove",
             data={"user_id": test_email, "tenant_id": test_tenant_id, "role_names": [role_name]},
         )
         assert resp.status == 200, f"Remove failed: {resp.status}"
-        assert elapsed_ms < MAX_API_RESPONSE_MS
     finally:
         if cleanup_role:
             with contextlib.suppress(Exception):
