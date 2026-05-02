@@ -21,6 +21,7 @@ from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.permission import PermissionRepository
 from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
+from app.repositories.sync_event import SyncEventRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 from app.services.adapters.descope import DescopeSyncAdapter
@@ -31,6 +32,7 @@ from app.services.permission import PermissionService
 from app.services.provider import ProviderService
 from app.services.reconciliation import ReconciliationService
 from app.services.role import RoleService
+from app.services.sync_status import SyncStatusService
 from app.services.tenant import TenantService
 from app.services.user import UserService
 
@@ -118,17 +120,29 @@ async def get_inbound_sync_service(
 ) -> InboundSyncService:
     """Build an InboundSyncService with its repositories.
 
-    AC-3.1.1: Wiring: AsyncSession -> UserRepository + IdPLinkRepository + ProviderRepository
-               -> InboundSyncService(user_repository, idp_link_repository, provider_repository)
+    AC-3.1.1: Wiring: AsyncSession -> UserRepository + IdPLinkRepository + ProviderRepository + SyncEventRepository
+               -> InboundSyncService(user_repository, idp_link_repository, provider_repository, sync_event_repository)
     """
     user_repository = UserRepository(session)
     idp_link_repository = IdPLinkRepository(session)
     provider_repository = ProviderRepository(session)
+    sync_event_repository = SyncEventRepository(session)
     return InboundSyncService(
         user_repository=user_repository,
         idp_link_repository=idp_link_repository,
         provider_repository=provider_repository,
+        sync_event_repository=sync_event_repository,
         publisher=request.app.state.cache_publisher,
+    )
+
+
+async def get_sync_status_service(
+    session: AsyncSession = Depends(get_async_session),
+) -> SyncStatusService:
+    return SyncStatusService(
+        provider_repository=ProviderRepository(session),
+        idp_link_repository=IdPLinkRepository(session),
+        sync_event_repository=SyncEventRepository(session),
     )
 
 

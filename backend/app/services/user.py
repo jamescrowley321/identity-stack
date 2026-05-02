@@ -332,6 +332,19 @@ class UserService:
             )
             return Ok([u.model_dump() for u in users])
 
+    async def list_canonical_users(
+        self,
+        *,
+        status: UserStatus | None = None,
+        limit: int = 50,
+    ) -> list[User]:
+        """List canonical users (cross-tenant) with optional status filter."""
+        with tracer.start_as_current_span("UserService.list_canonical_users") as span:
+            span.set_attribute("users.limit", limit)
+            if status is not None:
+                span.set_attribute("users.status_filter", status.value)
+            return await self._repository.list_filtered(status=status, limit=limit)
+
     @staticmethod
     def _log_sync_failure(
         result: Result[None, SyncError],

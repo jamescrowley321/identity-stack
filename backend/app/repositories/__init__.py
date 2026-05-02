@@ -6,6 +6,7 @@ from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.permission import PermissionRepository
 from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
+from app.repositories.sync_event import SyncEventRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 
@@ -16,6 +17,7 @@ __all__ = [
     "ProviderRepository",
     "RepositoryConflictError",
     "RoleRepository",
+    "SyncEventRepository",
     "TenantRepository",
     "UserRepository",
     "UserTenantRoleRepository",

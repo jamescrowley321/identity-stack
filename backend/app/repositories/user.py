@@ -82,6 +82,19 @@ class UserRepository(BaseRepository[User]):
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_filtered(
+        self,
+        *,
+        status: UserStatus | None = None,
+        limit: int = 50,
+    ) -> list[User]:
+        """List users with optional status filter, ordered by created_at desc."""
+        stmt = sa.select(User).order_by(User.created_at.desc()).limit(limit)
+        if status is not None:
+            stmt = stmt.where(User.status == status)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def exists_in_tenant(self, user_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
         """Check if a user has any role assignment in the given tenant."""
         stmt = sa.select(
