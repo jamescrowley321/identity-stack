@@ -59,3 +59,9 @@ class IdPLinkRepository(BaseRepository[IdPLink]):
         stmt = sa.select(IdPLink).where(IdPLink.user_id == user_id)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def count_users_by_provider(self) -> dict[uuid.UUID, int]:
+        """Return a mapping of provider_id -> count of distinct linked users."""
+        stmt = sa.select(IdPLink.provider_id, sa.func.count(sa.distinct(IdPLink.user_id))).group_by(IdPLink.provider_id)
+        result = await self._session.execute(stmt)
+        return {row[0]: int(row[1]) for row in result.all()}

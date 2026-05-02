@@ -17,6 +17,7 @@ from app.routers import (
     accesskeys,
     attributes,
     auth,
+    canonical_users,
     documents,
     fga,
     health,
@@ -27,6 +28,7 @@ from app.routers import (
     providers,
     reconciliation,
     roles,
+    sync_status,
     tenants,
     users,
 )
@@ -177,6 +179,8 @@ app.include_router(internal.router, prefix="/api")
 app.include_router(reconciliation.router, prefix="/api")
 app.include_router(idp_links.router, prefix="/api")
 app.include_router(providers.router, prefix="/api")
+app.include_router(sync_status.router, prefix="/api")
+app.include_router(canonical_users.router, prefix="/api")
 
 
 @app.get("/docs", include_in_schema=False)

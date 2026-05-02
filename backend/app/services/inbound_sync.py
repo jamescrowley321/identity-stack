@@ -9,16 +9,19 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import uuid as uuid_mod
 
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
 from app.errors.identity import Conflict, IdentityError, NotFound, ValidationError
 from app.models.identity.provider import ProviderType
+from app.models.identity.sync_event import SyncEvent, SyncEventVerb
 from app.models.identity.user import IdPLink, User, UserStatus
 from app.repositories.base import RepositoryConflictError
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
+from app.repositories.sync_event import SyncEventRepository
 from app.repositories.user import UserRepository
 from app.services.cache_invalidation import CacheInvalidationPublisher
 
@@ -44,12 +47,40 @@ class InboundSyncService:
         user_repository: UserRepository,
         idp_link_repository: IdPLinkRepository,
         provider_repository: ProviderRepository,
+        sync_event_repository: SyncEventRepository | None = None,
         publisher: CacheInvalidationPublisher | None = None,
     ) -> None:
         self._user_repo = user_repository
         self._link_repo = idp_link_repository
         self._provider_repo = provider_repository
+        self._event_repo = sync_event_repository
         self._publisher = CacheInvalidationPublisher() if publisher is None else publisher
+
+    async def _record_event(
+        self,
+        *,
+        provider_id: uuid_mod.UUID | None,
+        verb: SyncEventVerb,
+        subject_type: str,
+        subject_id: str = "",
+        external_sub: str = "",
+        detail: dict | None = None,
+    ) -> None:
+        if self._event_repo is None:
+            return
+        try:
+            await self._event_repo.create(
+                SyncEvent(
+                    provider_id=provider_id,
+                    verb=verb,
+                    subject_type=subject_type,
+                    subject_id=subject_id,
+                    external_sub=external_sub,
+                    detail=detail,
+                )
+            )
+        except Exception:
+            logger.exception("Failed to append sync event (verb=%s, subject_type=%s)", verb.value, subject_type)
 
     async def sync_user_from_flow(
         self,
@@ -109,6 +140,14 @@ class InboundSyncService:
                 except RepositoryConflictError:
                     return Error(Conflict(message=f"Email '{email}' conflicts with another user"))
 
+                await self._record_event(
+                    provider_id=provider.id,
+                    verb=SyncEventVerb.updated,
+                    subject_type="user",
+                    subject_id=str(existing_user.id),
+                    external_sub=user_id,
+                )
+
                 try:
                     await self._user_repo.commit()
                 except Exception:
@@ -151,6 +190,14 @@ class InboundSyncService:
                 await self._link_repo.create(link)
             except RepositoryConflictError:
                 return Error(Conflict(message="IdP link already exists for provider/subject"))
+
+            await self._record_event(
+                provider_id=provider.id,
+                verb=SyncEventVerb.created if created else SyncEventVerb.linked,
+                subject_type="user",
+                subject_id=str(existing_user.id),
+                external_sub=user_id,
+            )
 
             try:
                 await self._user_repo.commit()
@@ -297,6 +344,14 @@ class InboundSyncService:
             await self._user_repo.update(user)
         except RepositoryConflictError:
             return Error(Conflict(message="User deactivation conflicts with existing data"))
+
+        await self._record_event(
+            provider_id=provider.id,
+            verb=SyncEventVerb.deleted,
+            subject_type="user",
+            subject_id=str(user.id),
+            external_sub=external_sub,
+        )
 
         try:
             await self._user_repo.commit()
