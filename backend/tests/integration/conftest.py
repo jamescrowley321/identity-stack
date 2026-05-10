@@ -104,6 +104,22 @@ async def client():
 # ──────────────────────────────────────────────
 
 
+def _wait_for_port(host: str, port: int, timeout: float = 30.0) -> None:
+    import socket
+    import time
+
+    deadline = time.monotonic() + timeout
+    last_err: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=1.0):
+                return
+        except OSError as e:
+            last_err = e
+            time.sleep(0.25)
+    raise RuntimeError(f"Postgres at {host}:{port} not reachable after {timeout}s: {last_err}")
+
+
 @pytest.fixture(scope="session")
 def postgres_container():
     """Start a real Postgres container for the test session."""
@@ -118,6 +134,7 @@ def postgres_url(postgres_container):
 
     sync_url = postgres_container.get_connection_url()
     parsed = urlparse(sync_url)
+    _wait_for_port(parsed.hostname or "127.0.0.1", parsed.port or 5432)
     # Replace any sync scheme (postgresql+psycopg2, postgresql, etc.) with asyncpg
     async_url = urlunparse(parsed._replace(scheme="postgresql+asyncpg"))
     return async_url
