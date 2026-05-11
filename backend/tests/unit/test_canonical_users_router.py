@@ -88,14 +88,30 @@ async def test_list_users_rejects_admin(mock_validate, client):
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_list_users_returns_payload(mock_validate, mock_user_service, client):
+    """Router serializes each User domain object to the public payload shape verbatim."""
     mock_validate.return_value = OPERATOR_CLAIMS
-    mock_user_service.list_canonical_users.return_value = [_make_user(), _make_user()]
+    users = [_make_user(), _make_user()]
+    mock_user_service.list_canonical_users.return_value = users
 
     response = await client.get("/api/users", headers=AUTH_HEADER)
+
     assert response.status_code == 200
-    data = response.json()
-    assert len(data["users"]) == 2
-    assert {"id", "email", "status", "user_name"} <= set(data["users"][0].keys())
+    expected_payload = {
+        "users": [
+            {
+                "id": str(u.id),
+                "email": u.email,
+                "user_name": u.user_name,
+                "given_name": u.given_name,
+                "family_name": u.family_name,
+                "status": u.status.value,
+                "created_at": u.created_at.isoformat(),
+                "updated_at": u.updated_at.isoformat(),
+            }
+            for u in users
+        ]
+    }
+    assert response.json() == expected_payload
 
 
 @pytest.mark.anyio

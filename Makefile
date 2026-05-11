@@ -1,6 +1,10 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup lint test-unit test-frontend test-integration test-e2e test-all security dev-backend dev-frontend dev test-gateway-proxy dev-gateway test-integration-standalone test-integration-gateway seed
+.PHONY: help setup lint test-up test-down test-unit test-frontend test-integration test-e2e test-all security dev-backend dev-frontend dev test-gateway-proxy dev-gateway test-integration-standalone test-integration-gateway seed
+
+COMPOSE_TEST := docker compose -f docker-compose.test.yml
+TEST_DATABASE_URL := postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
+TEST_REDIS_URL := redis://localhost:16379/0
 
 help: ## show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -12,11 +16,21 @@ setup: ## install all dependencies
 lint: ## run linters
 	cd backend && ruff check . && ruff format --check .
 
-test-unit: ## run backend unit tests
-	cd backend && python -m pytest tests/unit/ -v
+test-up: ## bring up postgres+redis for tests (idempotent; leave running between test runs)
+	$(COMPOSE_TEST) up -d --wait
 
-test-integration: ## run backend integration tests (requires env vars)
-	cd backend && python -m pytest tests/integration/ -v
+test-down: ## tear down the test stack
+	$(COMPOSE_TEST) down -v
+
+test-unit: test-up ## run backend unit tests (auto-brings-up test stack)
+	set -a; [ -f backend/.env ] && . backend/.env; set +a; \
+	cd backend && TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TEST_REDIS_URL='$(TEST_REDIS_URL)' \
+	python -m pytest tests/unit/ -v
+
+test-integration: test-up ## run backend integration tests (auto-brings-up test stack)
+	set -a; [ -f backend/.env ] && . backend/.env; set +a; \
+	cd backend && TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TEST_REDIS_URL='$(TEST_REDIS_URL)' \
+	python -m pytest tests/integration/ -v
 
 test-frontend: ## run frontend unit tests
 	cd frontend && npm test
