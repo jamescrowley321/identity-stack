@@ -1,47 +1,39 @@
 """Shared fixtures for repository unit tests.
 
-Uses testcontainers Postgres with Alembic migrations and per-test
-transactional rollback. Postgres fixtures mirror integration/conftest.py —
-kept separate so unit and integration test sessions use independent containers.
+Postgres is provisioned externally by `make test-unit` via docker-compose.test.yml
+and reached at `TEST_DATABASE_URL` (or `DATABASE_URL`). Alembic migrations run
+once per session against the pre-provisioned DB; tests get per-test transactional
+rollback for isolation.
 """
 
 import os
-
-os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost:5432/testdb")
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from testcontainers.postgres import PostgresContainer
+
+
+def _require_test_database_url() -> str:
+    url = os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL")
+    if not url:
+        pytest.skip(
+            "TEST_DATABASE_URL (or DATABASE_URL) not set — bring up test stack with "
+            "`docker compose -f docker-compose.test.yml up -d --wait` and set "
+            "TEST_DATABASE_URL=postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test"
+        )
+    return url
 
 
 @pytest.fixture(scope="session")
-def postgres_container():
-    """Start a real Postgres container for the test session."""
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
-
-
-@pytest.fixture(scope="session")
-def postgres_url(postgres_container):
-    """Async-compatible connection URL for the testcontainers Postgres instance."""
-    from urllib.parse import urlparse, urlunparse
-
-    sync_url = postgres_container.get_connection_url()
-    parsed = urlparse(sync_url)
-    async_url = urlunparse(parsed._replace(scheme="postgresql+asyncpg"))
-    return async_url
+def postgres_url() -> str:
+    return _require_test_database_url()
 
 
 @pytest.fixture(scope="session")
 def _run_migrations(postgres_url):
-    """Run Alembic migrations against the test Postgres instance (once per session).
-
-    Uses subprocess to avoid asyncio.run() inside Alembic's env.py from
-    interfering with the pytest-asyncio session event loop.
-    """
+    """Run Alembic migrations against the pre-provisioned Postgres (once per session)."""
     import subprocess
     import sys
 
@@ -62,18 +54,12 @@ def _run_migrations(postgres_url):
 
 @pytest.fixture(scope="session")
 def async_engine(postgres_url, _run_migrations):
-    """Create an async engine pointing at the test Postgres instance."""
-    engine = create_async_engine(postgres_url, echo=False, poolclass=NullPool)
-    return engine
+    return create_async_engine(postgres_url, echo=False, poolclass=NullPool)
 
 
 @pytest_asyncio.fixture(loop_scope="session")
 async def db_session(async_engine):
-    """Per-test async session with transactional rollback for clean state.
-
-    Uses loop_scope="session" to match the session-scoped event loop
-    configured via asyncio_default_test_loop_scope in pyproject.toml.
-    """
+    """Per-test async session with transactional rollback for clean state."""
     async with async_engine.connect() as conn:
         transaction = await conn.begin()
         await conn.begin_nested()

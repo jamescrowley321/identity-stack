@@ -94,61 +94,55 @@ async def test_events_recent_rejects_admin(mock_validate, client):
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_sync_status_returns_aggregated_payload(mock_validate, mock_service, client):
+    """Router serializes the service payload verbatim — no field drops or transforms."""
     mock_validate.return_value = OPERATOR_CLAIMS
-    mock_service.get_status.return_value = Ok(
-        {
-            "providers": [
-                {
-                    "id": str(uuid.uuid4()),
-                    "name": "descope-prod",
-                    "type": "descope",
-                    "status": "active",
-                    "user_count": 12,
-                    "last_sync": datetime.now(timezone.utc).isoformat(),
-                }
-            ],
-            "last_reconciliation": datetime.now(timezone.utc).isoformat(),
-        }
-    )
+    expected_payload = {
+        "providers": [
+            {
+                "id": str(uuid.uuid4()),
+                "name": "descope-prod",
+                "type": "descope",
+                "status": "active",
+                "user_count": 12,
+                "last_sync": datetime.now(timezone.utc).isoformat(),
+            }
+        ],
+        "last_reconciliation": datetime.now(timezone.utc).isoformat(),
+    }
+    mock_service.get_status.return_value = Ok(expected_payload)
 
     response = await client.get("/api/sync/status", headers=AUTH_HEADER)
+
     assert response.status_code == 200
-    data = response.json()
-    assert "providers" in data
-    assert "last_reconciliation" in data
-    assert data["providers"][0]["user_count"] == 12
+    assert response.json() == expected_payload
 
 
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_events_recent_returns_event_list(mock_validate, mock_service, client):
+    """Router serializes the events payload verbatim and forwards default query args."""
     mock_validate.return_value = OPERATOR_CLAIMS
-    mock_service.list_events.return_value = Ok(
-        {
-            "events": [
-                {
-                    "id": str(uuid.uuid4()),
-                    "provider_id": str(uuid.uuid4()),
-                    "verb": "created",
-                    "subject_type": "user",
-                    "subject_id": str(uuid.uuid4()),
-                    "external_sub": "ext-1",
-                    "detail": None,
-                    "occurred_at": datetime.now(timezone.utc).isoformat(),
-                }
-            ]
-        }
-    )
+    expected_payload = {
+        "events": [
+            {
+                "id": str(uuid.uuid4()),
+                "provider_id": str(uuid.uuid4()),
+                "verb": "created",
+                "subject_type": "user",
+                "subject_id": str(uuid.uuid4()),
+                "external_sub": "ext-1",
+                "detail": None,
+                "occurred_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ]
+    }
+    mock_service.list_events.return_value = Ok(expected_payload)
 
     response = await client.get("/api/events/recent?limit=10", headers=AUTH_HEADER)
+
     assert response.status_code == 200
-    data = response.json()
-    assert len(data["events"]) == 1
-    mock_service.list_events.assert_awaited_once()
-    kwargs = mock_service.list_events.await_args.kwargs
-    assert kwargs["limit"] == 10
-    assert kwargs["provider_id"] is None
-    assert kwargs["verb"] is None
+    assert response.json() == expected_payload
+    mock_service.list_events.assert_awaited_once_with(limit=10, provider_id=None, verb=None)
 
 
 @pytest.mark.anyio

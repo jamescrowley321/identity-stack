@@ -1,0 +1,38 @@
+# Test-only compose stack. Provisioned by `make test-unit` / `make test-integration`
+# before pytest is invoked, torn down on exit.
+#
+# Independent from docker-compose.yml so test runs don't interfere with a
+# concurrently running dev stack. Ports are shifted (15432 / 16379) so both
+# stacks can run side by side.
+#
+# Storage is tmpfs — no persistent volumes; every `up` starts with a clean DB.
+
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    ports:
+      - "127.0.0.1:15432:5432"
+    environment:
+      POSTGRES_DB: identity_test
+      POSTGRES_USER: identity_test
+      POSTGRES_PASSWORD: identity_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U identity_test -d identity_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  redis-test:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:16379:6379"
+    command: redis-server --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+      start_period: 2s
