@@ -12,7 +12,7 @@ dependencies = [
     # Revisit when slowapi ships a fix for the new inclusion model.
     "fastapi>=0.115.0,<0.137",
     "uvicorn[standard]>=0.34.0,<1",
-    "py-identity-model>=2.1.0,<3",
+    "py-identity-model>=2.1.0,<4",
     "sqlmodel>=0.0.22,<1",
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.31.0",
