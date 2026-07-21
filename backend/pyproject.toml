@@ -10,7 +10,7 @@ dependencies = [
     # routes with an `.endpoint`, so router-included routes become "unmatched" and
     # SlowAPIMiddleware silently exempts them — disabling default rate limits.
     # Revisit when slowapi ships a fix for the new inclusion model.
-    "fastapi>=0.115.0,<0.137",
+    "fastapi>=0.115.0,<0.140",
     "uvicorn[standard]>=0.34.0,<1",
     "py-identity-model>=2.1.0,<3",
     "sqlmodel>=0.0.22,<1",
