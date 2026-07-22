@@ -4,7 +4,13 @@ version = "0.1.0"
 description = "FastAPI backend for Identity Stack"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.115.0,<1",
+    # Capped <0.137: FastAPI 0.137 changed include_router to append a lazy
+    # `_IncludedRouter` proxy to app.routes instead of flattening child routes.
+    # slowapi 0.1.10's SlowAPIMiddleware route matcher only recognizes top-level
+    # routes with an `.endpoint`, so router-included routes become "unmatched" and
+    # SlowAPIMiddleware silently exempts them — disabling default rate limits.
+    # Revisit when slowapi ships a fix for the new inclusion model.
+    "fastapi>=0.115.0,<0.137",
     "uvicorn[standard]>=0.34.0,<1",
     "py-identity-model>=2.1.0,<3",
     "sqlmodel>=0.0.22,<1",
