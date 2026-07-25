@@ -3,17 +3,6 @@ import { cva, type VariantProps } from "class-variance-authority"
 
 import { cn } from "@/lib/utils"
 
-const providerAbbreviations: Record<string, string> = {
-  descope: "DSC",
-  okta: "OKT",
-  auth0: "A0",
-  entra: "ENT",
-  cognito: "COG",
-  google: "GOO",
-  ory: "ORY",
-  generic: "GEN",
-}
-
 const providerGlyphVariants = cva(
   "inline-flex shrink-0 items-center justify-center rounded-lg border font-semibold leading-none",
   {
@@ -30,7 +19,7 @@ const providerGlyphVariants = cva(
         cognito:
           "border-[oklch(0.85_0.10_65)] bg-[oklch(0.97_0.05_65)] text-[oklch(0.42_0.18_65)]",
         google:
-          "border-[oklch(0.86_0.08_30)] bg-[oklch(0.97_0.04_30)] text-[oklch(0.45_0.18_30)]",
+          "border-[oklch(0.86_0.08_130)] bg-[oklch(0.97_0.04_130)] text-[oklch(0.45_0.18_130)]",
         ory:
           "border-[oklch(0.86_0.10_340)] bg-[oklch(0.97_0.05_340)] text-[oklch(0.42_0.20_340)]",
         generic:
@@ -53,6 +42,19 @@ type ProviderType = NonNullable<
   VariantProps<typeof providerGlyphVariants>["provider"]
 >
 
+// Keyed on ProviderType so adding a provider variant without an abbreviation
+// is a compile error — the abbreviation map and the cva variants stay in sync.
+const providerAbbreviations: Record<ProviderType, string> = {
+  descope: "DSC",
+  okta: "OKT",
+  auth0: "A0",
+  entra: "ENT",
+  cognito: "COG",
+  google: "GOO",
+  ory: "ORY",
+  generic: "GEN",
+}
+
 function ProviderGlyph({
   provider = "generic",
   size,
@@ -62,14 +64,16 @@ function ProviderGlyph({
   VariantProps<typeof providerGlyphVariants> & {
     provider?: ProviderType
   }) {
-  const abbreviation = providerAbbreviations[provider] ?? "GEN"
+  // Fallback derives from the map (no hardcoded literal) so it never drifts.
+  const abbreviation =
+    providerAbbreviations[provider] ?? providerAbbreviations.generic
 
   return (
     <span
+      {...props}
       data-slot="provider-glyph"
       data-provider={provider}
       className={cn(providerGlyphVariants({ provider, size }), className)}
-      {...props}
     >
       {abbreviation}
     </span>

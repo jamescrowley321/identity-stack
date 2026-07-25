@@ -82,6 +82,23 @@ describe("ProviderGlyph", () => {
     expect(el).toHaveTextContent("GEN");
   });
 
+  it("applies a distinct background color for each provider", () => {
+    const bgByProvider = new Map<ProviderType, string>();
+    for (const provider of allProviders) {
+      const { container, unmount } = render(
+        <ProviderGlyph provider={provider} />
+      );
+      const el = container.querySelector('[data-slot="provider-glyph"]');
+      expect(el).not.toBeNull();
+      const bg = Array.from(el!.classList).find((c) => c.startsWith("bg-"));
+      expect(bg, `provider "${provider}" must have a bg-* class`).toBeDefined();
+      bgByProvider.set(provider, bg!);
+      unmount();
+    }
+    const uniqueBackgrounds = new Set(bgByProvider.values());
+    expect(uniqueBackgrounds.size).toBe(allProviders.length);
+  });
+
   it("merges custom className", () => {
     const { container } = render(
       <ProviderGlyph provider="auth0" className="custom-class" />
