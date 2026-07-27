@@ -46,8 +46,8 @@ jobs:
       - name: Install dependencies
         run: cd frontend && npm ci
 
-      - name: Run npm audit
-        run: cd frontend && npm audit --omit=dev --audit-level=high
+      - name: Run npm audit (high/critical, with documented allowlist)
+        run: cd frontend && node scripts/audit-allowlist.mjs
 
   gitleaks:
     name: Gitleaks (Secret Scanning)
