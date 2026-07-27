@@ -52,6 +52,27 @@ describe("StreamRow", () => {
     expect(classes.size).toBe(4);
   });
 
+  // AC-1: timestamp is fixed-width monospace. Row carries the mono font and
+  // the timestamp span uses tabular-nums for fixed-width digits. Mutation
+  // guard — removing font-mono or tabular-nums fails this test.
+  it("renders the timestamp as fixed-width monospace", () => {
+    const { container } = render(<StreamRow event={baseEvent} />);
+    expect(container.querySelector('[data-slot="stream-row"]')).toHaveClass(
+      "font-mono",
+    );
+    expect(container.querySelector('[data-slot="stream-ts"]')).toHaveClass(
+      "tabular-nums",
+    );
+  });
+
+  // AC-3: subject is primary text (text-foreground), distinct from the muted
+  // timestamp/code. Mutation guard — changing text-foreground to a muted token
+  // fails this test.
+  it("renders the subject as primary foreground text", () => {
+    render(<StreamRow event={baseEvent} />);
+    expect(screen.getByText(baseEvent.subject)).toHaveClass("text-foreground");
+  });
+
   it("renders the icon node when provided", () => {
     const { container } = render(
       <StreamRow event={{ ...baseEvent, icon: <svg data-testid="glyph" /> }} />,
