@@ -12,6 +12,7 @@ from app.models.document import Document  # noqa: F401
 from app.models.identity.assignment import UserTenantRole  # noqa: F401
 from app.models.identity.provider import Provider  # noqa: F401
 from app.models.identity.role import Permission, Role, RolePermission  # noqa: F401
+from app.models.identity.sync_event import SyncEvent  # noqa: F401
 from app.models.identity.tenant import Tenant  # noqa: F401
 from app.models.identity.user import IdPLink, User  # noqa: F401
 from app.models.tenant import TenantResource  # noqa: F401

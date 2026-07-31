@@ -7,6 +7,10 @@ version: 2
 # with 9 patch/minor bumps in a single PR — too dangerous to merge as a
 # blob, too tedious to split by hand. Now patches/minors flow through
 # normally and majors get their own focused PR with no surprises.
+#
+# cooldown holds back freshly-published releases for a few days so a
+# compromised/yanked version isn't pulled in the moment it lands
+# (supply-chain hardening; also satisfies the Semgrep dependabot-cooldown rule).
 
 updates:
   - package-ecosystem: "pip"
@@ -14,6 +18,8 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
+    cooldown:
+      default-days: 7
     groups:
       python-deps-patch:
         patterns: ["*"]
@@ -30,6 +36,8 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
+    cooldown:
+      default-days: 7
     groups:
       npm-deps-patch:
         patterns: ["*"]
@@ -46,6 +54,8 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
+    cooldown:
+      default-days: 7
     groups:
       actions-patch:
         patterns: ["*"]

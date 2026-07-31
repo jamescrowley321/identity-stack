@@ -54,6 +54,9 @@ class TestUnauthenticatedEndpoints:
             ("GET", "/api/keys"),
             ("GET", "/api/members"),
             ("GET", "/api/providers"),
+            ("GET", "/api/sync/status"),
+            ("GET", "/api/events/recent"),
+            ("GET", "/api/users"),
         ],
     )
     def test_protected_endpoints_return_401(
@@ -168,6 +171,46 @@ class TestAdminEndpoints:
         resp = admin_api_context.get(f"{backend_url}/api/users/{fake_user}/idp-links")
         assert resp.status in (200, 403), f"/api/users/{{id}}/idp-links returned {resp.status}"
 
+    def test_sync_status_responds(self, admin_api_context: APIRequestContext, backend_url: str):
+        """Sync status endpoint responds (200 with operator role, 403 otherwise)."""
+        resp = admin_api_context.get(f"{backend_url}/api/sync/status")
+        assert resp.status in (200, 403), f"/api/sync/status returned {resp.status}"
+        if resp.status == 200:
+            body = resp.json()
+            assert "providers" in body
+            assert isinstance(body["providers"], list)
+            assert "last_reconciliation" in body
+
+    def test_events_recent_responds(self, admin_api_context: APIRequestContext, backend_url: str):
+        """Recent events endpoint responds (200 with operator role, 403 otherwise)."""
+        resp = admin_api_context.get(f"{backend_url}/api/events/recent")
+        assert resp.status in (200, 403), f"/api/events/recent returned {resp.status}"
+        if resp.status == 200:
+            body = resp.json()
+            assert "events" in body
+            assert isinstance(body["events"], list)
+
+    def test_events_recent_rejects_invalid_limit(self, admin_api_context: APIRequestContext, backend_url: str):
+        """Limit out of range returns 422 even before role check on operator endpoint."""
+        resp = admin_api_context.get(f"{backend_url}/api/events/recent?limit=0")
+        assert resp.status in (403, 422), f"/api/events/recent?limit=0 returned {resp.status}"
+        resp = admin_api_context.get(f"{backend_url}/api/events/recent?limit=201")
+        assert resp.status in (403, 422), f"/api/events/recent?limit=201 returned {resp.status}"
+
+    def test_canonical_users_responds(self, admin_api_context: APIRequestContext, backend_url: str):
+        """Canonical users endpoint responds (200 with operator role, 403 otherwise)."""
+        resp = admin_api_context.get(f"{backend_url}/api/users")
+        assert resp.status in (200, 403), f"/api/users returned {resp.status}"
+        if resp.status == 200:
+            body = resp.json()
+            assert "users" in body
+            assert isinstance(body["users"], list)
+
+    def test_canonical_users_rejects_invalid_status(self, admin_api_context: APIRequestContext, backend_url: str):
+        """Unknown status string returns 422."""
+        resp = admin_api_context.get(f"{backend_url}/api/users?status=bogus")
+        assert resp.status in (403, 422), f"/api/users?status=bogus returned {resp.status}"
+
     def test_admin_endpoints_reject_non_admin_token(self, auth_api_context: APIRequestContext, backend_url: str):
         """Admin endpoints return 403 with a valid but non-admin token."""
         admin_only = [
@@ -175,6 +218,9 @@ class TestAdminEndpoints:
             "/api/permissions",
             "/api/members",
             "/api/keys",
+            "/api/sync/status",
+            "/api/events/recent",
+            "/api/users",
         ]
         for path in admin_only:
             resp = auth_api_context.get(f"{backend_url}{path}")

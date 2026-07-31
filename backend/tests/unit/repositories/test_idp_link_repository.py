@@ -15,8 +15,8 @@ import pytest
 
 from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.user import IdPLink, User, UserStatus
+from app.repositories.base import RepositoryConflictError
 from app.repositories.idp_link import IdPLinkRepository
-from app.repositories.user import RepositoryConflictError
 
 pytestmark = pytest.mark.asyncio
 

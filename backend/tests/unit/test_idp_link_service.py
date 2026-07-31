@@ -13,9 +13,10 @@ import pytest
 
 from app.errors.identity import Conflict, NotFound
 from app.models.identity.user import IdPLink
+from app.repositories.base import RepositoryConflictError
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
-from app.repositories.user import RepositoryConflictError, UserRepository
+from app.repositories.user import UserRepository
 from app.services.idp_link import IdPLinkService
 
 

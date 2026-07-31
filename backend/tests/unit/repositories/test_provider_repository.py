@@ -14,8 +14,8 @@ import uuid
 import pytest
 
 from app.models.identity.provider import Provider, ProviderType
+from app.repositories.base import RepositoryConflictError
 from app.repositories.provider import ProviderRepository
-from app.repositories.user import RepositoryConflictError
 
 pytestmark = pytest.mark.asyncio
 

@@ -16,7 +16,8 @@ from opentelemetry import trace
 from app.errors.identity import Conflict, Forbidden, IdentityError, NotFound
 from app.models.identity.user import User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
-from app.repositories.user import RepositoryConflictError, UserRepository
+from app.repositories.base import RepositoryConflictError
+from app.repositories.user import UserRepository
 from app.services.adapters.base import IdentityProviderAdapter, SyncError
 from app.services.cache_invalidation import CacheInvalidationPublisher
 
@@ -330,6 +331,19 @@ class UserService:
                 name=query if query else None,
             )
             return Ok([u.model_dump() for u in users])
+
+    async def list_canonical_users(
+        self,
+        *,
+        status: UserStatus | None = None,
+        limit: int = 50,
+    ) -> list[User]:
+        """List canonical users (cross-tenant) with optional status filter."""
+        with tracer.start_as_current_span("UserService.list_canonical_users") as span:
+            span.set_attribute("users.limit", limit)
+            if status is not None:
+                span.set_attribute("users.status_filter", status.value)
+            return await self._repository.list_filtered(status=status, limit=limit)
 
     @staticmethod
     def _log_sync_failure(

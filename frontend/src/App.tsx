@@ -109,6 +109,7 @@ export default function App() {
         <Route path="members" element={<MemberManagement />} />
         <Route path="fga" element={<FGAManagement />} />
       </Route>
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }

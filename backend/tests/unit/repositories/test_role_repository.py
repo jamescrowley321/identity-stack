@@ -17,8 +17,8 @@ import pytest
 
 from app.models.identity.role import Permission, Role
 from app.models.identity.tenant import Tenant
+from app.repositories.base import RepositoryConflictError
 from app.repositories.role import RoleRepository
-from app.repositories.user import RepositoryConflictError
 
 pytestmark = pytest.mark.asyncio
 

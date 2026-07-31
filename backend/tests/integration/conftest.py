@@ -1,14 +1,17 @@
 """Shared fixtures for integration tests.
 
+Postgres and Redis are provisioned externally by `make test-integration` via
+docker-compose.test.yml and reached via TEST_DATABASE_URL / TEST_REDIS_URL
+(or DATABASE_URL / REDIS_URL). Descope fixtures pull live tokens from the
+project pointed to by the Descope env vars.
+
 Three fixture groups:
-1. Descope fixtures — for live integration tests against a Descope instance
-2. Postgres fixtures — testcontainers-based real Postgres with Alembic migrations
-3. Redis fixtures — testcontainers-based real Redis for cache tests
+1. Descope — live OIDC/management tokens (requires env vars)
+2. Postgres — pre-provisioned via compose; Alembic runs once per session
+3. Redis — pre-provisioned via compose
 """
 
 import os
-
-os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost:5432/testdb")
 
 import pytest
 import pytest_asyncio
@@ -22,7 +25,6 @@ from py_identity_model import (
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
-from testcontainers.postgres import PostgresContainer
 
 
 def _require_env(name: str) -> str:
@@ -100,27 +102,20 @@ async def client():
 
 
 # ──────────────────────────────────────────────
-# Testcontainers Postgres fixtures (AC-1.5.5)
+# Postgres fixtures (provisioned via docker-compose.test.yml)
 # ──────────────────────────────────────────────
 
 
 @pytest.fixture(scope="session")
-def postgres_container():
-    """Start a real Postgres container for the test session."""
-    with PostgresContainer("postgres:16-alpine") as pg:
-        yield pg
-
-
-@pytest.fixture(scope="session")
-def postgres_url(postgres_container):
-    """Async-compatible connection URL for the testcontainers Postgres instance."""
-    from urllib.parse import urlparse, urlunparse
-
-    sync_url = postgres_container.get_connection_url()
-    parsed = urlparse(sync_url)
-    # Replace any sync scheme (postgresql+psycopg2, postgresql, etc.) with asyncpg
-    async_url = urlunparse(parsed._replace(scheme="postgresql+asyncpg"))
-    return async_url
+def postgres_url() -> str:
+    url = os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL")
+    if not url:
+        pytest.skip(
+            "TEST_DATABASE_URL (or DATABASE_URL) not set — bring up test stack with "
+            "`docker compose -f docker-compose.test.yml up -d --wait` and set "
+            "TEST_DATABASE_URL=postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test"
+        )
+    return url
 
 
 @pytest.fixture(scope="session")
@@ -190,26 +185,22 @@ def noop_adapter():
 
 
 # ──────────────────────────────────────────────
-# Testcontainers Redis fixtures (AC-4.4.4)
+# Redis fixtures (provisioned via docker-compose.test.yml)
 # ──────────────────────────────────────────────
 
 
-@pytest.fixture(scope="session")
-def redis_container():
-    """Start a real Redis container for the test session."""
-    from testcontainers.redis import RedisContainer
-
-    with RedisContainer("redis:7-alpine") as rc:
-        yield rc
-
-
 @pytest_asyncio.fixture(loop_scope="session")
-async def redis_client(redis_container):
-    """Async Redis client connected to the testcontainers Redis instance."""
+async def redis_client():
+    """Async Redis client connected to the pre-provisioned test Redis."""
     from redis.asyncio import Redis
 
-    host = redis_container.get_container_host_ip()
-    port = redis_container.get_exposed_port(6379)
-    client = Redis(host=host, port=int(port), decode_responses=True)
+    url = os.environ.get("TEST_REDIS_URL") or os.environ.get("REDIS_URL")
+    if not url:
+        pytest.skip(
+            "TEST_REDIS_URL (or REDIS_URL) not set — bring up test stack with "
+            "`docker compose -f docker-compose.test.yml up -d --wait` and set "
+            "TEST_REDIS_URL=redis://localhost:16379/0"
+        )
+    client = Redis.from_url(url, decode_responses=True)
     yield client
     await client.aclose()
