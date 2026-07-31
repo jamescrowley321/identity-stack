@@ -20,6 +20,13 @@ updates:
     open-pull-requests-limit: 10
     cooldown:
       default-days: 7
+    ignore:
+      # fastapi >=0.137 regresses slowapi rate limiting — the limiter returns
+      # 200 instead of 429 (test_rate_limiting.py: 5 tests assert 429). Held at
+      # <0.137 in backend/pyproject.toml. Revisit when the rate-limiting
+      # middleware is adapted to the newer fastapi/starlette. See closed PR #329.
+      - dependency-name: "fastapi"
+        versions: [">=0.137"]
     groups:
       python-deps-patch:
         patterns: ["*"]
