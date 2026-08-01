@@ -1,50 +1,59 @@
 # Identity Stack
 
-A comprehensive reference project demonstrating identity platform features using vendor-agnostic libraries.
+A comprehensive reference project demonstrating a provider-independent identity platform — a canonical Postgres identity store with pluggable identity-provider adapters, built on vendor-agnostic libraries (py-identity-model, terraform-provider-descope).
 
 ## Architecture
 
 ```
 ┌────────────────────────────────────┐
-│  React Frontend (Vite + TS)        │
-│  - Tailwind CSS v4 + shadcn/ui    │
-│  - Sidebar layout + dark mode     │
+│  React 19 Frontend (Vite + TS)     │
+│  - Tailwind CSS v4 + shadcn/ui     │
+│  - Sidebar layout + dark mode      │
 │  - react-oidc-context (OIDC auth)  │
 │  - Tenant-aware routing            │
 │  - Role-based UI rendering         │
 └───────────────┬────────────────────┘
                 │ REST API
 ┌───────────────▼────────────────────┐
-│  FastAPI Backend (Python)          │
+│  FastAPI Backend (Python 3.12+)    │
 │  - py-identity-model (token authN) │
-│  - RBAC middleware (authZ)         │
+│  - RBAC + Descope FGA (authZ)      │
+│  - Canonical identity store +      │
+│    IdP sync adapters (PRD 5)       │
 │  - Multi-tenant data isolation     │
-└───────────────┬────────────────────┘
-                │
-┌───────────────▼────────────────────┐
-│  Terraform (IaC)                   │
-│  - terraform-provider-descope      │
-│    (jamescrowley321 fork)          │
-│  - Provisions entire Descope       │
-│    project config                  │
-└────────────────────────────────────┘
+└───────┬───────────────────┬────────┘
+        │                   │
+┌───────▼────────┐  ┌───────▼─────────────┐
+│  PostgreSQL    │  │  Terraform (IaC)    │
+│  Canonical     │  │  terraform-         │
+│  identity      │  │  provider-descope   │
+│  store         │  │  (fork) provisions  │
+│                │  │  Descope config     │
+└────────────────┘  └─────────────────────┘
 ```
+
+Identity providers are **sync targets** behind an adapter interface: API-originated writes go to Postgres first, then sync to the provider; out-of-band changes (console edits, SCIM) arrive via webhooks and reconciliation. Swapping or adding a provider means implementing one adapter — not rewriting the application.
 
 ## Tech Stack
 
 | Layer | Technology | Purpose |
 |---|---|---|
-| Frontend | React + Vite + TypeScript | SPA |
+| Frontend | React 19 + Vite + TypeScript | SPA |
 | UI Framework | Tailwind CSS v4 + shadcn/ui (Radix) | Design system and components |
+| Routing | React Router 7 | Client-side routing |
 | Auth (Frontend) | react-oidc-context + oidc-client-ts | Vendor-agnostic OIDC |
-| Backend | FastAPI | REST API |
-| Auth (Backend) | py-identity-model | Vendor-agnostic token validation |
-| IaC | Terraform + descope provider | Descope project configuration |
+| Backend | FastAPI (Python 3.12+) | REST API |
+| Auth (Backend) | py-identity-model (>=2.1.0,<4) | Vendor-agnostic token validation |
+| Data | PostgreSQL + SQLModel / SQLAlchemy 2 + Alembic | Canonical identity store, migrations |
+| Observability | OpenTelemetry | Tracing and metrics |
+| IaC | Terraform + descope provider (fork) | Descope project configuration |
+| Testing | Vitest (frontend) · pytest + Playwright (backend) | Unit and E2E |
 
 ## Prerequisites
 
 - Node.js 22+
 - Python 3.12+
+- PostgreSQL 15+ (or use Docker Compose, which provisions it)
 - Go 1.22+ (for building the Terraform provider)
 - Terraform 1.5+
 - A Descope account with a management key
@@ -169,6 +178,22 @@ All access key operations require owner/admin role and verify the key belongs to
 | DELETE | `/api/members/{id}` | Remove a member permanently |
 
 Tenant isolation is enforced via the `dct` (Descope current tenant) JWT claim. Users can only access resources belonging to their active tenant.
+
+### Canonical Identity & Provider Sync (PRD 5)
+
+The backend owns a canonical Postgres identity store; identity providers are sync targets behind an adapter interface. These endpoints manage the canonical model and its provider integrations:
+
+| Area | Router | Description |
+|------|--------|-------------|
+| Providers | `providers` | Register/list IdP configurations and claim mappings |
+| Canonical Users | `canonical_users` | Canonical user records with multi-provider identity links |
+| IdP Links | `idp_links` | Link/unlink runtime sign-ins to canonical users |
+| Sync Status | `sync_status` | Per-entity sync state and drift detection |
+| Reconciliation | `reconciliation` | Reconcile out-of-band provider changes (console edits, SCIM) |
+
+Fine-grained authorization (ReBAC) is proxied to Descope FGA via the `/api/fga` endpoints and enforced with `require_fga(...)` dependencies.
+
+> **Frontend note:** the admin UI for these areas (Providers, Sync Dashboard, Inbound Events, Identity Correlation, Provisional Users) is being built under PRD 5b — the backend surface is live; the pages are in progress.
 
 ### RBAC
 
