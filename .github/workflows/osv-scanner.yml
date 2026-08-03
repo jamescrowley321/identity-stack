@@ -3,24 +3,23 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main, ci/security-tier2]
+    branches: [main]
   schedule:
     - cron: "47 7 * * 1" # weekly Mon 07:47 UTC
 permissions: {}
 jobs:
-  scan-pr:
-    if: ${{ github.event_name == 'pull_request' }}
-    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
-    permissions:
-      security-events: write
-      contents: read
-      actions: read
-    with:
-      # Upload per-PR results to the Security tab without failing the check on
-      # the repo's pre-existing advisories (matches scan-scheduled).
-      fail-on-vuln: false
-  scan-scheduled:
-    if: ${{ github.event_name != 'pull_request' }}
+  # Full OSV scan on PRs, pushes to main, and weekly. Uploads a SARIF report to
+  # the Security tab (code scanning) on every run. fail-on-vuln: false so the
+  # repo's pre-existing npm/pip advisories surface as findings without redding
+  # PRs or main.
+  #
+  # NOTE: the diff-gating osv-scanner-reusable-pr.yml is intentionally not used.
+  # On a repo with pre-existing advisories its caller check reports failure even
+  # when a PR introduces no new vulnerabilities (the reusable-workflow job
+  # inherits the failed outcome of its base/head scan steps), which no input can
+  # suppress. The full-scan reusable workflow below achieves the same
+  # Security-tab coverage while staying green.
+  scan:
     uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
     permissions:
       security-events: write
