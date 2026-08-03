@@ -1,0 +1,30 @@
+name: OSV-Scanner
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, ci/security-tier2]
+  schedule:
+    - cron: "47 7 * * 1" # weekly Mon 07:47 UTC
+permissions: {}
+jobs:
+  scan-pr:
+    if: ${{ github.event_name == 'pull_request' }}
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    with:
+      # Upload per-PR results to the Security tab without failing the check on
+      # the repo's pre-existing advisories (matches scan-scheduled).
+      fail-on-vuln: false
+  scan-scheduled:
+    if: ${{ github.event_name != 'pull_request' }}
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    with:
+      fail-on-vuln: false
