@@ -1,0 +1,50 @@
+name: CodeQL
+
+# GitHub's dataflow SAST. Complements the Semgrep scan in security.yml with
+# deeper interprocedural analysis; results land in the repository Security tab
+# (code scanning). Both languages here are interpreted, so build-mode: none is
+# used and no toolchain setup is needed before init. Actions pinned to SHA
+# (tag in comment); Dependabot bumps them. See ci.yml.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "24 6 * * 1" # Weekly Monday 06:24 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write # upload results to code scanning
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # backend/ FastAPI service
+          - language: python
+            build-mode: none
+          # frontend/ Vite + React app
+          - language: javascript-typescript
+            build-mode: none
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4
+        with:
+          category: "/language:${{ matrix.language }}"
