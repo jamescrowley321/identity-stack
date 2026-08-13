@@ -43,7 +43,7 @@ Identity providers are **sync targets** behind an adapter interface: API-origina
 | Routing | React Router 7 | Client-side routing |
 | Auth (Frontend) | react-oidc-context + oidc-client-ts | Vendor-agnostic OIDC |
 | Backend | FastAPI (Python 3.12+) | REST API |
-| Auth (Backend) | py-identity-model (>=2.1.0,<4) | Vendor-agnostic token validation |
+| Auth (Backend) | py-identity-model (>=3.8.5,<4) | Vendor-agnostic token validation; the >=3.8.5 floor pulls cryptography>=50 (PYSEC-2026-3552/3553/3554 fixes) |
 | Data | PostgreSQL + SQLModel / SQLAlchemy 2 + Alembic | Canonical identity store, migrations |
 | Observability | OpenTelemetry | Tracing and metrics |
 | IaC | Terraform + descope provider (fork) | Descope project configuration |
@@ -106,7 +106,7 @@ uvicorn app.main:app --reload
 ```bash
 cd frontend
 cp .env.example .env
-# Edit .env with your DESCOPE_PROJECT_ID
+# Edit .env with your VITE_DESCOPE_PROJECT_ID
 npm install
 npm run dev
 ```
@@ -114,9 +114,12 @@ npm run dev
 ### Or use Docker Compose
 
 ```bash
-# Create a .env in the project root with your Descope credentials:
+# Create a .env in the project root. Required for the stack to start:
+#   POSTGRES_PASSWORD=choose-a-strong-password   # compose ABORTS if this is unset
 #   DESCOPE_PROJECT_ID=your-project-id
 #   DESCOPE_MANAGEMENT_KEY=your-management-key
+# See backend/.env.example for the full set (internal sync + webhook secrets).
+# Gateway mode also needs TYK_GATEWAY_SECRET — see tyk/README.md.
 docker compose up --build
 ```
 
@@ -229,9 +232,9 @@ API endpoints are rate limited via [slowapi](https://github.com/laurentS/slowapi
 
 | Tier | Limit | Endpoints |
 |------|-------|-----------|
-| Auth-sensitive | 10/minute | `POST /auth/logout`, `POST /validate-id-token`, `POST /keys`, `POST /members/invite` |
+| Auth-sensitive | 10/minute | `POST /api/auth/logout`, `POST /api/validate-id-token`, `POST /api/keys`, `POST /api/members/invite` |
 | Default | 60/minute | All other API endpoints |
-| Exempt | No limit | `GET /health` |
+| Exempt | No limit | `GET /api/health` |
 
 Rate limits are applied per-route per-key. Authenticated requests are keyed by user `sub` claim; unauthenticated requests are keyed by client IP.
 
@@ -271,6 +274,10 @@ identity-stack/
 │   ├── access_key.tf
 │   ├── tenants.tf     # Default tenant definitions
 │   ├── rbac.tf        # Permissions and role definitions
+│   ├── fga.tf         # Fine-grained authorization (ReBAC) schema
+│   ├── github.tf
+│   ├── variables.tf
+│   ├── outputs.tf
 │   └── environments/
 └── docker-compose.yml
 ```
