@@ -34,6 +34,8 @@ A comprehensive reference project demonstrating a provider-independent identity 
 
 Identity providers are **sync targets** behind an adapter interface: API-originated writes go to Postgres first, then sync to the provider; out-of-band changes (console edits, SCIM) arrive via webhooks and reconciliation. Swapping or adding a provider means implementing one adapter — not rewriting the application.
 
+The backend runs in one of two **deployment modes** (`DEPLOYMENT_MODE`): *standalone* (it validates tokens itself) or *gateway* (a [Tyk](tyk/README.md) gateway terminates auth at the edge). See [docs/deployment.md](docs/deployment.md).
+
 ## Tech Stack
 
 | Layer | Technology | Purpose |
@@ -124,6 +126,31 @@ docker compose up --build
 ```
 
 The frontend is available at http://localhost:3000 and the backend at http://localhost:8000.
+
+### Using the Makefile
+
+`make` is the canonical dev/test entry point (`make help` lists everything):
+
+```bash
+make setup          # install backend + frontend deps
+make dev-backend    # backend dev server (:8000)
+make dev-frontend   # frontend dev server (:3000)
+make dev-gateway    # full stack with the Tyk gateway profile
+make test-all       # lint + unit + frontend + integration
+```
+
+See [docs/local-development.md](docs/local-development.md) for the test stack (ports 15432/16379) and Compose profiles.
+
+## Documentation
+
+Detailed docs live in [`docs/`](docs/):
+
+- [Architecture](docs/architecture.md) — canonical store, deployment modes, sync flows
+- [Local development](docs/local-development.md) — the `make` workflow + test stack
+- [Deployment](docs/deployment.md) — standalone vs. gateway + Terraform
+- [Environment variables](docs/environment-variables.md) — full reference with defaults
+- [Security](docs/security.md) — token validation, RBAC/FGA, headers, rate limiting, CI scanning
+- [Gateway (Tyk)](tyk/README.md) — gateway config + routing
 
 ## API Endpoints
 
