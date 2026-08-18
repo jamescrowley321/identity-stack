@@ -37,7 +37,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
+    "pytest>=9.0.3",
     "anyio[trio]>=4.13.0",
     "pytest-asyncio>=1.3.0",
     "httpx>=0.28",
@@ -71,7 +71,7 @@ markers = [
 dev = [
     "pip-audit>=2.9",
     "pytest-playwright>=0.7.2",
-    "pytest>=8.0",
+    "pytest>=9.0.3",
     "anyio[trio]>=4.13.0",
     "pytest-asyncio>=1.3.0",
     "ruff>=0.9",
