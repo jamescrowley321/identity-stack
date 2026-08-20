@@ -8,6 +8,13 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from app.middleware.providers import (
+    audience_ok,
+    build_provider_configs,
+    infer_single_tenant_dct,
+    select_by_issuer,
+)
+
 logger = logging.getLogger(__name__)
 
 # Allow 30s of clock skew when validating exp — matches typical JWT library defaults.
@@ -24,18 +31,22 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
     so that downstream RBAC dependencies (require_role / require_permission)
     work identically to standalone mode.
 
-    Defense in depth: this middleware ALSO enforces ``exp`` and ``iss`` on
-    every request (and ``aud`` when present), even though Tyk should have
-    done the same. If Tyk is ever silently bypassed, misconfigured, or not
-    in front of the backend — the exact failure mode that went undetected
-    for four days while ``tyk/entrypoint.sh`` was broken (issue #240) —
-    these checks prevent forged or expired tokens from being trusted.
+    Provider-agnostic: the accepted issuers, audience, and claim handling come
+    from the configured provider list (see ``app.middleware.providers``). Descope
+    stays a configured provider; Ory is added by configuration.
 
-    These checks are NOT a substitute for signature verification. If Tyk
-    is not in front in production, a determined attacker can still forge a
-    payload that satisfies ``exp``/``iss``/``aud``. Signature verification
-    remains Tyk's responsibility; this middleware closes the "Tyk silently
-    not running" gap, not the "Tyk running but compromised" gap.
+    Defense in depth: this middleware ALSO enforces ``exp`` and ``iss`` on
+    every request (and ``aud`` when the provider defines one), even though Tyk
+    should have done the same. If Tyk is ever silently bypassed, misconfigured,
+    or not in front of the backend — the failure mode that went undetected for
+    four days while ``tyk/entrypoint.sh`` was broken (issue #240) — these checks
+    prevent forged or expired tokens from being trusted.
+
+    These checks are NOT a substitute for signature verification. If Tyk is not
+    in front in production, a determined attacker can still forge a payload that
+    satisfies ``exp``/``iss``/``aud``. Signature verification remains Tyk's
+    responsibility; this middleware closes the "Tyk silently not running" gap,
+    not the "Tyk running but compromised" gap.
     """
 
     def __init__(
@@ -44,24 +55,16 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
         descope_project_id: str = "",
         excluded_paths: set[str] | None = None,
         excluded_prefixes: set[str] | None = None,
+        ory_issuer_url: str = "",
+        ory_audience: str | None = None,
     ):
         super().__init__(app)
-        self.descope_project_id = descope_project_id
         self.excluded_paths = excluded_paths or set()
         self.excluded_prefixes = tuple(excluded_prefixes) if excluded_prefixes else ()
-        # Accepted issuers mirror TokenValidationMiddleware: Descope emits
-        # two formats depending on the token type (OIDC vs session/access
-        # key). Empty set means issuer validation is skipped, which is
-        # only appropriate for tests without a configured project id.
-        self._accepted_issuers = (
-            frozenset(
-                {
-                    f"https://api.descope.com/{descope_project_id}",
-                    f"https://api.descope.com/v1/apps/{descope_project_id}",
-                }
-            )
-            if descope_project_id
-            else frozenset()
+        self._providers = build_provider_configs(
+            descope_project_id=descope_project_id,
+            ory_issuer_url=ory_issuer_url,
+            ory_audience=ory_audience,
         )
 
     async def dispatch(self, request: Request, call_next):
@@ -103,35 +106,27 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
                 logger.warning("GatewayClaims rejected: exp claim past leeway (exp=%s)", exp)
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
-            # Defense in depth: enforce issuer allow-list when a project
-            # ID is configured. In tests without DESCOPE_PROJECT_ID the
-            # check is skipped (mirrors TokenValidationMiddleware).
-            if self._accepted_issuers:
-                iss = claims.get("iss")
-                if not isinstance(iss, str) or iss not in self._accepted_issuers:
-                    logger.warning("GatewayClaims rejected: iss not in allow-list (iss=%r)", iss)
-                    return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+            # Select the provider by the token's issuer. When no provider enforces
+            # an issuer allow-list (no project id / no Ory configured), this returns
+            # the default provider and issuer validation is skipped — the historical
+            # behavior. Otherwise an unknown/missing issuer is rejected.
+            provider = select_by_issuer(self._providers, claims.get("iss"))
+            if provider is None:
+                logger.warning("GatewayClaims rejected: iss not in allow-list (iss=%r)", claims.get("iss"))
+                return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
-            # Validate audience when present — OIDC tokens include aud,
-            # but Descope session tokens (from access key exchange) do not.
-            if self.descope_project_id and "aud" in claims:
-                aud = claims["aud"]
-                valid_aud = aud == self.descope_project_id or (isinstance(aud, list) and self.descope_project_id in aud)
-                if not valid_aud:
-                    logger.warning("GatewayClaims rejected: aud mismatch (aud=%r)", aud)
-                    return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+            # Validate audience when the provider defines one and the token carries
+            # it — OIDC tokens include aud, but Descope session tokens do not.
+            if provider.audience and "aud" in claims and not audience_ok(claims["aud"], provider.audience):
+                logger.warning("GatewayClaims rejected: aud mismatch (aud=%r)", claims["aud"])
+                return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
-            # For access key tokens: the exchange endpoint sets `tenants`
-            # but not `dct` (current tenant).  When there is exactly one
-            # tenant association, infer `dct` so downstream RBAC checks
-            # (require_role / require_permission) work.
-            if not claims.get("dct") and isinstance(claims.get("tenants"), dict):
-                tenants = claims["tenants"]
-                if len(tenants) == 1:
-                    claims["dct"] = next(iter(tenants))
+            # Descope access-key tokens set `tenants` but not `dct`; infer the
+            # current tenant when there is exactly one. No-op for Ory.
+            infer_single_tenant_dct(claims, provider)
 
             request.state.claims = claims
-            request.state.principal = to_principal(claims, "Descope")
+            request.state.principal = to_principal(claims, provider.name)
             request.state.tenant_id = claims.get("dct")
         except Exception:
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)

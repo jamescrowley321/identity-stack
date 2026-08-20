@@ -1,42 +1,59 @@
+import logging
+
 from py_identity_model import TokenValidationConfig, to_principal
 from py_identity_model.aio import validate_token
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from app.middleware.providers import (
+    audience_ok,
+    build_provider_configs,
+    infer_single_tenant_dct,
+    order_candidates,
+    unverified_issuer,
+)
+
+logger = logging.getLogger(__name__)
+
 
 class TokenValidationMiddleware(BaseHTTPMiddleware):
-    """Validates Descope JWTs on protected routes using py-identity-model.
+    """Validates OIDC JWTs on protected routes using py-identity-model.
 
-    Accepts both OIDC tokens (from client credentials flow) and Descope session
-    JWTs (from access key exchange, OTP, etc.). These use different issuer formats:
-      - OIDC / ID tokens: https://api.descope.com/{project_id}
-      - Session / access tokens: https://api.descope.com/v1/apps/{project_id}
-    Both are signed by the same project JWKS keys.
+    Provider-agnostic: the accepted issuers, discovery address, audience, and
+    claim handling come from the configured provider list (see
+    ``app.middleware.providers``) rather than being hardcoded to Descope. Descope
+    stays a configured provider; Ory (or any OIDC provider) is added by
+    configuration, not new validation code.
 
-    Note: The dual-issuer behavior is non-compliant with OIDC specs (OpenID Connect
-    Core 3.1.3.7, Discovery 1.0 §3) which require the token ``iss`` claim to exactly
-    match the discovery document ``issuer``. We work around this by disabling PyJWT's
-    issuer check and validating manually against both known formats.
+    For each request the middleware selects a provider by the token's issuer,
+    validates the signature against **that provider's** JWKS, then enforces the
+    provider's issuer allow-list and audience. Selecting the JWKS by the token's
+    (unverified) issuer is safe because the signature is always verified against
+    the selected provider's keys — a token claiming another issuer but signed with
+    a foreign key fails verification.
+
+    Descope specifics preserved: two issuer formats (OIDC vs session/access-key),
+    ``aud`` omitted on access-key tokens, and single-tenant ``dct`` inference.
+    Ory tokens are standard OIDC and carry no ``dct``/``tenants``.
     """
 
     def __init__(
         self,
         app,
-        descope_project_id: str,
+        descope_project_id: str = "",
         excluded_paths: set[str] | None = None,
         excluded_prefixes: set[str] | None = None,
+        ory_issuer_url: str = "",
+        ory_audience: str | None = None,
     ):
         super().__init__(app)
-        self.descope_project_id = descope_project_id
         self.excluded_paths = excluded_paths or set()
         self.excluded_prefixes = tuple(excluded_prefixes) if excluded_prefixes else ()
-        self.disco_address = f"https://api.descope.com/{descope_project_id}/.well-known/openid-configuration"
-        self._accepted_issuers = frozenset(
-            {
-                f"https://api.descope.com/{descope_project_id}",
-                f"https://api.descope.com/v1/apps/{descope_project_id}",
-            }
+        self._providers = build_provider_configs(
+            descope_project_id=descope_project_id,
+            ory_issuer_url=ory_issuer_url,
+            ory_audience=ory_audience,
         )
 
     async def dispatch(self, request: Request, call_next):
@@ -50,45 +67,47 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
         token = auth_header.removeprefix("Bearer ")
 
         try:
-            config = TokenValidationConfig(
-                perform_disco=True,
-                audience=self.descope_project_id,
-                # Disable PyJWT's strict issuer and audience checks; we
-                # validate manually below. Descope session tokens (from
-                # access key exchange) use a different issuer format and
-                # omit the aud claim entirely.
-                options={"verify_iss": False, "verify_aud": False},
-            )
-            claims = await validate_token(
-                jwt=token,
-                token_validation_config=config,
-                disco_doc_address=self.disco_address,
-            )
-            # Validate issuer against accepted Descope formats when a
-            # project ID is configured (in tests without DESCOPE_PROJECT_ID,
-            # issuer validation is skipped since we can't determine the
-            # expected value)
-            if self.descope_project_id and "iss" in claims and claims["iss"] not in self._accepted_issuers:
-                return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
-            # Validate audience when present — OIDC tokens include aud,
-            # but Descope session tokens (from access key exchange) do not.
-            if self.descope_project_id and "aud" in claims:
-                aud = claims["aud"]
-                valid_aud = aud == self.descope_project_id or (isinstance(aud, list) and self.descope_project_id in aud)
-                if not valid_aud:
+            iss_hint = unverified_issuer(token)
+            for provider in order_candidates(self._providers, iss_hint):
+                # Validate the signature against this provider's JWKS. Issuer and
+                # audience are checked manually below (Descope disables the library
+                # checks because session tokens use a non-discovery issuer and omit
+                # aud); Ory could use the library checks, but the manual path is
+                # uniform and equivalent.
+                config = TokenValidationConfig(
+                    perform_disco=True,
+                    audience=provider.audience or "",
+                    options={"verify_iss": False, "verify_aud": False},
+                )
+                try:
+                    claims = await validate_token(
+                        jwt=token,
+                        token_validation_config=config,
+                        disco_doc_address=provider.disco_address,
+                    )
+                except Exception:
+                    # Wrong provider (signature verified against the wrong JWKS) or
+                    # an invalid token — try the next configured provider.
+                    logger.debug("token did not validate against provider %s; trying next", provider.name)
+                    continue
+
+                # Issuer allow-list: when the token carries an ``iss`` that this
+                # provider does not accept, it belongs to a different provider —
+                # try the next. (Absent ``iss`` keeps the historical lenient path.)
+                if provider.accepted_issuers and "iss" in claims and claims["iss"] not in provider.accepted_issuers:
+                    continue
+
+                # Audience: enforce when the provider defines one and the token
+                # carries ``aud`` (Descope session tokens omit it).
+                if provider.audience and "aud" in claims and not audience_ok(claims["aud"], provider.audience):
                     return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
-            # For access key tokens: the exchange endpoint sets `tenants`
-            # but not `dct` (current tenant).  When there is exactly one
-            # tenant association, infer `dct` so downstream RBAC checks
-            # (require_role / require_permission) work.
-            if not claims.get("dct") and isinstance(claims.get("tenants"), dict):
-                tenants = claims["tenants"]
-                if len(tenants) == 1:
-                    claims["dct"] = next(iter(tenants))
-            request.state.claims = claims
-            request.state.principal = to_principal(claims, "Descope")
-            request.state.tenant_id = claims.get("dct")
+
+                infer_single_tenant_dct(claims, provider)
+                request.state.claims = claims
+                request.state.principal = to_principal(claims, provider.name)
+                request.state.tenant_id = claims.get("dct")
+                return await call_next(request)
+
+            return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
         except Exception:
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
-
-        return await call_next(request)

@@ -35,6 +35,8 @@ def _build_app(
     excluded_paths: set[str] | None = None,
     excluded_prefixes: set[str] | None = None,
     descope_project_id: str = "",
+    ory_issuer_url: str = "",
+    ory_audience: str | None = None,
 ) -> FastAPI:
     """Build a minimal FastAPI app with GatewayClaimsMiddleware."""
     app = FastAPI()
@@ -45,6 +47,7 @@ def _build_app(
             {
                 "claims": request.state.claims,
                 "has_principal": request.state.principal is not None,
+                "auth_type": request.state.principal.identity.authentication_type,
                 "tenant_id": request.state.tenant_id,
             }
         )
@@ -58,8 +61,70 @@ def _build_app(
         descope_project_id=descope_project_id,
         excluded_paths=excluded_paths or {"/api/health"},
         excluded_prefixes=excluded_prefixes,
+        ory_issuer_url=ory_issuer_url,
+        ory_audience=ory_audience,
     )
     return app
+
+
+ORY_ISSUER = "https://inspiring-nash-yli2uiwmcw.projects.oryapis.com"
+
+
+class TestOryProvider:
+    """Gateway-mode support for Ory tokens (standard OIDC, no dct/tenants)."""
+
+    @pytest.mark.anyio
+    async def test_ory_token_accepted_and_attributed(self):
+        app = _build_app(ory_issuer_url=ORY_ISSUER)
+        token = _make_token({"sub": "ory-user", "iss": ORY_ISSUER})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["auth_type"] == "Ory"
+        assert data["tenant_id"] is None
+
+    @pytest.mark.anyio
+    async def test_ory_does_not_infer_dct(self):
+        app = _build_app(ory_issuer_url=ORY_ISSUER)
+        token = _make_token({"sub": "u", "iss": ORY_ISSUER, "tenants": {"t-only": {}}})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 200
+        assert resp.json()["tenant_id"] is None
+
+    @pytest.mark.anyio
+    async def test_ory_audience_mismatch_rejected(self):
+        app = _build_app(ory_issuer_url=ORY_ISSUER, ory_audience="identity-stack")
+        token = _make_token({"sub": "u", "iss": ORY_ISSUER, "aud": "someone-else"})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 401
+
+    @pytest.mark.anyio
+    async def test_unknown_issuer_rejected_when_providers_configured(self):
+        app = _build_app(descope_project_id="P123", ory_issuer_url=ORY_ISSUER)
+        token = _make_token({"sub": "u", "iss": "https://evil.example.com"})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 401
+
+    @pytest.mark.anyio
+    async def test_descope_and_ory_route_by_issuer(self):
+        app = _build_app(descope_project_id="P123", ory_issuer_url=ORY_ISSUER)
+        descope_token = _make_token(
+            {"sub": "d", "iss": "https://api.descope.com/P123", "dct": "t1", "tenants": {"t1": {}}}
+        )
+        ory_token = _make_token({"sub": "o", "iss": ORY_ISSUER})
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            d_resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {descope_token}"})
+            o_resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {ory_token}"})
+        assert d_resp.status_code == 200
+        assert d_resp.json()["auth_type"] == "Descope"
+        assert d_resp.json()["tenant_id"] == "t1"
+        assert o_resp.status_code == 200
+        assert o_resp.json()["auth_type"] == "Ory"
+        assert o_resp.json()["tenant_id"] is None
 
 
 @pytest.fixture
