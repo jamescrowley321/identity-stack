@@ -1,0 +1,17 @@
+# Never commit Terraform state (contains the project API key + other secrets) or local provider caches.
+.terraform/
+*.tfstate
+# Saved plans can embed sensitive values
+tfplan
+*.tfplan
+*.tfstate.*
+crash.log
+crash.*.log
+# Local var files that may hold secrets/overrides
+*.auto.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.env
+.env.*
