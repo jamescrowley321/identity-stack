@@ -147,12 +147,19 @@ def configure_middleware(app: FastAPI) -> None:
     excluded_prefixes = {
         "/api/internal/",
     }
+    # Ory is added as a configured provider when ORY_ISSUER_URL is set; Descope
+    # stays configured via DESCOPE_PROJECT_ID. Both middlewares select a provider
+    # by the token's issuer (see app.middleware.providers).
+    ory_issuer_url = os.getenv("ORY_ISSUER_URL", "")
+    ory_audience = os.getenv("ORY_AUDIENCE") or None
     if DEPLOYMENT_MODE == "standalone":
         app.add_middleware(
             TokenValidationMiddleware,
             descope_project_id=os.getenv("DESCOPE_PROJECT_ID", ""),
             excluded_paths=excluded_paths,
             excluded_prefixes=excluded_prefixes,
+            ory_issuer_url=ory_issuer_url,
+            ory_audience=ory_audience,
         )
         logger.info("Middleware included: TokenValidationMiddleware")
     else:
@@ -161,6 +168,8 @@ def configure_middleware(app: FastAPI) -> None:
             descope_project_id=os.getenv("DESCOPE_PROJECT_ID", ""),
             excluded_paths=excluded_paths,
             excluded_prefixes=excluded_prefixes,
+            ory_issuer_url=ory_issuer_url,
+            ory_audience=ory_audience,
         )
         logger.info("Middleware included: GatewayClaimsMiddleware")
 
