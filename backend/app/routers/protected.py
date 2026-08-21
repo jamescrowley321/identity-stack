@@ -10,6 +10,7 @@ from app.dependencies.identity import (
     get_identity_provisioning_service,
     get_identity_resolution_service,
 )
+from app.errors.identity import NotFound, ValidationError
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
@@ -83,10 +84,18 @@ async def canonical_identity(
             provider_name=provider_name,
             sub=sub,
             email=claims.get("email", ""),
+            email_verified=bool(claims.get("email_verified", False)),
             given_name=claims.get("given_name", ""),
             family_name=claims.get("family_name", ""),
         )
         if provisioned.is_error():
+            err = provisioned.error
+            if isinstance(err, ValidationError):
+                # Missing/unverified email in the token — a client-side problem.
+                raise HTTPException(status_code=400, detail="A verified email is required to provision an identity")
+            if isinstance(err, NotFound):
+                # The provider isn't registered server-side — misconfiguration.
+                raise HTTPException(status_code=500, detail="Identity provider not configured")
             raise HTTPException(status_code=409, detail="Could not provision identity")
         result = await resolver.resolve(provider=provider_name, sub=sub)
 
