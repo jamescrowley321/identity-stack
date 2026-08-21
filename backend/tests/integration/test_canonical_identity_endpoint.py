@@ -67,7 +67,13 @@ async def _seed_ory(db_session):
 @pytest.mark.asyncio
 async def test_first_login_jit_provisions_and_returns_canonical_identity(db_session):
     await _seed_ory(db_session)
-    claims = {"sub": "ory-http-1", "email": "http@example.com", "given_name": "Http", "family_name": "User"}
+    claims = {
+        "sub": "ory-http-1",
+        "email": "http@example.com",
+        "email_verified": True,
+        "given_name": "Http",
+        "family_name": "User",
+    }
     app = _build_app(db_session, claims, auth_type="Ory")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
@@ -108,3 +114,22 @@ async def test_missing_subject_returns_401(db_session):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         resp = await c.get("/api/identity")
     assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_unverified_email_cannot_take_over_existing_user_via_endpoint(db_session):
+    """A token asserting a victim's email WITHOUT email_verified must fail closed
+    (400) and must not link the attacker's Ory subject to the victim."""
+    from app.models.identity.user import User, UserStatus
+
+    await _seed_ory(db_session)
+    victim = User(email="victim@corp.com", user_name="victim@corp.com", status=UserStatus.active)
+    db_session.add(victim)
+    await db_session.flush()
+
+    claims = {"sub": "ory|attacker", "email": "victim@corp.com"}  # no email_verified
+    app = _build_app(db_session, claims, auth_type="Ory")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.get("/api/identity")
+    assert resp.status_code == 400
+    assert await IdPLinkRepository(db_session).get_by_provider_name_and_sub("ory", "ory|attacker") is None

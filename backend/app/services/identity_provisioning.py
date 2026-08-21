@@ -71,14 +71,18 @@ class IdentityProvisioningService:
         provider_name: str,
         sub: str,
         email: str,
+        email_verified: bool = False,
         given_name: str = "",
         family_name: str = "",
     ) -> Result[uuid.UUID, IdentityError]:
         """Ensure a canonical user exists for (provider, sub). Returns the user id.
 
-        If a link already exists, returns its user id (idempotent). Otherwise
-        creates the user (or reuses an existing user with the same email), the
-        idp_link, and a default tenant/role assignment.
+        Fails closed on identity: an existing link short-circuits (idempotent);
+        otherwise a **verified** email is required. Linking a new provider identity
+        to an existing canonical user is done only on a verified email — never on a
+        self-asserted, unverified one — which is the account-takeover guard. When no
+        user with that email exists, a new user is created and assigned a default
+        tenant + a tenant-scoped default role.
         """
         with tracer.start_as_current_span(
             "IdentityProvisioningService.provision",
@@ -87,54 +91,67 @@ class IdentityProvisioningService:
             provider = await self._provider_repository.get_by_name(provider_name)
             if provider is None:
                 return Error(NotFound(f"Provider '{provider_name}' not found"))
+            # Capture the id BEFORE any rollback below. A rolled-back session
+            # expires loaded instances, and touching provider.id afterwards would
+            # trigger a lazy refresh that raises MissingGreenlet under async.
+            provider_id = provider.id
 
-            existing = await self._idp_link_repository.get_by_provider_and_sub(provider.id, sub)
+            existing = await self._idp_link_repository.get_by_provider_and_sub(provider_id, sub)
             if existing is not None:
                 return Ok(existing.user_id)
 
+            # Account-takeover guard: never create or link on an unverified email.
+            # An attacker who asserts a victim's (unverified) email must not be
+            # linked to the victim's canonical user.
             if not email:
-                return Error(ValidationError("email is required for just-in-time provisioning"))
+                return Error(ValidationError("A verified email is required for just-in-time provisioning"))
+            if not email_verified:
+                return Error(ValidationError("email_verified must be true for just-in-time provisioning"))
 
-            try:
-                tenant = await self._get_or_create_tenant(self._default_tenant_name)
-                role = await self._get_or_create_role(self._default_role_name)
+            # Retry once to absorb a first-login bootstrap race between two distinct
+            # new subjects on the shared default tenant/role (unique names).
+            for _ in range(2):
+                try:
+                    tenant = await self._get_or_create_tenant(self._default_tenant_name)
+                    role = await self._get_or_create_role(self._default_role_name, tenant.id)
 
-                user = await self._user_repository.get_by_email(email)
-                if user is None:
-                    user = User(
-                        email=email,
-                        user_name=email,
-                        given_name=given_name,
-                        family_name=family_name,
-                        status=UserStatus.active,
+                    user = await self._user_repository.get_by_email(email)
+                    if user is None:
+                        user = User(
+                            email=email,
+                            user_name=email,
+                            given_name=given_name,
+                            family_name=family_name,
+                            status=UserStatus.active,
+                        )
+                        self._session.add(user)
+                        await self._session.flush()
+
+                    self._session.add(
+                        IdPLink(
+                            user_id=user.id,
+                            provider_id=provider_id,
+                            external_sub=sub,
+                            external_email=email,
+                        )
                     )
-                    self._session.add(user)
                     await self._session.flush()
 
-                self._session.add(
-                    IdPLink(
-                        user_id=user.id,
-                        provider_id=provider.id,
-                        external_sub=sub,
-                        external_email=email,
-                    )
-                )
-                await self._session.flush()
+                    if await self._assignment_repository.get(user.id, tenant.id, role.id) is None:
+                        self._session.add(UserTenantRole(user_id=user.id, tenant_id=tenant.id, role_id=role.id))
+                        await self._session.flush()
 
-                if await self._assignment_repository.get(user.id, tenant.id, role.id) is None:
-                    self._session.add(UserTenantRole(user_id=user.id, tenant_id=tenant.id, role_id=role.id))
-                    await self._session.flush()
-
-                await self._session.commit()
-                return Ok(user.id)
-            except IntegrityError:
-                # Concurrent first login for the same subject won the unique
-                # (provider_id, external_sub) race — re-resolve and return it.
-                await self._session.rollback()
-                existing = await self._idp_link_repository.get_by_provider_and_sub(provider.id, sub)
-                if existing is not None:
-                    return Ok(existing.user_id)
-                return Error(Conflict("Concurrent provisioning conflict; please retry"))
+                    await self._session.commit()
+                    return Ok(user.id)
+                except IntegrityError:
+                    await self._session.rollback()
+                    # Concurrent same-subject login won the unique
+                    # (provider_id, external_sub) race — return the winner's user.
+                    existing = await self._idp_link_repository.get_by_provider_and_sub(provider_id, sub)
+                    if existing is not None:
+                        return Ok(existing.user_id)
+                    # Otherwise a bootstrap race on the default tenant/role — retry.
+            return Error(Conflict("Could not provision identity after retry; please retry"))
 
     async def _get_or_create_tenant(self, name: str) -> Tenant:
         tenant = await self._tenant_repository.get_by_name(name)
@@ -145,11 +162,17 @@ class IdentityProvisioningService:
         await self._session.flush()
         return tenant
 
-    async def _get_or_create_role(self, name: str) -> Role:
-        role = await self._role_repository.get_by_name(name, tenant_id=None)
+    async def _get_or_create_role(self, name: str, tenant_id: uuid.UUID) -> Role:
+        # Tenant-scoped (not global): the default role's permissions apply only
+        # within the default tenant, bounding blast radius.
+        role = await self._role_repository.get_by_name(name, tenant_id=tenant_id)
         if role is not None:
             return role
-        role = Role(name=name, description="Default role assigned on just-in-time provisioning")
+        role = Role(
+            name=name,
+            description="Default role assigned on just-in-time provisioning",
+            tenant_id=tenant_id,
+        )
         self._session.add(role)
         await self._session.flush()
         return role
