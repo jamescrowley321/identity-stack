@@ -50,7 +50,22 @@ These feed the follow-on epics (no secrets among them):
 > workspace API key in the Ory Console → workspace `auth-stack` → Settings → API keys, update the
 > `ORY_WORKSPACE_API_KEY` GitHub secret / HCP var, and delete the old one.
 
-Nothing sensitive is committed: `.gitignore` excludes `*.tfstate`, `.terraform/`, and `tfplan`.
+Nothing sensitive is committed: `.gitignore` excludes `*.tfstate`, `.terraform/`, and `tfplan`; the
+`.terraform.lock.hcl` **is** committed (hash-pins the provider).
+
+## Audience validation (fail-closed)
+
+The backend rejects Ory access tokens whose `aud` doesn't match `ORY_AUDIENCE` (see identity-stack
+token validation). To make that work end to end:
+
+1. This module sets `spa_audience` (default `["https://identity-stack-api"]`) as the client's allowed
+   audience, and `spa_allowed_cors_origins` for the browser token exchange.
+2. The **SPA must request** that audience (oidc-client-ts `extraQueryParams: { audience: … }`) so the
+   issued access token carries a matching `aud` — wired in the frontend epic.
+3. Set backend `ORY_AUDIENCE` to the same value.
+
+The live `identity-stack-dev` client predates this change — **re-apply** (`terraform apply`) to add the
+`audience`/`allowed_cors_origins` before enabling backend audience enforcement.
 
 ## Run it
 

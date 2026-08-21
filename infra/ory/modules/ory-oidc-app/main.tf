@@ -36,6 +36,9 @@ resource "ory_project_config" "this" {
 resource "ory_project_api_key" "tf" {
   project_id = ory_project.this.id
   name       = var.project_api_key_name
+  # Optional expiry (RFC3339). Bounds the lifetime of this project-admin key;
+  # null = non-expiring (rotate manually).
+  expires_at = var.project_api_key_expires_at
 }
 
 # Public SPA client: authorization_code + PKCE, no secret (token_endpoint_auth_method = none).
@@ -51,6 +54,30 @@ resource "ory_oauth2_client" "spa" {
   post_logout_redirect_uris  = var.spa_post_logout_redirect_uris
   scope                      = var.spa_scope
   access_token_strategy      = var.access_token_strategy
+  # Allowed access-token audience(s). The backend fail-closes on this audience
+  # (ORY_AUDIENCE), and the SPA must request it (oidc-client-ts extraQueryParams
+  # `audience`) so issued access tokens carry a matching `aud`.
+  audience = var.spa_audience
+  # CORS origins permitted to call Ory's OAuth2 endpoints from the browser
+  # (the SPA origin(s)) — required for the browser PKCE token exchange.
+  allowed_cors_origins = var.spa_allowed_cors_origins
+
+  lifecycle {
+    precondition {
+      condition = var.environment != "prod" || alltrue([
+        for u in var.spa_redirect_uris : startswith(u, "https://") && !strcontains(u, "localhost")
+      ])
+      error_message = "In prod, every spa_redirect_uris entry must be https and non-localhost."
+    }
+    precondition {
+      condition     = var.environment != "prod" || var.enforce_pkce_public_clients
+      error_message = "In prod, enforce_pkce_public_clients must be true for the public SPA client."
+    }
+    precondition {
+      condition     = var.environment != "prod" || length(var.spa_audience) > 0
+      error_message = "In prod, spa_audience must be set so access tokens carry an aud the backend can validate."
+    }
+  }
 }
 
 # SCIM-aligned identity schema: email (identifier, verification/recovery via email)

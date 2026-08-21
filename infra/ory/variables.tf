@@ -9,3 +9,15 @@ variable "spa_post_logout_redirect_uris" {
   type        = list(string)
   default     = ["http://localhost:3000"]
 }
+
+variable "spa_audience" {
+  description = "Access-token audience the SPA requests and the backend enforces (ORY_AUDIENCE)."
+  type        = list(string)
+  default     = ["https://identity-stack-api"]
+}
+
+variable "spa_allowed_cors_origins" {
+  description = "Browser origins allowed to call Ory OAuth2 endpoints (the SPA origin)."
+  type        = list(string)
+  default     = ["http://localhost:3000"]
+}

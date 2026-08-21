@@ -18,6 +18,8 @@ module "identity_stack_dev" {
   spa_client_name               = "identity-stack SPA (dev)"
   spa_redirect_uris             = var.spa_redirect_uris
   spa_post_logout_redirect_uris = var.spa_post_logout_redirect_uris
+  spa_audience                  = var.spa_audience
+  spa_allowed_cors_origins      = var.spa_allowed_cors_origins
 
   identity_schema_id = "identity_stack_user_v1"
 
