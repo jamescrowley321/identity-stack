@@ -25,6 +25,7 @@ from app.repositories.sync_event import SyncEventRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 from app.services.adapters.descope import DescopeSyncAdapter
+from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
 from app.services.idp_link import IdPLinkService
 from app.services.inbound_sync import InboundSyncService
@@ -237,4 +238,23 @@ async def get_identity_resolution_service(
         role_repository=role_repository,
         tenant_repository=tenant_repository,
         redis_client=request.app.state.redis_client,
+    )
+
+
+async def get_identity_provisioning_service(
+    session: AsyncSession = Depends(get_async_session),
+) -> IdentityProvisioningService:
+    """Build an IdentityProvisioningService (JIT provisioning write path).
+
+    Wiring: AsyncSession -> Provider/IdPLink/User/Tenant/Role/UserTenantRole
+             repositories -> IdentityProvisioningService.
+    """
+    return IdentityProvisioningService(
+        session=session,
+        provider_repository=ProviderRepository(session),
+        idp_link_repository=IdPLinkRepository(session),
+        user_repository=UserRepository(session),
+        tenant_repository=TenantRepository(session),
+        role_repository=RoleRepository(session),
+        assignment_repository=UserTenantRoleRepository(session),
     )
