@@ -1,6 +1,9 @@
 # Never commit Terraform state (contains the project API key + other secrets) or local provider caches.
 .terraform/
 *.tfstate
+# DO commit the provider lock file (hash-pins the provider) — re-include it here
+# because the repo-root .gitignore ignores it globally.
+!.terraform.lock.hcl
 # Saved plans can embed sensitive values
 tfplan
 *.tfplan

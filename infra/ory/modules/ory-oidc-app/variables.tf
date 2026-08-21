@@ -69,6 +69,24 @@ variable "spa_grant_types" {
   default     = ["authorization_code", "refresh_token"]
 }
 
+variable "spa_audience" {
+  description = "Allowed access-token audience(s) for the SPA client. The backend enforces this (ORY_AUDIENCE), and the SPA must request it so tokens carry a matching aud."
+  type        = list(string)
+  default     = []
+}
+
+variable "spa_allowed_cors_origins" {
+  description = "Browser origins allowed to call Ory's OAuth2 endpoints (the SPA origin(s)) — required for the browser PKCE token exchange."
+  type        = list(string)
+  default     = []
+}
+
+variable "project_api_key_expires_at" {
+  description = "Optional RFC3339 expiry for the Terraform-managed project API key. null = non-expiring (rotate manually)."
+  type        = string
+  default     = null
+}
+
 variable "identity_schema_id" {
   description = "Stable id for the project's default identity schema."
   type        = string
