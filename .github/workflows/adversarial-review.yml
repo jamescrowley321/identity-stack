@@ -1,0 +1,136 @@
+# Adversarial Review — fresh-context, diff-only AI PR review that fails the merge
+# on real defects. https://github.com/jamescrowley321/adversarial-review
+#
+# Setup:
+#   1. Add repo secret OPENROUTER_API_KEY (an OpenRouter key with Anthropic access).
+#   2. After the first run, require the "Merge Gate" check in branch protection.
+#
+# Toggle lenses in the ENABLED list in the `config` job — that one list drives
+# BOTH the parallel review matrix AND the gate.
+#
+# The action is pinned to a commit SHA (v1.6.0) for OpenSSF Scorecard.
+
+name: Adversarial Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+
+concurrency:
+  group: adversarial-review-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+  issues: read # the Compliance lens reads the PR thread
+
+jobs:
+  # The ONE place to toggle lenses. Emits the enabled set as a matrix (parallel
+  # review jobs) and a CSV (the gate).
+  config:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+      csv: ${{ steps.pick.outputs.csv }}
+    steps:
+      - id: pick
+        shell: node {0}
+        env:
+          ENABLED: |
+            blind          # logic bugs, footguns (zero context)
+            edge-case      # unhandled branches / boundaries
+            acceptance     # PR acceptance criteria met + tested
+            sentinel       # exploitable security vulnerabilities
+            viper          # red-team attack paths (auth/infra)
+            compliance     # AI-provenance policy + repo rules
+            owasp-web      # OWASP Web Top 10 — this is a web app + API
+            # owasp-llm    # OWASP GenAI/LLM Top 10 — enable if/when LLM features land
+        run: |
+          const NAMES = {
+            blind: "Blind Hunter", "edge-case": "Edge Case Hunter",
+            acceptance: "Acceptance Auditor", sentinel: "Sentinel", viper: "Viper",
+            compliance: "Compliance Auditor", "owasp-web": "OWASP Web Top 10",
+            "owasp-llm": "OWASP LLM Top 10",
+          };
+          const keys = (process.env.ENABLED || "").split("\n")
+            .map((l) => l.replace(/#.*/, "").trim()).filter(Boolean);
+          const include = keys.map((k) => ({ lens: k, name: NAMES[k] || k }));
+          const fs = require("fs");
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify({ include })}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `csv=${keys.join(",")}\n`);
+
+  # Don't spend the paid lenses until the cheap deterministic gates pass. Skips
+  # fork PRs (no secret) and Dependabot.
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: >-
+      github.event.pull_request.head.repo.fork == false &&
+      github.actor != 'dependabot[bot]'
+    permissions:
+      checks: read
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Wait for deterministic checks
+        uses: jamescrowley321/adversarial-review@7d18b99faf7567366b5091deaf1470692d668245 # v1.6.0
+        with:
+          mode: preflight
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # EXACT check-run names (job `name:` values) that must pass first.
+          required_checks: "Lint, Unit Tests, Semgrep (SAST), Gitleaks (Secret Scanning)"
+
+  review:
+    name: ${{ matrix.name }}
+    needs: [config, preflight]
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.config.outputs.matrix) }}
+    steps:
+      - name: ${{ matrix.name }}
+        uses: jamescrowley321/adversarial-review@7d18b99faf7567366b5091deaf1470692d668245 # v1.6.0
+        with:
+          mode: lens
+          lens: ${{ matrix.lens }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          api_key: ${{ secrets.OPENROUTER_API_KEY }}
+          # This is an auth/security app — use the sanctioned quality model for the
+          # security-sensitive lenses. Overridable per repo.
+          model: anthropic/claude-sonnet-5
+          # Enforce OpenRouter routing guardrails on the request (ZDR, price-sort
+          # inside filters) — not just at the account level.
+          models_config: |
+            {
+              "providers": {
+                "openrouter": {
+                  "modelOverrides": {
+                    "anthropic/claude-sonnet-5": {
+                      "compat": { "openRouterRouting": { "sort": "price", "zdr": true } }
+                    }
+                  }
+                }
+              }
+            }
+
+  gate:
+    name: Merge Gate
+    needs: [config, review]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always() && needs.review.result != 'skipped'
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Adjudicate lenses
+        uses: jamescrowley321/adversarial-review@7d18b99faf7567366b5091deaf1470692d668245 # v1.6.0
+        with:
+          mode: gate
+          lenses: ${{ needs.config.outputs.csv }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
