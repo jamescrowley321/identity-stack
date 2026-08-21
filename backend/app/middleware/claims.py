@@ -9,7 +9,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from app.middleware.providers import (
-    audience_ok,
+    audience_rejected,
     build_provider_configs,
     infer_single_tenant_dct,
     select_by_issuer,
@@ -57,6 +57,7 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
         excluded_prefixes: set[str] | None = None,
         ory_issuer_url: str = "",
         ory_audience: str | None = None,
+        ory_require_audience: bool = True,
     ):
         super().__init__(app)
         self.excluded_paths = excluded_paths or set()
@@ -65,6 +66,7 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
             descope_project_id=descope_project_id,
             ory_issuer_url=ory_issuer_url,
             ory_audience=ory_audience,
+            ory_require_audience=ory_require_audience,
         )
 
     async def dispatch(self, request: Request, call_next):
@@ -115,10 +117,10 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
                 logger.warning("GatewayClaims rejected: iss not in allow-list (iss=%r)", claims.get("iss"))
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
-            # Validate audience when the provider defines one and the token carries
-            # it — OIDC tokens include aud, but Descope session tokens do not.
-            if provider.audience and "aud" in claims and not audience_ok(claims["aud"], provider.audience):
-                logger.warning("GatewayClaims rejected: aud mismatch (aud=%r)", claims["aud"])
+            # Audience: fail-closed for providers that require it (Ory); for Descope,
+            # checked only when present (session tokens omit ``aud``).
+            if audience_rejected(claims, provider):
+                logger.warning("GatewayClaims rejected: audience check failed (aud=%r)", claims.get("aud"))
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
             # Descope access-key tokens set `tenants` but not `dct`; infer the

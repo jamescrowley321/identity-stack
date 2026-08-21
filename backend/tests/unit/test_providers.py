@@ -3,9 +3,12 @@
 import base64
 import json
 
+import pytest
+
 from app.middleware.providers import (
     ProviderTokenConfig,
     audience_ok,
+    audience_rejected,
     build_provider_configs,
     descope_config,
     infer_single_tenant_dct,
@@ -43,13 +46,14 @@ class TestDescopeConfig:
 
 class TestOryConfig:
     def test_config_fields(self):
-        cfg = ory_config(ORY_ISSUER)
+        cfg = ory_config(ORY_ISSUER, audience="identity-stack-api")
         assert cfg == ProviderTokenConfig(
             name="Ory",
             accepted_issuers=frozenset({ORY_ISSUER}),
             disco_address=f"{ORY_ISSUER}/.well-known/openid-configuration",
-            audience=None,
+            audience="identity-stack-api",
             infer_single_tenant_dct=False,
+            require_audience=True,
         )
 
     def test_trailing_slash_stripped(self):
@@ -65,12 +69,14 @@ class TestBuildProviderConfigs:
         assert [p.name for p in providers] == ["Descope"]
 
     def test_descope_and_ory(self):
-        providers = build_provider_configs(descope_project_id="P123", ory_issuer_url=ORY_ISSUER)
+        providers = build_provider_configs(
+            descope_project_id="P123", ory_issuer_url=ORY_ISSUER, ory_audience="identity-stack-api"
+        )
         assert [p.name for p in providers] == ["Descope", "Ory"]
         assert providers[1].accepted_issuers == frozenset({ORY_ISSUER})
 
     def test_descope_always_present_even_without_project_id(self):
-        providers = build_provider_configs(ory_issuer_url=ORY_ISSUER)
+        providers = build_provider_configs(ory_issuer_url=ORY_ISSUER, ory_audience="identity-stack-api")
         assert [p.name for p in providers] == ["Descope", "Ory"]
         assert providers[0].accepted_issuers == frozenset()
 
@@ -94,7 +100,9 @@ class TestUnverifiedIssuer:
 
 class TestOrderCandidates:
     def _providers(self):
-        return build_provider_configs(descope_project_id="P123", ory_issuer_url=ORY_ISSUER)
+        return build_provider_configs(
+            descope_project_id="P123", ory_issuer_url=ORY_ISSUER, ory_audience="identity-stack-api"
+        )
 
     def test_hint_matches_returns_only_that_provider(self):
         providers = self._providers()
@@ -118,7 +126,9 @@ class TestOrderCandidates:
     def test_no_hint_orders_configured_first(self):
         # Descope-with-no-pid (empty allow-list) must come AFTER a configured Ory
         # so an opaque/mock token is attributed by its returned issuer.
-        providers = build_provider_configs(descope_project_id="", ory_issuer_url=ORY_ISSUER)
+        providers = build_provider_configs(
+            descope_project_id="", ory_issuer_url=ORY_ISSUER, ory_audience="identity-stack-api"
+        )
         ordered = order_candidates(providers, None)
         assert [p.name for p in ordered] == ["Ory", "Descope"]
 
@@ -129,11 +139,15 @@ class TestSelectByIssuer:
         assert select_by_issuer(providers, None) is providers[0]
 
     def test_matches_ory(self):
-        providers = build_provider_configs(descope_project_id="P123", ory_issuer_url=ORY_ISSUER)
+        providers = build_provider_configs(
+            descope_project_id="P123", ory_issuer_url=ORY_ISSUER, ory_audience="identity-stack-api"
+        )
         assert select_by_issuer(providers, ORY_ISSUER).name == "Ory"
 
     def test_matches_descope_session_issuer(self):
-        providers = build_provider_configs(descope_project_id="P123", ory_issuer_url=ORY_ISSUER)
+        providers = build_provider_configs(
+            descope_project_id="P123", ory_issuer_url=ORY_ISSUER, ory_audience="identity-stack-api"
+        )
         assert select_by_issuer(providers, "https://api.descope.com/v1/apps/P123").name == "Descope"
 
     def test_unknown_issuer_returns_none(self):
@@ -157,6 +171,47 @@ class TestAudienceOk:
 
     def test_list_absent(self):
         assert audience_ok(["other"], "P123") is False
+
+
+class TestRequireAudience:
+    def test_descope_does_not_require_audience(self):
+        assert descope_config("P123").require_audience is False
+
+    def test_ory_requires_audience_by_default(self):
+        assert ory_config(ORY_ISSUER, audience="a").require_audience is True
+
+    def test_build_ory_without_audience_raises(self):
+        with pytest.raises(ValueError, match="ORY_AUDIENCE"):
+            build_provider_configs(descope_project_id="P123", ory_issuer_url=ORY_ISSUER)
+
+    def test_build_ory_with_audience_ok(self):
+        providers = build_provider_configs(ory_issuer_url=ORY_ISSUER, ory_audience="a")
+        assert providers[1].require_audience is True and providers[1].audience == "a"
+
+    def test_build_ory_opt_out_allows_no_audience(self):
+        providers = build_provider_configs(ory_issuer_url=ORY_ISSUER, ory_require_audience=False)
+        assert providers[1].require_audience is False
+
+
+class TestAudienceRejected:
+    def _ory(self):
+        return ory_config(ORY_ISSUER, audience="api")
+
+    def test_require_audience_rejects_missing_aud(self):
+        assert audience_rejected({"sub": "u"}, self._ory()) is True
+
+    def test_require_audience_rejects_wrong_aud(self):
+        assert audience_rejected({"sub": "u", "aud": "other"}, self._ory()) is True
+
+    def test_require_audience_accepts_matching_aud(self):
+        assert audience_rejected({"sub": "u", "aud": "api"}, self._ory()) is False
+        assert audience_rejected({"sub": "u", "aud": ["api", "x"]}, self._ory()) is False
+
+    def test_non_require_descope_skips_absent_aud(self):
+        assert audience_rejected({"sub": "u"}, descope_config("P123")) is False
+
+    def test_non_require_descope_rejects_present_mismatch(self):
+        assert audience_rejected({"sub": "u", "aud": "P456"}, descope_config("P123")) is True
 
 
 class TestInferSingleTenantDct:

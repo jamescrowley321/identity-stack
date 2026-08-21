@@ -68,6 +68,7 @@ def _build_app(
 
 
 ORY_ISSUER = "https://inspiring-nash-yli2uiwmcw.projects.oryapis.com"
+ORY_AUD = "identity-stack-api"
 
 
 class TestOryProvider:
@@ -75,8 +76,8 @@ class TestOryProvider:
 
     @pytest.mark.anyio
     async def test_ory_token_accepted_and_attributed(self):
-        app = _build_app(ory_issuer_url=ORY_ISSUER)
-        token = _make_token({"sub": "ory-user", "iss": ORY_ISSUER})
+        app = _build_app(ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
+        token = _make_token({"sub": "ory-user", "iss": ORY_ISSUER, "aud": ORY_AUD})
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
@@ -86,16 +87,25 @@ class TestOryProvider:
 
     @pytest.mark.anyio
     async def test_ory_does_not_infer_dct(self):
-        app = _build_app(ory_issuer_url=ORY_ISSUER)
-        token = _make_token({"sub": "u", "iss": ORY_ISSUER, "tenants": {"t-only": {}}})
+        app = _build_app(ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
+        token = _make_token({"sub": "u", "iss": ORY_ISSUER, "aud": ORY_AUD, "tenants": {"t-only": {}}})
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
         assert resp.json()["tenant_id"] is None
 
     @pytest.mark.anyio
+    async def test_ory_missing_aud_rejected(self):
+        """Fail closed: an Ory token with no aud is rejected in gateway mode too."""
+        app = _build_app(ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
+        token = _make_token({"sub": "u", "iss": ORY_ISSUER})  # no aud
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 401
+
+    @pytest.mark.anyio
     async def test_ory_audience_mismatch_rejected(self):
-        app = _build_app(ory_issuer_url=ORY_ISSUER, ory_audience="identity-stack")
+        app = _build_app(ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
         token = _make_token({"sub": "u", "iss": ORY_ISSUER, "aud": "someone-else"})
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
@@ -103,7 +113,7 @@ class TestOryProvider:
 
     @pytest.mark.anyio
     async def test_unknown_issuer_rejected_when_providers_configured(self):
-        app = _build_app(descope_project_id="P123", ory_issuer_url=ORY_ISSUER)
+        app = _build_app(descope_project_id="P123", ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
         token = _make_token({"sub": "u", "iss": "https://evil.example.com"})
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
@@ -111,11 +121,11 @@ class TestOryProvider:
 
     @pytest.mark.anyio
     async def test_descope_and_ory_route_by_issuer(self):
-        app = _build_app(descope_project_id="P123", ory_issuer_url=ORY_ISSUER)
+        app = _build_app(descope_project_id="P123", ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
         descope_token = _make_token(
             {"sub": "d", "iss": "https://api.descope.com/P123", "dct": "t1", "tenants": {"t1": {}}}
         )
-        ory_token = _make_token({"sub": "o", "iss": ORY_ISSUER})
+        ory_token = _make_token({"sub": "o", "iss": ORY_ISSUER, "aud": ORY_AUD})
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             d_resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {descope_token}"})
             o_resp = await c.get("/api/protected", headers={"Authorization": f"Bearer {ory_token}"})

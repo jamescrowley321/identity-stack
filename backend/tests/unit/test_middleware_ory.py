@@ -20,6 +20,7 @@ from app.middleware.auth import TokenValidationMiddleware
 
 ORY_ISSUER = "https://inspiring-nash-yli2uiwmcw.projects.oryapis.com"
 DESCOPE_ISSUER = "https://api.descope.com/P123"
+ORY_AUD = "identity-stack-api"
 
 
 def _token(payload: dict) -> str:
@@ -43,11 +44,7 @@ def _build_app(**mw_kwargs) -> FastAPI:
             }
         )
 
-    app.add_middleware(
-        TokenValidationMiddleware,
-        excluded_paths={"/api/health"},
-        **mw_kwargs,
-    )
+    app.add_middleware(TokenValidationMiddleware, excluded_paths={"/api/health"}, **mw_kwargs)
     return app
 
 
@@ -65,9 +62,9 @@ class TestOryProvider:
     @pytest.mark.anyio
     @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
     async def test_valid_ory_token_attributed_to_ory(self, mock_validate):
-        """An Ory-issued token authenticates and is attributed to the Ory provider."""
-        mock_validate.return_value = {"sub": "ory-user", "email": "u@example.com", "iss": ORY_ISSUER}
-        app = _build_app(ory_issuer_url=ORY_ISSUER)
+        """An Ory-issued token (with a matching aud) authenticates and is attributed to Ory."""
+        mock_validate.return_value = {"sub": "ory-user", "email": "u@example.com", "iss": ORY_ISSUER, "aud": ORY_AUD}
+        app = _build_app(ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
         resp = await _get(app, _token({"iss": ORY_ISSUER, "sub": "ory-user"}))
         assert resp.status_code == 200
         data = resp.json()
@@ -78,9 +75,8 @@ class TestOryProvider:
     @pytest.mark.anyio
     @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
     async def test_ory_token_has_no_tenant_without_dct(self, mock_validate):
-        """Ory tokens carry no dct/tenants; tenant_id stays None (resolved canonically)."""
-        mock_validate.return_value = {"sub": "ory-user", "iss": ORY_ISSUER}
-        app = _build_app(ory_issuer_url=ORY_ISSUER)
+        mock_validate.return_value = {"sub": "ory-user", "iss": ORY_ISSUER, "aud": ORY_AUD}
+        app = _build_app(ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
         resp = await _get(app, _token({"iss": ORY_ISSUER, "sub": "ory-user"}))
         assert resp.status_code == 200
         assert resp.json()["tenant_id"] is None
@@ -88,28 +84,34 @@ class TestOryProvider:
     @pytest.mark.anyio
     @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
     async def test_ory_does_not_infer_dct_from_tenants(self, mock_validate):
-        """Even if a tenants claim is present, the Ory provider does not infer dct."""
-        mock_validate.return_value = {"sub": "u", "iss": ORY_ISSUER, "tenants": {"t-only": {}}}
-        app = _build_app(ory_issuer_url=ORY_ISSUER)
+        mock_validate.return_value = {"sub": "u", "iss": ORY_ISSUER, "aud": ORY_AUD, "tenants": {"t-only": {}}}
+        app = _build_app(ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
         resp = await _get(app, _token({"iss": ORY_ISSUER, "sub": "u"}))
         assert resp.status_code == 200
         assert resp.json()["tenant_id"] is None
 
     @pytest.mark.anyio
     @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+    async def test_ory_missing_aud_rejected(self, mock_validate):
+        """Fail closed: a genuine Ory token that carries no aud is rejected."""
+        mock_validate.return_value = {"sub": "u", "iss": ORY_ISSUER}  # no aud
+        app = _build_app(ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
+        resp = await _get(app, _token({"iss": ORY_ISSUER, "sub": "u"}))
+        assert resp.status_code == 401
+
+    @pytest.mark.anyio
+    @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
     async def test_ory_audience_mismatch_rejected(self, mock_validate):
-        """When an Ory audience is configured, a mismatching aud is rejected."""
         mock_validate.return_value = {"sub": "u", "iss": ORY_ISSUER, "aud": "someone-else"}
-        app = _build_app(ory_issuer_url=ORY_ISSUER, ory_audience="identity-stack")
+        app = _build_app(ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
         resp = await _get(app, _token({"iss": ORY_ISSUER, "sub": "u"}))
         assert resp.status_code == 401
 
     @pytest.mark.anyio
     @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
     async def test_ory_audience_match_accepted(self, mock_validate):
-        """A matching Ory audience is accepted."""
-        mock_validate.return_value = {"sub": "u", "iss": ORY_ISSUER, "aud": ["identity-stack"]}
-        app = _build_app(ory_issuer_url=ORY_ISSUER, ory_audience="identity-stack")
+        mock_validate.return_value = {"sub": "u", "iss": ORY_ISSUER, "aud": [ORY_AUD]}
+        app = _build_app(ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
         resp = await _get(app, _token({"iss": ORY_ISSUER, "sub": "u"}))
         assert resp.status_code == 200
         assert resp.json()["auth_type"] == "Ory"
@@ -119,8 +121,8 @@ class TestMultiProviderRouting:
     @pytest.mark.anyio
     @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
     async def test_ory_token_routes_to_ory_when_both_configured(self, mock_validate):
-        mock_validate.return_value = {"sub": "u", "iss": ORY_ISSUER}
-        app = _build_app(descope_project_id="P123", ory_issuer_url=ORY_ISSUER)
+        mock_validate.return_value = {"sub": "u", "iss": ORY_ISSUER, "aud": ORY_AUD}
+        app = _build_app(descope_project_id="P123", ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
         resp = await _get(app, _token({"iss": ORY_ISSUER, "sub": "u"}))
         assert resp.status_code == 200
         assert resp.json()["auth_type"] == "Ory"
@@ -129,7 +131,7 @@ class TestMultiProviderRouting:
     @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
     async def test_descope_token_routes_to_descope_when_both_configured(self, mock_validate):
         mock_validate.return_value = {"sub": "u", "iss": DESCOPE_ISSUER, "dct": "t1", "tenants": {"t1": {}}}
-        app = _build_app(descope_project_id="P123", ory_issuer_url=ORY_ISSUER)
+        app = _build_app(descope_project_id="P123", ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
         resp = await _get(app, _token({"iss": DESCOPE_ISSUER, "sub": "u"}))
         assert resp.status_code == 200
         data = resp.json()
@@ -138,9 +140,29 @@ class TestMultiProviderRouting:
 
     @pytest.mark.anyio
     @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+    async def test_crypto_fallthrough_attributes_to_second_provider(self, mock_validate):
+        """An opaque (no-iss-hint) token: the first candidate's JWKS rejects it
+        (validate_token raises); the loop falls through to the provider whose keys
+        actually verify it, and attribution follows the verified issuer."""
+        mock_validate.side_effect = [Exception("wrong JWKS"), {"sub": "u", "iss": ORY_ISSUER, "aud": ORY_AUD}]
+        app = _build_app(descope_project_id="P123", ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
+        resp = await _get(app, _token({"sub": "u"}))  # no iss → tries providers in order
+        assert resp.status_code == 200
+        assert resp.json()["auth_type"] == "Ory"
+        assert mock_validate.await_count == 2
+
+    @pytest.mark.anyio
+    @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+    async def test_all_candidates_fail_signature_returns_401(self, mock_validate):
+        mock_validate.side_effect = Exception("bad signature")
+        app = _build_app(descope_project_id="P123", ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
+        resp = await _get(app, _token({"sub": "u"}))
+        assert resp.status_code == 401
+
+    @pytest.mark.anyio
+    @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
     async def test_unknown_issuer_rejected_without_validation(self, mock_validate):
-        """A token whose issuer matches no configured provider is rejected up front."""
-        app = _build_app(descope_project_id="P123", ory_issuer_url=ORY_ISSUER)
+        app = _build_app(descope_project_id="P123", ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
         resp = await _get(app, _token({"iss": "https://evil.example.com", "sub": "u"}))
         assert resp.status_code == 401
         mock_validate.assert_not_awaited()
