@@ -152,6 +152,8 @@ def configure_middleware(app: FastAPI) -> None:
     # by the token's issuer (see app.middleware.providers).
     ory_issuer_url = os.getenv("ORY_ISSUER_URL", "")
     ory_audience = os.getenv("ORY_AUDIENCE") or None
+    # Ory access-token audience validation is required by default (fail closed).
+    ory_require_audience = os.getenv("ORY_REQUIRE_AUDIENCE", "true").strip().lower() not in ("false", "0", "no")
     if DEPLOYMENT_MODE == "standalone":
         app.add_middleware(
             TokenValidationMiddleware,
@@ -160,6 +162,7 @@ def configure_middleware(app: FastAPI) -> None:
             excluded_prefixes=excluded_prefixes,
             ory_issuer_url=ory_issuer_url,
             ory_audience=ory_audience,
+            ory_require_audience=ory_require_audience,
         )
         logger.info("Middleware included: TokenValidationMiddleware")
     else:
@@ -170,6 +173,7 @@ def configure_middleware(app: FastAPI) -> None:
             excluded_prefixes=excluded_prefixes,
             ory_issuer_url=ory_issuer_url,
             ory_audience=ory_audience,
+            ory_require_audience=ory_require_audience,
         )
         logger.info("Middleware included: GatewayClaimsMiddleware")
 

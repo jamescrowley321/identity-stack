@@ -29,6 +29,10 @@ class ProviderTokenConfig:
     disco_address: str
     audience: str | None = None
     infer_single_tenant_dct: bool = False
+    # When True, a token MUST carry an ``aud`` that matches ``audience`` (fail
+    # closed). When False, ``aud`` is only checked if present — the Descope
+    # behavior, since Descope session/access-key tokens omit ``aud``.
+    require_audience: bool = False
 
 
 def descope_config(project_id: str) -> ProviderTokenConfig:
@@ -59,13 +63,17 @@ def descope_config(project_id: str) -> ProviderTokenConfig:
     )
 
 
-def ory_config(issuer_url: str, audience: str | None = None) -> ProviderTokenConfig:
+def ory_config(issuer_url: str, audience: str | None = None, require_audience: bool = True) -> ProviderTokenConfig:
     """Ory Network provider config — standard OIDC.
 
     Ory issues a single OIDC-compliant issuer and JWT access tokens validated via
     py-identity-model (the path py-identity-model already runs against this exact
     Ory project). It does not use Descope's ``dct``/``tenants`` claims — tenant and
     roles are resolved from the canonical model, not the token.
+
+    Audience is enforced fail-closed by default (``require_audience=True``): without
+    it, any token the Ory project issues — for any client/audience, or with no
+    ``aud`` at all — would authenticate (confused-deputy).
     """
     issuer = issuer_url.rstrip("/")
     return ProviderTokenConfig(
@@ -74,6 +82,7 @@ def ory_config(issuer_url: str, audience: str | None = None) -> ProviderTokenCon
         disco_address=f"{issuer}/.well-known/openid-configuration",
         audience=audience or None,
         infer_single_tenant_dct=False,
+        require_audience=require_audience,
     )
 
 
@@ -82,15 +91,26 @@ def build_provider_configs(
     descope_project_id: str = "",
     ory_issuer_url: str = "",
     ory_audience: str | None = None,
+    ory_require_audience: bool = True,
 ) -> list[ProviderTokenConfig]:
     """Build the configured provider list.
 
     Descope is always present (preserving single-provider behavior, including the
     no-project-id path). Ory is appended when an issuer is configured.
+
+    Fail-closed: if Ory is configured with audience enforcement on (the default) but
+    no ``ory_audience`` is provided, raise at startup rather than silently accept any
+    Ory-issued token. Set ``ory_require_audience=False`` (env ``ORY_REQUIRE_AUDIENCE=false``)
+    to knowingly opt out.
     """
     providers = [descope_config(descope_project_id)]
     if ory_issuer_url:
-        providers.append(ory_config(ory_issuer_url, ory_audience))
+        if ory_require_audience and not ory_audience:
+            raise ValueError(
+                "ORY_AUDIENCE must be set when ORY_ISSUER_URL is set — Ory access-token "
+                "audience validation is required. Set ORY_REQUIRE_AUDIENCE=false to opt out."
+            )
+        providers.append(ory_config(ory_issuer_url, ory_audience, require_audience=ory_require_audience))
     return providers
 
 
@@ -155,6 +175,17 @@ def select_by_issuer(providers: list[ProviderTokenConfig], iss: object) -> Provi
 def audience_ok(aud: object, expected: str) -> bool:
     """True if the token audience matches (string equality or membership in a list)."""
     return aud == expected or (isinstance(aud, list) and expected in aud)
+
+
+def audience_rejected(claims: dict, provider: ProviderTokenConfig) -> bool:
+    """True if the token must be rejected on audience grounds for this provider.
+
+    - ``require_audience`` (Ory): ``aud`` MUST be present and match — fail closed.
+    - otherwise (Descope): ``aud`` is checked only when present (session tokens omit it).
+    """
+    if provider.require_audience:
+        return "aud" not in claims or not audience_ok(claims["aud"], provider.audience or "")
+    return bool(provider.audience) and "aud" in claims and not audience_ok(claims["aud"], provider.audience)
 
 
 def infer_single_tenant_dct(claims: dict, provider: ProviderTokenConfig) -> None:
