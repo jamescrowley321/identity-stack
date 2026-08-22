@@ -12,6 +12,12 @@
 
 name: Adversarial Review
 
+# Security model: this is a `pull_request` (NOT pull_request_target) workflow, so
+# it never runs with secrets for fork PRs — GitHub withholds all secrets and makes
+# GITHUB_TOKEN read-only for forks. A forked PR that edits this file therefore
+# cannot read OPENROUTER_API_KEY or forge a check run. Combined with the owner-only
+# guard on `preflight` below, the secret-bearing lens jobs run only for the owner's
+# own PRs; everyone else fails closed at the gate.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -32,6 +38,7 @@ jobs:
   # review jobs) and a CSV (the gate).
   config:
     runs-on: ubuntu-latest
+    permissions: {} # computes the lens matrix only — no API access needed
     outputs:
       matrix: ${{ steps.pick.outputs.matrix }}
       csv: ${{ steps.pick.outputs.csv }}
