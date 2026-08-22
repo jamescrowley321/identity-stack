@@ -57,6 +57,10 @@ jobs:
           };
           const keys = (process.env.ENABLED || "").split("\n")
             .map((l) => l.replace(/#.*/, "").trim()).filter(Boolean);
+          if (keys.length === 0) {
+            core.setFailed("ENABLED must list at least one lens; an empty matrix would fail workflow validation with an opaque error.");
+            return;
+          }
           const include = keys.map((k) => ({ lens: k, name: NAMES[k] || k }));
           const fs = require("fs");
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify({ include })}\n`);
@@ -68,9 +72,10 @@ jobs:
     name: Preflight
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: >-
-      github.event.pull_request.head.repo.fork == false &&
-      github.actor != 'dependabot[bot]'
+    # Auto-review runs ONLY for PRs authored by the repo owner. Collaborators,
+    # outside contributors, forks, and bots skip the paid lenses; the gate then
+    # fails closed (below), so those PRs require manual owner review + merge.
+    if: github.event.pull_request.author_association == 'OWNER'
     permissions:
       checks: read
       contents: read
@@ -120,15 +125,28 @@ jobs:
 
   gate:
     name: Merge Gate
-    needs: [config, review]
+    needs: [config, preflight, review]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: always() && needs.review.result != 'skipped'
+    # Always run so the required "Merge Gate" check is never absent or skipped.
+    # Branch protection treats a skipped required check as passing, so a gate
+    # that skips for non-owner PRs (whose review is skipped) would let them merge
+    # with zero review. Fail closed instead — non-owner PRs require manual review.
+    if: always()
     permissions:
       contents: read
       pull-requests: read
     steps:
+      # review is 'skipped' for non-owner PRs (only owner PRs are auto-reviewed)
+      # and 'failure' if a lens leg crashed. Either way, don't adjudicate a
+      # partial/absent lens set — fail closed so the owner reviews and merges.
+      - name: Fail closed when review did not complete
+        if: needs.review.result != 'success'
+        run: |
+          echo "::error::Adversarial review did not complete (non-owner PR, or a lens failed: review=${{ needs.review.result }}). Only owner PRs are auto-reviewed; others require manual owner review + merge. The Merge Gate fails closed."
+          exit 1
       - name: Adjudicate lenses
+        if: needs.review.result == 'success'
         uses: jamescrowley321/adversarial-review@7d18b99faf7567366b5091deaf1470692d668245 # v1.6.0
         with:
           mode: gate
