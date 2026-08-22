@@ -90,7 +90,7 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
                 except Exception:
                     # Wrong provider (signature verified against the wrong JWKS) or
                     # an invalid token — try the next configured provider.
-                    logger.debug("token did not validate against provider %s; trying next", provider.name)
+                    logger.debug("validation failed for candidate provider %s; trying next", provider.name)
                     continue
 
                 # Issuer allow-list: when the token carries an ``iss`` that this
