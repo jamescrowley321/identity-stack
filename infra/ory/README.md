@@ -49,6 +49,11 @@ These feed the follow-on epics (no secrets among them):
 > 2026-11-17) was generated during an assistant session, so treat it as exposed: generate a fresh
 > workspace API key in the Ory Console → workspace `auth-stack` → Settings → API keys, update the
 > `ORY_WORKSPACE_API_KEY` GitHub secret / HCP var, and delete the old one.
+>
+> **Automated path:** `scripts/rotate-workspace-key.sh` mints a fresh key, verifies it
+> authenticates before touching anything, updates the `ORY_WORKSPACE_API_KEY` secret via
+> `gh`, then deletes the old key (confirm-gated). Run it as an `auth-stack` member with the
+> `ory` and `gh` CLIs authenticated. Also use it for the routine 90-day rotation.
 
 Nothing sensitive is committed: `.gitignore` excludes `*.tfstate`, `.terraform/`, and `tfplan`; the
 `.terraform.lock.hcl` **is** committed (hash-pins the provider).
