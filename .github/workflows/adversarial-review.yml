@@ -27,11 +27,11 @@ concurrency:
   group: adversarial-review-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege by default: only the `review` job (the lens reviewer that
+# posts inline comments + per-lens check runs) is granted write, scoped on the
+# job below. config/preflight/gate keep narrower read-only scopes.
 permissions:
   contents: read
-  pull-requests: write
-  checks: write
-  issues: read # the Compliance lens reads the PR thread
 
 jobs:
   # The ONE place to toggle lenses. Emits the enabled set as a matrix (parallel
@@ -65,16 +65,19 @@ jobs:
           const keys = (process.env.ENABLED || "").split("\n")
             .map((l) => l.replace(/#.*/, "").trim()).filter(Boolean);
           if (keys.length === 0) {
-            core.setFailed("ENABLED must list at least one lens; an empty matrix would fail workflow validation with an opaque error.");
-            return;
+            // `shell: node {0}` runs plain Node — there is no actions/github-script
+            // `core` object here, so fail via process.exit, not `core.setFailed`.
+            console.error("ENABLED must list at least one lens; an empty matrix would fail workflow validation with an opaque error.");
+            process.exit(1);
           }
           const include = keys.map((k) => ({ lens: k, name: NAMES[k] || k }));
           const fs = require("fs");
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify({ include })}\n`);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `csv=${keys.join(",")}\n`);
 
-  # Don't spend the paid lenses until the cheap deterministic gates pass. Skips
-  # fork PRs (no secret) and Dependabot.
+  # Don't spend the paid lenses until the cheap deterministic gates pass. Runs
+  # only for owner-authored PRs (guard below); forks, collaborators, and bots
+  # (e.g. Dependabot) skip the paid lenses and fail closed at the gate.
   preflight:
     name: Preflight
     runs-on: ubuntu-latest
@@ -101,6 +104,13 @@ jobs:
     needs: [config, preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 12
+    # The only job that needs write: it posts inline review comments and the
+    # per-lens check run. Scoped here rather than granted workflow-wide.
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+      issues: read # the Compliance lens reads the PR thread
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.config.outputs.matrix) }}
