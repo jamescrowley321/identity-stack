@@ -55,6 +55,14 @@ updates:
       npm-deps-major:
         patterns: ["*"]
         update-types: ["major"]
+    ignore:
+      # TypeScript 7 is held until typescript-eslint supports TS >=7.1
+      # (typescript-eslint#10940; the current v8 hard-throws at load on TS 7.0,
+      # and it peer-caps typescript <6.1.0 so npm ci can't even resolve). App
+      # source is already TS7-clean — only the lint toolchain blocks the bump.
+      # Tracked in #387; remove this ignore when typescript-eslint ships TS>=7.1.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
