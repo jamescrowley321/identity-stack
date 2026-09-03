@@ -1,7 +1,18 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
-  readonly VITE_DESCOPE_PROJECT_ID: string;
+  /**
+   * Generic OIDC provider configuration (FR-15). When set, these target the
+   * login flow at any standard-OIDC provider and take precedence over the
+   * `VITE_DESCOPE_*` variables below, which remain as a backward-compat
+   * fallback (NFR-8). No provider is hardcoded (NFR-5).
+   */
+  readonly VITE_OIDC_AUTHORITY?: string;
+  readonly VITE_OIDC_CLIENT_ID?: string;
+  readonly VITE_OIDC_SCOPE?: string;
+  readonly VITE_OIDC_REDIRECT_URI?: string;
+
+  readonly VITE_DESCOPE_PROJECT_ID?: string;
   readonly VITE_DESCOPE_BASE_URL?: string;
   /**
    * Absolute base URL the browser uses for API calls.
