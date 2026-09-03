@@ -38,6 +38,12 @@ Defaults below are the values baked into the code (`backend/app/...`). Copy `bac
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `VITE_DESCOPE_PROJECT_ID` | — (**required**) | Descope project ID for the SPA login. |
-| `VITE_DESCOPE_BASE_URL` | Descope default | Optional; set for a custom auth domain. |
+| `VITE_OIDC_AUTHORITY` | — | Generic OIDC issuer/authority URL. When set, points the SPA login at any standard-OIDC provider and takes precedence over `VITE_DESCOPE_*`. |
+| `VITE_OIDC_CLIENT_ID` | — | OIDC client ID for the SPA. Overrides `VITE_DESCOPE_PROJECT_ID`. |
+| `VITE_OIDC_SCOPE` | `openid profile email` | Requested OAuth scopes (e.g. add `offline_access` for refresh tokens). |
+| `VITE_OIDC_REDIRECT_URI` | current window origin | OIDC redirect URI. |
+| `VITE_DESCOPE_PROJECT_ID` | — (**required** unless `VITE_OIDC_*` set) | Descope project ID for the SPA login (backward-compat fallback). |
+| `VITE_DESCOPE_BASE_URL` | `https://api.descope.com` | Optional; set for a custom auth domain. |
 | `VITE_API_BASE_URL` | `""` | Empty ⇒ relative `/api/...` (standalone, proxied by nginx). Gateway mode sets this to the Tyk URL so the browser hits the gateway directly. Because Vite inlines it at build time, each mode needs its own image. |
+
+The `VITE_OIDC_*` variables are provider-neutral: when set they target the login flow at any standard-OIDC provider (e.g. Ory) and override the `VITE_DESCOPE_*` fallback per-field. Leave them unset to keep using Descope. See [`frontend/.env.example`](../frontend/.env.example) for a worked example.
