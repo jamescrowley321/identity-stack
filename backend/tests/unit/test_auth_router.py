@@ -232,3 +232,38 @@ async def test_logout_ory_no_end_session_endpoint_fails_closed(mock_validate, mo
         )
 
     assert response.status_code == 500
+
+
+class _FailedDisco:
+    """Mimics py-identity-model's DiscoveryDocumentResponse on a failed fetch:
+    ``end_session_endpoint`` is a guarded field that raises rather than returning
+    None, so the strategy must check ``is_successful`` before reading it."""
+
+    is_successful = False
+
+    @property
+    def end_session_endpoint(self):  # pragma: no cover - accessor must not run
+        raise RuntimeError("guarded field accessed on a failed discovery response")
+
+
+@pytest.mark.anyio
+@patch("app.services.logout.get_discovery_document", new_callable=AsyncMock)
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_logout_ory_failed_discovery_fails_closed_cleanly(mock_validate, mock_disco, monkeypatch):
+    """A failed discovery (is_successful=False) → clean 500 without touching the
+    guarded end_session_endpoint field (regression for the is_successful gate)."""
+    monkeypatch.setenv("ORY_ISSUER_URL", _ORY_ISSUER)
+    monkeypatch.setenv("ORY_AUDIENCE", _ORY_AUD)
+
+    mock_validate.return_value = {"sub": "ory-user", "iss": _ORY_ISSUER, "aud": _ORY_AUD}
+    mock_disco.return_value = _FailedDisco()
+
+    transport = ASGITransport(app=_ory_app())
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        response = await c.post(
+            "/api/auth/logout",
+            headers={"Authorization": f"Bearer {_jwt({'iss': _ORY_ISSUER, 'sub': 'ory-user'})}"},
+            json={"id_token": "the-id-token"},
+        )
+
+    assert response.status_code == 500
