@@ -87,6 +87,11 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
   const { apiFetch } = useApiClient();
 
   const isAuthenticated = auth.isAuthenticated;
+  // The authenticated subject. Keying the fetch on it forces a reload — and a
+  // reset of the cached identity — whenever a *different* user logs in on the
+  // same tab (SPA local-logout → login, no page reload), so one user's roles/
+  // tenants/email can never be surfaced to the next.
+  const subject = auth.user?.profile?.sub ?? null;
   const [fetchedIdentity, setFetchedIdentity] = useState<CanonicalIdentity | null>(null);
   const [fetchLoading, setFetchLoading] = useState(false);
   const [fetchError, setFetchError] = useState<Error | null>(null);
@@ -101,6 +106,10 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
 
     const loadIdentity = async () => {
+      // Drop any prior subject's identity/error before the new fetch resolves,
+      // so a stale principal is never exposed during the load window.
+      setFetchedIdentity(null);
+      setFetchError(null);
       setFetchLoading(true);
       try {
         const res = await apiFetch("/api/identity");
@@ -125,11 +134,16 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [isAuthenticated, apiFetch]);
+  }, [isAuthenticated, subject, apiFetch]);
 
   // Fail-closed: never surface a stale identity/error once unauthenticated.
   const identity = isAuthenticated ? fetchedIdentity : null;
-  const loading = isAuthenticated ? fetchLoading : false;
+  // While authenticated but not yet resolved (neither identity nor error),
+  // report loading=true so consumers don't momentarily read identity=null +
+  // loading=false as a genuine no-access state (flash of stripped roles).
+  const loading = isAuthenticated
+    ? fetchLoading || (fetchedIdentity === null && fetchError === null)
+    : false;
   const error = isAuthenticated ? fetchError : null;
 
   const currentTenantId = useMemo(() => {

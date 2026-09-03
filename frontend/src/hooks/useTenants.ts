@@ -25,15 +25,22 @@ export function useTenants() {
   return useMemo(() => {
     if (!identity) return { currentTenantId: null, tenants: [] as TenantInfo[] };
 
-    const tenants: TenantInfo[] = identity.tenant_memberships.map((membership) => {
-      const tenantRoles = identity.roles.filter(
+    // Guard against a malformed-but-200 payload (gateway/cache/API-version
+    // skew): a missing list must fail closed (empty) rather than throw
+    // `undefined.map` in render, which — with no ErrorBoundary — would blank
+    // the whole app tree.
+    const memberships = identity.tenant_memberships ?? [];
+    const allRoles = identity.roles ?? [];
+
+    const tenants: TenantInfo[] = memberships.map((membership) => {
+      const tenantRoles = allRoles.filter(
         (r) => r.tenant_id === membership.tenant_id,
       );
       return {
         id: membership.tenant_id,
         name: membership.tenant_name || membership.tenant_id,
         roles: tenantRoles.map((r) => r.role_name),
-        permissions: [...new Set(tenantRoles.flatMap((r) => r.permissions))],
+        permissions: [...new Set(tenantRoles.flatMap((r) => r.permissions ?? []))],
       };
     });
 
