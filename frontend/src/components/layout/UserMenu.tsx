@@ -2,6 +2,7 @@ import { useAuth } from "react-oidc-context"
 import { useNavigate } from "react-router-dom"
 import { useCallback, useState } from "react"
 import { LogOut, User } from "lucide-react"
+import { toast } from "sonner"
 import { useApiClient } from "@/hooks/useApiClient"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import {
@@ -35,16 +36,32 @@ export function UserMenu() {
     // providers (Ory) that we must redirect the browser to; Descope revokes
     // server-side and returns none, so we just navigate to /login.
     let logoutUrl: string | undefined
+    let backendRejected = false
     try {
       const response = await apiFetch("/api/auth/logout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id_token: auth.user?.id_token }),
       })
-      const data = await response.json().catch(() => null)
-      logoutUrl = data?.logout_url
+      if (response.ok) {
+        const data = await response.json().catch(() => null)
+        logoutUrl = data?.logout_url
+      } else {
+        // The backend failed closed (e.g. an RP-initiated provider advertises no
+        // end_session_endpoint). We MUST NOT report success or clear the local
+        // session — the provider (OP) session may still be live, and navigating
+        // to /login would silently strand it. Surface the error and let the user
+        // retry.
+        backendRejected = true
+      }
     } catch {
-      // Best-effort — still clear the local session below.
+      // Network failure (no structured response) — fall through to a best-effort
+      // local clear so the user is not stuck in a broken session.
+    }
+    if (backendRejected) {
+      toast.error("Sign out failed. Please try again.")
+      setIsLoggingOut(false)
+      return
     }
     try {
       await auth.removeUser()
@@ -80,7 +97,7 @@ export function UserMenu() {
           Profile
         </DropdownMenuItem>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onClick={handleLogout}>
+        <DropdownMenuItem onClick={handleLogout} disabled={isLoggingOut}>
           <LogOut />
           Sign out
         </DropdownMenuItem>

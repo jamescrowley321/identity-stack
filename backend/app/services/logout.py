@@ -38,7 +38,7 @@ async def _descope_management_logout(provider: ProviderTokenConfig, claims: dict
     Unchanged from the pre-ORY-5.1 behavior: same endpoint, headers, body, and
     response shape (NFR-8). ``id_token`` is unused — Descope revokes server-side.
     """
-    project_id = os.environ["DESCOPE_PROJECT_ID"]
+    project_id = os.getenv("DESCOPE_PROJECT_ID", "")
     management_key = os.getenv("DESCOPE_MANAGEMENT_KEY", "")
     user_id = claims.get("sub")
 
@@ -72,7 +72,10 @@ async def _ory_rp_initiated_logout(provider: ProviderTokenConfig, claims: dict, 
     which would silently leave the provider session live.
     """
     disco = await get_discovery_document(DiscoveryDocumentRequest(address=provider.disco_address))
-    end_session_endpoint = getattr(disco, "end_session_endpoint", None)
+    # ``is_successful`` is unguarded, but ``end_session_endpoint`` is a guarded
+    # field that raises FailedResponseAccessError on a failed discovery (and
+    # getattr's default does NOT suppress it), so check success before reading it.
+    end_session_endpoint = disco.end_session_endpoint if getattr(disco, "is_successful", False) else None
     if not end_session_endpoint:
         raise HTTPException(
             status_code=500,

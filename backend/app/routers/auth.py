@@ -1,6 +1,6 @@
 import os
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.dependencies.auth import get_claims
 from app.middleware.providers import build_provider_configs
@@ -51,5 +51,12 @@ async def logout(request: Request, claims: dict = Depends(get_claims)):
     except Exception:
         id_token = None
 
-    strategy = LOGOUT_STRATEGIES[provider.logout_kind]
+    # Guarded dispatch: an unrecognized logout_kind (typo / future provider) must
+    # not crash the shared entrypoint with an unhandled KeyError.
+    strategy = LOGOUT_STRATEGIES.get(provider.logout_kind)
+    if strategy is None:
+        raise HTTPException(
+            status_code=500,
+            detail=f"No logout strategy configured for provider logout_kind '{provider.logout_kind}'",
+        )
     return await strategy(provider, claims, id_token)
