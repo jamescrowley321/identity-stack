@@ -33,6 +33,11 @@ class ProviderTokenConfig:
     # closed). When False, ``aud`` is only checked if present — the Descope
     # behavior, since Descope session/access-key tokens omit ``aud``.
     require_audience: bool = False
+    # How this provider logs a user out (see app.services.logout). "management"
+    # is Descope's server-side session revocation (the historical default);
+    # "rp_initiated" is standard OIDC RP-initiated logout (Ory) — redirect the
+    # browser to the provider's ``end_session_endpoint``.
+    logout_kind: str = "management"
 
 
 def descope_config(project_id: str) -> ProviderTokenConfig:
@@ -83,6 +88,7 @@ def ory_config(issuer_url: str, audience: str | None = None, require_audience: b
         audience=audience or None,
         infer_single_tenant_dct=False,
         require_audience=require_audience,
+        logout_kind="rp_initiated",
     )
 
 

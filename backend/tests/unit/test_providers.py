@@ -37,6 +37,7 @@ class TestDescopeConfig:
         assert cfg.audience == "P123"
         assert cfg.infer_single_tenant_dct is True
         assert cfg.disco_address == "https://api.descope.com/P123/.well-known/openid-configuration"
+        assert cfg.logout_kind == "management"
 
     def test_without_project_id_skips_issuer_validation(self):
         cfg = descope_config("")
@@ -54,7 +55,12 @@ class TestOryConfig:
             audience="identity-stack-api",
             infer_single_tenant_dct=False,
             require_audience=True,
+            logout_kind="rp_initiated",
         )
+
+    def test_uses_rp_initiated_logout(self):
+        """Ory logs out via OIDC RP-initiated logout (ORY-5.1)."""
+        assert ory_config(ORY_ISSUER, audience="a").logout_kind == "rp_initiated"
 
     def test_trailing_slash_stripped(self):
         cfg = ory_config(ORY_ISSUER + "/", audience="identity-stack")
