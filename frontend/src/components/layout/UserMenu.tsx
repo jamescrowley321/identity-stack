@@ -31,15 +31,29 @@ export function UserMenu() {
   const handleLogout = useCallback(async () => {
     if (isLoggingOut) return
     setIsLoggingOut(true)
+    // Provider-aware logout: the backend returns a `logout_url` for RP-initiated
+    // providers (Ory) that we must redirect the browser to; Descope revokes
+    // server-side and returns none, so we just navigate to /login.
+    let logoutUrl: string | undefined
     try {
-      await apiFetch("/api/auth/logout", { method: "POST" })
+      const response = await apiFetch("/api/auth/logout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id_token: auth.user?.id_token }),
+      })
+      const data = await response.json().catch(() => null)
+      logoutUrl = data?.logout_url
     } catch {
-      // Best-effort
+      // Best-effort — still clear the local session below.
     }
     try {
       await auth.removeUser()
     } catch {
-      // removeUser failed — still navigate away
+      // removeUser failed — still redirect/navigate away.
+    }
+    if (logoutUrl) {
+      window.location.assign(logoutUrl)
+      return
     }
     navigate("/login")
   }, [apiFetch, auth, navigate, isLoggingOut])
