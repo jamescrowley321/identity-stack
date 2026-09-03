@@ -66,6 +66,30 @@ describe("buildOidcConfig", () => {
     });
   });
 
+  describe("empty / missing inputs (boundary)", () => {
+    it("yields an empty client_id and a base-only authority when no provider env is set", () => {
+      // Mirrors the legacy inline behavior: `${baseUrl}/${projectId}` with an
+      // undefined projectId. Locked here so a fallback-chain change is caught.
+      const config = buildOidcConfig({}, ORIGIN);
+
+      expect(config.client_id).toBe("");
+      expect(config.authority).toBe("https://api.descope.com/undefined");
+      expect(config.scope).toBe("openid profile email");
+      expect(config.redirect_uri).toBe(ORIGIN);
+    });
+
+    it("treats an empty VITE_DESCOPE_BASE_URL as unset and uses the default base (|| semantics)", () => {
+      const env: OidcEnv = {
+        VITE_DESCOPE_PROJECT_ID: "P123",
+        VITE_DESCOPE_BASE_URL: "",
+      };
+
+      const config = buildOidcConfig(env, ORIGIN);
+
+      expect(config.authority).toBe("https://api.descope.com/P123");
+    });
+  });
+
   describe("static config invariants", () => {
     it("uses the authorization-code flow with silent renew and a signin callback", () => {
       const config = buildOidcConfig({ VITE_DESCOPE_PROJECT_ID: "P123" }, ORIGIN);
