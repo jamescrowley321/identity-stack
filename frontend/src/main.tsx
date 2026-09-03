@@ -4,6 +4,7 @@ import { BrowserRouter } from "react-router-dom";
 import { AuthProvider } from "react-oidc-context";
 import { ThemeProvider } from "next-themes";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { IdentityProvider } from "./contexts/IdentityContext";
 import App from "./App";
 import { buildOidcConfig } from "@/config/oidc";
 import "./index.css";
@@ -16,7 +17,9 @@ createRoot(document.getElementById("root")!).render(
       <TooltipProvider>
         <AuthProvider {...oidcConfig}>
           <BrowserRouter>
-            <App />
+            <IdentityProvider>
+              <App />
+            </IdentityProvider>
           </BrowserRouter>
         </AuthProvider>
       </TooltipProvider>
