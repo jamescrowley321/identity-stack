@@ -93,6 +93,11 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
   // tenants/email can never be surfaced to the next.
   const subject = auth.user?.profile?.sub ?? null;
   const [fetchedIdentity, setFetchedIdentity] = useState<CanonicalIdentity | null>(null);
+  // The subject the cached identity/error belongs to. Recorded at fetch
+  // completion so the render-time gate below can reject a cache left over from
+  // a different user — closing the one-frame window between an in-tab subject
+  // switch and the effect that reloads.
+  const [fetchedSubject, setFetchedSubject] = useState<string | null>(null);
   const [fetchLoading, setFetchLoading] = useState(false);
   const [fetchError, setFetchError] = useState<Error | null>(null);
   const [selectedTenantId, setSelectedTenantId] = useState<string | null>(() =>
@@ -117,12 +122,14 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
         const data = (await res.json()) as CanonicalIdentity;
         if (!cancelled) {
           setFetchedIdentity(data);
+          setFetchedSubject(subject);
           setFetchError(null);
         }
       } catch (err: unknown) {
         if (cancelled) return;
         // Fail-closed — drop identity so no roles/tenants are surfaced.
         setFetchedIdentity(null);
+        setFetchedSubject(subject);
         setFetchError(err instanceof Error ? err : new Error(String(err)));
       } finally {
         if (!cancelled) setFetchLoading(false);
@@ -136,15 +143,21 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
     };
   }, [isAuthenticated, subject, apiFetch]);
 
-  // Fail-closed: never surface a stale identity/error once unauthenticated.
-  const identity = isAuthenticated ? fetchedIdentity : null;
-  // While authenticated but not yet resolved (neither identity nor error),
-  // report loading=true so consumers don't momentarily read identity=null +
-  // loading=false as a genuine no-access state (flash of stripped roles).
-  const loading = isAuthenticated
-    ? fetchLoading || (fetchedIdentity === null && fetchError === null)
-    : false;
-  const error = isAuthenticated ? fetchError : null;
+  // Fail-closed: surface the cached identity/error ONLY while authenticated AND
+  // the cache belongs to the current subject. Gating on the subject at render
+  // time (not just in the effect) means a payload fetched for a previous user
+  // is never painted for the next — even for the single frame between an in-tab
+  // subject switch and the reload effect.
+  const cacheMatchesSubject = fetchedSubject === subject;
+  const identity = isAuthenticated && cacheMatchesSubject ? fetchedIdentity : null;
+  const error = isAuthenticated && cacheMatchesSubject ? fetchError : null;
+  // Loading while authenticated until a result (identity or error) has landed
+  // for the CURRENT subject — this also covers the transient post-switch frame,
+  // so consumers never read identity=null + loading=false as a genuine
+  // no-access state (flash of stripped roles).
+  const resolvedForSubject =
+    cacheMatchesSubject && (fetchedIdentity !== null || fetchError !== null);
+  const loading = isAuthenticated ? fetchLoading || !resolvedForSubject : false;
 
   const currentTenantId = useMemo(() => {
     const memberships = identity?.tenant_memberships ?? [];
