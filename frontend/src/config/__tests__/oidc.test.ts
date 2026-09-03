@@ -88,6 +88,27 @@ describe("buildOidcConfig", () => {
 
       expect(config.authority).toBe("https://api.descope.com/P123");
     });
+
+    it("treats blank VITE_OIDC_* overrides as unset and falls back to Descope/defaults (NFR-8)", () => {
+      // A user who uncomments the `.env.example` VITE_OIDC_* lines but leaves
+      // them blank materializes empty strings under Vite. These must NOT override
+      // the working Descope fallback — otherwise login silently breaks.
+      const env: OidcEnv = {
+        VITE_OIDC_AUTHORITY: "",
+        VITE_OIDC_CLIENT_ID: "",
+        VITE_OIDC_SCOPE: "",
+        VITE_OIDC_REDIRECT_URI: "",
+        VITE_DESCOPE_PROJECT_ID: "P123",
+        VITE_DESCOPE_BASE_URL: "https://auth.custom.com",
+      };
+
+      const config = buildOidcConfig(env, ORIGIN);
+
+      expect(config.authority).toBe("https://auth.custom.com/P123");
+      expect(config.client_id).toBe("P123");
+      expect(config.scope).toBe("openid profile email");
+      expect(config.redirect_uri).toBe(ORIGIN);
+    });
   });
 
   describe("static config invariants", () => {
