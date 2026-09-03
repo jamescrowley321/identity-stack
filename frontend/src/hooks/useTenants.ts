@@ -1,6 +1,5 @@
-import { useAuth } from "react-oidc-context";
 import { useMemo } from "react";
-import { jwtDecode } from "../utils/jwt";
+import { useIdentityContext } from "../contexts/IdentityContext";
 
 export interface TenantInfo {
   id: string;
@@ -9,37 +8,35 @@ export interface TenantInfo {
   permissions: string[];
 }
 
-interface DescopeClaims {
-  dct?: string;
-  tenants?: Record<string, { roles?: string[]; permissions?: string[] }>;
-}
-
 /**
- * Extract tenant information from the Descope access token.
+ * Tenant memberships and the active tenant, sourced from the canonical
+ * `GET /api/identity` payload (provider-neutral — no Descope `dct`/`tenants`
+ * claim decoding).
  *
- * - `currentTenantId`: the `dct` claim (current tenant context)
- * - `tenants`: all tenants the user belongs to with their roles/permissions
+ * - `currentTenantId`: the active tenant (client-side selection from
+ *   IdentityContext; defaults to the first membership).
+ * - `tenants`: every tenant the user belongs to. `tenant_memberships` is the
+ *   source of id + display name; roles and permissions are aggregated across
+ *   all of that tenant's role assignments (permissions de-duped).
  */
 export function useTenants() {
-  const auth = useAuth();
+  const { identity, currentTenantId } = useIdentityContext();
 
   return useMemo(() => {
-    const token = auth.user?.access_token;
-    if (!token) return { currentTenantId: null, tenants: [] };
+    if (!identity) return { currentTenantId: null, tenants: [] as TenantInfo[] };
 
-    try {
-      const claims = jwtDecode<DescopeClaims>(token);
-      const currentTenantId = claims.dct ?? null;
-      const tenantsMap = claims.tenants ?? {};
-      const tenants: TenantInfo[] = Object.entries(tenantsMap).map(([id, info]) => ({
-        id,
-        name: id,  // default to ID, updated by fetchTenantNames
-        roles: info.roles ?? [],
-        permissions: info.permissions ?? [],
-      }));
-      return { currentTenantId, tenants };
-    } catch {
-      return { currentTenantId: null, tenants: [] };
-    }
-  }, [auth.user?.access_token]);
+    const tenants: TenantInfo[] = identity.tenant_memberships.map((membership) => {
+      const tenantRoles = identity.roles.filter(
+        (r) => r.tenant_id === membership.tenant_id,
+      );
+      return {
+        id: membership.tenant_id,
+        name: membership.tenant_name || membership.tenant_id,
+        roles: tenantRoles.map((r) => r.role_name),
+        permissions: [...new Set(tenantRoles.flatMap((r) => r.permissions))],
+      };
+    });
+
+    return { currentTenantId, tenants };
+  }, [identity, currentTenantId]);
 }
