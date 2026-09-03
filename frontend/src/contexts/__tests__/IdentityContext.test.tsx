@@ -190,6 +190,67 @@ describe("IdentityProvider / useIdentityContext", () => {
     expect(window.localStorage.getItem(STORAGE_KEY)).toBe("t2");
   });
 
+  it("drops a populated identity once isAuthenticated flips to false (fail-closed logout)", async () => {
+    mockUseAuth.mockReturnValue({
+      isAuthenticated: true,
+      user: { profile: { sub: "ory-user-1" } },
+    });
+    mockApiFetch.mockResolvedValue(okResponse(oryIdentity));
+    const { rerender } = renderWithProvider();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("email").textContent).toBe("alice@ory.example"),
+    );
+
+    // Local logout (auth.removeUser) without a redirect/remount.
+    mockUseAuth.mockReturnValue({ isAuthenticated: false });
+    rerender(<IdentityProvider><Consumer /></IdentityProvider>);
+
+    expect(screen.getByTestId("email").textContent).toBe("no-identity");
+    expect(screen.getByTestId("current-tenant").textContent).toBe("null");
+    expect(screen.getByTestId("loading").textContent).toBe("false");
+  });
+
+  it("does not surface the previous user's identity after an in-tab user switch", async () => {
+    // User A resolves.
+    mockUseAuth.mockReturnValue({
+      isAuthenticated: true,
+      user: { profile: { sub: "ory-user-1" } },
+    });
+    mockApiFetch.mockResolvedValue(okResponse(oryIdentity));
+    const { rerender } = renderWithProvider();
+    await waitFor(() =>
+      expect(screen.getByTestId("email").textContent).toBe("alice@ory.example"),
+    );
+
+    // A different user (subject B) logs in on the same tab; B's fetch is still
+    // in flight. The cached A payload must be cleared, not re-exposed to B.
+    let resolveB: (r: Response) => void = () => {};
+    mockApiFetch.mockReturnValue(
+      new Promise<Response>((resolve) => {
+        resolveB = resolve;
+      }),
+    );
+    mockUseAuth.mockReturnValue({
+      isAuthenticated: true,
+      user: { profile: { sub: "descope-user-1" } },
+    });
+    rerender(<IdentityProvider><Consumer /></IdentityProvider>);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("email").textContent).toBe("no-identity"),
+    );
+    expect(screen.getByTestId("loading").textContent).toBe("true");
+
+    // B's fetch resolves — now (and only now) B's identity appears.
+    await act(async () => {
+      resolveB(okResponse(descopeIdentity));
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("email").textContent).toBe("bob@descope.example"),
+    );
+  });
+
   it("throws when useIdentityContext is used outside an IdentityProvider", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     expect(() => render(<Consumer />)).toThrow(

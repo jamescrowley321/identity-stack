@@ -155,6 +155,41 @@ describe("useTenants", () => {
     expect(result.current.currentTenantId).toBeNull();
   });
 
+  it("fails closed (no crash) on a malformed 200 payload missing lists", () => {
+    // A gateway/cache/API-skew 200 body can omit tenant_memberships/roles or a
+    // role's permissions. Without guards these would throw undefined.map in
+    // render and — with no ErrorBoundary — blank the whole app. Assert the hook
+    // degrades to empty rather than throwing.
+    mockUseIdentityContext.mockReturnValue({
+      identity: { user: oryIdentity.user, linked_idps: [] } as unknown as CanonicalIdentity,
+      currentTenantId: null,
+    });
+    let missingLists: ReturnType<typeof useTenants> | undefined;
+    expect(() => {
+      missingLists = renderHook(() => useTenants()).result.current;
+    }).not.toThrow();
+    expect(missingLists?.tenants).toEqual([]);
+
+    mockUseIdentityContext.mockReturnValue({
+      identity: {
+        ...oryIdentity,
+        tenant_memberships: [{ tenant_id: "t1", tenant_name: "Acme" }],
+        roles: [{ tenant_id: "t1", role_name: "admin" }],
+      } as unknown as CanonicalIdentity,
+      currentTenantId: "t1",
+    });
+    let missingPerms: ReturnType<typeof useTenants> | undefined;
+    expect(() => {
+      missingPerms = renderHook(() => useTenants()).result.current;
+    }).not.toThrow();
+    expect(missingPerms?.tenants[0]).toEqual({
+      id: "t1",
+      name: "Acme",
+      roles: ["admin"],
+      permissions: [],
+    });
+  });
+
   it("ignores orphan role entries whose tenant has no membership row", () => {
     mockUseIdentityContext.mockReturnValue({
       identity: {
