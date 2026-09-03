@@ -24,6 +24,11 @@ vi.mock("@/hooks/useApiClient", () => ({
   useApiClient: () => ({ apiFetch: mockApiFetch }),
 }))
 
+const mockToastError = vi.fn()
+vi.mock("sonner", () => ({
+  toast: { error: (...args: unknown[]) => mockToastError(...args) },
+}))
+
 const assignMock = vi.fn()
 
 // jsdom lacks these Radix-required primitives (see the shared vitest Radix note).
@@ -57,7 +62,7 @@ async function clickSignOut() {
 describe("UserMenu logout", () => {
   it("redirects to the RP-initiated logout_url when the backend returns one (Ory)", async () => {
     const url = "https://inspiring-nash-yli2uiwmcw.projects.oryapis.com/oauth2/sessions/logout?id_token_hint=x"
-    mockApiFetch.mockResolvedValue({ json: async () => ({ status: "logout_redirect", logout_url: url }) })
+    mockApiFetch.mockResolvedValue({ ok: true, json: async () => ({ status: "logout_redirect", logout_url: url }) })
 
     render(<UserMenu />)
     await clickSignOut()
@@ -68,7 +73,7 @@ describe("UserMenu logout", () => {
   })
 
   it("posts the id_token in the request body", async () => {
-    mockApiFetch.mockResolvedValue({ json: async () => ({ status: "logged_out" }) })
+    mockApiFetch.mockResolvedValue({ ok: true, json: async () => ({ status: "logged_out" }) })
 
     render(<UserMenu />)
     await clickSignOut()
@@ -81,13 +86,27 @@ describe("UserMenu logout", () => {
   })
 
   it("navigates to /login when the backend returns no logout_url (Descope)", async () => {
-    mockApiFetch.mockResolvedValue({ json: async () => ({ status: "logged_out", sub: "u" }) })
+    mockApiFetch.mockResolvedValue({ ok: true, json: async () => ({ status: "logged_out", sub: "u" }) })
 
     render(<UserMenu />)
     await clickSignOut()
 
     await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith("/login"))
     expect(mockRemoveUser).toHaveBeenCalled()
+    expect(assignMock).not.toHaveBeenCalled()
+  })
+
+  it("fails closed on a backend error: keeps the session, surfaces an error, does not navigate", async () => {
+    // Ory fail-closed 500 (no end_session_endpoint). Reporting success and
+    // navigating to /login would strand a live provider (OP) session.
+    mockApiFetch.mockResolvedValue({ ok: false, status: 500, json: async () => ({ detail: "no end_session_endpoint" }) })
+
+    render(<UserMenu />)
+    await clickSignOut()
+
+    await waitFor(() => expect(mockToastError).toHaveBeenCalledWith(expect.stringMatching(/sign out failed/i)))
+    expect(mockRemoveUser).not.toHaveBeenCalled()
+    expect(mockNavigate).not.toHaveBeenCalled()
     expect(assignMock).not.toHaveBeenCalled()
   })
 
