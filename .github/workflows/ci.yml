@@ -168,9 +168,15 @@ jobs:
           sleep 2
 
       - name: Run E2E tests
-        if: env.DESCOPE_PROJECT_ID != ''
+        # No `if` guard: this step must always run so the authenticated-coverage
+        # gate (E2E_REQUIRE_AUTH, see tests/e2e/test_coverage_gate.py) fails
+        # loudly when credentials are missing, instead of skipping into a green,
+        # hollow job. (The old `if: env.DESCOPE_PROJECT_ID != ''` was also
+        # ineffective — a step's own `env:` is not visible to its own `if:`.)
         run: cd backend && python -m pytest tests/e2e/ -v
         env:
+          # Require the authenticated E2E/UI suite to actually run in CI.
+          E2E_REQUIRE_AUTH: "1"
           DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
           DESCOPE_MANAGEMENT_KEY: ${{ secrets.DESCOPE_MANAGEMENT_KEY }}
           DESCOPE_CLIENT_ID: ${{ secrets.DESCOPE_CLIENT_ID }}
