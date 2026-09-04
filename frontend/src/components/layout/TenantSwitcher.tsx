@@ -1,7 +1,5 @@
-import { useEffect, useState } from "react"
-import { useAuth } from "react-oidc-context"
 import { useTenants, TenantInfo } from "@/hooks/useTenants"
-import { apiUrl } from "@/hooks/useApiClient"
+import { useIdentityContext } from "@/contexts/IdentityContext"
 import { Badge } from "@/components/ui/badge"
 import {
   Select,
@@ -14,34 +12,16 @@ import {
 /**
  * Displays the user's current tenant and allows switching between tenants.
  *
- * Fetches tenant names from the backend API so the display shows
- * human-readable names instead of raw Descope tenant IDs.
+ * Tenant names and memberships come from the canonical `GET /api/identity`
+ * payload (via useTenants), so no separate `/api/tenants` fetch is needed.
+ * Switching updates the client-side active-tenant selection — the canonical
+ * resolution is provider-neutral, so there is no token re-issue.
  */
 export default function TenantSwitcher() {
-  const auth = useAuth()
   const { currentTenantId, tenants } = useTenants()
-  const [tenantNames, setTenantNames] = useState<Record<string, string>>({})
+  const { setCurrentTenantId } = useIdentityContext()
 
-  useEffect(() => {
-    if (!auth.user?.access_token || tenants.length === 0) return
-
-    fetch(apiUrl("/api/tenants"), {
-      headers: { Authorization: `Bearer ${auth.user.access_token}` },
-    })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data?.tenants) {
-          const names: Record<string, string> = {}
-          for (const t of data.tenants) {
-            names[t.id] = t.name || t.id
-          }
-          setTenantNames(names)
-        }
-      })
-      .catch(() => {})
-  }, [auth.user?.access_token, tenants.length])
-
-  const displayName = (t: TenantInfo) => tenantNames[t.id] || t.id
+  const displayName = (t: TenantInfo) => t.name || t.id
 
   if (tenants.length === 0) {
     return <span className="text-sm text-muted-foreground">No tenants</span>
@@ -49,7 +29,7 @@ export default function TenantSwitcher() {
 
   const handleSwitch = (tenantId: string) => {
     if (tenantId === currentTenantId) return
-    auth.signinRedirect({ extraQueryParams: { tenant: tenantId } })
+    setCurrentTenantId(tenantId)
   }
 
   if (tenants.length === 1) {

@@ -7,8 +7,10 @@ const EMPTY_PERMISSIONS: string[] = [];
 /**
  * RBAC hook for the current tenant context.
  *
- * Reads roles and permissions from the Descope JWT `tenants` claim
- * for the active tenant (`dct` claim).
+ * Reads roles and permissions from the canonical `GET /api/identity` payload
+ * (via useTenants) for the active tenant. Provider-neutral — the public API
+ * ({roles, permissions, hasRole, hasPermission, isOwner, isAdmin,
+ * currentTenantId}) is unchanged regardless of the upstream IdP.
  */
 export function useRBAC() {
   const { currentTenantId, tenants } = useTenants();
