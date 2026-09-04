@@ -32,8 +32,8 @@ Ory `ORY_WORKSPACE_API_KEY` + `ORY_WORKSPACE_ID`.
 | `DESCOPE_CLIENT_ID` | `descope_access_key.integration_tests.client_id` | resource | CI integ/e2e | ok |
 | `DESCOPE_CLIENT_SECRET` | `descope_access_key.integration_tests.cleartext` | resource | CI integ/e2e | ok (sensitive) |
 | `DESCOPE_EXPIRED_TOKEN` | `local-exec` curl → `local_file` | resource (derived) | CI integ | **fragile** — local curl/python + 3-min expiry; empty on failure |
-| **`DESCOPE_MANAGEMENT_KEY`** | **`var.descope_management_key` (default `""`)** | var | CI e2e, backend, **provider auth** | **⚠ default `""` → silent empty secret** (root cause of the E2E gap) |
-| **`E2E_TEST_EMAIL`** | **`var.e2e_test_email` (default `""`)** | var | CI e2e | **⚠ default `""` → silent empty secret** |
+| `DESCOPE_MANAGEMENT_KEY` | `descope_management_key.ci_e2e.cleartext` (TF-minted) | resource | CI e2e, backend | ✅ fixed in #410 — was `var` default `""` (the root cause of the E2E gap); now self-provisioning, always valid. (Provider *auth* still uses the workspace env var — separate.) |
+| `E2E_TEST_EMAIL` | `var.e2e_test_email` (default now synthetic) | var | CI e2e | ✅ fixed in #410 — default set to a synthetic non-deliverable address; no longer blanks |
 | `E2E_TEST_TENANT_ID` | `descope_tenant.acme.id` | resource | CI e2e | ok |
 | `OPENROUTER_API_KEY` | manual GH secret | manual | adversarial-review lenses | not in TF |
 | GitHub provider token | manual TFC env var | manual | `terraform apply` | not codified |
@@ -55,9 +55,13 @@ target is: **every credential flows from one source-of-truth (HCP Vault) through
 Terraform to each provider and consumer, with a guard that no synced secret can
 be empty.**
 
-1. **Close the silent-empty class (done / in flight).** `#396` adds
-   `github.tf` preconditions (fail `apply` on empty `descope_management_key` /
-   `e2e_test_email`) + a CI coverage gate. Do the same for `DESCOPE_EXPIRED_TOKEN`.
+1. **Close the silent-empty class (largely done).** `#410` repaired the
+   descope-provider drift (which had broken `apply` since ~March, the reason the
+   secret rotted) and made `DESCOPE_MANAGEMENT_KEY` **self-provisioning** from a
+   TF-minted `descope_management_key` resource; `E2E_TEST_EMAIL` now defaults to a
+   synthetic address. `#396` adds `github.tf` preconditions + a CI coverage gate.
+   Still to do: source `DESCOPE_EXPIRED_TOKEN` the same way (it can still push
+   empty on a `local-exec` failure).
 2. **Single source-of-truth = HCP Vault.** Read every secret from Vault via the
    `vault` provider; TF fans out to each provider *and* the GH-secret sync. No
    hand-set TFC workspace variables (the exact thing that broke here).
