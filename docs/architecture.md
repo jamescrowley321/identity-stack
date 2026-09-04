@@ -28,10 +28,11 @@ Descope JWTs use two custom claims the middleware understands:
 - **`dct`** — the *current* tenant for the session.
 - **`tenants`** — all tenant memberships, each with its roles and permissions.
 
-Two issuer formats are supported, so validation must accept both:
+Three issuer formats are supported (all signed by the same project JWKS), so validation must accept all:
 
-- `https://api.descope.com/{project_id}`
-- `https://api.descope.com/v1/apps/{project_id}`
+- `https://api.descope.com/{project_id}` — OIDC / ID tokens
+- `https://api.descope.com/v1/apps/{project_id}` — OIDC inbound-app tokens
+- `{project_id}` — the bare project id, used by SDK / session / access-key tokens (e.g. the access-key exchange `sessionJwt`)
 
 Token validation is delegated to [`py-identity-model`](https://github.com/jamescrowley321/py-identity-model) (`>=3.8.5`); the RBAC/FGA authorization layer sits on top of the validated claims (see [security.md](security.md)).
 
