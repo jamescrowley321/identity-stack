@@ -20,9 +20,11 @@ import pytest
 # ``skipif`` markers in test_authenticated_ui.py / test_identity_repository_ui.py
 # / test_rbac_api.py.
 REQUIRED_AUTH_ENV = (
+    "DESCOPE_PROJECT_ID",      # discovery + mgmt auth header + token authority
     "DESCOPE_MANAGEMENT_KEY",  # _ensure_test_user + admin_access_token
     "DESCOPE_CLIENT_ID",       # auth_access_token (with DESCOPE_CLIENT_SECRET)
     "DESCOPE_CLIENT_SECRET",
+    "E2E_TEST_EMAIL",          # ensure_test_user() raises RuntimeError if empty
     "E2E_TEST_TENANT_ID",      # tenant / RBAC-scoped UI flows
 )
 
