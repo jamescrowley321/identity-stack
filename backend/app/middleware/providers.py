@@ -38,15 +38,24 @@ class ProviderTokenConfig:
 def descope_config(project_id: str) -> ProviderTokenConfig:
     """Descope provider config.
 
-    Descope emits two issuer formats — OIDC/ID tokens
-    (``https://api.descope.com/{pid}``) and session/access-key tokens
-    (``https://api.descope.com/v1/apps/{pid}``) — both signed by the same JWKS.
-    With no project id the allow-list is empty (issuer validation skipped), which
+    Descope emits three issuer formats, all signed by the same project JWKS:
+
+    - ``https://api.descope.com/{pid}`` — OIDC / ID tokens
+    - ``https://api.descope.com/v1/apps/{pid}`` — OIDC inbound-app tokens
+    - ``{pid}`` (the **bare project id**) — SDK / session / access-key tokens,
+      e.g. the ``sessionJwt`` returned by the access-key exchange endpoint
+
+    All three are accepted; the signature is always verified against the project
+    JWKS, so the issuer allow-list is not the security boundary. Omitting the
+    bare-``{pid}`` form rejected valid access-key session tokens outright in
+    ``order_candidates`` (before any crypto), 401ing the admin E2E path. With no
+    project id the allow-list is empty (issuer validation skipped), which
     preserves the historical test path.
     """
     accepted = (
         frozenset(
             {
+                project_id,
                 f"https://api.descope.com/{project_id}",
                 f"https://api.descope.com/v1/apps/{project_id}",
             }
