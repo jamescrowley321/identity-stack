@@ -92,7 +92,7 @@ jobs:
       pull-requests: read
     steps:
       - name: Wait for deterministic checks
-        uses: jamescrowley321/adversarial-review@7d18b99faf7567366b5091deaf1470692d668245 # v1.6.0
+        uses: jamescrowley321/adversarial-review@85b6ccc81380ae8076d5582a8de933d34f2fc922 # v1.7.1
         with:
           mode: preflight
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -116,29 +116,19 @@ jobs:
       matrix: ${{ fromJSON(needs.config.outputs.matrix) }}
     steps:
       - name: ${{ matrix.name }}
-        uses: jamescrowley321/adversarial-review@7d18b99faf7567366b5091deaf1470692d668245 # v1.6.0
+        uses: jamescrowley321/adversarial-review@85b6ccc81380ae8076d5582a8de933d34f2fc922 # v1.7.1
         with:
           mode: lens
           lens: ${{ matrix.lens }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           api_key: ${{ secrets.OPENROUTER_API_KEY }}
-          # This is an auth/security app — use the sanctioned quality model for the
-          # security-sensitive lenses. Overridable per repo.
-          model: anthropic/claude-sonnet-5
-          # Enforce OpenRouter routing guardrails on the request (ZDR, price-sort
-          # inside filters) — not just at the account level.
-          models_config: |
-            {
-              "providers": {
-                "openrouter": {
-                  "modelOverrides": {
-                    "anthropic/claude-sonnet-5": {
-                      "compat": { "openRouterRouting": { "sort": "price", "zdr": true } }
-                    }
-                  }
-                }
-              }
-            }
+          # google/gemini-2.5-pro: stable OpenRouter slug that pi's catalog also
+          # carries, with strong JSON adherence. Anthropic Sonnet-5 is unusable
+          # via openrouter+pi — OpenRouter retired the undated alias (404) while
+          # pi's catalog lacks the dated snapshot. No models_config: matches the
+          # action's proven-green self-review config (avoids forcing a ZDR
+          # endpoint that may not exist for Gemini).
+          model: google/gemini-2.5-pro
 
   gate:
     name: Merge Gate
@@ -164,7 +154,7 @@ jobs:
           exit 1
       - name: Adjudicate lenses
         if: needs.review.result == 'success'
-        uses: jamescrowley321/adversarial-review@7d18b99faf7567366b5091deaf1470692d668245 # v1.6.0
+        uses: jamescrowley321/adversarial-review@85b6ccc81380ae8076d5582a8de933d34f2fc922 # v1.7.1
         with:
           mode: gate
           lenses: ${{ needs.config.outputs.csv }}
