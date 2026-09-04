@@ -6,9 +6,9 @@ variable "descope_management_key" {
 }
 
 variable "e2e_test_email" {
-  description = "Email address for E2E test user (must have admin role in Acme tenant)"
+  description = "Login id for the E2E test user (created on demand via the mgmt API; no mail is sent). Synthetic + non-deliverable by default so no real identity is used; override per env if needed."
   type        = string
-  default     = ""
+  default     = "identity-stack-e2e@example.com"
 }
 
 # OAuth2 - Google
