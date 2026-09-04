@@ -1,23 +1,3 @@
-variable "descope_management_key" {
-  description = <<-EOT
-    Descope management key, written to the DESCOPE_MANAGEMENT_KEY GitHub
-    Actions secret.
-
-    No default, by design. This variable previously defaulted to "", so an
-    apply that ran without it supplied wrote an empty string over a working
-    CI secret — silently, because Terraform reports no error and GitHub
-    secrets cannot be read back to notice. That is what disabled the
-    authenticated E2E suite for roughly five months.
-  EOT
-  type        = string
-  sensitive   = true
-
-  validation {
-    condition     = length(trimspace(var.descope_management_key)) > 0
-    error_message = "descope_management_key must be non-empty; refusing to overwrite the CI secret with a blank value."
-  }
-}
-
 variable "e2e_test_email" {
   description = <<-EOT
     Email address for the E2E test user, which must hold the admin role in the
