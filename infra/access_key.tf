@@ -2,14 +2,14 @@
 # Keys can be global or scoped to specific tenants with roles.
 
 resource "descope_access_key" "integration_tests" {
-  project_id  = var.descope_project_id
+  project_id  = descope_project.main.id
   name        = "Integration Tests"
   description = "Access key used by CI integration tests for client credentials flow"
 }
 
 # Example: tenant-scoped access key with viewer role
 resource "descope_access_key" "acme_api" {
-  project_id  = var.descope_project_id
+  project_id  = descope_project.main.id
   name        = "Acme API Key"
   description = "Programmatic access for Acme Corp integrations"
 
