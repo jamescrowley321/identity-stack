@@ -4,10 +4,11 @@ This documents the application-level security controls. For vulnerability report
 
 ## Token validation
 
-Bearer tokens are validated by [`py-identity-model`](https://github.com/jamescrowley321/py-identity-model) (`>=3.8.5`, a security-pinned floor — it pulls `cryptography>=50` with the PYSEC-2026-3552/3553/3554 fixes). Validation accepts both Descope issuer formats:
+Bearer tokens are validated by [`py-identity-model`](https://github.com/jamescrowley321/py-identity-model) (`>=3.8.5`, a security-pinned floor — it pulls `cryptography>=50` with the PYSEC-2026-3552/3553/3554 fixes). Validation accepts all three Descope issuer formats (all signed by the same project JWKS — the signature is the security boundary, not the issuer string):
 
-- `https://api.descope.com/{project_id}`
-- `https://api.descope.com/v1/apps/{project_id}`
+- `https://api.descope.com/{project_id}` — OIDC / ID tokens
+- `https://api.descope.com/v1/apps/{project_id}` — OIDC inbound-app tokens
+- `{project_id}` — the **bare project id**, used by SDK / session / access-key tokens (e.g. the `sessionJwt` from the access-key exchange endpoint)
 
 In `gateway` mode, auth is terminated at the Tyk edge and the backend trusts gateway-forwarded identity headers instead (`middleware/factory.py`).
 

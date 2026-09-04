@@ -33,8 +33,9 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
     the selected provider's keys — a token claiming another issuer but signed with
     a foreign key fails verification.
 
-    Descope specifics preserved: two issuer formats (OIDC vs session/access-key),
-    ``aud`` omitted on access-key tokens, and single-tenant ``dct`` inference.
+    Descope specifics preserved: three issuer formats (two OIDC URL forms plus the
+    bare project id used by session/access-key tokens), ``aud`` omitted on
+    access-key tokens, and single-tenant ``dct`` inference.
     Ory tokens are standard OIDC and carry no ``dct``/``tenants``.
     """
 

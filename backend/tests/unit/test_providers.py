@@ -28,15 +28,32 @@ def _token_with(payload: dict) -> str:
 
 
 class TestDescopeConfig:
-    def test_with_project_id_has_both_issuer_formats(self):
+    def test_with_project_id_has_all_issuer_formats(self):
         cfg = descope_config("P123")
         assert cfg.name == "Descope"
         assert cfg.accepted_issuers == frozenset(
-            {"https://api.descope.com/P123", "https://api.descope.com/v1/apps/P123"}
+            {
+                "P123",  # bare project id — SDK / session / access-key tokens
+                "https://api.descope.com/P123",
+                "https://api.descope.com/v1/apps/P123",
+            }
         )
         assert cfg.audience == "P123"
         assert cfg.infer_single_tenant_dct is True
         assert cfg.disco_address == "https://api.descope.com/P123/.well-known/openid-configuration"
+
+    def test_session_token_bare_project_id_issuer_is_accepted(self):
+        """Regression: Descope SDK/access-key session JWTs use the bare project id
+        as ``iss``. Omitting it from the allow-list rejected them in
+        ``order_candidates`` before any signature check — 401ing the admin E2E
+        path (create role/permission/idp-link) even with a valid token."""
+        cfg = descope_config("P123")
+        assert "P123" in cfg.accepted_issuers
+        # A bare-pid iss must route to the Descope provider, not [] (reject).
+        assert order_candidates([cfg], "P123") == [cfg]
+        # A session token (no ``aud``) must not be audience-rejected.
+        session_claims = {"iss": "P123", "sub": "u1", "tenants": {"T1": ["owner", "admin"]}}
+        assert audience_rejected(session_claims, cfg) is False
 
     def test_without_project_id_skips_issuer_validation(self):
         cfg = descope_config("")
