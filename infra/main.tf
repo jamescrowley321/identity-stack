@@ -2,8 +2,14 @@ terraform {
   cloud {
     organization = "jamescrowley321"
 
+    # Tag-based selection so one config maps to per-environment workspaces
+    # (identity-stack-dev, identity-stack-prod). Pick the target at run time:
+    #   TF_WORKSPACE=identity-stack-dev terraform plan -var-file=environments/dev.tfvars
+    # The existing identity-stack-dev workspace must carry both tags in TFC;
+    # this is an add-tags operation — the workspace is not renamed and state is
+    # not moved.
     workspaces {
-      name = "identity-stack-dev"
+      tags = ["identity-stack", "descope"]
     }
   }
 
