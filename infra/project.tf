@@ -7,6 +7,11 @@
 variable "descope_project_id" {
   description = "ID of the shared Descope project (from py-identity-model Terraform)"
   type        = string
+
+  validation {
+    condition     = length(trimspace(var.descope_project_id)) > 0
+    error_message = "descope_project_id must not be empty — set it via TF_VAR_descope_project_id or a workspace variable."
+  }
 }
 
 import {

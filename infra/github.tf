@@ -56,6 +56,14 @@ resource "github_actions_secret" "descope_management_key" {
   repository      = var.github_repository
   secret_name     = "DESCOPE_MANAGEMENT_KEY"
   plaintext_value = var.descope_management_key
+
+  # Fail loud rather than silently overwriting the live CI secret with "".
+  lifecycle {
+    precondition {
+      condition     = length(trimspace(var.descope_management_key)) > 0
+      error_message = "Refusing to push an empty DESCOPE_MANAGEMENT_KEY secret — set descope_management_key (env DESCOPE_MANAGEMENT_KEY)."
+    }
+  }
 }
 
 resource "github_actions_secret" "e2e_test_email" {
