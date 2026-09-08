@@ -172,6 +172,13 @@ jobs:
           DESCOPE_MANAGEMENT_KEY: ${{ secrets.DESCOPE_MANAGEMENT_KEY }}
           DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
           REDIS_URL: redis://localhost:16379/0
+          # The rate-limit key is the authenticated `sub`, and the whole E2E suite
+          # shares one access-key identity — so the default 10/minute write budget
+          # is consumed by the first few tests and the rest 429. That is an artifact
+          # of the harness, not of real usage. Limiter behavior is covered by the 18
+          # tests in tests/unit/test_rate_limiting.py.
+          RATE_LIMIT_DEFAULT: 2000/minute
+          RATE_LIMIT_AUTH: 1000/minute
 
       - name: Start frontend (preview)
         run: |
