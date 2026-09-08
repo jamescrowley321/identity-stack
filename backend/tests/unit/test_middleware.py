@@ -5,8 +5,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from starlette.applications import Starlette
+from starlette.routing import Route
 
 from app.main import app
+from app.middleware.auth import TokenValidationMiddleware
 
 # Build a mock issuer matching the Descope format the middleware accepts.
 # When DESCOPE_PROJECT_ID is set (CI), the issuer must match; when unset,
@@ -98,3 +101,52 @@ async def test_middleware_sets_tenant_id_from_dct_claim(mock_validate, client):
     assert response.status_code == 200
     data = response.json()
     assert data["dct"] == "tenant-abc"
+
+
+def _app_with_failing_route(exc: Exception):
+    """A minimal app behind TokenValidationMiddleware whose only route raises."""
+    inner = Starlette(
+        routes=[Route("/boom", lambda request: (_ for _ in ()).throw(exc))],
+    )
+    inner.add_middleware(TokenValidationMiddleware, descope_project_id=_mock_project_id)
+    return inner
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_downstream_exception_is_not_reported_as_invalid_token(mock_validate):
+    """A handler that raises must surface as a server error, never as a 401.
+
+    Regression: ``call_next`` used to be inside the authentication try/except, so
+    every unhandled downstream exception came back as
+    ``401 {"detail": "Invalid or expired token"}``. In CI the E2E backend ran on a
+    schema-less database, and the resulting ``no such table`` errors were reported
+    as 62 authentication failures — the real fault was invisible.
+    """
+    mock_validate.return_value = {"sub": "user123", "iss": _mock_issuer}
+
+    transport = ASGITransport(app=_app_with_failing_route(RuntimeError("boom")), raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        response = await c.get("/boom", headers={"Authorization": "Bearer valid.mock.token"})
+
+    assert response.status_code == 500, (
+        f"downstream failure reported as {response.status_code} — "
+        "authentication must not swallow request-handling errors"
+    )
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_rejected_token_never_reaches_the_route(mock_validate):
+    """The 401 path still holds: an unvalidatable token stops before the handler."""
+    mock_validate.side_effect = ValueError("bad signature")
+
+    transport = ASGITransport(
+        app=_app_with_failing_route(AssertionError("route must not run")),
+        raise_app_exceptions=False,
+    )
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        response = await c.get("/boom", headers={"Authorization": "Bearer valid.mock.token"})
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid or expired token"

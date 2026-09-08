@@ -69,48 +69,69 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
 
         token = auth_header.removeprefix("Bearer ")
 
+        # Authentication is the ONLY thing guarded by this try. ``call_next`` is
+        # deliberately outside it: a downstream failure (database, upstream
+        # provider, application bug) must surface as its own status code, not be
+        # relabelled "Invalid or expired token". Wrapping the request handling in
+        # the authentication except-clause reported every unhandled 500 as a 401
+        # and made real outages read as auth failures.
         try:
-            iss_hint = unverified_issuer(token)
-            for provider in order_candidates(self._providers, iss_hint):
-                # Validate the signature against this provider's JWKS. Issuer and
-                # audience are checked manually below (Descope disables the library
-                # checks because session tokens use a non-discovery issuer and omit
-                # aud); Ory could use the library checks, but the manual path is
-                # uniform and equivalent.
-                config = TokenValidationConfig(
-                    perform_disco=True,
-                    audience=provider.audience or "",
-                    options={"verify_iss": False, "verify_aud": False},
-                )
-                try:
-                    claims = await validate_token(
-                        jwt=token,
-                        token_validation_config=config,
-                        disco_doc_address=provider.disco_address,
-                    )
-                except Exception:
-                    # Wrong provider (signature verified against the wrong JWKS) or
-                    # an invalid token — try the next configured provider.
-                    logger.debug("validation failed for candidate provider %s; trying next", provider.name)
-                    continue
-
-                # Issuer allow-list: when the token carries an ``iss`` that this
-                # provider does not accept, it belongs to a different provider —
-                # try the next. (Absent ``iss`` keeps the historical lenient path.)
-                if provider.accepted_issuers and "iss" in claims and claims["iss"] not in provider.accepted_issuers:
-                    continue
-
-                # Audience: fail-closed for providers that require it (Ory); for
-                # Descope, checked only when present (session tokens omit ``aud``).
-                if audience_rejected(claims, provider):
-                    return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
-
-                infer_single_tenant_dct(claims, provider)
-                request.state.claims = claims
-                request.state.principal = to_principal(claims, provider.name)
-                request.state.tenant_id = claims.get("dct")
-                return await call_next(request)
-
-            return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+            authenticated = await self._authenticate(token)
         except Exception:
+            logger.debug("token authentication failed", exc_info=True)
+            authenticated = None
+
+        if authenticated is None:
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+
+        claims, principal = authenticated
+        request.state.claims = claims
+        request.state.principal = principal
+        request.state.tenant_id = claims.get("dct")
+        return await call_next(request)
+
+    async def _authenticate(self, token: str) -> tuple[dict, object] | None:
+        """Validate ``token`` against the configured providers.
+
+        Returns the accepted claims and the principal built from them, or None
+        when no configured provider accepts the token.
+        """
+        iss_hint = unverified_issuer(token)
+        for provider in order_candidates(self._providers, iss_hint):
+            # Validate the signature against this provider's JWKS. Issuer and
+            # audience are checked manually below (Descope disables the library
+            # checks because session tokens use a non-discovery issuer and omit
+            # aud); Ory could use the library checks, but the manual path is
+            # uniform and equivalent.
+            config = TokenValidationConfig(
+                perform_disco=True,
+                audience=provider.audience or "",
+                options={"verify_iss": False, "verify_aud": False},
+            )
+            try:
+                claims = await validate_token(
+                    jwt=token,
+                    token_validation_config=config,
+                    disco_doc_address=provider.disco_address,
+                )
+            except Exception:
+                # Wrong provider (signature verified against the wrong JWKS) or
+                # an invalid token — try the next configured provider.
+                logger.debug("validation failed for candidate provider %s; trying next", provider.name)
+                continue
+
+            # Issuer allow-list: when the token carries an ``iss`` that this
+            # provider does not accept, it belongs to a different provider —
+            # try the next. (Absent ``iss`` keeps the historical lenient path.)
+            if provider.accepted_issuers and "iss" in claims and claims["iss"] not in provider.accepted_issuers:
+                continue
+
+            # Audience: fail-closed for providers that require it (Ory); for
+            # Descope, checked only when present (session tokens omit ``aud``).
+            if audience_rejected(claims, provider):
+                return None
+
+            infer_single_tenant_dct(claims, provider)
+            return claims, to_principal(claims, provider.name)
+
+        return None
