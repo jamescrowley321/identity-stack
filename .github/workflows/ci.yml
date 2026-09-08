@@ -151,6 +151,17 @@ jobs:
         env:
           VITE_DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
 
+      - name: Start test stack (postgres + redis)
+        run: docker compose -f docker-compose.test.yml up -d --wait
+
+      - name: Apply database schema
+        run: cd backend && python -m alembic upgrade head
+        env:
+          DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
+
+      # The backend must run against a schema-bearing database. It previously ran
+      # on sqlite :memory:, which passes the startup connectivity check but has no
+      # tables, so every canonical-repository route raised "no such table".
       - name: Start backend
         run: |
           cd backend
@@ -159,7 +170,8 @@ jobs:
         env:
           DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
           DESCOPE_MANAGEMENT_KEY: ${{ secrets.DESCOPE_MANAGEMENT_KEY }}
-          DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+          DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
+          REDIS_URL: redis://localhost:16379/0
 
       - name: Start frontend (preview)
         run: |
@@ -179,6 +191,10 @@ jobs:
           E2E_TEST_TENANT_ID: ${{ secrets.E2E_TEST_TENANT_ID }}
           E2E_FRONTEND_URL: "http://localhost:3000"
           E2E_BACKEND_URL: "http://localhost:8000"
+
+      - name: Stop test stack
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v
 
   docker-build:
     name: Docker Build
