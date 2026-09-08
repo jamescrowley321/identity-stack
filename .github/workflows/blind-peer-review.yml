@@ -41,7 +41,6 @@ jobs:
     permissions: {} # computes the lens matrix only — no API access needed
     outputs:
       matrix: ${{ steps.pick.outputs.matrix }}
-      csv: ${{ steps.pick.outputs.csv }}
     steps:
       - id: pick
         shell: node {0}
@@ -73,7 +72,6 @@ jobs:
           const include = keys.map((k) => ({ lens: k, name: NAMES[k] || k }));
           const fs = require("fs");
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify({ include })}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `csv=${keys.join(",")}\n`);
 
   # Don't spend the paid lenses until the cheap deterministic gates pass. Runs
   # only for owner-authored PRs (guard below); forks, collaborators, and bots
@@ -92,12 +90,16 @@ jobs:
       pull-requests: read
     steps:
       - name: Wait for deterministic checks
-        uses: jamescrowley321/blind-peer-review@b17dc0c0de28ef42595498f03074353d89475785 # v2.0.0
+        uses: jamescrowley321/blind-peer-review@9cf7e5a77cb7372122571feb9741049d7b5f94dc # v3.0.0
         with:
           mode: preflight
           github_token: ${{ secrets.GITHUB_TOKEN }}
           # EXACT check-run names (job `name:` values) that must pass first.
-          required_checks: "Lint, Unit Tests, Semgrep (SAST), Gitleaks (Secret Scanning)"
+          required_checks: |
+            Lint
+            Unit Tests
+            Semgrep (SAST)
+            Gitleaks (Secret Scanning)
 
   review:
     name: ${{ matrix.name }}
@@ -116,7 +118,7 @@ jobs:
       matrix: ${{ fromJSON(needs.config.outputs.matrix) }}
     steps:
       - name: ${{ matrix.name }}
-        uses: jamescrowley321/blind-peer-review@b17dc0c0de28ef42595498f03074353d89475785 # v2.0.0
+        uses: jamescrowley321/blind-peer-review@9cf7e5a77cb7372122571feb9741049d7b5f94dc # v3.0.0
         with:
           mode: lens
           lens: ${{ matrix.lens }}
@@ -164,8 +166,8 @@ jobs:
           exit 1
       - name: Adjudicate lenses
         if: needs.review.result == 'success'
-        uses: jamescrowley321/blind-peer-review@b17dc0c0de28ef42595498f03074353d89475785 # v2.0.0
+        uses: jamescrowley321/blind-peer-review@9cf7e5a77cb7372122571feb9741049d7b5f94dc # v3.0.0
         with:
           mode: gate
-          lenses: ${{ needs.config.outputs.csv }}
+          lenses: ${{ needs.config.outputs.matrix }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
