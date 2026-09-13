@@ -46,6 +46,13 @@ def _mock_client(**kwargs) -> AsyncMock:
     return mock_client
 
 
+def _unresolving_client(**kwargs) -> AsyncMock:
+    """A client mock for which no identifier names a real user."""
+    mock_client = AsyncMock(**kwargs)
+    mock_client.load_user.return_value = {}
+    return mock_client
+
+
 ADMIN_CLAIMS = {
     "sub": "user123",
     "dct": "tenant-abc",
@@ -1073,3 +1080,65 @@ async def test_list_relations_tolerates_a_null_resource(mock_validate, client):
         {"resource": None, "relationDefinition": "owner", "target": "u1"},
         {"resource": "doc-1", "relationDefinition": "viewer", "target": "u2"},
     ]
+
+
+# ============================================================
+# The raw admin surface accepts targets that are not users
+# ============================================================
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_check_answers_for_a_subject_that_is_not_a_descope_user(mock_validate, client):
+    """A permission check for an unknown subject must answer, not 404.
+
+    /api/fga/check is the raw admin view of the authz store, where a target need
+    not be a user at all. Resolution is best-effort: an identifier that names no
+    user is passed through unchanged.
+    """
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = _unresolving_client()
+    mock_client.check_permission.return_value = False
+    app.state.descope_client = mock_client
+
+    body = {"resource_type": "doc", "resource_id": "1", "relation": "viewer", "target": "user:ghost"}
+    response = await client.post("/api/fga/check", headers=AUTH_HEADER, json=body)
+
+    assert response.status_code == 200
+    assert response.json() == {"allowed": False}
+    mock_client.check_permission.assert_called_once_with("doc", "tenant-abc:1", "viewer", "user:ghost")
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_relation_can_be_written_for_a_target_that_is_not_a_descope_user(mock_validate, client):
+    """Writing a tuple for a non-user subject is what the admin surface is for."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = _unresolving_client()
+    app.state.descope_client = mock_client
+
+    body = {"resource_type": "doc", "resource_id": "1", "relation": "owner", "target": "service:indexer"}
+    response = await client.post("/api/fga/relations", headers=AUTH_HEADER, json=body)
+
+    assert response.status_code == 201
+    assert response.json()["target"] == "service:indexer"
+    mock_client.create_relation.assert_called_once_with("doc", "tenant-abc:1", "owner", "service:indexer")
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_an_upstream_fault_resolving_a_target_is_not_mistaken_for_no_such_user(mock_validate, client):
+    """Only a clean 404 falls through to the identifier; a 500 must surface."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    request = httpx.Request("POST", "https://api.descope.com")
+    mock_client.load_user.side_effect = httpx.HTTPStatusError(
+        "500", request=request, response=httpx.Response(500, request=request, text="boom")
+    )
+    app.state.descope_client = mock_client
+
+    body = {"resource_type": "doc", "resource_id": "1", "relation": "viewer", "target": "u1"}
+    response = await client.post("/api/fga/check", headers=AUTH_HEADER, json=body)
+
+    assert response.status_code == 502
+    mock_client.check_permission.assert_not_called()
