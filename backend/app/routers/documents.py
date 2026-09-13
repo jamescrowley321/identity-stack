@@ -77,6 +77,10 @@ async def create_document(
     try:
         client = request.app.state.descope_client
         await client.create_relation("document", prefixed_id, "owner", user_id)
+    except ValueError as exc:
+        # DescopeManagementClient validates FGA identifiers and raises ValueError.
+        # A rejected identifier is a malformed request, not a server fault.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error(
             "Failed to create FGA owner relation for doc %s: %s",
@@ -119,6 +123,10 @@ async def list_documents(
     try:
         client = request.app.state.descope_client
         resources = await client.list_user_resources("document", "can_view", user_id)
+    except ValueError as exc:
+        # DescopeManagementClient validates FGA identifiers and raises ValueError.
+        # A rejected identifier is a malformed request, not a server fault.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error(
             "FGA list_user_resources failed for user %s: %s",
@@ -226,6 +234,10 @@ async def delete_document(
         client = request.app.state.descope_client
         # Every relation on the document, so cleanup deletes all of them.
         relations = (await client.list_all_relations("document", prefixed_id)) or []
+    except ValueError as exc:
+        # DescopeManagementClient validates FGA identifiers and raises ValueError.
+        # A rejected identifier is a malformed request, not a server fault.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error("FGA cleanup failed for doc %s: %s", document_id, type(exc).__name__)
         raise HTTPException(status_code=502, detail="Failed to clean up document permissions") from exc
@@ -245,6 +257,10 @@ async def delete_document(
             if rd and target:
                 await client.delete_relation("document", prefixed_id, rd, target)
                 deleted_relations.append({"relation": rd, "target": target})
+    except ValueError as exc:
+        # DescopeManagementClient validates FGA identifiers and raises ValueError.
+        # A rejected identifier is a malformed request, not a server fault.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error("FGA cleanup failed for doc %s: %s", document_id, type(exc).__name__)
         raise HTTPException(status_code=502, detail="Failed to clean up document permissions") from exc
@@ -328,6 +344,10 @@ async def share_document(
     prefixed_id = _prefix_resource_id(tenant_id, document_id)
     try:
         await client.create_relation("document", prefixed_id, body.relation, body.user_id)
+    except ValueError as exc:
+        # DescopeManagementClient validates FGA identifiers and raises ValueError.
+        # A rejected identifier is a malformed request, not a server fault.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error(
             "Failed to create share relation for doc %s: %s",

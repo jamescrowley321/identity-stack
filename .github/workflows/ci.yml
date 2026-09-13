@@ -210,20 +210,25 @@ jobs:
       # the runner rather than trusted to be clean: JWT-shaped triples and any
       # Bearer value are redacted. Never weaken this to upload the raw log.
       - name: Redact credentials from the backend log
+        id: redact
         if: always()
         run: |
           f="$RUNNER_TEMP/backend.log"
           [ -f "$f" ] || exit 0
           sed -i -E \
             -e 's/eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]+/<redacted-jwt>/g' \
-            -e 's/([Bb]earer )[A-Za-z0-9._~+\/-]+=*/\1<redacted>/g' \
+            -e 's/([Bb]earer )[A-Za-z0-9._~+:\/-]+=*/\1<redacted>/g' \
+            -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^:/@ ]+:[^@ ]+@#\1<redacted>:<redacted>@#g' \
             -e 's/(K[A-Za-z0-9]{25,})/<redacted-key>/g' \
             "$f"
 
       # Always, not only on failure: a suite that passes while the backend logs
       # upstream errors is exactly the state this repo spent months in.
+      # NOT plain always(): publishing is conditional on the redaction above
+      # having succeeded. If sed fails the log must not leave the runner —
+      # this repository is public and artifacts are world-readable.
       - name: Upload backend log
-        if: always()
+        if: always() && steps.redact.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: e2e-backend-log

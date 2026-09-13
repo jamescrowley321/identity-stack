@@ -1,3 +1,4 @@
+import json
 import logging
 
 import httpx
@@ -136,6 +137,11 @@ async def create_relation(
             "relation": body.relation,
             "target": body.target,
         }
+    except json.JSONDecodeError as exc:
+        # Must precede ValueError: JSONDecodeError subclasses it, and an upstream body
+        # we cannot parse is an upstream fault, not the caller's malformed request.
+        logger.warning("Descope returned an unparseable body: %s", exc)
+        raise HTTPException(status_code=502, detail="Descope returned an unparseable response") from exc
     except ValueError as exc:
         # The client validates FGA identifiers itself and raises ValueError. That is a
         # malformed request, not a server fault — uncaught it escaped the handler and
@@ -165,6 +171,11 @@ async def delete_relation(
         client = request.app.state.descope_client
         await client.delete_relation(body.resource_type, prefixed_id, body.relation, body.target)
         return {"status": "deleted"}
+    except json.JSONDecodeError as exc:
+        # Must precede ValueError: JSONDecodeError subclasses it, and an upstream body
+        # we cannot parse is an upstream fault, not the caller's malformed request.
+        logger.warning("Descope returned an unparseable body: %s", exc)
+        raise HTTPException(status_code=502, detail="Descope returned an unparseable response") from exc
     except ValueError as exc:
         # The client validates FGA identifiers itself and raises ValueError. That is a
         # malformed request, not a server fault — uncaught it escaped the handler and
@@ -206,6 +217,11 @@ async def list_relations(
             if isinstance(rel, dict) and "resource_id" in rel:
                 rel["resource_id"] = _strip_tenant_prefix(tenant_id, rel["resource_id"])
         return {"relations": relations}
+    except json.JSONDecodeError as exc:
+        # Must precede ValueError: JSONDecodeError subclasses it, and an upstream body
+        # we cannot parse is an upstream fault, not the caller's malformed request.
+        logger.warning("Descope returned an unparseable body: %s", exc)
+        raise HTTPException(status_code=502, detail="Descope returned an unparseable response") from exc
     except ValueError as exc:
         # The client validates FGA identifiers itself and raises ValueError. That is a
         # malformed request, not a server fault — uncaught it escaped the handler and
@@ -235,6 +251,11 @@ async def check_permission(
         client = request.app.state.descope_client
         allowed = bool(await client.check_permission(body.resource_type, prefixed_id, body.relation, body.target))
         return {"allowed": allowed}
+    except json.JSONDecodeError as exc:
+        # Must precede ValueError: JSONDecodeError subclasses it, and an upstream body
+        # we cannot parse is an upstream fault, not the caller's malformed request.
+        logger.warning("Descope returned an unparseable body: %s", exc)
+        raise HTTPException(status_code=502, detail="Descope returned an unparseable response") from exc
     except ValueError as exc:
         # The client validates FGA identifiers itself and raises ValueError. That is a
         # malformed request, not a server fault — uncaught it escaped the handler and
