@@ -917,3 +917,69 @@ def test_sanitize_error_detail_truncates():
     result = _sanitize_error_detail(long_text)
     # Should be truncated to 200 chars + "Validation error: " prefix
     assert len(result) <= 220
+
+
+# --- Client-side identifier validation surfaces as 422, not 500 ---
+
+# DescopeClient validates FGA identifiers itself and raises ValueError. The routes
+# caught only httpx errors, so a malformed identifier escaped the handler and
+# Starlette rendered it as an unhandled 500 — visible in CI as
+# "ValueError: target contains invalid characters" with a 500 on the wire.
+
+_BAD_TARGET = "user:someone@example.com"  # '@' is outside the permitted FGA charset
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_create_relation_invalid_identifier_returns_422(mock_validate, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.create_relation.side_effect = ValueError(
+        "target contains invalid characters (allowed: alphanumeric, _, :, ., -)"
+    )
+    app.state.descope_client = mock_client
+
+    response = await client.post(
+        "/api/fga/relations",
+        headers=AUTH_HEADER,
+        json={"resource_type": "document", "resource_id": "doc1", "relation": "owner", "target": _BAD_TARGET},
+    )
+    assert response.status_code == 422, f"expected 422 for a malformed identifier, got {response.status_code}"
+    assert "invalid characters" in response.json()["detail"]
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_delete_relation_invalid_identifier_returns_422(mock_validate, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.delete_relation.side_effect = ValueError(
+        "target contains invalid characters (allowed: alphanumeric, _, :, ., -)"
+    )
+    app.state.descope_client = mock_client
+
+    response = await client.request(
+        "DELETE",
+        "/api/fga/relations",
+        headers=AUTH_HEADER,
+        json={"resource_type": "document", "resource_id": "doc1", "relation": "owner", "target": _BAD_TARGET},
+    )
+    assert response.status_code == 422, f"expected 422 for a malformed identifier, got {response.status_code}"
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_check_permission_invalid_identifier_returns_422(mock_validate, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.check_permission.side_effect = ValueError(
+        "target contains invalid characters (allowed: alphanumeric, _, :, ., -)"
+    )
+    app.state.descope_client = mock_client
+
+    response = await client.post(
+        "/api/fga/check",
+        headers=AUTH_HEADER,
+        json={"resource_type": "document", "resource_id": "doc1", "relation": "can_view", "target": _BAD_TARGET},
+    )
+    assert response.status_code == 422, f"expected 422 for a malformed identifier, got {response.status_code}"

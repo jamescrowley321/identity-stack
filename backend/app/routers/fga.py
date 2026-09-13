@@ -136,6 +136,11 @@ async def create_relation(
             "relation": body.relation,
             "target": body.target,
         }
+    except ValueError as exc:
+        # The client validates FGA identifiers itself and raises ValueError. That is a
+        # malformed request, not a server fault — uncaught it escaped the handler and
+        # Starlette turned it into an unhandled 500.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except httpx.HTTPStatusError as exc:
         logger.warning("Descope API error creating relation: %s %s", exc.response.status_code, exc.response.text[:500])
         if exc.response.status_code == 400:
@@ -160,6 +165,11 @@ async def delete_relation(
         client = request.app.state.descope_client
         await client.delete_relation(body.resource_type, prefixed_id, body.relation, body.target)
         return {"status": "deleted"}
+    except ValueError as exc:
+        # The client validates FGA identifiers itself and raises ValueError. That is a
+        # malformed request, not a server fault — uncaught it escaped the handler and
+        # Starlette turned it into an unhandled 500.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except httpx.HTTPStatusError as exc:
         logger.warning("Descope API error deleting relation: %s %s", exc.response.status_code, exc.response.text[:500])
         if exc.response.status_code == 400:
@@ -191,6 +201,11 @@ async def list_relations(
             if isinstance(rel, dict) and "resource_id" in rel:
                 rel["resource_id"] = _strip_tenant_prefix(tenant_id, rel["resource_id"])
         return {"relations": relations}
+    except ValueError as exc:
+        # The client validates FGA identifiers itself and raises ValueError. That is a
+        # malformed request, not a server fault — uncaught it escaped the handler and
+        # Starlette turned it into an unhandled 500.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except httpx.HTTPStatusError as exc:
         logger.warning("Descope API error listing relations: %s %s", exc.response.status_code, exc.response.text[:500])
         if exc.response.status_code == 400:
@@ -215,6 +230,11 @@ async def check_permission(
         client = request.app.state.descope_client
         allowed = bool(await client.check_permission(body.resource_type, prefixed_id, body.relation, body.target))
         return {"allowed": allowed}
+    except ValueError as exc:
+        # The client validates FGA identifiers itself and raises ValueError. That is a
+        # malformed request, not a server fault — uncaught it escaped the handler and
+        # Starlette turned it into an unhandled 500.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except httpx.HTTPStatusError as exc:
         resp_body = exc.response.text[:500]
         logger.warning("Descope API error checking permission: %s %s", exc.response.status_code, resp_body)
