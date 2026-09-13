@@ -38,34 +38,42 @@ def _extract_tenant_id(request: Request) -> str:
 
 
 async def resolve_fga_user_target(client, identifier: str) -> str:
-    """Resolve a caller-supplied user identifier to the Descope userId FGA keys on.
+    """Resolve a user identifier to the Descope userId FGA keys on, if it names one.
 
     Every FGA *read* in this service keys on the JWT ``sub``, which is a Descope
-    userId: ``require_fga`` checks with it, and the owner tuple is written from it.
-    A write that keys on whatever the caller happened to type therefore lands on a
-    target no read will ever match. Sharing by email failed loudly (the ``@`` is
-    outside the FGA charset, so the client rejected it), but sharing by a
-    charset-legal username returned 200 while granting nothing at all, and revoking
-    reported success while removing nothing. Resolving every caller-supplied target
-    through the same lookup makes both ends of the tuple agree.
+    userId: ``require_fga`` checks with it, and the owner tuple is written from
+    it. A write that keys on whatever the caller happened to type therefore lands
+    on a target no read will ever match. Sharing by email failed loudly (the ``@``
+    is outside the FGA charset, so the client rejected it), but sharing by a
+    charset-legal username returned 200 while granting nothing at all, and
+    revoking reported success while removing nothing. Resolving caller-supplied
+    targets through the same lookup makes both ends of the tuple agree.
 
-    ``load_user`` accepts either form and tries the other on a miss, so an
-    identifier that is already a userId costs a lookup and comes back unchanged.
+    Best-effort by design: an identifier that names no Descope user is returned
+    unchanged. ``/api/fga/relations`` and ``/api/fga/check`` are the raw admin
+    surface over the authz store, where a target need not be a user at all — a
+    permission check for a subject that does not exist must be answerable
+    ("allowed: false"), not a 404. Endpoints that *require* the target to be a
+    real user — document share and revoke — establish that themselves and answer
+    404 before they get here.
+
+    An upstream fault is never silently swallowed: only a clean "no such user"
+    falls through to the identifier.
     """
     try:
         user = await client.load_user(identifier)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
-            raise HTTPException(status_code=404, detail="Target user not found") from exc
+            return identifier
         logger.error("Failed to resolve FGA target: HTTP %s", exc.response.status_code)
         raise HTTPException(status_code=502, detail="Failed to resolve target user") from exc
     except httpx.RequestError as exc:
         logger.error("Network error resolving FGA target: %s", type(exc).__name__)
         raise HTTPException(status_code=502, detail="Failed to resolve target user") from exc
 
-    if not isinstance(user, dict) or not user.get("userId"):
-        raise HTTPException(status_code=404, detail="Target user not found")
-    return str(user["userId"])
+    if isinstance(user, dict) and user.get("userId"):
+        return str(user["userId"])
+    return identifier
 
 
 def require_fga(
@@ -111,13 +119,18 @@ def require_fga(
             client = request.app.state.descope_client
             allowed = await client.check_permission(resource_type, prefixed_id, relation, user_id)
         except httpx.HTTPStatusError as exc:
+            # Include the upstream body. Without it a 400 here says only "the
+            # authz store refused", and the reason — a relation the schema does
+            # not define, a malformed identifier — is nowhere in the logs, which
+            # is what made a drifted FGA schema undiagnosable from CI alone.
             logger.error(
-                "FGA check failed (HTTP %s) user=%s resource=%s:%s relation=%s",
+                "FGA check failed (HTTP %s) user=%s resource=%s:%s relation=%s upstream=%s",
                 exc.response.status_code,
                 user_id,
                 resource_type,
                 resource_id,
                 relation,
+                exc.response.text[:500],
             )
             raise HTTPException(status_code=502, detail="Authorization check failed") from exc
         except httpx.RequestError as exc:
