@@ -39,15 +39,21 @@ def test_navigate_to_members_page(auth_page: Page, frontend_url: str):
     expect(auth_page).not_to_have_url("**/login**")
 
 
-def test_navigate_to_settings_page(auth_page: Page, frontend_url: str):
-    """Navigate to /settings (tenant settings) and verify the page loads."""
-    auth_page.goto(f"{frontend_url}/settings")
-    auth_page.wait_for_load_state("networkidle")
-    expect(auth_page).not_to_have_url("**/login**")
-    # "Tenant Settings" also labels the sidebar link and the header breadcrumb, so
-    # a bare text match is a strict-mode violation. The page's own <h1> is the one
-    # that proves the route rendered.
-    expect(auth_page.get_by_role("heading", name="Tenant Settings", level=1)).to_be_visible()
+def test_navigate_to_settings_page(admin_page: Page, frontend_url: str):
+    """Navigate to /settings (tenant settings) and verify the page loads.
+
+    Browses as an admin: the settings fetch 403s for an identity with no tenant
+    claims and TenantSettings then renders <Unauthorized/>, which carries no
+    page heading. The old assertion — a bare "Tenant Settings" text match —
+    passed against the sidebar link and the header breadcrumb, so it never
+    noticed the page itself had not rendered.
+    """
+    admin_page.goto(f"{frontend_url}/settings")
+    admin_page.wait_for_load_state("networkidle")
+    expect(admin_page).not_to_have_url("**/login**")
+    # Scoped to the page's own <h1>: the sidebar and breadcrumb carry the same
+    # words, so an unscoped match is both a strict-mode violation and no proof.
+    expect(admin_page.get_by_role("heading", name="Tenant Settings", level=1)).to_be_visible()
 
 
 # --- Test 2: Data display — create role via API, verify in UI ---
