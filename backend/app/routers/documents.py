@@ -5,6 +5,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 from sqlmodel import select
 
 from app.dependencies.fga import extract_user_id, require_fga
@@ -111,6 +112,25 @@ async def create_document(
     return document.model_dump()
 
 
+async def _restore_relations(client, prefixed_id: str, deleted_relations: list[dict], document_id: str) -> None:
+    """Put back relations a failed delete had already removed.
+
+    Best-effort: a compensation that itself fails is logged, not raised, because
+    the caller is already on an error path and the original fault is the one
+    worth reporting.
+    """
+    for dr in deleted_relations:
+        try:
+            await client.create_relation("document", prefixed_id, dr["relation"], dr["target"])
+        except Exception:
+            logger.warning(
+                "FGA compensation failed for doc %s relation %s->%s",
+                document_id,
+                dr["relation"],
+                dr["target"],
+            )
+
+
 @router.get("/documents")
 async def list_documents(
     request: Request,
@@ -166,7 +186,7 @@ async def list_documents(
 @router.get("/documents/{document_id}")
 async def get_document(
     document_id: DocumentId,
-    user_id: str = Depends(require_fga("document", "can_view")),
+    user_id: str = Depends(require_fga("document", "can_view", resource_id_pattern=_UUID_PATTERN)),
     tenant_id: str = Depends(get_tenant_id),
     session: AsyncSession = Depends(get_async_session),
 ):
@@ -183,7 +203,7 @@ async def update_document(
     request: Request,
     document_id: DocumentId,
     body: UpdateDocumentRequest,
-    user_id: str = Depends(require_fga("document", "can_edit")),
+    user_id: str = Depends(require_fga("document", "can_edit", resource_id_pattern=_UUID_PATTERN)),
     tenant_id: str = Depends(get_tenant_id),
     session: AsyncSession = Depends(get_async_session),
 ):
@@ -218,7 +238,7 @@ async def update_document(
 async def delete_document(
     request: Request,
     document_id: DocumentId,
-    user_id: str = Depends(require_fga("document", "can_delete")),
+    user_id: str = Depends(require_fga("document", "can_delete", resource_id_pattern=_UUID_PATTERN)),
     tenant_id: str = Depends(get_tenant_id),
     session: AsyncSession = Depends(get_async_session),
 ):
@@ -260,31 +280,37 @@ async def delete_document(
     except ValueError as exc:
         # DescopeManagementClient validates FGA identifiers and raises ValueError.
         # A rejected identifier is a malformed request, not a server fault.
+        await _restore_relations(client, prefixed_id, deleted_relations, document_id)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+        # A 429 or 5xx partway through leaves the document with a partially
+        # stripped ACL: the caller sees 502, the row is still there, and the owner
+        # is locked out of a document nothing can restore. Put back what this
+        # request removed before reporting the failure — the same compensation the
+        # DB-failure path below has always done.
         logger.error("FGA cleanup failed for doc %s: %s", document_id, type(exc).__name__)
+        await _restore_relations(client, prefixed_id, deleted_relations, document_id)
         raise HTTPException(status_code=502, detail="Failed to clean up document permissions") from exc
 
     # DB delete — compensate FGA on failure by re-creating deleted relations
     try:
         await session.delete(document)
         await session.commit()
+    except StaleDataError:
+        # Two concurrent DELETEs: the other request already removed the row. The
+        # document IS gone, so this is a success, not a DB fault — compensating
+        # here would re-create every relation for a document that no longer
+        # exists, leaving orphan grants in the authz store. DELETE is idempotent.
+        await session.rollback()
+        logger.info("Doc %s was deleted by a concurrent request", document_id)
+        return {"status": "deleted", "id": document_id}
     except Exception as exc:
         await session.rollback()
         logger.error(
             "DB delete failed for doc %s after FGA cleanup — attempting compensation",
             document_id,
         )
-        for dr in deleted_relations:
-            try:
-                await client.create_relation("document", prefixed_id, dr["relation"], dr["target"])
-            except Exception:
-                logger.warning(
-                    "FGA compensation failed for doc %s relation %s->%s",
-                    document_id,
-                    dr["relation"],
-                    dr["target"],
-                )
+        await _restore_relations(client, prefixed_id, deleted_relations, document_id)
         raise HTTPException(status_code=500, detail="Failed to delete document") from exc
 
     return {"status": "deleted", "id": document_id}
@@ -296,7 +322,7 @@ async def share_document(
     request: Request,
     document_id: DocumentId,
     body: ShareDocumentRequest,
-    user_id: str = Depends(require_fga("document", "owner")),
+    user_id: str = Depends(require_fga("document", "owner", resource_id_pattern=_UUID_PATTERN)),
     tenant_id: str = Depends(get_tenant_id),
     session: AsyncSession = Depends(get_async_session),
 ):
@@ -340,10 +366,18 @@ async def share_document(
             detail="Cannot share with users outside your tenant",
         )
 
+    # The tuple must key on the userId every read uses, not on whatever
+    # identifier the caller addressed the person by. See resolve_fga_user_target.
+    target_user_id = str(target_user.get("userId") or "")
+    if not target_user_id:
+        raise HTTPException(status_code=404, detail="Target user not found")
+    if target_user_id == user_id:
+        raise HTTPException(status_code=400, detail="Cannot share a document with yourself")
+
     # Create FGA relation with tenant-prefixed resource ID
     prefixed_id = _prefix_resource_id(tenant_id, document_id)
     try:
-        await client.create_relation("document", prefixed_id, body.relation, body.user_id)
+        await client.create_relation("document", prefixed_id, body.relation, target_user_id)
     except ValueError as exc:
         # DescopeManagementClient validates FGA identifiers and raises ValueError.
         # A rejected identifier is a malformed request, not a server fault.
@@ -358,7 +392,7 @@ async def share_document(
 
     return {
         "document_id": document_id,
-        "user_id": body.user_id,
+        "user_id": target_user_id,
         "relation": body.relation,
     }
 
@@ -369,7 +403,7 @@ async def revoke_share(
     request: Request,
     document_id: DocumentId,
     target_user_id: str,
-    user_id: str = Depends(require_fga("document", "owner")),
+    user_id: str = Depends(require_fga("document", "owner", resource_id_pattern=_UUID_PATTERN)),
     tenant_id: str = Depends(get_tenant_id),
     session: AsyncSession = Depends(get_async_session),
 ):
@@ -418,10 +452,14 @@ async def revoke_share(
             detail="Cannot revoke access for users outside your tenant",
         )
 
+    resolved_target_id = str(target_user.get("userId") or "")
+    if not resolved_target_id:
+        raise HTTPException(status_code=404, detail="Target user not found")
+
     prefixed_id = _prefix_resource_id(tenant_id, document_id)
     for relation in ("viewer", "editor"):
         try:
-            await client.delete_relation("document", prefixed_id, relation, target_user_id)
+            await client.delete_relation("document", prefixed_id, relation, resolved_target_id)
         except httpx.HTTPStatusError as exc:
             # Relation may not exist — tolerate 400/404 from Descope
             if exc.response.status_code not in (400, 404):
@@ -449,5 +487,5 @@ async def revoke_share(
     return {
         "status": "revoked",
         "document_id": document_id,
-        "user_id": target_user_id,
+        "user_id": resolved_target_id,
     }

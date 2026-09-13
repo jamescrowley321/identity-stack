@@ -5,6 +5,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from app.dependencies.fga import resolve_fga_user_target
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
@@ -26,6 +27,9 @@ class RelationRequest(BaseModel):
     resource_type: str = Field(min_length=1, max_length=200)
     resource_id: str = Field(min_length=1, max_length=200)
     relation: str = Field(min_length=1, max_length=200)
+    # A user identifier in any form the caller holds — userId, email, or username.
+    # It is resolved to the Descope userId before it reaches FGA, because that is
+    # what every read keys on. See resolve_fga_user_target.
     target: str = Field(min_length=1, max_length=200)
 
 
@@ -34,8 +38,15 @@ def _prefix_resource_id(tenant_id: str, resource_id: str) -> str:
     return f"{tenant_id}:{resource_id}"
 
 
-def _strip_tenant_prefix(tenant_id: str, resource_id: str) -> str:
-    """Strip the tenant prefix from a resource ID before returning to client."""
+def _strip_tenant_prefix(tenant_id: str, resource_id: object) -> object:
+    """Strip the tenant prefix from a resource ID before returning to client.
+
+    Non-string values are returned untouched: a null ``resource`` in an upstream
+    relation reached ``.startswith`` and raised AttributeError, which Starlette
+    turned into a 500 for a response the caller could otherwise have read.
+    """
+    if not isinstance(resource_id, str):
+        return resource_id
     prefix = f"{tenant_id}:"
     return resource_id[len(prefix) :] if resource_id.startswith(prefix) else resource_id
 
@@ -96,6 +107,11 @@ async def update_fga_schema(
     try:
         client = request.app.state.descope_client
         await client.update_fga_schema(body.schema_)
+    except ValueError as exc:
+        # The client rejects an empty/blank schema with ValueError. min_length=1
+        # stops "" but not "   ", so this fifth route was the one that still let a
+        # blank body through to an unhandled 500 — the other four already guard it.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except httpx.HTTPStatusError as exc:
         resp_body = exc.response.text[:500]
         logger.warning("Descope API error updating FGA schema: %s %s", exc.response.status_code, resp_body)
@@ -128,14 +144,15 @@ async def create_relation(
 ):
     """Create an FGA relation tuple. Requires owner or admin role."""
     prefixed_id = _prefix_resource_id(tenant_id, body.resource_id)
+    client = request.app.state.descope_client
+    target = await resolve_fga_user_target(client, body.target)
     try:
-        client = request.app.state.descope_client
-        await client.create_relation(body.resource_type, prefixed_id, body.relation, body.target)
+        await client.create_relation(body.resource_type, prefixed_id, body.relation, target)
         return {
             "resource_type": body.resource_type,
             "resource_id": body.resource_id,
             "relation": body.relation,
-            "target": body.target,
+            "target": target,
         }
     except json.JSONDecodeError as exc:
         # Must precede ValueError: JSONDecodeError subclasses it, and an upstream body
@@ -167,9 +184,10 @@ async def delete_relation(
 ):
     """Delete an FGA relation tuple. Requires owner or admin role."""
     prefixed_id = _prefix_resource_id(tenant_id, body.resource_id)
+    client = request.app.state.descope_client
+    target = await resolve_fga_user_target(client, body.target)
     try:
-        client = request.app.state.descope_client
-        await client.delete_relation(body.resource_type, prefixed_id, body.relation, body.target)
+        await client.delete_relation(body.resource_type, prefixed_id, body.relation, target)
         return {"status": "deleted"}
     except json.JSONDecodeError as exc:
         # Must precede ValueError: JSONDecodeError subclasses it, and an upstream body
@@ -247,9 +265,10 @@ async def check_permission(
 ):
     """Check an FGA permission. Requires owner or admin role. Fail-closed: errors deny access."""
     prefixed_id = _prefix_resource_id(tenant_id, body.resource_id)
+    client = request.app.state.descope_client
+    target = await resolve_fga_user_target(client, body.target)
     try:
-        client = request.app.state.descope_client
-        allowed = bool(await client.check_permission(body.resource_type, prefixed_id, body.relation, body.target))
+        allowed = bool(await client.check_permission(body.resource_type, prefixed_id, body.relation, target))
         return {"allowed": allowed}
     except json.JSONDecodeError as exc:
         # Must precede ValueError: JSONDecodeError subclasses it, and an upstream body

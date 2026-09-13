@@ -1,4 +1,5 @@
 import logging
+import re
 
 import httpx
 from fastapi import HTTPException, Request
@@ -36,11 +37,43 @@ def _extract_tenant_id(request: Request) -> str:
     return tenant_id
 
 
+async def resolve_fga_user_target(client, identifier: str) -> str:
+    """Resolve a caller-supplied user identifier to the Descope userId FGA keys on.
+
+    Every FGA *read* in this service keys on the JWT ``sub``, which is a Descope
+    userId: ``require_fga`` checks with it, and the owner tuple is written from it.
+    A write that keys on whatever the caller happened to type therefore lands on a
+    target no read will ever match. Sharing by email failed loudly (the ``@`` is
+    outside the FGA charset, so the client rejected it), but sharing by a
+    charset-legal username returned 200 while granting nothing at all, and revoking
+    reported success while removing nothing. Resolving every caller-supplied target
+    through the same lookup makes both ends of the tuple agree.
+
+    ``load_user`` accepts either form and tries the other on a miss, so an
+    identifier that is already a userId costs a lookup and comes back unchanged.
+    """
+    try:
+        user = await client.load_user(identifier)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Target user not found") from exc
+        logger.error("Failed to resolve FGA target: HTTP %s", exc.response.status_code)
+        raise HTTPException(status_code=502, detail="Failed to resolve target user") from exc
+    except httpx.RequestError as exc:
+        logger.error("Network error resolving FGA target: %s", type(exc).__name__)
+        raise HTTPException(status_code=502, detail="Failed to resolve target user") from exc
+
+    if not isinstance(user, dict) or not user.get("userId"):
+        raise HTTPException(status_code=404, detail="Target user not found")
+    return str(user["userId"])
+
+
 def require_fga(
     resource_type: str,
     relation: str,
     *,
     resource_id_param: str = "document_id",
+    resource_id_pattern: str | None = None,
 ):
     """Dependency factory that enforces an FGA permission check.
 
@@ -51,7 +84,16 @@ def require_fga(
 
     Returns the caller's user_id for downstream use.
     Fail-closed: any FGA API error results in HTTP 502 (deny).
+
+    ``resource_id_pattern`` is checked here rather than left to the path
+    parameter's own ``Path(pattern=...)``. FastAPI solves dependencies before it
+    validates the endpoint's own parameters, so a malformed id reached the FGA
+    call first and came back 403 "denied" — Descope cannot hold a relation for a
+    syntactically impossible resource — and the 422 the path parameter would have
+    raised was never reported. Validating here makes the response describe the
+    real fault and spares the upstream authz call.
     """
+    compiled = re.compile(resource_id_pattern) if resource_id_pattern else None
 
     async def dependency(request: Request) -> str:
         user_id = extract_user_id(request)
@@ -59,6 +101,11 @@ def require_fga(
         resource_id = request.path_params.get(resource_id_param, "")
         if not resource_id:
             raise HTTPException(status_code=400, detail="Missing resource identifier")
+        if compiled is not None and not compiled.fullmatch(resource_id):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid {resource_id_param}: expected {resource_id_pattern}",
+            )
         prefixed_id = f"{tenant_id}:{resource_id}"
         try:
             client = request.app.state.descope_client
