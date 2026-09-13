@@ -327,11 +327,30 @@ class DescopeManagementClient:
         resp = await self._request("/v1/mgmt/authz/re/who", body)
         return resp.json().get("relationInfo") or []
 
-    async def relation_definitions(self, resource_type: str) -> list[str]:
-        """Names of the relations the FGA schema defines for a resource type.
+    @staticmethod
+    def _is_stored_relation(rd: dict) -> bool:
+        """True for a relation held as an actual tuple, false for a computed permission.
 
-        Empty when the type is absent from the schema — an unknown type simply has
-        no relations, which is not an error.
+        Descope returns relations and permissions together in `relationDefinitions`,
+        so the name alone cannot tell them apart. A directly-held relation is
+        `nType: "child"` over `neType: "self"`; a permission is either a union
+        (`can_view: viewer | editor | owner`) or points at another relation's target
+        set (`can_delete: owner` -> `neType: "targetSet"`).
+
+        The distinction matters because a permission is derived, not stored: there is
+        no tuple behind it to delete, and counting one would inflate the number of
+        relations a resource appears to carry.
+        """
+        definition = rd.get("complexDefinition") or {}
+        expression = definition.get("expression") or {}
+        return definition.get("nType") == "child" and expression.get("neType") == "self"
+
+    async def relation_definitions(self, resource_type: str) -> list[str]:
+        """Names of the directly-held relations the FGA schema defines for a type.
+
+        Computed permissions are excluded; see _is_stored_relation. Empty when the
+        type is absent from the schema — an unknown type simply has no relations,
+        which is not an error.
         """
         self._validate_fga_param(resource_type, "resource_type")
         schema = await self.get_fga_schema() or {}
@@ -340,7 +359,7 @@ class DescopeManagementClient:
                 return [
                     rd["name"]
                     for rd in (namespace.get("relationDefinitions") or [])
-                    if isinstance(rd, dict) and rd.get("name")
+                    if isinstance(rd, dict) and rd.get("name") and self._is_stored_relation(rd)
                 ]
         return []
 
