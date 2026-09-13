@@ -277,6 +277,30 @@ class DescopeManagementClient:
             raise ValueError("schema must be a non-empty string")
         await self._request("/v1/mgmt/authz/schema/save", {"schema": schema})
 
+    # Every /v1/mgmt/authz/re/* endpoint below was verified against the live API on
+    # 2026-09-13, because the previous shapes failed SILENTLY. `create` and `delete`
+    # took a flat body and returned {} with HTTP 200 while writing nothing at all;
+    # `has` returned empty arrays, so check_permission answered False for every
+    # question ever asked of it. Nothing raised. The verified contract is:
+    #
+    #   create / delete   {"relations":       [<tuple>]}
+    #   has               {"relationQueries": [<tuple>]} -> .relationQueries[].hasRelation
+    #   resource          {namespace, resource}          -> .relations  (all relations here)
+    #   targetall         {namespace, relationDefinition, target} -> .relations
+    #                     (NB: it ignores relationDefinition and returns everything)
+    #   who               {namespace, resource, relationDefinition} -> .targets (strings)
+    #
+    # The field is `namespace`, never `resourceType`.
+
+    @staticmethod
+    def _relation_tuple(resource_type: str, resource_id: str, relation: str, target: str) -> dict:
+        return {
+            "resource": resource_id,
+            "relationDefinition": relation,
+            "namespace": resource_type,
+            "target": target,
+        }
+
     async def create_relation(self, resource_type: str, resource_id: str, relation: str, target: str) -> None:
         """Create an FGA relation tuple."""
         self._validate_fga_param(resource_type, "resource_type")
@@ -285,12 +309,7 @@ class DescopeManagementClient:
         self._validate_fga_param(target, "target")
         await self._request(
             "/v1/mgmt/authz/re/create",
-            {
-                "resourceType": resource_type,
-                "resource": resource_id,
-                "relationDefinition": relation,
-                "target": target,
-            },
+            {"relations": [self._relation_tuple(resource_type, resource_id, relation, target)]},
         )
 
     async def delete_relation(self, resource_type: str, resource_id: str, relation: str, target: str) -> None:
@@ -301,106 +320,61 @@ class DescopeManagementClient:
         self._validate_fga_param(target, "target")
         await self._request(
             "/v1/mgmt/authz/re/delete",
-            {
-                "resourceType": resource_type,
-                "resource": resource_id,
-                "relationDefinition": relation,
-                "target": target,
-            },
+            {"relations": [self._relation_tuple(resource_type, resource_id, relation, target)]},
         )
 
     async def list_relations(
         self, resource_type: str, resource_id: str, relation: str | None = None, target: str | None = None
     ) -> list[dict]:
-        """List all relation tuples for a specific resource. Returns empty list if none."""
+        """Relation tuples on a resource, optionally narrowed by relation and/or target.
+
+        `/re/resource` returns every relation held on the resource in one call, as
+        dicts carrying resource/relationDefinition/namespace/target — so there is no
+        need to ask per relation, and no need to read the schema to find out which
+        relations exist. Narrowing is done here because the endpoint does not take
+        those filters.
+        """
         self._validate_fga_param(resource_type, "resource_type")
         self._validate_fga_param(resource_id, "resource_id")
         if relation is not None:
             self._validate_fga_param(relation, "relation")
         if target is not None:
             self._validate_fga_param(target, "target")
-        body: dict = {"resourceType": resource_type, "resource": resource_id}
+
+        resp = await self._request("/v1/mgmt/authz/re/resource", {"namespace": resource_type, "resource": resource_id})
+        relations = [r for r in (resp.json().get("relations") or []) if isinstance(r, dict)]
         if relation is not None:
-            body["relationDefinition"] = relation
+            relations = [r for r in relations if r.get("relationDefinition") == relation]
         if target is not None:
-            body["target"] = target
-        resp = await self._request("/v1/mgmt/authz/re/who", body)
-        return resp.json().get("relationInfo") or []
-
-    @staticmethod
-    def _is_stored_relation(rd: dict) -> bool:
-        """True for a relation held as an actual tuple, false for a computed permission.
-
-        Descope returns relations and permissions together in `relationDefinitions`,
-        so the name alone cannot tell them apart. A directly-held relation is
-        `nType: "child"` over `neType: "self"`; a permission is either a union
-        (`can_view: viewer | editor | owner`) or points at another relation's target
-        set (`can_delete: owner` -> `neType: "targetSet"`).
-
-        The distinction matters because a permission is derived, not stored: there is
-        no tuple behind it to delete, and counting one would inflate the number of
-        relations a resource appears to carry.
-        """
-        definition = rd.get("complexDefinition") or {}
-        expression = definition.get("expression") or {}
-        return definition.get("nType") == "child" and expression.get("neType") == "self"
-
-    async def relation_definitions(self, resource_type: str) -> list[str]:
-        """Names of the directly-held relations the FGA schema defines for a type.
-
-        Computed permissions are excluded; see _is_stored_relation. Empty when the
-        type is absent from the schema — an unknown type simply has no relations,
-        which is not an error.
-        """
-        self._validate_fga_param(resource_type, "resource_type")
-        schema = await self.get_fga_schema() or {}
-        for namespace in schema.get("namespaces") or []:
-            if namespace.get("name") == resource_type:
-                return [
-                    rd["name"]
-                    for rd in (namespace.get("relationDefinitions") or [])
-                    if isinstance(rd, dict) and rd.get("name") and self._is_stored_relation(rd)
-                ]
-        return []
+            relations = [r for r in relations if r.get("target") == target]
+        return relations
 
     async def list_all_relations(self, resource_type: str, resource_id: str) -> list[dict]:
-        """Every relation tuple on a resource, across all relations in the schema.
-
-        Descope has no "all relations for this resource" call: /v1/mgmt/authz/re/who
-        answers "who holds relation R on resource X" and *requires* relationDefinition.
-        Calling it without one returns
-        400 E011003 "The relationDefinition field is required", which is what
-        GET /api/fga/relations did on every request. So read the relations the schema
-        defines for this type and ask once per relation.
-        """
-        relations = await self.relation_definitions(resource_type)
-        out: list[dict] = []
-        for relation in relations:
-            for info in await self.list_relations(resource_type, resource_id, relation=relation):
-                # `who` answers per-relation, so the relation is not always echoed back
-                # in the tuple; carry it so a merged list stays self-describing.
-                if isinstance(info, dict):
-                    info.setdefault("relationDefinition", relation)
-                out.append(info)
-        return out
+        """Every relation tuple on a resource. One call; see list_relations."""
+        return await self.list_relations(resource_type, resource_id)
 
     async def list_user_resources(self, resource_type: str, relation: str, target: str) -> list[dict]:
-        """List resources a target has a specific relation to. Returns empty list if none."""
+        """Resources a target holds `relation` on, derived relations included.
+
+        `/re/targetall` ignores the relationDefinition it is given and returns every
+        relation the target holds in the namespace, so the filter is applied here —
+        without it a can_view query also answers with can_edit, can_delete and owner.
+        """
         self._validate_fga_param(resource_type, "resource_type")
         self._validate_fga_param(relation, "relation")
         self._validate_fga_param(target, "target")
         resp = await self._request(
-            "/v1/mgmt/authz/re/resource",
-            {
-                "resourceType": resource_type,
-                "relationDefinition": relation,
-                "target": target,
-            },
+            "/v1/mgmt/authz/re/targetall",
+            {"namespace": resource_type, "relationDefinition": relation, "target": target},
         )
-        return resp.json().get("resources") or []
+        return [
+            r
+            for r in (resp.json().get("relations") or [])
+            if isinstance(r, dict) and r.get("relationDefinition") == relation
+        ]
 
     async def check_permission(self, resource_type: str, resource_id: str, relation: str, target: str) -> bool:
-        """Check if a subject has a relation to a resource. Returns True/False.
+        """Whether a target holds a relation (direct or derived) on a resource.
 
         Raises httpx.HTTPStatusError on API errors (4xx/5xx).
         Raises httpx.RequestError on network/transport errors.
@@ -412,14 +386,10 @@ class DescopeManagementClient:
         self._validate_fga_param(target, "target")
         resp = await self._request(
             "/v1/mgmt/authz/re/has",
-            {
-                "resourceType": resource_type,
-                "resource": resource_id,
-                "relationDefinition": relation,
-                "target": target,
-            },
+            {"relationQueries": [self._relation_tuple(resource_type, resource_id, relation, target)]},
         )
-        return bool(resp.json().get("allowed", False))
+        queries = resp.json().get("relationQueries") or []
+        return bool(queries and queries[0].get("hasRelation"))
 
     async def invite_user(self, email: str, tenant_id: str, role_names: list[str] | None = None) -> dict:
         """Create a user and assign them to a tenant with roles."""

@@ -198,14 +198,7 @@ async def list_relations(
     prefixed_id = _prefix_resource_id(tenant_id, resource_id)
     try:
         client = request.app.state.descope_client
-        # Unfiltered listing fans out over the schema's relations. Descope's
-        # /v1/mgmt/authz/re/who requires relationDefinition, so the single
-        # unfiltered call this used to make always returned
-        # 400 E011003 "The relationDefinition field is required".
-        if relation is None:
-            relations = await client.list_all_relations(resource_type, prefixed_id) or []
-        else:
-            relations = await client.list_relations(resource_type, prefixed_id, relation=relation) or []
+        relations = await client.list_relations(resource_type, prefixed_id, relation=relation) or []
         # Strip tenant prefix from resource_id in response items
         for rel in relations:
             if isinstance(rel, dict) and "resource" in rel:
