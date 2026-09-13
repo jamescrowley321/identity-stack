@@ -128,16 +128,36 @@ class DescopeManagementClient:
             {"loginId": user_id, "tenantId": tenant_id, "roleNames": role_names},
         )
 
-    async def load_user(self, user_id: str) -> dict:
-        """Load a user by userId (from JWT sub claim). Returns user object including customAttributes.
+    # A Descope userId is alphanumeric (e.g. "U3J36liQh0rQ39NT2SdRqdEqb4Zs"); a loginId
+    # is an email, phone or username and may contain characters userIds rejects.
+    _DESCOPE_USER_ID = re.compile(r"^U[A-Za-z0-9]+$")
 
-        Uses the search endpoint with a userIds filter because the
-        ``/v1/mgmt/user/load`` endpoint does not exist in the current
-        Descope API version (returns 404).
+    async def load_user(self, identifier: str) -> dict:
+        """Load a user by Descope userId (JWT sub) or by loginId (email/phone).
+
+        Uses the search endpoint because ``/v1/mgmt/user/load`` does not exist in the
+        current Descope API version (returns 404).
+
+        Two things the obvious implementation gets wrong:
+
+        * The ``userIds`` filter rejects anything non-alphanumeric outright — an email
+          comes back 400 "The userIds[0] field must only contain alphanumeric
+          characters", not an empty result. Callers legitimately hold either form: the
+          JWT carries a userId, while document sharing addresses people by loginId, so
+          the filter is chosen from the shape and the other one is tried on a miss.
+        * The search **omits Descope test users unless asked**, and the E2E suite's own
+          account is one. Without ``withTestUser`` it reports no such user.
         """
-        resp = await self._request("/v1/mgmt/user/search", {"userIds": [user_id], "limit": 1})
-        users = resp.json().get("users", [])
-        return users[0] if users else {}
+        first = "userIds" if self._DESCOPE_USER_ID.match(identifier) else "loginIds"
+        second = "loginIds" if first == "userIds" else "userIds"
+        for key in (first, second):
+            if key == "userIds" and not self._DESCOPE_USER_ID.match(identifier):
+                continue  # would 400 rather than simply miss
+            resp = await self._request("/v1/mgmt/user/search", {key: [identifier], "limit": 1, "withTestUser": True})
+            users = resp.json().get("users", [])
+            if users:
+                return users[0]
+        return {}
 
     async def resolve_login_id(self, user_id: str) -> str:
         """Resolve a userId (JWT sub) to the primary loginId required by mutation endpoints.
