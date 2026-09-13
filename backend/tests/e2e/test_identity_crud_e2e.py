@@ -18,6 +18,7 @@ import pytest
 from playwright.sync_api import APIRequestContext
 
 from tests.e2e.helpers.api import unique_name
+from tests.e2e.helpers.auth import cleanup_test_user
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DESCOPE_MANAGEMENT_KEY"),
@@ -418,6 +419,11 @@ class TestMemberCrud:
             if created_user_id:
                 with contextlib.suppress(Exception):
                     admin_api_context.delete(f"{backend_url}/api/members/{created_user_id}")
+            # Backstop: the invite can create the Descope user and still return a
+            # body with no id (the 207 path skips above, before created_user_id is
+            # ever assigned). Deleting by login id does not depend on parsing one.
+            with contextlib.suppress(Exception):
+                cleanup_test_user(test_email)
 
     def test_member_deactivate_activate_lifecycle(self, admin_api_context: APIRequestContext, backend_url: str):
         """Invite → deactivate → activate → remove lifecycle."""
@@ -464,6 +470,10 @@ class TestMemberCrud:
             if created_user_id:
                 with contextlib.suppress(Exception):
                     admin_api_context.delete(f"{backend_url}/api/members/{created_user_id}")
+            # Backstop, as above: the 207 path skips before created_user_id is
+            # assigned, so id-based cleanup never runs even though the user exists.
+            with contextlib.suppress(Exception):
+                cleanup_test_user(test_email)
 
 
 class TestTenantOperations:
