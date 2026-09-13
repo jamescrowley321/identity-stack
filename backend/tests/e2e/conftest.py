@@ -1,6 +1,7 @@
 """E2E test configuration and fixtures."""
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -120,8 +121,45 @@ def test_tenant_id() -> str:
     return tid
 
 
+# --- Failure evidence for browser tests -------------------------------------
+#
+# pytest-playwright's --screenshot/--tracing only cover ITS `page` fixture. The
+# authenticated fixtures below build their own context (they have to: the OIDC
+# session is injected via add_init_script before first paint), so those pages
+# are invisible to it and a UI failure reports only which locator it waited for
+# — never what the page actually showed. Capture it here instead.
+
+_ARTIFACT_DIR = os.environ.get("E2E_ARTIFACT_DIR", "")
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_runtest_makereport(item, call):
+    """Record each phase's report on the item so fixtures can see the outcome."""
+    outcome = yield
+    report = outcome.get_result()
+    setattr(item, f"_report_{report.when}", report)
+
+
+def _capture_on_failure(page, request, label: str) -> None:
+    """Save a screenshot and the rendered HTML if the test failed."""
+    if not _ARTIFACT_DIR:
+        return
+    report = getattr(request.node, "_report_call", None)
+    if report is None or not report.failed:
+        return
+    out = Path(_ARTIFACT_DIR)
+    out.mkdir(parents=True, exist_ok=True)
+    stem = f"{request.node.name}-{label}".replace("/", "_").replace("::", "-")
+    try:
+        page.screenshot(path=str(out / f"{stem}.png"), full_page=True)
+        (out / f"{stem}.html").write_text(page.content(), encoding="utf-8")
+        (out / f"{stem}.url.txt").write_text(page.url, encoding="utf-8")
+    except Exception as exc:  # pragma: no cover - diagnostics must never fail a test
+        print(f"[e2e] could not capture failure evidence for {stem}: {exc}")
+
+
 @pytest.fixture
-def admin_page(browser, _ensure_test_user, admin_access_token, frontend_url):
+def admin_page(browser, _ensure_test_user, admin_access_token, frontend_url, request):
     """Browser page authenticated as an admin/owner of the test tenant.
 
     ``auth_page`` injects the plain client-credentials token, which carries no
@@ -135,11 +173,12 @@ def admin_page(browser, _ensure_test_user, admin_access_token, frontend_url):
     page.goto(frontend_url + "/")
     page.wait_for_load_state("networkidle")
     yield page
+    _capture_on_failure(page, request, "admin_page")
     context.close()
 
 
 @pytest.fixture
-def auth_page(browser, _ensure_test_user, auth_access_token, frontend_url):
+def auth_page(browser, _ensure_test_user, auth_access_token, frontend_url, request):
     """Browser page with OIDC tokens injected for authenticated testing.
 
     Uses client credentials access token injected into sessionStorage
@@ -151,4 +190,5 @@ def auth_page(browser, _ensure_test_user, auth_access_token, frontend_url):
     page.goto(frontend_url + "/")
     page.wait_for_load_state("networkidle")
     yield page
+    _capture_on_failure(page, request, "auth_page")
     context.close()

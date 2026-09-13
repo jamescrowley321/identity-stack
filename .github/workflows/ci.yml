@@ -213,6 +213,7 @@ jobs:
           --tracing=retain-on-failure
           --output="$RUNNER_TEMP/playwright"
         env:
+          E2E_ARTIFACT_DIR: ${{ runner.temp }}/playwright
           INTERNAL_IDENTITY_KEY: ${{ env.INTERNAL_IDENTITY_KEY }}
           DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
           DESCOPE_MANAGEMENT_KEY: ${{ secrets.DESCOPE_MANAGEMENT_KEY }}
