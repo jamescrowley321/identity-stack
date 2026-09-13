@@ -121,6 +121,24 @@ def test_tenant_id() -> str:
 
 
 @pytest.fixture
+def admin_page(browser, _ensure_test_user, admin_access_token, frontend_url):
+    """Browser page authenticated as an admin/owner of the test tenant.
+
+    ``auth_page`` injects the plain client-credentials token, which carries no
+    ``dct``/``tenants`` claims — so ``useRBAC`` reports isAdmin=false and every
+    admin-gated card stays unrendered. A test that creates something through the
+    admin API and then looks for it in the UI needs the browser session to be that
+    same admin, or it is asserting against a page the identity can never see.
+    """
+    context = create_authenticated_context(browser, frontend_url, admin_access_token)
+    page = context.new_page()
+    page.goto(frontend_url + "/")
+    page.wait_for_load_state("networkidle")
+    yield page
+    context.close()
+
+
+@pytest.fixture
 def auth_page(browser, _ensure_test_user, auth_access_token, frontend_url):
     """Browser page with OIDC tokens injected for authenticated testing.
 

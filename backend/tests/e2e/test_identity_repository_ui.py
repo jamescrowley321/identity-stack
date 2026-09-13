@@ -44,14 +44,17 @@ def test_navigate_to_settings_page(auth_page: Page, frontend_url: str):
     auth_page.goto(f"{frontend_url}/settings")
     auth_page.wait_for_load_state("networkidle")
     expect(auth_page).not_to_have_url("**/login**")
-    expect(auth_page.get_by_text("Tenant Settings")).to_be_visible()
+    # "Tenant Settings" also labels the sidebar link and the header breadcrumb, so
+    # a bare text match is a strict-mode violation. The page's own <h1> is the one
+    # that proves the route rendered.
+    expect(auth_page.get_by_role("heading", name="Tenant Settings", level=1)).to_be_visible()
 
 
 # --- Test 2: Data display — create role via API, verify in UI ---
 
 
 def test_role_created_via_api_visible_in_ui(
-    auth_page: Page,
+    admin_page: Page,
     admin_api_context: APIRequestContext,
     backend_url: str,
     frontend_url: str,
@@ -68,9 +71,11 @@ def test_role_created_via_api_visible_in_ui(
         assert resp.status == 201, f"Create role failed: {resp.status}"
         cleanup_role = role_name
 
-        auth_page.goto(f"{frontend_url}/roles")
-        auth_page.wait_for_load_state("networkidle")
-        expect(auth_page.get_by_text(role_name)).to_be_visible(timeout=10000)
+        # The roles table is gated on useRBAC().isAdmin, so this must browse as the
+        # same admin identity that created the role — see the admin_page fixture.
+        admin_page.goto(f"{frontend_url}/roles")
+        admin_page.wait_for_load_state("networkidle")
+        expect(admin_page.get_by_text(role_name)).to_be_visible(timeout=10000)
 
     finally:
         if cleanup_role:
