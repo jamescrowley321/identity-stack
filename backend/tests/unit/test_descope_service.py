@@ -174,14 +174,39 @@ class TestDescopeManagementClient:
             json=MagicMock(return_value={"users": [{"name": "Test", "customAttributes": {"dept": "Eng"}}]}),
         )
 
-        result = await client.load_user("user1")
+        result = await client.load_user("U3J36liQh0rQ39NT2SdRqdEqb4Zs")
         assert result["name"] == "Test"
         assert result["customAttributes"]["dept"] == "Eng"
         mock_http.post.assert_called_once_with(
             "https://api.descope.com/v1/mgmt/user/search",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
-            json={"userIds": ["user1"], "limit": 1},
+            # withTestUser: the search omits Descope test users by default, and the
+            # E2E suite's own account is one.
+            json={"userIds": ["U3J36liQh0rQ39NT2SdRqdEqb4Zs"], "limit": 1, "withTestUser": True},
         )
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_load_user_by_login_id(self, mock_cls, client):
+        """An email must go in loginIds — userIds 400s on anything non-alphanumeric.
+
+        Document sharing addresses people by loginId, so this is a real caller shape,
+        not a defensive nicety.
+        """
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(
+            status_code=200,
+            raise_for_status=MagicMock(),
+            json=MagicMock(return_value={"users": [{"userId": "U123", "loginIds": ["a@b.test"]}]}),
+        )
+
+        result = await client.load_user("a@b.test")
+        assert result["userId"] == "U123"
+        body = mock_http.post.call_args[1]["json"]
+        assert body["loginIds"] == ["a@b.test"], "an email in userIds is rejected outright, not merely missed"
+        assert "userIds" not in body
+        assert body["withTestUser"] is True
 
     @pytest.mark.anyio
     @patch("app.services.descope.httpx.AsyncClient")
