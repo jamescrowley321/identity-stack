@@ -203,7 +203,15 @@ jobs:
 
       - name: Run E2E tests
         if: env.DESCOPE_PROJECT_ID != ''
-        run: cd backend && python -m pytest tests/e2e/ -v
+        # Screenshots + traces on failure, for the same reason the backend log is
+        # kept: a Playwright assertion failure reports only which locator it
+        # waited for, never what the page actually showed, so a UI failure is
+        # undiagnosable from CI alone.
+        run: >-
+          cd backend && python -m pytest tests/e2e/ -v
+          --screenshot=only-on-failure
+          --tracing=retain-on-failure
+          --output="$RUNNER_TEMP/playwright"
         env:
           INTERNAL_IDENTITY_KEY: ${{ env.INTERNAL_IDENTITY_KEY }}
           DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
@@ -251,6 +259,18 @@ jobs:
           name: e2e-backend-log
           path: ${{ runner.temp }}/backend.log
           if-no-files-found: warn
+          retention-days: 7
+
+      # Screenshots and traces of the rendered page. They contain whatever the
+      # authenticated UI displayed, so treat them as you would the backend log:
+      # this repository is public and artifacts are world-readable.
+      - name: Upload Playwright failure artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-playwright-failures
+          path: ${{ runner.temp }}/playwright
+          if-no-files-found: ignore
           retention-days: 7
 
       - name: Stop test stack
