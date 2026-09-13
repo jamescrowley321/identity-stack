@@ -6,6 +6,7 @@ import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm.exc import StaleDataError
 from sqlmodel import SQLModel
 
 from app.main import app
@@ -505,7 +506,12 @@ async def test_update_document_cross_tenant(mock_validate, client, test_db):
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_update_document_fga_denied(mock_validate, client):
-    """PUT: FGA denies can_edit → 403. No DB seed needed — FGA dep short-circuits."""
+    """PUT: FGA denies can_edit → 403. No DB seed needed — FGA dep short-circuits.
+
+    The id must be a well-formed UUID for this to test what it says: a malformed
+    one is now rejected as 422 before any FGA call, so "doc-1" would assert the
+    validation path rather than the denial path.
+    """
     mock_validate.return_value = AUTHED_CLAIMS
 
     mock_client = AsyncMock()
@@ -513,13 +519,13 @@ async def test_update_document_fga_denied(mock_validate, client):
     app.state.descope_client = mock_client
 
     resp = await client.put(
-        "/api/documents/doc-1",
+        f"/api/documents/{DOC_UUID_1}",
         headers=AUTH_HEADER,
         json={"title": "Updated"},
     )
     assert resp.status_code == 403
     assert resp.json()["detail"] == "Access denied"
-    mock_client.check_permission.assert_called_once_with("document", "tenant-abc:doc-1", "can_edit", "user-1")
+    mock_client.check_permission.assert_called_once_with("document", f"tenant-abc:{DOC_UUID_1}", "can_edit", "user-1")
 
 
 @pytest.mark.anyio
@@ -533,13 +539,13 @@ async def test_update_document_fga_error_fail_closed(mock_validate, client):
     app.state.descope_client = mock_client
 
     resp = await client.put(
-        "/api/documents/doc-1",
+        f"/api/documents/{DOC_UUID_1}",
         headers=AUTH_HEADER,
         json={"title": "Updated"},
     )
     assert resp.status_code == 502
     assert resp.json()["detail"] == "Authorization check failed"
-    mock_client.check_permission.assert_called_once_with("document", "tenant-abc:doc-1", "can_edit", "user-1")
+    mock_client.check_permission.assert_called_once_with("document", f"tenant-abc:{DOC_UUID_1}", "can_edit", "user-1")
 
 
 # ============================================================
@@ -1290,3 +1296,175 @@ async def test_list_documents_checks_can_view_relation(mock_validate, client):
     resp = await client.get("/api/documents", headers=AUTH_HEADER)
     assert resp.status_code == 200
     mock_client.list_user_resources.assert_called_once_with("document", "can_view", AUTHED_CLAIMS["sub"])
+
+
+# ============================================================
+# FGA target resolution, path validation, and delete compensation
+# ============================================================
+
+
+def _resolving_client(**kwargs):
+    """A Descope client mock that resolves any identifier to RESOLVED_TARGET."""
+    mock_client = AsyncMock(**kwargs)
+    mock_client.load_user.return_value = {
+        "userId": RESOLVED_TARGET,
+        "loginIds": [SHARE_LOGIN_ID],
+        "userTenants": [{"tenantId": "tenant-abc"}],
+    }
+    mock_client.check_permission.return_value = True
+    return mock_client
+
+
+RESOLVED_TARGET = "U2ResolvedTargetId00000000001"
+SHARE_LOGIN_ID = "someone@example.com"
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_share_writes_the_tuple_against_the_resolved_user_id(mock_validate, client, test_db):
+    """Sharing by loginId must write the tuple FGA reads key on, not the loginId.
+
+    Reads key on the JWT sub — require_fga and the owner tuple both use it — so a
+    tuple written against the caller's chosen identifier grants nothing. This
+    returned 200 while granting nothing at all.
+    """
+    mock_validate.return_value = AUTHED_CLAIMS
+    mock_client = _resolving_client()
+    app.state.descope_client = mock_client
+    await _seed_doc(test_db)
+
+    resp = await client.post(
+        f"/api/documents/{DOC_UUID_1}/share",
+        headers=AUTH_HEADER,
+        json={"user_id": SHARE_LOGIN_ID, "relation": "viewer"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "document_id": DOC_UUID_1,
+        "user_id": RESOLVED_TARGET,
+        "relation": "viewer",
+    }
+    mock_client.create_relation.assert_called_once_with(
+        "document", f"tenant-abc:{DOC_UUID_1}", "viewer", RESOLVED_TARGET
+    )
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_revoke_deletes_the_tuple_against_the_resolved_user_id(mock_validate, client, test_db):
+    """Revoking by loginId must delete the tuple FGA reads key on."""
+    mock_validate.return_value = AUTHED_CLAIMS
+    mock_client = _resolving_client()
+    app.state.descope_client = mock_client
+    await _seed_doc(test_db)
+
+    resp = await client.delete(
+        f"/api/documents/{DOC_UUID_1}/share/{SHARE_LOGIN_ID}",
+        headers=AUTH_HEADER,
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["user_id"] == RESOLVED_TARGET
+    assert [c.args for c in mock_client.delete_relation.call_args_list] == [
+        ("document", f"tenant-abc:{DOC_UUID_1}", "viewer", RESOLVED_TARGET),
+        ("document", f"tenant-abc:{DOC_UUID_1}", "editor", RESOLVED_TARGET),
+    ]
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_share_with_own_resolved_identity_is_rejected(mock_validate, client, test_db):
+    """Sharing with your own loginId is still self-sharing once resolved."""
+    mock_validate.return_value = AUTHED_CLAIMS
+    mock_client = _resolving_client()
+    mock_client.load_user.return_value = {
+        "userId": AUTHED_CLAIMS["sub"],
+        "loginIds": [SHARE_LOGIN_ID],
+        "userTenants": [{"tenantId": "tenant-abc"}],
+    }
+    app.state.descope_client = mock_client
+    await _seed_doc(test_db)
+
+    resp = await client.post(
+        f"/api/documents/{DOC_UUID_1}/share",
+        headers=AUTH_HEADER,
+        json={"user_id": SHARE_LOGIN_ID, "relation": "viewer"},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Cannot share a document with yourself"
+    mock_client.create_relation.assert_not_called()
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_malformed_document_id_is_422_before_any_fga_call(mock_validate, client):
+    """A non-UUID id is a malformed request, not an authorization denial.
+
+    FastAPI solves dependencies before validating the endpoint's own parameters,
+    so require_fga used to reach Descope with a syntactically impossible resource
+    id and return its "denied" as 403 — hiding the real fault and spending an
+    upstream call on it.
+    """
+    mock_validate.return_value = AUTHED_CLAIMS
+    mock_client = _resolving_client()
+    app.state.descope_client = mock_client
+
+    resp = await client.get("/api/documents/not-a-uuid", headers=AUTH_HEADER)
+
+    assert resp.status_code == 422
+    mock_client.check_permission.assert_not_called()
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_delete_restores_relations_when_cleanup_fails_midway(mock_validate, client, test_db):
+    """A 429 partway through cleanup must not leave a half-stripped ACL.
+
+    The caller sees 502 and the row survives, so every relation this request
+    removed has to go back — otherwise the owner is locked out of a document
+    nothing can restore.
+    """
+    mock_validate.return_value = AUTHED_CLAIMS
+    mock_client = _resolving_client()
+    mock_client.list_all_relations.return_value = [
+        {"relationDefinition": "owner", "target": "user-1"},
+        {"relationDefinition": "viewer", "target": "user-2"},
+    ]
+    mock_client.delete_relation.side_effect = [None, _make_http_error(429)]
+    app.state.descope_client = mock_client
+    await _seed_doc(test_db)
+
+    resp = await client.delete(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
+
+    assert resp.status_code == 502
+    mock_client.create_relation.assert_called_once_with("document", f"tenant-abc:{DOC_UUID_1}", "owner", "user-1")
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_concurrent_delete_loser_does_not_recreate_relations(mock_validate, client, test_db):
+    """The loser of a concurrent double-DELETE must not resurrect the ACL.
+
+    Its StaleDataError means the other request already removed the row, so the
+    document IS gone. Treating it as a DB fault re-created every relation for a
+    document that no longer exists, leaving orphan grants in the authz store.
+    """
+    mock_validate.return_value = AUTHED_CLAIMS
+    mock_client = _resolving_client()
+    mock_client.list_all_relations.return_value = [
+        {"relationDefinition": "owner", "target": "user-1"},
+    ]
+    app.state.descope_client = mock_client
+    await _seed_doc(test_db)
+
+    with patch(
+        "sqlalchemy.ext.asyncio.AsyncSession.commit",
+        new=AsyncMock(side_effect=StaleDataError("DELETE statement on table matched 0 rows")),
+    ):
+        resp = await client.delete(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "deleted", "id": DOC_UUID_1}
+    mock_client.create_relation.assert_not_called()
