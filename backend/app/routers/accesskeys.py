@@ -29,9 +29,23 @@ async def create_access_key(
     request: Request,
     body: CreateAccessKeyRequest,
     tenant_id: str = Depends(get_tenant_id),
-    _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    caller_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
-    """Create an access key scoped to the current tenant. Returns cleartext (shown once)."""
+    """Create an access key scoped to the current tenant. Returns cleartext (shown once).
+
+    Only an owner may mint a key carrying `owner`, mirroring the guard on
+    `POST /members/invite`. Without it an `admin` could grant itself `owner` on a
+    key, exchange the cleartext for a session token whose `tenants` claim carries
+    that role, and return as an owner — making indirectly exactly the grant the
+    invite route refuses to make directly. A key also outlives the membership that
+    created it and has caller-chosen expiry, so this is a persistence path as well
+    as an escalation one.
+
+    Granting roles the caller holds, or lesser ones, stays allowed: scoping a key
+    down is the normal use of this endpoint.
+    """
+    if "owner" in (body.role_names or []) and "owner" not in caller_roles:
+        raise HTTPException(status_code=403, detail="Only owners can assign the owner role")
     client = request.app.state.descope_client
     result = await client.create_access_key(
         name=body.name,

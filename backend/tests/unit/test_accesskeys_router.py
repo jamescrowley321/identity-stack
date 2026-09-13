@@ -34,6 +34,14 @@ ADMIN_CLAIMS = {
     },
 }
 
+OWNER_CLAIMS = {
+    "sub": "owner123",
+    "dct": "tenant-abc",
+    "tenants": {
+        "tenant-abc": {"roles": ["owner"], "permissions": ["settings.manage"]},
+    },
+}
+
 VIEWER_CLAIMS = {
     "sub": "user456",
     "dct": "tenant-abc",
@@ -213,3 +221,43 @@ async def test_create_key_rejected_without_tenant(mock_validate, client):
         json={"name": "No Tenant Key"},
     )
     assert response.status_code == 403
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_admin_cannot_mint_an_owner_key(mock_validate, client):
+    """An admin minting an `owner` key is privilege escalation, not delegation.
+
+    The key's roles land in the `tenants` claim of the session token its cleartext
+    exchanges for, so granting `owner` here makes indirectly the grant that
+    POST /members/invite refuses to make directly — and the key outlives the
+    membership that created it.
+    """
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    app.state.descope_client = mock_client
+
+    response = await client.post(
+        "/api/keys",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"name": "escalate", "role_names": ["owner"], "expire_time": 0},
+    )
+    assert response.status_code == 403, f"admin minted an owner key: {response.status_code}"
+    mock_client.create_access_key.assert_not_called()
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_owner_may_mint_an_owner_key(mock_validate, client):
+    """An owner delegating `owner` is not escalation."""
+    mock_validate.return_value = OWNER_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.create_access_key.return_value = {"key": {"id": "k1"}, "cleartext": "x"}
+    app.state.descope_client = mock_client
+
+    response = await client.post(
+        "/api/keys",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"name": "ok", "role_names": ["owner"]},
+    )
+    assert response.status_code == 200
