@@ -1,42 +1,37 @@
 variable "descope_management_key" {
-  description = "Descope management key. Set via DESCOPE_MANAGEMENT_KEY env var."
+  description = <<-EOT
+    Descope management key, written to the DESCOPE_MANAGEMENT_KEY GitHub
+    Actions secret.
+
+    No default, by design. This variable previously defaulted to "", so an
+    apply that ran without it supplied wrote an empty string over a working
+    CI secret — silently, because Terraform reports no error and GitHub
+    secrets cannot be read back to notice. That is what disabled the
+    authenticated E2E suite for roughly five months.
+  EOT
   type        = string
   sensitive   = true
-  default     = ""
+
+  validation {
+    condition     = length(trimspace(var.descope_management_key)) > 0
+    error_message = "descope_management_key must be non-empty; refusing to overwrite the CI secret with a blank value."
+  }
 }
 
 variable "e2e_test_email" {
-  description = "Email address for E2E test user (must have admin role in Acme tenant)"
-  type        = string
-  default     = ""
-}
+  description = <<-EOT
+    Email address for the E2E test user, which must hold the admin role in the
+    Acme tenant. Written to the E2E_TEST_EMAIL GitHub Actions secret.
 
-# OAuth2 - Google
-variable "google_oauth_client_id" {
-  description = "Google OAuth2 client ID (leave empty to disable)"
+    No default, for the same reason as descope_management_key: a blank value
+    here silently disables authenticated E2E coverage rather than failing.
+  EOT
   type        = string
-  default     = ""
-}
 
-variable "google_oauth_client_secret" {
-  description = "Google OAuth2 client secret"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
-# OAuth2 - GitHub
-variable "github_oauth_client_id" {
-  description = "GitHub OAuth2 client ID (leave empty to disable)"
-  type        = string
-  default     = ""
-}
-
-variable "github_oauth_client_secret" {
-  description = "GitHub OAuth2 client secret"
-  type        = string
-  default     = ""
-  sensitive   = true
+  validation {
+    condition     = length(trimspace(var.e2e_test_email)) > 0
+    error_message = "e2e_test_email must be non-empty; refusing to overwrite the CI secret with a blank value."
+  }
 }
 
 # GitHub Actions
