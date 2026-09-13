@@ -54,8 +54,18 @@ async def _verify_user_in_tenant(
     tenant_id = claims.get("dct") if claims else None
     if not tenant_id:
         raise HTTPException(status_code=404, detail="User not found in tenant")
+    # `dct` is the IdP's own opaque tenant id — a Descope tenant id looks like
+    # "T3Bj8QOcyflY8V0bvSu1eEoHmjk6" — while user_tenant_roles.tenant_id is a
+    # canonical UUID foreign key. A `dct` that is not a UUID therefore cannot
+    # match any assignment row, which is a 404 (this user is not in the caller's
+    # tenant), not a server error. Coercing it unguarded raised ValueError out of
+    # the handler and surfaced to the client as a 500.
+    try:
+        tenant_uuid = uuid.UUID(tenant_id)
+    except (AttributeError, TypeError, ValueError):
+        raise HTTPException(status_code=404, detail="User not found in tenant") from None
     assignment_repo = UserTenantRoleRepository(session)
-    assignments = await assignment_repo.list_by_user_tenant(user_uuid, uuid.UUID(tenant_id))
+    assignments = await assignment_repo.list_by_user_tenant(user_uuid, tenant_uuid)
     if not assignments:
         raise HTTPException(status_code=404, detail="User not found in tenant")
 

@@ -434,3 +434,59 @@ async def test_create_link_metadata_too_many_keys_rejected(mock_validate, client
         json={"provider_id": PROVIDER_ID, "external_sub": "ext-sub", "metadata": metadata},
     )
     assert response.status_code == 422
+
+
+# --- Non-UUID tenant ids (real Descope `dct` claims) ---
+
+# Descope issues opaque tenant ids like "T3Bj8QOcyflY8V0bvSu1eEoHmjk6", not UUIDs.
+# Every claim fixture above uses a UUID-shaped `dct`, so the router's
+# `uuid.UUID(tenant_id)` coercion looked safe under unit test while raising
+# ValueError against a real Descope token — surfacing as a 500 rather than the
+# documented 404. These three cases pin the real-world shape.
+
+DESCOPE_TENANT_ID = "T3Bj8QOcyflY8V0bvSu1eEoHmjk6"
+
+DESCOPE_ADMIN_CLAIMS = {
+    "sub": "admin1",
+    "dct": DESCOPE_TENANT_ID,
+    "tenants": {
+        DESCOPE_TENANT_ID: {"roles": ["admin"], "permissions": []},
+    },
+}
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_list_links_non_uuid_tenant_returns_404_not_500(mock_validate, client):
+    """A Descope-shaped `dct` cannot match a canonical UUID FK → 404, never 500."""
+    mock_validate.return_value = DESCOPE_ADMIN_CLAIMS
+    response = await client.get(f"/api/users/{USER_ID}/idp-links", headers=AUTH_HEADER)
+    assert response.status_code == 404
+    assert response.json()["detail"] == "User not found in tenant"
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_create_link_non_uuid_tenant_returns_404_not_500(mock_validate, client):
+    """Create under a Descope-shaped `dct` → 404, never 500."""
+    mock_validate.return_value = DESCOPE_ADMIN_CLAIMS
+    response = await client.post(
+        f"/api/users/{USER_ID}/idp-links",
+        headers=AUTH_HEADER,
+        json={"provider_id": PROVIDER_ID, "external_sub": "ext-sub"},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "User not found in tenant"
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_delete_link_non_uuid_tenant_returns_404_not_500(mock_validate, client):
+    """Delete under a Descope-shaped `dct` → 404, never 500."""
+    mock_validate.return_value = DESCOPE_ADMIN_CLAIMS
+    response = await client.delete(
+        f"/api/users/{USER_ID}/idp-links/{LINK_ID}",
+        headers=AUTH_HEADER,
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "User not found in tenant"

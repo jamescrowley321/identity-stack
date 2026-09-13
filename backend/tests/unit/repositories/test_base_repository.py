@@ -118,3 +118,29 @@ async def test_repository_conflict_error_importable():
     from app.repositories.base import RepositoryConflictError as RCE
 
     assert issubclass(RCE, Exception)
+
+
+async def test_base_update_keeps_updated_at_in_model_dump(db_session):
+    """update() must leave server-generated columns serialisable.
+
+    `updated_at` is declared `onupdate=sa.func.now()`, so the database produces
+    its new value and SQLAlchemy expires the attribute on flush. An expired
+    attribute is gone from the instance `__dict__`, and `model_dump()` serialises
+    from `__dict__` — so without a refresh the field is silently *omitted* from
+    the dict the API returns, rather than being stale or null. Creates never hit
+    this (their value comes from the Python default_factory), which is why only
+    update responses lost the field.
+    """
+    repo = PermissionRepository(db_session)
+    perm = _make_permission()
+    await repo.create(perm)
+    assert "updated_at" in perm.model_dump()
+
+    perm.description = "updated"
+    updated = await repo.update(perm)
+
+    dumped = updated.model_dump()
+    assert "updated_at" in dumped, f"update() dropped updated_at from the serialised body: {dumped}"
+    assert dumped["updated_at"] is not None
+    assert "created_at" in dumped
+    assert dumped["description"] == "updated"
