@@ -7,6 +7,7 @@ from pydantic import BaseModel, EmailStr, Field
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
+from app.services.canonical import canonical_user
 
 router = APIRouter(tags=["Users"])
 logger = logging.getLogger(__name__)
@@ -76,7 +77,7 @@ async def invite_member(
             tenant_id=tenant_id,
             role_names=body.role_names,
         )
-        return {"status": "invited", "email": body.email, "user": result}
+        return {"status": "invited", "email": body.email, "user": canonical_user(result)}
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 400:
             detail = exc.response.json().get("errorDescription", "Bad request")
