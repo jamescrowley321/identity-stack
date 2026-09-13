@@ -850,3 +850,106 @@ class TestDescopeManagementClient:
 
         result = await client.list_user_resources("document", "editor", "user:u1")
         assert result == []
+
+
+class TestFgaRelationFanOut:
+    """`who` requires relationDefinition, so listing every relation means asking per relation.
+
+    Calling /v1/mgmt/authz/re/who without relationDefinition returns
+    400 E011003 "The relationDefinition field is required" — which is what an
+    unfiltered GET /api/fga/relations used to do on every request.
+    """
+
+    _SCHEMA = {
+        "schema": {
+            "namespaces": [
+                {"name": "user", "relationDefinitions": []},
+                {
+                    "name": "document",
+                    "relationDefinitions": [{"name": "owner"}, {"name": "editor"}, {"name": "viewer"}],
+                },
+            ]
+        }
+    }
+
+    def _responder(self, mock_http, per_relation):
+        """Route schema/load to the schema and re/who to per_relation[relationDefinition]."""
+        calls: list[str] = []
+
+        async def _post(url, headers=None, json=None):
+            if url.endswith("/authz/schema/load"):
+                return MagicMock(
+                    status_code=200, raise_for_status=MagicMock(), json=MagicMock(return_value=self._SCHEMA)
+                )
+            rd = (json or {}).get("relationDefinition")
+            calls.append(rd)
+            return MagicMock(
+                status_code=200,
+                raise_for_status=MagicMock(),
+                json=MagicMock(return_value={"relationInfo": per_relation.get(rd, [])}),
+            )
+
+        mock_http.post.side_effect = _post
+        return calls
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_relation_definitions_reads_the_schema(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        self._responder(mock_http, {})
+
+        assert await client.relation_definitions("document") == ["owner", "editor", "viewer"]
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_relation_definitions_unknown_type_is_empty(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        self._responder(mock_http, {})
+
+        assert await client.relation_definitions("nonexistent") == []
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_list_all_relations_asks_once_per_relation_and_merges(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        calls = self._responder(
+            mock_http,
+            {
+                "owner": [{"target": "user:alice"}],
+                "viewer": [{"target": "user:bob"}, {"target": "user:carol"}],
+            },
+        )
+
+        result = await client.list_all_relations("document", "tenant-abc:doc-1")
+
+        assert calls == ["owner", "editor", "viewer"], f"one call per schema relation, got {calls}"
+        assert result == [
+            {"target": "user:alice", "relationDefinition": "owner"},
+            {"target": "user:bob", "relationDefinition": "viewer"},
+            {"target": "user:carol", "relationDefinition": "viewer"},
+        ]
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_list_all_relations_never_calls_who_without_a_relation(self, mock_cls, client):
+        """The regression itself: no request may go out with relationDefinition unset."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        calls = self._responder(mock_http, {"owner": [{"target": "user:alice"}]})
+
+        await client.list_all_relations("document", "tenant-abc:doc-1")
+
+        assert None not in calls, "a `who` call went out without relationDefinition — this is the 400 E011003 bug"
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_list_all_relations_unknown_type_makes_no_who_calls(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        calls = self._responder(mock_http, {})
+
+        assert await client.list_all_relations("nonexistent", "tenant-abc:x") == []
+        assert calls == []

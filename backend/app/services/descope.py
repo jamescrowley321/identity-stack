@@ -327,6 +327,44 @@ class DescopeManagementClient:
         resp = await self._request("/v1/mgmt/authz/re/who", body)
         return resp.json().get("relationInfo") or []
 
+    async def relation_definitions(self, resource_type: str) -> list[str]:
+        """Names of the relations the FGA schema defines for a resource type.
+
+        Empty when the type is absent from the schema — an unknown type simply has
+        no relations, which is not an error.
+        """
+        self._validate_fga_param(resource_type, "resource_type")
+        schema = await self.get_fga_schema() or {}
+        for namespace in schema.get("namespaces") or []:
+            if namespace.get("name") == resource_type:
+                return [
+                    rd["name"]
+                    for rd in (namespace.get("relationDefinitions") or [])
+                    if isinstance(rd, dict) and rd.get("name")
+                ]
+        return []
+
+    async def list_all_relations(self, resource_type: str, resource_id: str) -> list[dict]:
+        """Every relation tuple on a resource, across all relations in the schema.
+
+        Descope has no "all relations for this resource" call: /v1/mgmt/authz/re/who
+        answers "who holds relation R on resource X" and *requires* relationDefinition.
+        Calling it without one returns
+        400 E011003 "The relationDefinition field is required", which is what
+        GET /api/fga/relations did on every request. So read the relations the schema
+        defines for this type and ask once per relation.
+        """
+        relations = await self.relation_definitions(resource_type)
+        out: list[dict] = []
+        for relation in relations:
+            for info in await self.list_relations(resource_type, resource_id, relation=relation):
+                # `who` answers per-relation, so the relation is not always echoed back
+                # in the tuple; carry it so a merged list stays self-describing.
+                if isinstance(info, dict):
+                    info.setdefault("relationDefinition", relation)
+                out.append(info)
+        return out
+
     async def list_user_resources(self, resource_type: str, relation: str, target: str) -> list[dict]:
         """List resources a target has a specific relation to. Returns empty list if none."""
         self._validate_fga_param(resource_type, "resource_type")

@@ -555,7 +555,7 @@ async def test_delete_document_success(mock_validate, client, test_db):
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_client.list_relations.return_value = [
+    mock_client.list_all_relations.return_value = [
         {"relationDefinition": "owner", "target": "user-1"},
         {"relationDefinition": "viewer", "target": "user-2"},
     ]
@@ -595,7 +595,7 @@ async def test_delete_document_fga_cleanup_fails(mock_validate, client, test_db)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_client.list_relations.side_effect = _make_http_error(500)
+    mock_client.list_all_relations.side_effect = _make_http_error(500)
     app.state.descope_client = mock_client
 
     resp = await client.delete(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
@@ -616,7 +616,7 @@ async def test_delete_document_too_many_relations_aborts(mock_validate, client, 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
     # Return 101 relations (exceeds _MAX_FGA_CLEANUP=100)
-    mock_client.list_relations.return_value = [
+    mock_client.list_all_relations.return_value = [
         {"relationDefinition": "viewer", "target": f"user-{i}"} for i in range(101)
     ]
     app.state.descope_client = mock_client
@@ -642,7 +642,7 @@ async def test_delete_document_db_failure_compensates_fga(mock_validate, client)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_client.list_relations.return_value = [
+    mock_client.list_all_relations.return_value = [
         {"relationDefinition": "owner", "target": "user-1"},
         {"relationDefinition": "viewer", "target": "user-2"},
     ]
@@ -693,7 +693,7 @@ async def test_delete_document_db_failure_compensation_also_fails(mock_validate,
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_client.list_relations.return_value = [
+    mock_client.list_all_relations.return_value = [
         {"relationDefinition": "owner", "target": "user-1"},
     ]
     # delete_relation succeeds, but create_relation (compensation) fails
@@ -1172,13 +1172,13 @@ async def test_update_document_no_changes(mock_validate, client, test_db):
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_delete_document_fga_relations_none(mock_validate, client, test_db):
-    """list_relations returns None -> treated as empty, delete succeeds."""
+    """list_all_relations returns None -> treated as empty, delete succeeds."""
     mock_validate.return_value = AUTHED_CLAIMS
     await _seed_doc(test_db, doc_id=DOC_UUID_1)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_client.list_relations.return_value = None
+    mock_client.list_all_relations.return_value = None
     app.state.descope_client = mock_client
 
     resp = await client.delete(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
@@ -1241,7 +1241,7 @@ async def test_delete_document_checks_can_delete(mock_validate, client, test_db)
 
     mock_client = AsyncMock()
     mock_client.check_permission.return_value = True
-    mock_client.list_relations.return_value = []
+    mock_client.list_all_relations.return_value = []
     app.state.descope_client = mock_client
 
     resp = await client.delete(f"/api/documents/{DOC_UUID_1}", headers=AUTH_HEADER)
