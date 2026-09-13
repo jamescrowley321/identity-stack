@@ -167,12 +167,22 @@ jobs:
       # including the upstream Descope status and body behind every 400/502 the
       # API passes through — was written to an already-closed step log and lost.
       # That is what made this failure class undiagnosable from CI alone.
+      # The identity-resolution endpoint authenticates with a shared secret read
+      # from the environment at import time. Unset, the backend rejected every
+      # request and the suite could only ever observe the 422 FastAPI raises for
+      # the missing header — so the unknown-provider test could never reach the
+      # 404 it asserts. Generated per run rather than committed: it is a
+      # localhost-only test credential and nothing should ship a fixed one.
+      - name: Generate the internal identity key for the test stack
+        run: echo "INTERNAL_IDENTITY_KEY=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+
       - name: Start backend
         run: |
           cd backend
           uvicorn app.main:app --host 0.0.0.0 --port 8000 > "$RUNNER_TEMP/backend.log" 2>&1 &
           sleep 3
         env:
+          INTERNAL_IDENTITY_KEY: ${{ env.INTERNAL_IDENTITY_KEY }}
           DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
           DESCOPE_MANAGEMENT_KEY: ${{ secrets.DESCOPE_MANAGEMENT_KEY }}
           DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
@@ -195,6 +205,7 @@ jobs:
         if: env.DESCOPE_PROJECT_ID != ''
         run: cd backend && python -m pytest tests/e2e/ -v
         env:
+          INTERNAL_IDENTITY_KEY: ${{ env.INTERNAL_IDENTITY_KEY }}
           DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
           DESCOPE_MANAGEMENT_KEY: ${{ secrets.DESCOPE_MANAGEMENT_KEY }}
           DESCOPE_CLIENT_ID: ${{ secrets.DESCOPE_CLIENT_ID }}
@@ -209,6 +220,12 @@ jobs:
       # can carry one it was handed, so the log is scrubbed before it ever leaves
       # the runner rather than trusted to be clean: JWT-shaped triples and any
       # Bearer value are redacted. Never weaken this to upload the raw log.
+      #
+      # The management-key rule is word-anchored. Unanchored, its K matched inside
+      # any longer alphanumeric token, so Descope user and tenant ids carrying a K
+      # with 25+ characters behind it were rewritten to <redacted-key> — 152 times
+      # across the published artifacts. That errs safe, but it blanks exactly the
+      # identity detail these logs exist to show.
       - name: Redact credentials from the backend log
         id: redact
         if: always()
@@ -219,7 +236,7 @@ jobs:
             -e 's/eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]+/<redacted-jwt>/g' \
             -e 's/([Bb]earer )[A-Za-z0-9._~+:\/-]+=*/\1<redacted>/g' \
             -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^:/@ ]+:[^@ ]+@#\1<redacted>:<redacted>@#g' \
-            -e 's/(K[A-Za-z0-9]{25,})/<redacted-key>/g' \
+            -e 's/\bK[A-Za-z0-9]{25,}\b/<redacted-key>/g' \
             "$f"
 
       # Always, not only on failure: a suite that passes while the backend logs
