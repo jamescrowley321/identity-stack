@@ -462,7 +462,9 @@ async def test_list_links_non_uuid_tenant_returns_404_not_500(mock_validate, cli
     mock_validate.return_value = DESCOPE_ADMIN_CLAIMS
     response = await client.get(f"/api/users/{USER_ID}/idp-links", headers=AUTH_HEADER)
     assert response.status_code == 404
-    assert response.json()["detail"] == "User not found in tenant"
+    body = response.json()
+    assert body["detail"] == "User not found in tenant"
+    assert "type" in body, f"tenant-guard 404 must be an RFC 9457 problem detail, got {body}"
 
 
 @pytest.mark.anyio
@@ -476,7 +478,9 @@ async def test_create_link_non_uuid_tenant_returns_404_not_500(mock_validate, cl
         json={"provider_id": PROVIDER_ID, "external_sub": "ext-sub"},
     )
     assert response.status_code == 404
-    assert response.json()["detail"] == "User not found in tenant"
+    body = response.json()
+    assert body["detail"] == "User not found in tenant"
+    assert "type" in body, f"tenant-guard 404 must be an RFC 9457 problem detail, got {body}"
 
 
 @pytest.mark.anyio
@@ -489,4 +493,6 @@ async def test_delete_link_non_uuid_tenant_returns_404_not_500(mock_validate, cl
         headers=AUTH_HEADER,
     )
     assert response.status_code == 404
-    assert response.json()["detail"] == "User not found in tenant"
+    body = response.json()
+    assert body["detail"] == "User not found in tenant"
+    assert "type" in body, f"tenant-guard 404 must be an RFC 9457 problem detail, got {body}"

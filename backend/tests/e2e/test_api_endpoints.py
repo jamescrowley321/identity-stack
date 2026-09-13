@@ -169,7 +169,11 @@ class TestAdminEndpoints:
         """IdP links endpoint responds (200/403/404 depending on user existence)."""
         fake_user = "00000000-0000-0000-0000-000000000000"
         resp = admin_api_context.get(f"{backend_url}/api/users/{fake_user}/idp-links")
-        assert resp.status in (200, 403), f"/api/users/{{id}}/idp-links returned {resp.status}"
+        # 404 is the documented answer for a user outside the caller's tenant, and
+        # this user id is deliberately one that does not exist. The assertion had
+        # omitted it while the docstring named it, so the only way to pass was the
+        # 500 the endpoint used to raise.
+        assert resp.status in (200, 403, 404), f"/api/users/{{id}}/idp-links returned {resp.status}"
 
     def test_sync_status_responds(self, admin_api_context: APIRequestContext, backend_url: str):
         """Sync status endpoint responds (200 with operator role, 403 otherwise)."""
