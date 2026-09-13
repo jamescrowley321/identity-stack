@@ -860,17 +860,45 @@ class TestFgaRelationFanOut:
     unfiltered GET /api/fga/relations used to do on every request.
     """
 
-    _SCHEMA = {
-        "schema": {
-            "namespaces": [
-                {"name": "user", "relationDefinitions": []},
-                {
-                    "name": "document",
-                    "relationDefinitions": [{"name": "owner"}, {"name": "editor"}, {"name": "viewer"}],
-                },
-            ]
+    # Mirrors what /v1/mgmt/authz/schema/load actually returns: relations and
+    # permissions arrive together in relationDefinitions, distinguishable only by
+    # their complexDefinition. owner/editor/viewer are stored tuples; can_view and
+    # can_edit are unions and can_delete points at another relation's target set.
+    @staticmethod
+    def _stored(name):
+        return {"name": name, "complexDefinition": {"nType": "child", "children": [], "expression": {"neType": "self"}}}
+
+    @staticmethod
+    def _union(name, n):
+        return {"name": name, "complexDefinition": {"nType": "union", "children": [{}] * n, "expression": None}}
+
+    @staticmethod
+    def _target_set(name):
+        return {
+            "name": name,
+            "complexDefinition": {"nType": "child", "children": [], "expression": {"neType": "targetSet"}},
         }
-    }
+
+    @property
+    def _SCHEMA(self):
+        return {
+            "schema": {
+                "namespaces": [
+                    {"name": "user", "relationDefinitions": []},
+                    {
+                        "name": "document",
+                        "relationDefinitions": [
+                            self._stored("owner"),
+                            self._stored("editor"),
+                            self._stored("viewer"),
+                            self._union("can_view", 3),
+                            self._union("can_edit", 2),
+                            self._target_set("can_delete"),
+                        ],
+                    },
+                ]
+            }
+        }
 
     def _responder(self, mock_http, per_relation):
         """Route schema/load to the schema and re/who to per_relation[relationDefinition]."""
@@ -925,7 +953,7 @@ class TestFgaRelationFanOut:
 
         result = await client.list_all_relations("document", "tenant-abc:doc-1")
 
-        assert calls == ["owner", "editor", "viewer"], f"one call per schema relation, got {calls}"
+        assert calls == ["owner", "editor", "viewer"], f"one call per STORED relation, got {calls}"
         assert result == [
             {"target": "user:alice", "relationDefinition": "owner"},
             {"target": "user:bob", "relationDefinition": "viewer"},
@@ -953,3 +981,24 @@ class TestFgaRelationFanOut:
 
         assert await client.list_all_relations("nonexistent", "tenant-abc:x") == []
         assert calls == []
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_computed_permissions_are_not_treated_as_relations(self, mock_cls, client):
+        """can_view/can_edit/can_delete are derived, so they are not tuples to list or delete.
+
+        Descope returns them alongside real relations in relationDefinitions. Treating
+        one as a relation would make document cleanup try to delete a permission that
+        has no tuple behind it, and would inflate the relation count a document
+        appears to carry against the cleanup ceiling.
+        """
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        calls = self._responder(mock_http, {"owner": [{"target": "user:alice"}]})
+
+        assert await client.relation_definitions("document") == ["owner", "editor", "viewer"]
+
+        await client.list_all_relations("document", "tenant-abc:doc-1")
+        assert "can_view" not in calls and "can_edit" not in calls and "can_delete" not in calls, (
+            f"a computed permission was queried as if it were a relation: {calls}"
+        )
