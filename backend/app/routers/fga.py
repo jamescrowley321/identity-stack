@@ -186,14 +186,26 @@ async def list_relations(
     # FGA identifiers; Descope uses short names/IDs — 200 is generous
     resource_type: str = Query(min_length=1, max_length=200),
     resource_id: str = Query(min_length=1, max_length=200),
+    relation: str | None = Query(default=None, min_length=1, max_length=200),
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
-    """List FGA relation tuples for a resource. Requires owner or admin role."""
+    """List FGA relation tuples for a resource. Requires owner or admin role.
+
+    With `relation`, answers "who holds this relation on this resource". Without it,
+    returns every relation the schema defines for the resource type.
+    """
     prefixed_id = _prefix_resource_id(tenant_id, resource_id)
     try:
         client = request.app.state.descope_client
-        relations = await client.list_relations(resource_type, prefixed_id) or []
+        # Unfiltered listing fans out over the schema's relations. Descope's
+        # /v1/mgmt/authz/re/who requires relationDefinition, so the single
+        # unfiltered call this used to make always returned
+        # 400 E011003 "The relationDefinition field is required".
+        if relation is None:
+            relations = await client.list_all_relations(resource_type, prefixed_id) or []
+        else:
+            relations = await client.list_relations(resource_type, prefixed_id, relation=relation) or []
         # Strip tenant prefix from resource_id in response items
         for rel in relations:
             if isinstance(rel, dict) and "resource" in rel:

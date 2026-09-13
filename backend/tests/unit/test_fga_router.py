@@ -574,7 +574,7 @@ async def test_delete_relation_network_error(mock_validate, client):
 async def test_list_relations_success(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
-    mock_client.list_relations.return_value = [
+    mock_client.list_all_relations.return_value = [
         {"relationDefinition": "owner", "target": "user:u1"},
         {"relationDefinition": "viewer", "target": "user:u2"},
     ]
@@ -587,7 +587,7 @@ async def test_list_relations_success(mock_validate, client):
     data = response.json()
     assert len(data["relations"]) == 2
     # Verify service call uses tenant-prefixed resource_id
-    mock_client.list_relations.assert_called_once_with("doc", "tenant-abc:1")
+    mock_client.list_all_relations.assert_called_once_with("doc", "tenant-abc:1")
 
 
 @pytest.mark.anyio
@@ -596,7 +596,7 @@ async def test_list_relations_strips_tenant_prefix(mock_validate, client):
     """Verify tenant prefix is stripped from resource_id in response."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
-    mock_client.list_relations.return_value = [
+    mock_client.list_all_relations.return_value = [
         {"relationDefinition": "owner", "target": "user:u1", "resource_id": "tenant-abc:doc-1"},
         {"relationDefinition": "viewer", "target": "user:u2", "resource": "tenant-abc:doc-1"},
     ]
@@ -616,7 +616,7 @@ async def test_list_relations_strips_tenant_prefix(mock_validate, client):
 async def test_list_relations_empty(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
-    mock_client.list_relations.return_value = []
+    mock_client.list_all_relations.return_value = []
     app.state.descope_client = mock_client
 
     response = await client.get(
@@ -632,7 +632,7 @@ async def test_list_relations_none_result(mock_validate, client):
     """list_relations() returns None -> empty list, not null."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
-    mock_client.list_relations.return_value = None
+    mock_client.list_all_relations.return_value = None
     app.state.descope_client = mock_client
 
     response = await client.get(
@@ -655,7 +655,7 @@ async def test_list_relations_missing_params(mock_validate, client):
 async def test_list_relations_descope_error(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
-    mock_client.list_relations.side_effect = _make_http_status_error(500)
+    mock_client.list_all_relations.side_effect = _make_http_status_error(500)
     app.state.descope_client = mock_client
 
     response = await client.get(
@@ -671,7 +671,7 @@ async def test_list_relations_descope_400(mock_validate, client):
     """GET relations: Descope 400 -> HTTP 400 (not 502)."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
-    mock_client.list_relations.side_effect = _make_http_status_error(400)
+    mock_client.list_all_relations.side_effect = _make_http_status_error(400)
     app.state.descope_client = mock_client
 
     response = await client.get(
@@ -685,7 +685,7 @@ async def test_list_relations_descope_400(mock_validate, client):
 async def test_list_relations_network_error(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = AsyncMock()
-    mock_client.list_relations.side_effect = _make_request_error()
+    mock_client.list_all_relations.side_effect = _make_request_error()
     app.state.descope_client = mock_client
 
     response = await client.get(
@@ -921,7 +921,7 @@ def test_sanitize_error_detail_truncates():
 
 # --- Client-side identifier validation surfaces as 422, not 500 ---
 
-# DescopeClient validates FGA identifiers itself and raises ValueError. The routes
+# DescopeManagementClient validates FGA identifiers itself and raises ValueError. The routes
 # caught only httpx errors, so a malformed identifier escaped the handler and
 # Starlette rendered it as an unhandled 500 — visible in CI as
 # "ValueError: target contains invalid characters" with a 500 on the wire.
@@ -983,3 +983,48 @@ async def test_check_permission_invalid_identifier_returns_422(mock_validate, cl
         json={"resource_type": "document", "resource_id": "doc1", "relation": "can_view", "target": _BAD_TARGET},
     )
     assert response.status_code == 422, f"expected 422 for a malformed identifier, got {response.status_code}"
+
+
+# --- Unfiltered relation listing goes through the schema fan-out ---
+
+# Descope's /v1/mgmt/authz/re/who requires relationDefinition. The router used to
+# call it with none, so GET /api/fga/relations always came back
+# 400 E011003 "The relationDefinition field is required". The fan-out itself is
+# tested against the real client in tests/unit/test_descope_service.py.
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_list_relations_without_relation_uses_fan_out(mock_validate, client):
+    """No `relation` → the schema-driven fan-out, never the unfiltered `who` call."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.list_all_relations.return_value = [{"relationDefinition": "owner", "target": "user:u1"}]
+    app.state.descope_client = mock_client
+
+    response = await client.get(
+        "/api/fga/relations", headers=AUTH_HEADER, params={"resource_type": "doc", "resource_id": "1"}
+    )
+    assert response.status_code == 200
+    assert response.json()["relations"] == [{"relationDefinition": "owner", "target": "user:u1"}]
+    mock_client.list_all_relations.assert_called_once_with("doc", "tenant-abc:1")
+    mock_client.list_relations.assert_not_called()
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_list_relations_with_relation_queries_only_that_one(mock_validate, client):
+    """An explicit `relation` asks once and skips the fan-out."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.list_relations.return_value = [{"target": "user:alice", "relationDefinition": "viewer"}]
+    app.state.descope_client = mock_client
+
+    response = await client.get(
+        "/api/fga/relations",
+        headers=AUTH_HEADER,
+        params={"resource_type": "doc", "resource_id": "1", "relation": "viewer"},
+    )
+    assert response.status_code == 200
+    mock_client.list_all_relations.assert_not_called()
+    mock_client.list_relations.assert_called_once_with("doc", "tenant-abc:1", relation="viewer")
