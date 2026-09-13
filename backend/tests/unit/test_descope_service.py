@@ -593,10 +593,14 @@ class TestDescopeManagementClient:
             "https://api.descope.com/v1/mgmt/authz/re/create",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={
-                "resourceType": "document",
-                "resource": "doc-123",
-                "relationDefinition": "editor",
-                "target": "user:u1",
+                "relations": [
+                    {
+                        "resource": "doc-123",
+                        "relationDefinition": "editor",
+                        "namespace": "document",
+                        "target": "user:u1",
+                    }
+                ]
             },
         )
 
@@ -612,10 +616,14 @@ class TestDescopeManagementClient:
             "https://api.descope.com/v1/mgmt/authz/re/delete",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={
-                "resourceType": "document",
-                "resource": "doc-123",
-                "relationDefinition": "editor",
-                "target": "user:u1",
+                "relations": [
+                    {
+                        "resource": "doc-123",
+                        "relationDefinition": "editor",
+                        "namespace": "document",
+                        "target": "user:u1",
+                    }
+                ]
             },
         )
 
@@ -629,9 +637,9 @@ class TestDescopeManagementClient:
             raise_for_status=MagicMock(),
             json=MagicMock(
                 return_value={
-                    "relationInfo": [
-                        {"target": "user:u1", "relationDefinition": "editor"},
-                        {"target": "user:u2", "relationDefinition": "viewer"},
+                    "relations": [
+                        {"resource": "doc-123", "target": "user:u1", "relationDefinition": "editor"},
+                        {"resource": "doc-123", "target": "user:u2", "relationDefinition": "viewer"},
                     ]
                 }
             ),
@@ -641,9 +649,9 @@ class TestDescopeManagementClient:
         assert len(result) == 2
         assert result[0]["target"] == "user:u1"
         mock_http.post.assert_called_once_with(
-            "https://api.descope.com/v1/mgmt/authz/re/who",
+            "https://api.descope.com/v1/mgmt/authz/re/resource",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
-            json={"resourceType": "document", "resource": "doc-123"},
+            json={"namespace": "document", "resource": "doc-123"},
         )
 
     @pytest.mark.anyio
@@ -669,17 +677,27 @@ class TestDescopeManagementClient:
         mock_http.post.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
-            json=MagicMock(return_value={"resources": [{"resource": "doc-1"}, {"resource": "doc-2"}]}),
+            json=MagicMock(
+                return_value={
+                    "relations": [
+                        {"resource": "doc-1", "relationDefinition": "editor", "target": "user:u1"},
+                        {"resource": "doc-2", "relationDefinition": "editor", "target": "user:u1"},
+                        # targetall ignores the relationDefinition it is given and
+                        # returns every relation the target holds, so this must be
+                        # filtered out rather than reported as an "editor" resource.
+                        {"resource": "doc-3", "relationDefinition": "can_view", "target": "user:u1"},
+                    ]
+                }
+            ),
         )
 
         result = await client.list_user_resources("document", "editor", "user:u1")
-        assert len(result) == 2
-        assert result[0]["resource"] == "doc-1"
+        assert [r["resource"] for r in result] == ["doc-1", "doc-2"]
         mock_http.post.assert_called_once_with(
-            "https://api.descope.com/v1/mgmt/authz/re/resource",
+            "https://api.descope.com/v1/mgmt/authz/re/targetall",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={
-                "resourceType": "document",
+                "namespace": "document",
                 "relationDefinition": "editor",
                 "target": "user:u1",
             },
@@ -709,7 +727,12 @@ class TestDescopeManagementClient:
         mock_http.post.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
-            json=MagicMock(return_value={"allowed": True}),
+            json=MagicMock(
+                return_value={
+                    "relationQueries": [{"resource": "doc-123", "hasRelation": True}],
+                    "directRelations": [True],
+                }
+            ),
         )
 
         result = await client.check_permission("document", "doc-123", "editor", "user:u1")
@@ -718,10 +741,14 @@ class TestDescopeManagementClient:
             "https://api.descope.com/v1/mgmt/authz/re/has",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={
-                "resourceType": "document",
-                "resource": "doc-123",
-                "relationDefinition": "editor",
-                "target": "user:u1",
+                "relationQueries": [
+                    {
+                        "resource": "doc-123",
+                        "relationDefinition": "editor",
+                        "namespace": "document",
+                        "target": "user:u1",
+                    }
+                ]
             },
         )
 
@@ -793,7 +820,10 @@ class TestDescopeManagementClient:
     @pytest.mark.anyio
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_check_permission_missing_allowed_field(self, mock_cls, client):
-        """Edge case: if 'allowed' field is missing, defaults to False (fail-closed)."""
+        """Edge case: an empty body reads as denied (fail-closed).
+
+        This is the exact shape the old malformed request produced on every call.
+        """
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(
@@ -808,13 +838,13 @@ class TestDescopeManagementClient:
     @pytest.mark.anyio
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_check_permission_null_allowed_field(self, mock_cls, client):
-        """Edge case: if 'allowed' is null, returns False (fail-closed, coerced to bool)."""
+        """Edge case: a null hasRelation reads as denied, coerced to bool."""
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
-            json=MagicMock(return_value={"allowed": None}),
+            json=MagicMock(return_value={"relationQueries": [{"hasRelation": None}]}),
         )
 
         result = await client.check_permission("document", "doc-123", "editor", "user:u1")
@@ -824,13 +854,13 @@ class TestDescopeManagementClient:
     @pytest.mark.anyio
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_list_relations_null_value(self, mock_cls, client):
-        """Edge case: if 'relationInfo' is null, returns empty list."""
+        """Edge case: a null relations list reads as no relations."""
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
-            json=MagicMock(return_value={"relationInfo": None}),
+            json=MagicMock(return_value={"relations": None}),
         )
 
         result = await client.list_relations("document", "doc-123")
@@ -839,7 +869,7 @@ class TestDescopeManagementClient:
     @pytest.mark.anyio
     @patch("app.services.descope.httpx.AsyncClient")
     async def test_list_user_resources_null_value(self, mock_cls, client):
-        """Edge case: if 'resources' is null, returns empty list."""
+        """Edge case: a null relations list reads as no resources."""
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(
@@ -852,153 +882,42 @@ class TestDescopeManagementClient:
         assert result == []
 
 
-class TestFgaRelationFanOut:
-    """`who` requires relationDefinition, so listing every relation means asking per relation.
+class TestFgaWireContractRegressions:
+    """The two shapes that produced a silent, successful-looking no-op.
 
-    Calling /v1/mgmt/authz/re/who without relationDefinition returns
-    400 E011003 "The relationDefinition field is required" — which is what an
-    unfiltered GET /api/fga/relations used to do on every request.
+    Verified against the live API 2026-09-13: a flat body is accepted with HTTP
+    200 and writes nothing, and `has` answers with empty arrays so every check
+    reads as denied. Nothing raises, so only asserting on the request body catches
+    a regression here.
     """
 
-    # Mirrors what /v1/mgmt/authz/schema/load actually returns: relations and
-    # permissions arrive together in relationDefinitions, distinguishable only by
-    # their complexDefinition. owner/editor/viewer are stored tuples; can_view and
-    # can_edit are unions and can_delete points at another relation's target set.
-    @staticmethod
-    def _stored(name):
-        return {"name": name, "complexDefinition": {"nType": "child", "children": [], "expression": {"neType": "self"}}}
-
-    @staticmethod
-    def _union(name, n):
-        return {"name": name, "complexDefinition": {"nType": "union", "children": [{}] * n, "expression": None}}
-
-    @staticmethod
-    def _target_set(name):
-        return {
-            "name": name,
-            "complexDefinition": {"nType": "child", "children": [], "expression": {"neType": "targetSet"}},
-        }
-
-    @property
-    def _SCHEMA(self):
-        return {
-            "schema": {
-                "namespaces": [
-                    {"name": "user", "relationDefinitions": []},
-                    {
-                        "name": "document",
-                        "relationDefinitions": [
-                            self._stored("owner"),
-                            self._stored("editor"),
-                            self._stored("viewer"),
-                            self._union("can_view", 3),
-                            self._union("can_edit", 2),
-                            self._target_set("can_delete"),
-                        ],
-                    },
-                ]
-            }
-        }
-
-    def _responder(self, mock_http, per_relation):
-        """Route schema/load to the schema and re/who to per_relation[relationDefinition]."""
-        calls: list[str] = []
-
-        async def _post(url, headers=None, json=None):
-            if url.endswith("/authz/schema/load"):
-                return MagicMock(
-                    status_code=200, raise_for_status=MagicMock(), json=MagicMock(return_value=self._SCHEMA)
-                )
-            rd = (json or {}).get("relationDefinition")
-            calls.append(rd)
-            return MagicMock(
-                status_code=200,
-                raise_for_status=MagicMock(),
-                json=MagicMock(return_value={"relationInfo": per_relation.get(rd, [])}),
-            )
-
-        mock_http.post.side_effect = _post
-        return calls
-
     @pytest.mark.anyio
     @patch("app.services.descope.httpx.AsyncClient")
-    async def test_relation_definitions_reads_the_schema(self, mock_cls, client):
+    async def test_relation_writes_are_never_sent_flat(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
-        self._responder(mock_http, {})
-
-        assert await client.relation_definitions("document") == ["owner", "editor", "viewer"]
-
-    @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
-    async def test_relation_definitions_unknown_type_is_empty(self, mock_cls, client):
-        mock_http = AsyncMock()
-        mock_cls.return_value = mock_http
-        self._responder(mock_http, {})
-
-        assert await client.relation_definitions("nonexistent") == []
-
-    @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
-    async def test_list_all_relations_asks_once_per_relation_and_merges(self, mock_cls, client):
-        mock_http = AsyncMock()
-        mock_cls.return_value = mock_http
-        calls = self._responder(
-            mock_http,
-            {
-                "owner": [{"target": "user:alice"}],
-                "viewer": [{"target": "user:bob"}, {"target": "user:carol"}],
-            },
+        mock_http.post.return_value = MagicMock(
+            status_code=200, raise_for_status=MagicMock(), json=MagicMock(return_value={})
         )
 
-        result = await client.list_all_relations("document", "tenant-abc:doc-1")
-
-        assert calls == ["owner", "editor", "viewer"], f"one call per STORED relation, got {calls}"
-        assert result == [
-            {"target": "user:alice", "relationDefinition": "owner"},
-            {"target": "user:bob", "relationDefinition": "viewer"},
-            {"target": "user:carol", "relationDefinition": "viewer"},
-        ]
-
-    @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
-    async def test_list_all_relations_never_calls_who_without_a_relation(self, mock_cls, client):
-        """The regression itself: no request may go out with relationDefinition unset."""
-        mock_http = AsyncMock()
-        mock_cls.return_value = mock_http
-        calls = self._responder(mock_http, {"owner": [{"target": "user:alice"}]})
-
-        await client.list_all_relations("document", "tenant-abc:doc-1")
-
-        assert None not in calls, "a `who` call went out without relationDefinition — this is the 400 E011003 bug"
+        for call in (client.create_relation, client.delete_relation):
+            mock_http.post.reset_mock()
+            await call("document", "doc-1", "owner", "user:alice")
+            body = mock_http.post.call_args[1]["json"]
+            assert "relations" in body, f"{call.__name__} sent a flat body: accepted, writes nothing"
+            assert body["relations"][0]["namespace"] == "document"
+            assert "resourceType" not in body["relations"][0]
 
     @pytest.mark.anyio
     @patch("app.services.descope.httpx.AsyncClient")
-    async def test_list_all_relations_unknown_type_makes_no_who_calls(self, mock_cls, client):
+    async def test_check_permission_denies_on_the_empty_shape(self, mock_cls, client):
+        """The response the malformed request used to produce must not read as allowed."""
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
-        calls = self._responder(mock_http, {})
-
-        assert await client.list_all_relations("nonexistent", "tenant-abc:x") == []
-        assert calls == []
-
-    @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
-    async def test_computed_permissions_are_not_treated_as_relations(self, mock_cls, client):
-        """can_view/can_edit/can_delete are derived, so they are not tuples to list or delete.
-
-        Descope returns them alongside real relations in relationDefinitions. Treating
-        one as a relation would make document cleanup try to delete a permission that
-        has no tuple behind it, and would inflate the relation count a document
-        appears to carry against the cleanup ceiling.
-        """
-        mock_http = AsyncMock()
-        mock_cls.return_value = mock_http
-        calls = self._responder(mock_http, {"owner": [{"target": "user:alice"}]})
-
-        assert await client.relation_definitions("document") == ["owner", "editor", "viewer"]
-
-        await client.list_all_relations("document", "tenant-abc:doc-1")
-        assert "can_view" not in calls and "can_edit" not in calls and "can_delete" not in calls, (
-            f"a computed permission was queried as if it were a relation: {calls}"
+        mock_http.post.return_value = MagicMock(
+            status_code=200,
+            raise_for_status=MagicMock(),
+            json=MagicMock(return_value={"relationQueries": [], "directRelations": []}),
         )
+
+        assert await client.check_permission("document", "doc-1", "can_view", "user:alice") is False

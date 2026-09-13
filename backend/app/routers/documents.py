@@ -224,10 +224,7 @@ async def delete_document(
     # FGA cleanup first — abort if it fails or if too many relations
     try:
         client = request.app.state.descope_client
-        # Every relation on the document, so cleanup deletes all of them. The
-        # unfiltered list_relations call this replaces always returned
-        # 400 E011003 "The relationDefinition field is required" from Descope,
-        # so this cleanup could only ever 502.
+        # Every relation on the document, so cleanup deletes all of them.
         relations = (await client.list_all_relations("document", prefixed_id)) or []
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.error("FGA cleanup failed for doc %s: %s", document_id, type(exc).__name__)
