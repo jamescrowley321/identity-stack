@@ -12,6 +12,7 @@ from app.dependencies.tenant import get_tenant_claims, get_tenant_id
 from app.errors.problem_detail import result_to_response
 from app.models.database import get_async_session
 from app.models.tenant import TenantResource
+from app.services.canonical import canonical_tenant
 from app.services.tenant import TenantService
 
 logger = logging.getLogger(__name__)
@@ -101,7 +102,7 @@ async def get_current_tenant(
         tenant_data = await client.load_tenant(tenant_id)
         if not tenant_data:
             raise HTTPException(status_code=404, detail=f"Tenant {tenant_id} not found")
-        return {"tenant_id": tenant_id, "tenant": tenant_data}
+        return {"tenant_id": tenant_id, "tenant": canonical_tenant(tenant_data)}
     except HTTPException:
         raise
     except Exception as exc:
