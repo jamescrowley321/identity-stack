@@ -16,7 +16,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 interface TenantSettingsData {
   tenant_id: string;
   name: string;
-  custom_attributes: Record<string, string | number | boolean>;
+  // Null when the tenant carries no custom attributes — Descope sends the key
+  // with a null value rather than omitting it.
+  custom_attributes: Record<string, string | number | boolean> | null;
 }
 
 const PLAN_TIERS = ["free", "pro", "enterprise"];
@@ -61,7 +63,7 @@ export default function TenantSettings() {
         toast.success("Settings saved");
         setSettings((prev) =>
           prev
-            ? { ...prev, custom_attributes: { ...prev.custom_attributes, plan_tier: planTier, max_members: parseInt(maxMembers, 10) || 10 } }
+            ? { ...prev, custom_attributes: { ...(prev.custom_attributes ?? {}), plan_tier: planTier, max_members: parseInt(maxMembers, 10) || 10 } }
             : prev,
         );
       } else {
@@ -86,7 +88,10 @@ export default function TenantSettings() {
     );
   }
 
-  const attrs = settings.custom_attributes;
+  // Descope returns customAttributes: null for a tenant that has none, and the
+  // ?? below guards a missing *value*, not a missing container — so reading
+  // attrs.plan_tier threw and took the whole SPA down, leaving an empty #root.
+  const attrs = settings.custom_attributes ?? {};
 
   return (
     <>
