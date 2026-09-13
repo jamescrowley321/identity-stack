@@ -20,11 +20,14 @@ build/
 .env.*.local
 
 # Terraform
+#
+# .terraform.lock.hcl is deliberately NOT ignored: it pins provider versions
+# and their hashes, and belongs in version control so every run — local or on
+# Terraform Cloud — resolves the same providers.
 .terraform/
 *.tfstate
 *.tfstate.*
 *.tfplan
-.terraform.lock.hcl
 crash.log
 infra/expired_token.txt
 
