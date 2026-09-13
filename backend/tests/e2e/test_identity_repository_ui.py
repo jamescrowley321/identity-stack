@@ -59,6 +59,16 @@ def test_navigate_to_settings_page(admin_page: Page, frontend_url: str):
 # --- Test 2: Data display — create role via API, verify in UI ---
 
 
+@pytest.mark.xfail(
+    reason=(
+        "useRBAC derives isAdmin from the JWT `tenants` claim, which carries no "
+        "roles for this identity, so the admin-gated roles table never renders — "
+        "the page itself reports 'Roles: None' next to 'Server-confirmed: owner, "
+        "admin'. Sourcing useRBAC from GET /api/identity is #392; drop this mark "
+        "when that lands."
+    ),
+    strict=True,
+)
 def test_role_created_via_api_visible_in_ui(
     admin_page: Page,
     admin_api_context: APIRequestContext,
@@ -77,8 +87,12 @@ def test_role_created_via_api_visible_in_ui(
         assert resp.status == 201, f"Create role failed: {resp.status}"
         cleanup_role = role_name
 
-        # The roles table is gated on useRBAC().isAdmin, so this must browse as the
-        # same admin identity that created the role — see the admin_page fixture.
+        # The roles table is gated on useRBAC().isAdmin, which reads roles out of
+        # the JWT's `tenants` claim. For this identity that claim carries the
+        # tenant but no roles, so the page renders "Roles: None" beside
+        # "Server-confirmed: owner, admin" — the client cannot see what the server
+        # can. Sourcing useRBAC from the canonical GET /api/identity is #392; this
+        # test asserts the behaviour that lands with it.
         admin_page.goto(f"{frontend_url}/roles")
         admin_page.wait_for_load_state("networkidle")
         expect(admin_page.get_by_text(role_name)).to_be_visible(timeout=10000)

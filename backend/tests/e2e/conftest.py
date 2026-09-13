@@ -140,8 +140,21 @@ def pytest_runtest_makereport(item, call):
     setattr(item, f"_report_{report.when}", report)
 
 
-def _capture_on_failure(page, request, label: str) -> None:
-    """Save a screenshot and the rendered HTML if the test failed."""
+def _record_console(page) -> list[str]:
+    """Collect console output and uncaught errors for the life of the page.
+
+    An SPA that throws during mount leaves `<div id="root"></div>` and nothing
+    else, so the DOM says only that nothing rendered. The reason is in the
+    console, which is otherwise discarded when the context closes.
+    """
+    messages: list[str] = []
+    page.on("console", lambda m: messages.append(f"{m.type}: {m.text}"))
+    page.on("pageerror", lambda e: messages.append(f"pageerror: {e}"))
+    return messages
+
+
+def _capture_on_failure(page, request, label: str, console: list[str] | None = None) -> None:
+    """Save a screenshot, the rendered HTML, and the console if the test failed."""
     if not _ARTIFACT_DIR:
         return
     report = getattr(request.node, "_report_call", None)
@@ -154,6 +167,8 @@ def _capture_on_failure(page, request, label: str) -> None:
         page.screenshot(path=str(out / f"{stem}.png"), full_page=True)
         (out / f"{stem}.html").write_text(page.content(), encoding="utf-8")
         (out / f"{stem}.url.txt").write_text(page.url, encoding="utf-8")
+        if console:
+            (out / f"{stem}.console.txt").write_text("\n".join(console), encoding="utf-8")
     except Exception as exc:  # pragma: no cover - diagnostics must never fail a test
         print(f"[e2e] could not capture failure evidence for {stem}: {exc}")
 
@@ -170,10 +185,11 @@ def admin_page(browser, _ensure_test_user, admin_access_token, frontend_url, req
     """
     context = create_authenticated_context(browser, frontend_url, admin_access_token)
     page = context.new_page()
+    console = _record_console(page)
     page.goto(frontend_url + "/")
     page.wait_for_load_state("networkidle")
     yield page
-    _capture_on_failure(page, request, "admin_page")
+    _capture_on_failure(page, request, "admin_page", console)
     context.close()
 
 
@@ -187,8 +203,9 @@ def auth_page(browser, _ensure_test_user, auth_access_token, frontend_url, reque
     """
     context = create_authenticated_context(browser, frontend_url, auth_access_token)
     page = context.new_page()
+    console = _record_console(page)
     page.goto(frontend_url + "/")
     page.wait_for_load_state("networkidle")
     yield page
-    _capture_on_failure(page, request, "auth_page")
+    _capture_on_failure(page, request, "auth_page", console)
     context.close()
