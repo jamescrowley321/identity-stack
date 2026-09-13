@@ -46,7 +46,17 @@ class BaseRepository[T]:
         return await self._session.get(self._model, entity_id)
 
     async def update(self, entity: T) -> T:
-        """Flush updated entity state.
+        """Flush updated entity state and refresh server-generated columns.
+
+        The refresh is not incidental. ``updated_at`` is declared with
+        ``onupdate=sa.func.now()``, so its new value is produced by the database,
+        not by Python. SQLAlchemy expires such a column on flush, which removes it
+        from the instance ``__dict__`` — and ``model_dump()`` serialises from
+        ``__dict__``, so the field is silently *omitted* from the response rather
+        than appearing stale or null. Creates were unaffected (their ``updated_at``
+        comes from the Python ``default_factory``), which is why only update
+        responses lost the field. Refreshing re-reads what the database actually
+        stored, so callers see the real value.
 
         Raises RepositoryConflictError if a uniqueness constraint is violated.
         Does NOT rollback — the service layer owns the transaction boundary.
@@ -55,6 +65,7 @@ class BaseRepository[T]:
             await self._session.flush()
         except IntegrityError as exc:
             raise RepositoryConflictError(str(exc)) from exc
+        await self._session.refresh(entity)
         return entity
 
     async def delete(self, entity_id: uuid.UUID) -> bool:
