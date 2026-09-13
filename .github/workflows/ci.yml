@@ -162,10 +162,15 @@ jobs:
       # The backend must run against a schema-bearing database. It previously ran
       # on sqlite :memory:, which passes the startup connectivity check but has no
       # tables, so every canonical-repository route raised "no such table".
+      # Redirected to a file, not left on the step's stdout. The backend outlives
+      # the step that starts it, so everything it logs during the test run —
+      # including the upstream Descope status and body behind every 400/502 the
+      # API passes through — was written to an already-closed step log and lost.
+      # That is what made this failure class undiagnosable from CI alone.
       - name: Start backend
         run: |
           cd backend
-          uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+          uvicorn app.main:app --host 0.0.0.0 --port 8000 > "$RUNNER_TEMP/backend.log" 2>&1 &
           sleep 3
         env:
           DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
@@ -198,6 +203,33 @@ jobs:
           E2E_TEST_TENANT_ID: ${{ secrets.E2E_TEST_TENANT_ID }}
           E2E_FRONTEND_URL: "http://localhost:3000"
           E2E_BACKEND_URL: "http://localhost:8000"
+
+      # This repository is public, so its artifacts are world-readable. The
+      # backend is not supposed to log credentials, but an unhandled traceback
+      # can carry one it was handed, so the log is scrubbed before it ever leaves
+      # the runner rather than trusted to be clean: JWT-shaped triples and any
+      # Bearer value are redacted. Never weaken this to upload the raw log.
+      - name: Redact credentials from the backend log
+        if: always()
+        run: |
+          f="$RUNNER_TEMP/backend.log"
+          [ -f "$f" ] || exit 0
+          sed -i -E \
+            -e 's/eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]+/<redacted-jwt>/g' \
+            -e 's/([Bb]earer )[A-Za-z0-9._~+\/-]+=*/\1<redacted>/g' \
+            -e 's/(K[A-Za-z0-9]{25,})/<redacted-key>/g' \
+            "$f"
+
+      # Always, not only on failure: a suite that passes while the backend logs
+      # upstream errors is exactly the state this repo spent months in.
+      - name: Upload backend log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-backend-log
+          path: ${{ runner.temp }}/backend.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Stop test stack
         if: always()
