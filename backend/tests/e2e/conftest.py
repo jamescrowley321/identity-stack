@@ -10,6 +10,7 @@ from tests.e2e.helpers.auth import (
     ensure_test_user,
     get_admin_session_token,
     get_oidc_access_token,
+    sweep_leaked_e2e_users,
 )
 
 FRONTEND_URL = os.environ.get("E2E_FRONTEND_URL", "http://localhost:3000")
@@ -47,6 +48,21 @@ def _credentials_are_present_in_ci():
             + ". The authenticated tests would skip and the job would report green; "
             "fix the secret rather than letting the gate go hollow."
         )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _sweep_leaked_users():
+    """Remove users stranded by this or an earlier E2E run.
+
+    Runs on the way in as well as out: a run that is cancelled or killed never
+    reaches its teardown, so sweeping only at the end would let those users
+    accumulate until someone noticed the project was at its user limit.
+    """
+    if _has_mgmt_key:
+        sweep_leaked_e2e_users()
+    yield
+    if _has_mgmt_key:
+        sweep_leaked_e2e_users()
 
 
 @pytest.fixture(scope="session")

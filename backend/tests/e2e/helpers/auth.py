@@ -12,6 +12,7 @@ import base64
 import contextlib
 import json
 import os
+from http import HTTPStatus
 
 import httpx
 from playwright.sync_api import BrowserContext
@@ -261,3 +262,57 @@ def cleanup_test_user(email: str = "") -> None:
             headers=_auth_header(),
             json={"loginId": email},
         )
+
+
+# Login-id prefixes for users the E2E suite creates as fixtures. Anything
+# matching these is disposable by construction — the suffix is a random uuid4
+# fragment, so a surviving one can only be litter from an earlier run.
+LEAKED_USER_PREFIXES = ("e2e-invite-", "e2e-lifecycle-")
+
+
+def sweep_leaked_e2e_users() -> int:
+    """Delete users left behind by earlier E2E runs. Returns the count removed.
+
+    Per-test cleanup deletes by user id, which means it cannot run when the
+    invite response does not carry one — notably the 207 path, where Descope
+    has already created the user but the body is an RFC 9457 Problem Detail.
+    Those users then survive forever and count against the project's user
+    limit. This sweeps by login-id prefix instead, so it also catches users
+    stranded by a crashed or cancelled run.
+
+    Never touches E2E_TEST_EMAIL: that user is provisioned deliberately and is
+    reused across runs.
+    """
+    if not (DESCOPE_PROJECT_ID and DESCOPE_MANAGEMENT_KEY):
+        return 0
+
+    removed = 0
+    with httpx.Client(timeout=30) as client:
+        response = client.post(
+            _mgmt_url("/v2/mgmt/user/search"),
+            headers=_auth_header(),
+            json={"limit": 500, "page": 0},
+        )
+        if response.status_code != HTTPStatus.OK:
+            print(f"[E2E] user sweep: search returned {response.status_code}, skipping")
+            return 0
+
+        for user in response.json().get("users", []):
+            login_ids = user.get("loginIds") or []
+            if not login_ids:
+                continue
+            login_id = login_ids[0]
+            if login_id == E2E_TEST_EMAIL:
+                continue
+            if not login_id.startswith(LEAKED_USER_PREFIXES):
+                continue
+            client.post(
+                _mgmt_url("/v1/mgmt/user/delete"),
+                headers=_auth_header(),
+                json={"loginId": login_id},
+            )
+            removed += 1
+
+    if removed:
+        print(f"[E2E] user sweep: removed {removed} leaked user(s)")
+    return removed
