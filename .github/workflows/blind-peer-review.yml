@@ -1,6 +1,5 @@
-# Adversarial Review — fresh-context, diff-only AI PR review. ON DEMAND ONLY.
-# https://github.com/jamescrowley321/blind-peer-review (renamed; this pin is the
-# pre-rename v1.6.0 SHA, which GitHub still resolves through the redirect).
+# Blind Peer Review — fresh-context, diff-only AI PR review. ON DEMAND ONLY.
+# https://github.com/jamescrowley321/blind-peer-review
 #
 # This does NOT run automatically on pull requests, and "Merge Gate" is NOT a
 # required check. Routine review happens locally, before the push, running the
@@ -22,8 +21,15 @@
 #
 # Setup: repo secret OPENROUTER_API_KEY. Toggle lenses in the ENABLED list in the
 # `config` job — that one list drives BOTH the review matrix AND the gate.
+#
+# NOTE: the dispatch path itself is fixed by blind-peer-review#85 and needs the
+# release that carries it. At this pin, every step that anchors to the commit
+# under review reads `context.payload.pull_request.head.sha`, which is undefined
+# on a workflow_dispatch — preflight throws a TypeError, the lenses skip, and the
+# gate fails closed. Bump the pin once that lands. Local review via the plugin
+# above is unaffected and is the routine path either way.
 
-name: Adversarial Review
+name: Blind Peer Review
 
 on:
   workflow_dispatch:
@@ -37,7 +43,11 @@ on:
 # normally), so keying on the ref would make two reviews of two different PRs
 # cancel each other.
 concurrency:
-  group: adversarial-review-${{ inputs.pr_number }}
+  # The `|| github.ref` fallback is not reachable today (dispatch is the only
+  # trigger, and pr_number is required). It is there so that re-adding any other
+  # trigger cannot silently collapse every run into one group named
+  # `blind-peer-review-` and have each new PR cancel the previous PR's review.
+  group: blind-peer-review-${{ inputs.pr_number || github.ref }}
   cancel-in-progress: true
 # Least privilege by default: only the `review` job (the lens reviewer that
 # posts inline comments + per-lens check runs) is granted write, scoped on the
@@ -46,33 +56,37 @@ permissions:
   contents: read
 
 jobs:
-  # The ONE place to toggle lenses. Emits the enabled set as a matrix (parallel
-  # review jobs) and a CSV (the gate).
+  # The ONE place to toggle lenses. Emits the enabled set as a matrix, which is
+  # what BOTH the review jobs and the gate consume — v3.0.0 takes the matrix
+  # object itself as the gate's `lenses` input, so there is no second delimited
+  # copy to drift.
   config:
     runs-on: ubuntu-latest
     permissions: {} # computes the lens matrix only — no API access needed
     outputs:
       matrix: ${{ steps.pick.outputs.matrix }}
-      csv: ${{ steps.pick.outputs.csv }}
     steps:
       - id: pick
         shell: node {0}
         env:
+          # v3.0.0 renamed every lens key. The old names (blind, edge-case,
+          # sentinel, viper, compliance, owasp-web) are rejected by the action's
+          # registry, so these must move together with the pin.
           ENABLED: |
-            blind          # logic bugs, footguns (zero context)
-            edge-case      # unhandled branches / boundaries
-            acceptance     # PR acceptance criteria met + tested
-            sentinel       # exploitable security vulnerabilities
-            viper          # red-team attack paths (auth/infra)
-            compliance     # AI-provenance policy + repo rules
-            owasp-web      # OWASP Web Top 10 — this is a web app + API
-            # owasp-llm    # OWASP GenAI/LLM Top 10 — enable if/when LLM features land
+            cold_read  # logic bugs, footguns (zero context)
+            edge_case  # unhandled branches / boundaries
+            acceptance # PR acceptance criteria met + tested
+            security   # exploitable security vulnerabilities
+            red_team   # red-team attack paths (auth/infra)
+            policy     # AI-provenance policy + repo rules
+            owasp_web  # OWASP Web Top 10 — this is a web app + API
+            # owasp_llm  # OWASP GenAI/LLM Top 10 — enable if/when LLM features land
         run: |
           const NAMES = {
-            blind: "Blind Hunter", "edge-case": "Edge Case Hunter",
-            acceptance: "Acceptance Auditor", sentinel: "Sentinel", viper: "Viper",
-            compliance: "Compliance Auditor", "owasp-web": "OWASP Web Top 10",
-            "owasp-llm": "OWASP LLM Top 10",
+            cold_read: "Cold Read", edge_case: "Edge Cases",
+            acceptance: "Acceptance Criteria", security: "Security Review",
+            red_team: "Red Team", policy: "Policy & Provenance",
+            owasp_web: "OWASP Web Top 10", owasp_llm: "OWASP LLM Top 10",
           };
           const keys = (process.env.ENABLED || "").split("\n")
             .map((l) => l.replace(/#.*/, "").trim()).filter(Boolean);
@@ -85,7 +99,6 @@ jobs:
           const include = keys.map((k) => ({ lens: k, name: NAMES[k] || k }));
           const fs = require("fs");
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify({ include })}\n`);
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `csv=${keys.join(",")}\n`);
 
   # Don't spend the paid lenses until the cheap deterministic gates pass.
   preflight:
@@ -103,55 +116,61 @@ jobs:
       pull-requests: read
     steps:
       - name: Wait for deterministic checks
-        uses: jamescrowley321/adversarial-review@7d18b99faf7567366b5091deaf1470692d668245 # v1.6.0
+        uses: jamescrowley321/blind-peer-review@9cf7e5a77cb7372122571feb9741049d7b5f94dc # v3.0.0
         with:
           mode: preflight
           github_token: ${{ secrets.GITHUB_TOKEN }}
           pr_number: ${{ inputs.pr_number }}
           # EXACT check-run names (job `name:` values) that must pass first.
-          required_checks: "Lint, Unit Tests, Semgrep (SAST), Gitleaks (Secret Scanning)"
+          #
+          # One per line. v3.0.0 stopped splitting this input on commas, because
+          # a check name may legally contain one — and this repo has two that do
+          # ("Semgrep (SAST)" does not, but the comma form would still have made
+          # `Lint, Unit Tests, Semgrep (SAST), Gitleaks (Secret Scanning)` a
+          # SINGLE check name that never reports, so preflight could only end in
+          # its timeout and the gate then fails closed).
+          #
+          # E2E Tests is deliberately excluded: it is a required check for merge,
+          # but it runs for minutes against live Descope and is not what "is this
+          # PR worth spending review compute on" should wait for.
+          required_checks: |
+            Lint
+            Unit Tests
+            Semgrep (SAST)
+            Gitleaks (Secret Scanning)
 
   review:
     name: ${{ matrix.name }}
     needs: [config, preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 12
-    # The only job that needs write: it posts inline review comments and the
-    # per-lens check run. Scoped here rather than granted workflow-wide.
+    # The only job that needs write: it posts inline review comments. Scoped
+    # here rather than granted workflow-wide. No checks:write — the action's
+    # only Checks API call is checks.listForRef (read), in preflight.
     permissions:
       contents: read
       pull-requests: write
-      checks: write
-      issues: read # the Compliance lens reads the PR thread
+      issues: read # the Policy & Provenance lens reads the PR thread
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.config.outputs.matrix) }}
     steps:
       - name: ${{ matrix.name }}
-        uses: jamescrowley321/adversarial-review@7d18b99faf7567366b5091deaf1470692d668245 # v1.6.0
+        uses: jamescrowley321/blind-peer-review@9cf7e5a77cb7372122571feb9741049d7b5f94dc # v3.0.0
         with:
           mode: lens
           lens: ${{ matrix.lens }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           pr_number: ${{ inputs.pr_number }}
           api_key: ${{ secrets.OPENROUTER_API_KEY }}
-          # This is an auth/security app — use the sanctioned quality model for the
-          # security-sensitive lenses. Overridable per repo.
-          model: anthropic/claude-sonnet-5
-          # Enforce OpenRouter routing guardrails on the request (ZDR, price-sort
-          # inside filters) — not just at the account level.
-          models_config: |
-            {
-              "providers": {
-                "openrouter": {
-                  "modelOverrides": {
-                    "anthropic/claude-sonnet-5": {
-                      "compat": { "openRouterRouting": { "sort": "price", "zdr": true } }
-                    }
-                  }
-                }
-              }
-            }
+          # anthropic/claude-sonnet-5 is unusable via openrouter+pi: OpenRouter
+          # retired the undated alias (404) while pi's catalog lacks the dated
+          # snapshot, so every lens on every recent run failed with
+          # `404 <!DOCTYPE html>`. google/gemini-2.5-pro is the v3.0.0 default and
+          # what identity-model runs. No models_config: the account-level routing
+          # is the proven-green path, and pinning a zdr filter per request can
+          # leave the model with no eligible endpoint.
+          model: google/gemini-2.5-pro
 
   gate:
     name: Merge Gate
@@ -170,13 +189,13 @@ jobs:
       - name: Fail closed when review did not complete
         if: needs.review.result != 'success'
         run: |
-          echo "::error::Adversarial review did not complete (review=${{ needs.review.result }}): preflight failed, or one or more lenses crashed. Nothing was adjudicated — re-run the dispatch, or review locally with /blind-peer-review:check."
+          echo "::error::Blind peer review did not complete (review=${{ needs.review.result }}): preflight failed, or one or more lenses crashed. Nothing was adjudicated — re-run the dispatch, or review locally with /blind-peer-review:check."
           exit 1
       - name: Adjudicate lenses
         if: needs.review.result == 'success'
-        uses: jamescrowley321/adversarial-review@7d18b99faf7567366b5091deaf1470692d668245 # v1.6.0
+        uses: jamescrowley321/blind-peer-review@9cf7e5a77cb7372122571feb9741049d7b5f94dc # v3.0.0
         with:
           mode: gate
-          lenses: ${{ needs.config.outputs.csv }}
+          lenses: ${{ needs.config.outputs.matrix }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           pr_number: ${{ inputs.pr_number }}
