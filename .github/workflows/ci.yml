@@ -173,8 +173,23 @@ jobs:
       # the missing header — so the unknown-provider test could never reach the
       # 404 it asserts. Generated per run rather than committed: it is a
       # localhost-only test credential and nothing should ship a fixed one.
-      - name: Generate the internal identity key for the test stack
-        run: echo "INTERNAL_IDENTITY_KEY=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+      #
+      # The webhook and flow-sync endpoints authenticate the same way, from
+      # DESCOPE_WEBHOOK_SECRET and DESCOPE_FLOW_SYNC_SECRET. Unset, they reject
+      # every request and the four tests covering them — including the only
+      # coverage of webhook HMAC verification — skipped on every run. The tests
+      # compute the HMAC from the same variable, so generating one here is
+      # enough to exercise the real signature path.
+      #
+      # add-mask so a generated value cannot surface in a step log: these are
+      # written to $GITHUB_ENV, which GitHub does not mask on its own.
+      - name: Generate the test stack's shared secrets
+        run: |
+          for name in INTERNAL_IDENTITY_KEY DESCOPE_WEBHOOK_SECRET DESCOPE_FLOW_SYNC_SECRET; do
+            value="$(openssl rand -hex 32)"
+            echo "::add-mask::$value"
+            echo "$name=$value" >> "$GITHUB_ENV"
+          done
 
       - name: Start backend
         run: |
@@ -183,6 +198,8 @@ jobs:
           sleep 3
         env:
           INTERNAL_IDENTITY_KEY: ${{ env.INTERNAL_IDENTITY_KEY }}
+          DESCOPE_WEBHOOK_SECRET: ${{ env.DESCOPE_WEBHOOK_SECRET }}
+          DESCOPE_FLOW_SYNC_SECRET: ${{ env.DESCOPE_FLOW_SYNC_SECRET }}
           DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
           DESCOPE_MANAGEMENT_KEY: ${{ secrets.DESCOPE_MANAGEMENT_KEY }}
           DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
@@ -215,6 +232,8 @@ jobs:
         env:
           E2E_ARTIFACT_DIR: ${{ runner.temp }}/playwright
           INTERNAL_IDENTITY_KEY: ${{ env.INTERNAL_IDENTITY_KEY }}
+          DESCOPE_WEBHOOK_SECRET: ${{ env.DESCOPE_WEBHOOK_SECRET }}
+          DESCOPE_FLOW_SYNC_SECRET: ${{ env.DESCOPE_FLOW_SYNC_SECRET }}
           DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
           DESCOPE_MANAGEMENT_KEY: ${{ secrets.DESCOPE_MANAGEMENT_KEY }}
           DESCOPE_CLIENT_ID: ${{ secrets.DESCOPE_CLIENT_ID }}
@@ -243,9 +262,11 @@ jobs:
           [ -f "$f" ] || exit 0
           sed -i -E \
             -e 's/eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]+/<redacted-jwt>/g' \
-            -e 's/([Bb]earer )[A-Za-z0-9._~+:\/-]+=*/\1<redacted>/g' \
+            -e 's/(bearer )[A-Za-z0-9._~+:\/-]+=*/\1<redacted>/gI' \
+            -e 's/(basic )[A-Za-z0-9+\/=]+/\1<redacted>/gI' \
             -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^:/@ ]+:[^@ ]+@#\1<redacted>:<redacted>@#g' \
-            -e 's/\bK[A-Za-z0-9]{25,}\b/<redacted-key>/g' \
+            -e 's/\bK[A-Za-z0-9_-]{25,}/<redacted-key>/g' \
+            -e 's/\b[0-9a-f]{64}\b/<redacted-hex>/g' \
             "$f"
 
       # Always, not only on failure: a suite that passes while the backend logs
@@ -262,11 +283,30 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      # Screenshots and traces of the rendered page. They contain whatever the
-      # authenticated UI displayed, so treat them as you would the backend log:
-      # this repository is public and artifacts are world-readable.
-      - name: Upload Playwright failure artifacts
+      # The same treatment as the backend log, for the same reason: conftest
+      # writes page.content(), the page URL and console output into this
+      # directory from a session authenticated as owner+admin, and this
+      # repository is public. Text is scrubbed with the rules above; the upload
+      # is gated on the scrub succeeding. Screenshots and traces are binary and
+      # cannot be scrubbed line-wise — they still carry whatever the
+      # authenticated UI rendered, which is why retention is short.
+      - name: Redact credentials from the Playwright artifacts
+        id: redact_playwright
         if: always()
+        run: |
+          d="$RUNNER_TEMP/playwright"
+          [ -d "$d" ] || exit 0
+          find "$d" -type f \( -name '*.html' -o -name '*.txt' -o -name '*.json' -o -name '*.md' \) -print0 \
+            | xargs -0 --no-run-if-empty sed -i -E \
+              -e 's/eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]+/<redacted-jwt>/g' \
+              -e 's/(bearer )[A-Za-z0-9._~+:\/-]+=*/\1<redacted>/gI' \
+              -e 's/(basic )[A-Za-z0-9+\/=]+/\1<redacted>/gI' \
+              -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^:/@ ]+:[^@ ]+@#\1<redacted>:<redacted>@#g' \
+              -e 's/\bK[A-Za-z0-9_-]{25,}/<redacted-key>/g' \
+              -e 's/\b[0-9a-f]{64}\b/<redacted-hex>/g'
+
+      - name: Upload Playwright failure artifacts
+        if: always() && steps.redact_playwright.outcome == 'success' 
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: e2e-playwright-failures
