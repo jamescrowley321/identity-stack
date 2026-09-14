@@ -150,3 +150,39 @@ async def test_rejected_token_never_reaches_the_route(mock_validate):
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid or expired token"
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_bare_issuer_refresh_token_never_reaches_the_route(mock_validate):
+    """A signature-valid token from the right project, of the wrong KIND, is rejected.
+
+    Descope's bare-project-id tokens omit ``aud``, so the audience check cannot
+    bind them to this API: every credential the project signs would otherwise
+    authenticate here, including the refresh token, whose whole purpose is to
+    live in a browser far longer than the 180-second session token.
+    """
+    mock_validate.return_value = {"sub": "user123", "iss": _mock_project_id, "drn": "DSR"}
+
+    transport = ASGITransport(
+        app=_app_with_failing_route(AssertionError("route must not run")),
+        raise_app_exceptions=False,
+    )
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        response = await c.get("/boom", headers={"Authorization": "Bearer valid.mock.token"})
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid or expired token"
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_bare_issuer_session_token_still_authenticates(mock_validate):
+    """The guard must not cost the E2E path this PR exists to repair."""
+    mock_validate.return_value = {"sub": "user123", "iss": _mock_project_id, "drn": "DS"}
+
+    transport = ASGITransport(app=_app_with_failing_route(RuntimeError("boom")), raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        response = await c.get("/boom", headers={"Authorization": "Bearer valid.mock.token"})
+
+    assert response.status_code == 500, "the session token must authenticate and reach the route"
