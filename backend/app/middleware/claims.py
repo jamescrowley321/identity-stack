@@ -13,6 +13,7 @@ from app.middleware.providers import (
     build_provider_configs,
     infer_single_tenant_dct,
     select_by_issuer,
+    token_kind_rejected,
 )
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,13 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
             # checked only when present (session tokens omit ``aud``).
             if audience_rejected(claims, provider):
                 logger.warning("GatewayClaims rejected: audience check failed (aud=%r)", claims.get("aud"))
+                return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+
+            # Token kind: bare-project-id tokens carry no ``aud``, so the check
+            # above cannot bind them to this API. A refresh token is signed by
+            # the same JWKS and differs only in ``drn``.
+            if token_kind_rejected(claims, provider):
+                logger.warning("GatewayClaims rejected: token kind on the bare issuer (drn=%r)", claims.get("drn"))
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
             # Descope access-key tokens set `tenants` but not `dct`; infer the

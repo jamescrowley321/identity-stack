@@ -11,6 +11,7 @@ from app.middleware.providers import (
     build_provider_configs,
     infer_single_tenant_dct,
     order_candidates,
+    token_kind_rejected,
     unverified_issuer,
 )
 
@@ -129,6 +130,12 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
             # Audience: fail-closed for providers that require it (Ory); for
             # Descope, checked only when present (session tokens omit ``aud``).
             if audience_rejected(claims, provider):
+                return None
+
+            # Token kind: a bare-project-id token must be a session token. The
+            # audience check above cannot reject these — they carry no ``aud``.
+            if token_kind_rejected(claims, provider):
+                logger.debug("rejected: token kind not accepted on the bare issuer (drn=%r)", claims.get("drn"))
                 return None
 
             infer_single_tenant_dct(claims, provider)

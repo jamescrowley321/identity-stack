@@ -33,6 +33,16 @@ class ProviderTokenConfig:
     # closed). When False, ``aud`` is only checked if present — the Descope
     # behavior, since Descope session/access-key tokens omit ``aud``.
     require_audience: bool = False
+    # The provider's non-URL issuer form, if it has one — Descope's bare project
+    # id. Tokens on this issuer carry no ``aud``, so the audience check above
+    # cannot bind them to this API; ``token_kind_rejected`` binds them by kind
+    # instead. ``None`` leaves the kind unchecked.
+    bare_issuer: str | None = None
+    # ``drn`` values acceptable on ``bare_issuer``. Descope stamps ``DS`` on a
+    # session token. Verified against the live project: a session JWT carries
+    # ``{drn, exp, iat, iss, rexp, sub, tenants}`` — ``drn`` is the only claim
+    # that names what kind of token it is.
+    session_token_kinds: frozenset[str] = frozenset({"DS"})
 
 
 def descope_config(project_id: str) -> ProviderTokenConfig:
@@ -69,6 +79,7 @@ def descope_config(project_id: str) -> ProviderTokenConfig:
         disco_address=f"https://api.descope.com/{project_id}/.well-known/openid-configuration",
         audience=project_id or None,
         infer_single_tenant_dct=True,
+        bare_issuer=project_id or None,
     )
 
 
@@ -195,6 +206,27 @@ def audience_rejected(claims: dict, provider: ProviderTokenConfig) -> bool:
     if provider.require_audience:
         return "aud" not in claims or not audience_ok(claims["aud"], provider.audience or "")
     return bool(provider.audience) and "aud" in claims and not audience_ok(claims["aud"], provider.audience)
+
+
+def token_kind_rejected(claims: dict, provider: ProviderTokenConfig) -> bool:
+    """True if the token must be rejected because of what KIND of token it is.
+
+    Only the bare-project-id issuer is checked, and only when the provider names
+    one. That issuer is the one form Descope uses for the tokens its SDK mints,
+    and those tokens carry no ``aud`` — so ``audience_rejected`` cannot bind them
+    to this API, and every credential the project signs would otherwise
+    authenticate here. Descope's refresh token is signed by the same project
+    JWKS, carries the same bare issuer, omits ``aud`` in the same way, and is
+    built to live in a browser far longer than the 180-second session token;
+    ``drn`` is the only claim that separates them.
+
+    Fails closed: a bare-issuer token with no ``drn`` at all is rejected, because
+    Descope stamps one on every token it mints on that issuer. URL-issuer tokens
+    (OIDC / inbound-app) are untouched — they are bound by ``aud`` instead.
+    """
+    if not provider.bare_issuer or claims.get("iss") != provider.bare_issuer:
+        return False
+    return claims.get("drn") not in provider.session_token_kinds
 
 
 def infer_single_tenant_dct(claims: dict, provider: ProviderTokenConfig) -> None:

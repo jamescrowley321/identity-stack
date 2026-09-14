@@ -15,6 +15,7 @@ from app.middleware.providers import (
     order_candidates,
     ory_config,
     select_by_issuer,
+    token_kind_rejected,
     unverified_issuer,
 )
 
@@ -59,6 +60,50 @@ class TestDescopeConfig:
         cfg = descope_config("")
         assert cfg.accepted_issuers == frozenset()
         assert cfg.audience is None
+
+
+class TestTokenKindOnTheBareIssuer:
+    """The bare-project-id issuer is the one form that carries no ``aud``.
+
+    Verified against the live project: an access-key session JWT decodes to
+    ``{drn, exp, iat, iss, rexp, sub, tenants}`` — ``iss`` is the bare project id,
+    there is no ``aud``, and ``drn`` is ``DS``. So ``audience_rejected`` cannot
+    bind these tokens to this API and ``drn`` is the only thing that can.
+    """
+
+    def test_a_session_token_is_accepted(self):
+        cfg = descope_config("P123")
+        assert token_kind_rejected({"iss": "P123", "drn": "DS", "sub": "u1"}, cfg) is False
+
+    def test_a_refresh_token_is_rejected(self):
+        """Same JWKS, same issuer, no ``aud`` — and built to outlive the 180s session token."""
+        cfg = descope_config("P123")
+        assert token_kind_rejected({"iss": "P123", "drn": "DSR", "sub": "u1"}, cfg) is True
+
+    def test_a_bare_issuer_token_without_drn_is_rejected(self):
+        """Fails closed: Descope stamps ``drn`` on every token it mints on this issuer."""
+        cfg = descope_config("P123")
+        assert token_kind_rejected({"iss": "P123", "sub": "u1"}, cfg) is True
+
+    @pytest.mark.parametrize(
+        "iss",
+        ["https://api.descope.com/P123", "https://api.descope.com/v1/apps/P123"],
+    )
+    def test_url_issuer_tokens_are_not_kind_checked(self, iss):
+        """OIDC / inbound-app tokens are bound by ``aud`` instead, and carry no ``drn``."""
+        cfg = descope_config("P123")
+        assert token_kind_rejected({"iss": iss, "sub": "u1"}, cfg) is False
+
+    def test_a_provider_with_no_bare_issuer_never_rejects_on_kind(self):
+        cfg = ory_config(ORY_ISSUER, audience="identity-stack-api")
+        assert cfg.bare_issuer is None
+        assert token_kind_rejected({"iss": ORY_ISSUER, "drn": "anything"}, cfg) is False
+
+    def test_without_a_project_id_there_is_no_bare_issuer(self):
+        """The no-config path stays lenient, as it does for issuer and audience."""
+        cfg = descope_config("")
+        assert cfg.bare_issuer is None
+        assert token_kind_rejected({"iss": "", "drn": "DSR"}, cfg) is False
 
 
 class TestOryConfig:
