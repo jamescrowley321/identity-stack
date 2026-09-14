@@ -123,10 +123,12 @@ async def update_fga_schema(
         logger.error("Network error updating FGA schema: %s", exc)
         raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
 
-    # Read-back is best-effort; if it fails, return the submitted schema
+    # Read-back is best-effort; if it fails, return the submitted schema.
+    # get_fga_schema returns the DSL string, not a wrapper dict — reading a key
+    # off it raised AttributeError and this route answered 500 on a save that
+    # had in fact succeeded.
     try:
-        result = await client.get_fga_schema() or {}
-        return {"schema": result.get("schema") or ""}
+        return {"schema": await client.get_fga_schema() or body.schema_}
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         logger.warning("FGA schema updated but read-back failed: %s", exc)
         return {"schema": body.schema_}

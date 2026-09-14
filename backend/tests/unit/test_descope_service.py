@@ -398,8 +398,12 @@ class TestDescopeManagementClient:
         mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
 
         await client.update_user_status("u1", "disabled")
+        # /v1/mgmt/user/update/status, not the camelCase path this test used to
+        # pin: probed live, the camelCase one 404s and this one returns 200 for
+        # the identical body. A test that asserts the URL the code sends still
+        # passes when that URL does not exist, which is how this shipped.
         mock_http.post.assert_called_once_with(
-            "https://api.descope.com/v1/mgmt/user/updateStatus",
+            "https://api.descope.com/v1/mgmt/user/update/status",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
             json={"loginId": "u1", "status": "disabled"},
         )
