@@ -1,5 +1,6 @@
 """Unit tests for the documents CRUD router with FGA enforcement."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -206,6 +207,54 @@ async def test_create_document_fga_network_error(mock_validate, client):
 
     resp = await client.post("/api/documents", headers=AUTH_HEADER, json={"title": "Doc"})
     assert resp.status_code == 502
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_create_document_unparseable_upstream_body_is_502_not_422(mock_validate, client):
+    """An upstream body this service cannot parse is an upstream fault.
+
+    ``json.JSONDecodeError`` subclasses ``ValueError``, and the handler answers
+    ``ValueError`` with 422 — so without an earlier branch, Descope returning a
+    non-JSON body (an outage page, a truncated response) came back to the caller
+    as "your request was malformed", with the parser's message as the detail.
+    """
+    mock_validate.return_value = AUTHED_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.create_relation.side_effect = json.JSONDecodeError("Expecting value", "<html>503</html>", 0)
+    app.state.descope_client = mock_client
+
+    resp = await client.post("/api/documents", headers=AUTH_HEADER, json={"title": "Doc"})
+    assert resp.status_code == 502
+    assert resp.json()["detail"] == "Descope returned an unparseable response"
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_create_document_invalid_identifier_is_still_422(mock_validate, client):
+    """The 422 path must survive: a rejected FGA identifier is the caller's fault."""
+    mock_validate.return_value = AUTHED_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.create_relation.side_effect = ValueError("invalid FGA identifier")
+    app.state.descope_client = mock_client
+
+    resp = await client.post("/api/documents", headers=AUTH_HEADER, json={"title": "Doc"})
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "invalid FGA identifier"
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_list_documents_unparseable_upstream_body_is_502_not_422(mock_validate, client):
+    """Same ordering bug, same fix, on the listing path."""
+    mock_validate.return_value = AUTHED_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.list_user_resources.side_effect = json.JSONDecodeError("Expecting value", "<html>503</html>", 0)
+    app.state.descope_client = mock_client
+
+    resp = await client.get("/api/documents", headers=AUTH_HEADER)
+    assert resp.status_code == 502
+    assert resp.json()["detail"] == "Descope returned an unparseable response"
 
 
 @pytest.mark.anyio

@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Annotated, Literal
 
@@ -78,6 +79,13 @@ async def create_document(
     try:
         client = request.app.state.descope_client
         await client.create_relation("document", prefixed_id, "owner", user_id)
+    except json.JSONDecodeError as exc:
+        # Must precede ValueError: JSONDecodeError subclasses it, so an upstream
+        # body this service cannot parse would otherwise be answered 422 — an
+        # upstream outage relabelled as the caller's malformed request. Same
+        # ordering as routers/fga.py.
+        logger.warning("Descope returned an unparseable body: %s", exc)
+        raise HTTPException(status_code=502, detail="Descope returned an unparseable response") from exc
     except ValueError as exc:
         # DescopeManagementClient validates FGA identifiers and raises ValueError.
         # A rejected identifier is a malformed request, not a server fault.
@@ -143,6 +151,13 @@ async def list_documents(
     try:
         client = request.app.state.descope_client
         resources = await client.list_user_resources("document", "can_view", user_id)
+    except json.JSONDecodeError as exc:
+        # Must precede ValueError: JSONDecodeError subclasses it, so an upstream
+        # body this service cannot parse would otherwise be answered 422 — an
+        # upstream outage relabelled as the caller's malformed request. Same
+        # ordering as routers/fga.py.
+        logger.warning("Descope returned an unparseable body: %s", exc)
+        raise HTTPException(status_code=502, detail="Descope returned an unparseable response") from exc
     except ValueError as exc:
         # DescopeManagementClient validates FGA identifiers and raises ValueError.
         # A rejected identifier is a malformed request, not a server fault.
@@ -254,6 +269,13 @@ async def delete_document(
         client = request.app.state.descope_client
         # Every relation on the document, so cleanup deletes all of them.
         relations = (await client.list_all_relations("document", prefixed_id)) or []
+    except json.JSONDecodeError as exc:
+        # Must precede ValueError: JSONDecodeError subclasses it, so an upstream
+        # body this service cannot parse would otherwise be answered 422 — an
+        # upstream outage relabelled as the caller's malformed request. Same
+        # ordering as routers/fga.py.
+        logger.warning("Descope returned an unparseable body: %s", exc)
+        raise HTTPException(status_code=502, detail="Descope returned an unparseable response") from exc
     except ValueError as exc:
         # DescopeManagementClient validates FGA identifiers and raises ValueError.
         # A rejected identifier is a malformed request, not a server fault.
@@ -277,6 +299,12 @@ async def delete_document(
             if rd and target:
                 await client.delete_relation("document", prefixed_id, rd, target)
                 deleted_relations.append({"relation": rd, "target": target})
+    except json.JSONDecodeError as exc:
+        # Must precede ValueError (it subclasses it): an unparseable upstream body
+        # is an upstream fault, and the ACL stripped so far must still be put back.
+        logger.warning("Descope returned an unparseable body: %s", exc)
+        await _restore_relations(client, prefixed_id, deleted_relations, document_id)
+        raise HTTPException(status_code=502, detail="Descope returned an unparseable response") from exc
     except ValueError as exc:
         # DescopeManagementClient validates FGA identifiers and raises ValueError.
         # A rejected identifier is a malformed request, not a server fault.
@@ -378,6 +406,13 @@ async def share_document(
     prefixed_id = _prefix_resource_id(tenant_id, document_id)
     try:
         await client.create_relation("document", prefixed_id, body.relation, target_user_id)
+    except json.JSONDecodeError as exc:
+        # Must precede ValueError: JSONDecodeError subclasses it, so an upstream
+        # body this service cannot parse would otherwise be answered 422 — an
+        # upstream outage relabelled as the caller's malformed request. Same
+        # ordering as routers/fga.py.
+        logger.warning("Descope returned an unparseable body: %s", exc)
+        raise HTTPException(status_code=502, detail="Descope returned an unparseable response") from exc
     except ValueError as exc:
         # DescopeManagementClient validates FGA identifiers and raises ValueError.
         # A rejected identifier is a malformed request, not a server fault.
