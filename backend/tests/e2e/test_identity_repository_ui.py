@@ -108,7 +108,7 @@ def test_role_created_via_api_is_not_yet_visible_in_ui(
         # Anchor on something the page must render BEFORE asserting the absence
         # of the role, so the negative cannot resolve against a page that has
         # not finished loading — which would pass whether or not #392 landed.
-        expect(admin_page.get_by_role("heading", name="Roles", level=1)).to_be_visible()
+        expect(admin_page.get_by_role("heading", name="Role Management", level=1)).to_be_visible()
         expect(admin_page.get_by_text(role_name)).not_to_be_visible()
 
     finally:
