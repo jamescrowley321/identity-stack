@@ -327,7 +327,11 @@ async def test_get_schema_network_error(mock_validate, client):
 async def test_update_schema_success(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = _mock_client()
-    mock_client.get_fga_schema.return_value = {"schema": "type doc { relation viewer: user }"}
+    # The read-back returns the DSL STRING. This mock used to hand back
+    # {"schema": ...}, so the router's `result.get("schema")` passed here while
+    # raising AttributeError against the real client — the route answered 500 on
+    # a save that had already succeeded.
+    mock_client.get_fga_schema.return_value = "type doc { relation viewer: user }"
     app.state.descope_client = mock_client
 
     response = await client.put(
@@ -337,6 +341,36 @@ async def test_update_schema_success(mock_validate, client):
     assert response.json()["schema"] == "type doc { relation viewer: user }"
     mock_client.update_fga_schema.assert_called_once_with("type doc { relation viewer: user }")
     mock_client.get_fga_schema.assert_called_once()
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_update_schema_readback_returns_the_stored_dsl(mock_validate, client):
+    """Descope may normalise what it stores, so the read-back wins over the input."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = _mock_client()
+    stored = "model AuthZ 1.0\n\ntype user\n\ntype document\n  relation owner: user"
+    mock_client.get_fga_schema.return_value = stored
+    app.state.descope_client = mock_client
+
+    response = await client.put("/api/fga/schema", headers=AUTH_HEADER, json={"schema": "type user"})
+
+    assert response.status_code == 200
+    assert response.json() == {"schema": stored}
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_update_schema_empty_readback_falls_back_to_the_submitted_dsl(mock_validate, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = _mock_client()
+    mock_client.get_fga_schema.return_value = ""
+    app.state.descope_client = mock_client
+
+    response = await client.put("/api/fga/schema", headers=AUTH_HEADER, json={"schema": "type user"})
+
+    assert response.status_code == 200
+    assert response.json() == {"schema": "type user"}
 
 
 @pytest.mark.anyio

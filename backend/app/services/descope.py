@@ -455,8 +455,17 @@ class DescopeManagementClient:
         return resp.json().get("users", [])
 
     async def update_user_status(self, user_id: str, status: Literal["enabled", "disabled"]) -> None:
-        """Update user status."""
-        await self._request("/v1/mgmt/user/updateStatus", {"loginId": user_id, "status": status})
+        """Enable or disable a user.
+
+        ``/v1/mgmt/user/update/status``. The path used to be
+        ``/v1/mgmt/user/updateStatus``, which does not exist — Descope answered
+        404, the router read that as "user not found" and reported 502, so
+        deactivate/activate looked like an upstream outage on every call. Probed
+        against the live API: the camelCase path 404s, this one returns 200 for
+        the same body. Matches go-sdk's ManagementUserUpdateStatus, which is what
+        the Terraform provider and Descope's own SDKs use.
+        """
+        await self._request("/v1/mgmt/user/update/status", {"loginId": user_id, "status": status})
 
     async def remove_user_from_tenant(self, user_id: str, tenant_id: str) -> None:
         """Remove a user from a specific tenant (does not delete the user globally)."""
