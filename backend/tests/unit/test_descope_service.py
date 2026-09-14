@@ -7,6 +7,16 @@ import pytest
 
 from app.services.descope import DescopeManagementClient
 
+#: A schema in the AuthZ 1.0 DSL — the representation an FGA project stores,
+#: and the one infra/fga.tf declares.
+FGA_DSL = """model AuthZ 1.0
+
+type user
+
+type document
+  relation owner: user
+  permission can_view: owner"""
+
 
 @pytest.fixture
 def client():
@@ -573,38 +583,74 @@ class TestDescopeManagementClient:
 
     # --- FGA method tests ---
 
+    # The load/save pair must address the SAME API. These tests used to pin
+    # /v1/mgmt/authz/schema/{load,save} — the older AuthZ namespaces API — while
+    # the project's schema is FGA. Loading namespaces and saving them back as a
+    # JSON string is why every round trip answered E011001 Request is malformed,
+    # and the tests could not catch it because they asserted the broken pair.
+    # /v1/mgmt/fga/schema is what the Terraform provider's descope_fga_schema
+    # uses (go-sdk FGA().LoadSchema / SaveSchema), keyed "dsl".
+
     @pytest.mark.anyio
     @patch("app.services.descope.httpx.AsyncClient")
-    async def test_get_fga_schema(self, mock_cls, client):
+    async def test_get_fga_schema_reads_the_dsl_from_the_fga_api(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
-        mock_http.post.return_value = MagicMock(
+        mock_http.get.return_value = MagicMock(
             status_code=200,
             raise_for_status=MagicMock(),
-            json=MagicMock(return_value={"schema": {"name": "test-schema"}}),
+            json=MagicMock(return_value={"dsl": FGA_DSL}),
         )
 
         result = await client.get_fga_schema()
-        assert result == {"name": "test-schema"}
-        mock_http.post.assert_called_once_with(
-            "https://api.descope.com/v1/mgmt/authz/schema/load",
+        assert result == FGA_DSL
+        mock_http.get.assert_called_once_with(
+            "https://api.descope.com/v1/mgmt/fga/schema",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
-            json={},
         )
 
     @pytest.mark.anyio
     @patch("app.services.descope.httpx.AsyncClient")
-    async def test_update_fga_schema(self, mock_cls, client):
+    async def test_get_fga_schema_without_a_dsl_key_is_empty(self, mock_cls, client):
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.get.return_value = MagicMock(
+            status_code=200, raise_for_status=MagicMock(), json=MagicMock(return_value={})
+        )
+        assert await client.get_fga_schema() == ""
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_update_fga_schema_posts_the_dsl_to_the_fga_api(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
         mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
 
-        await client.update_fga_schema('{"name": "my-schema"}')
+        await client.update_fga_schema(FGA_DSL)
         mock_http.post.assert_called_once_with(
-            "https://api.descope.com/v1/mgmt/authz/schema/save",
+            "https://api.descope.com/v1/mgmt/fga/schema",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
-            json={"schema": '{"name": "my-schema"}'},
+            json={"dsl": FGA_DSL},
         )
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_what_load_returns_is_what_save_accepts(self, mock_cls, client):
+        """The round trip the FGA admin page performs, and the one that 400'd."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.get.return_value = MagicMock(
+            status_code=200, raise_for_status=MagicMock(), json=MagicMock(return_value={"dsl": FGA_DSL})
+        )
+        mock_http.post.return_value = MagicMock(status_code=200, raise_for_status=MagicMock())
+
+        loaded = await client.get_fga_schema()
+        await client.update_fga_schema(loaded)
+
+        get_url = mock_http.get.call_args[0][0]
+        post_url, post_body = mock_http.post.call_args[0][0], mock_http.post.call_args[1]["json"]
+        assert get_url == post_url, "load and save must address the same API"
+        assert post_body == {"dsl": FGA_DSL}, "saved verbatim, not re-encoded"
 
     @pytest.mark.anyio
     @patch("app.services.descope.httpx.AsyncClient")
@@ -814,7 +860,11 @@ class TestDescopeManagementClient:
         mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
             "400 Bad Request", request=MagicMock(), response=mock_response
         )
+        # Both verbs: get_fga_schema reads through GET /v1/mgmt/fga/schema while
+        # the rest POST, and a stub for one verb only let a method that moved
+        # between them pass by never being called at all.
         mock_http.post.return_value = mock_response
+        mock_http.get.return_value = mock_response
 
         with pytest.raises(httpx.HTTPStatusError):
             await getattr(client, method_name)(*args)
@@ -838,6 +888,7 @@ class TestDescopeManagementClient:
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
         mock_http.post.side_effect = httpx.RequestError("Connection refused", request=MagicMock())
+        mock_http.get.side_effect = httpx.RequestError("Connection refused", request=MagicMock())
 
         with pytest.raises(httpx.RequestError):
             await getattr(client, method_name)(*args)

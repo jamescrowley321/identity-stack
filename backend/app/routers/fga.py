@@ -78,10 +78,11 @@ async def get_fga_schema(
     """
     try:
         client = request.app.state.descope_client
-        schema = await client.get_fga_schema() or {}
-        # get_fga_schema() already extracts .schema from the API response,
-        # so `schema` is the schema dict itself (with .namespaces etc.),
-        # not a wrapper around it.
+        # The AuthZ 1.0 DSL string — the same text infra/fga.tf declares and the
+        # same text PUT takes back, so the round trip this page performs is
+        # symmetric. The UI already expected a string (FGAManagement.tsx renders
+        # it into the editor); it was handed a namespaces object instead.
+        schema = await client.get_fga_schema() or ""
         return {"schema": schema}
     except httpx.HTTPStatusError as exc:
         logger.warning("Descope API error loading FGA schema: %s %s", exc.response.status_code, exc.response.text[:500])
