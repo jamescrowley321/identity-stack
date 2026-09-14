@@ -405,9 +405,10 @@ class TestMemberCrud:
 
             body = resp.json()
             if resp.status == 207:
-                # 207 = Postgres OK, Descope sync failed → RFC 9457 Problem Detail
-                # Extract user_id from inner detail if available, otherwise skip
-                pytest.skip("Invite returned 207 (sync failed) — canonical fields not in Problem Detail body")
+                # 207 = Postgres accepted the write, the Descope sync did not.
+                # That is a half-provisioned member, which is the product failing,
+                # not a reason to stop looking.
+                pytest.fail(f"Invite returned 207 — the Descope sync failed: {body}")
             assert "user" in body, f"Missing 'user' key in invite response: {body.keys()}"
             user = body["user"]
             assert "id" in user, f"Missing 'id' in user response: {user}"
@@ -435,7 +436,7 @@ class TestMemberCrud:
                 created_user_id = str(body["user"]["id"])
 
             if not created_user_id:
-                pytest.skip("Could not extract user_id from invite response")
+                pytest.fail(f"Invite response carried no user id — status {resp.status}, body {body}")
 
             # Deactivate
             resp = admin_api_context.post(

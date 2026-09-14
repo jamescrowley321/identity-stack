@@ -53,7 +53,7 @@ def test_relation_create_and_delete(admin_api_context: APIRequestContext, backen
     )
     # May return 201 (success), 400 (schema not configured), or 502 (Descope API error)
     if resp.status in (400, 502):
-        pytest.skip(f"FGA not operational in this Descope project (status {resp.status})")
+        pytest.fail(f"FGA not operational in this Descope project (status {resp.status})")
     assert resp.status == 201, f"Create failed: {resp.status}"
 
     # Verify via list
@@ -82,9 +82,9 @@ def test_list_relations_empty(admin_api_context: APIRequestContext, backend_url:
         f"{backend_url}/api/fga/relations",
         params={"resource_type": "nonexistent", "resource_id": "nope-000"},
     )
-    # Descope API may return 400 when resource_type is unknown or required fields are missing
+    # A 400 here is the upstream refusing the request this test exists to make.
     if resp.status == 400:
-        pytest.skip("Descope API rejected request for unknown resource type")
+        pytest.fail("Descope API rejected request for unknown resource type")
     assert resp.status == 200
     body = resp.json()
     assert body["relations"] == []
@@ -106,7 +106,7 @@ def test_check_permission_denied_for_nonexistent(admin_api_context: APIRequestCo
     )
     # May return 200 (allowed: false) or 502 (FGA not configured) depending on project state
     if resp.status == 502:
-        pytest.skip("FGA not configured in this Descope project")
+        pytest.fail("FGA not configured in this Descope project")
     assert resp.status == 200, f"Expected 200, got {resp.status}"
     assert resp.json()["allowed"] is False
 
@@ -187,7 +187,7 @@ def test_relation_lifecycle_with_permission_check(admin_api_context: APIRequestC
     # Create
     resp = admin_api_context.post(f"{backend_url}/api/fga/relations", data=relation_body)
     if resp.status in (400, 502):
-        pytest.skip(f"FGA not operational (status {resp.status})")
+        pytest.fail(f"FGA not operational (status {resp.status})")
     assert resp.status == 201
 
     try:
@@ -200,7 +200,7 @@ def test_relation_lifecycle_with_permission_check(admin_api_context: APIRequestC
         }
         resp = admin_api_context.post(f"{backend_url}/api/fga/check", data=check_body)
         if resp.status == 502:
-            pytest.skip("FGA check not operational")
+            pytest.fail("FGA check not operational")
         assert resp.status == 200
         body = resp.json()
         assert "allowed" in body, f"FGA check response missing 'allowed' key: {body}"
@@ -213,7 +213,7 @@ def test_relation_lifecycle_with_permission_check(admin_api_context: APIRequestC
         # Check again — should be denied
         resp = admin_api_context.post(f"{backend_url}/api/fga/check", data=check_body)
         if resp.status == 502:
-            pytest.skip("FGA check not operational")
+            pytest.fail("FGA check not operational")
         assert resp.status == 200
         body = resp.json()
         assert "allowed" in body, f"FGA check response missing 'allowed' key: {body}"
@@ -235,7 +235,7 @@ def test_update_fga_schema(admin_api_context: APIRequestContext, backend_url: st
     original = resp.json().get("schema", "")
 
     if not original:
-        pytest.skip("No FGA schema configured — cannot test update")
+        pytest.fail("No FGA schema configured — the project this suite runs against must have one")
 
     # Re-save the same schema (idempotent — safe for concurrent runs)
     schema_str = original if isinstance(original, str) else json.dumps(original)
@@ -244,6 +244,6 @@ def test_update_fga_schema(admin_api_context: APIRequestContext, backend_url: st
         data={"schema": schema_str},
     )
     if resp.status in (400, 502):
-        pytest.skip(f"Schema update not supported (status {resp.status})")
+        pytest.fail(f"Schema update rejected (status {resp.status})")
     assert resp.status == 200
     assert "schema" in resp.json()

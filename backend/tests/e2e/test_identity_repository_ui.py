@@ -59,23 +59,26 @@ def test_navigate_to_settings_page(admin_page: Page, frontend_url: str):
 # --- Test 2: Data display — create role via API, verify in UI ---
 
 
-@pytest.mark.xfail(
-    reason=(
-        "useRBAC derives isAdmin from the JWT `tenants` claim, which carries no "
-        "roles for this identity, so the admin-gated roles table never renders — "
-        "the page itself reports 'Roles: None' next to 'Server-confirmed: owner, "
-        "admin'. Sourcing useRBAC from GET /api/identity is #392; drop this mark "
-        "when that lands."
-    ),
-    strict=True,
-)
-def test_role_created_via_api_visible_in_ui(
+def test_role_created_via_api_is_not_yet_visible_in_ui(
     admin_page: Page,
     admin_api_context: APIRequestContext,
     backend_url: str,
     frontend_url: str,
 ):
-    """Create a role via API, navigate to /roles in browser, verify it appears."""
+    """Create a role via API, navigate to /roles, and pin what the UI does today.
+
+    This used to be ``xfail(strict=True)`` on the documented useRBAC gap. An
+    xfail covers the whole call phase, so it also swallowed the precondition:
+    verified locally that a fixture setup error and a failing
+    ``assert resp.status == 201`` BOTH report XFAIL with exit code 0. A 500 from
+    ``POST /api/roles``, a broken admin token, or a frontend that never came up
+    would all have shipped green here.
+
+    So the gap is asserted instead of marked. The role must be created (a real
+    assertion), and the table must still not show it — which is the behavior
+    #392 changes. When sourcing useRBAC from ``GET /api/identity`` lands, this
+    test fails and is rewritten to assert visibility.
+    """
     role_name = unique_name("ui-role")
     cleanup_role = None
 
@@ -95,7 +98,8 @@ def test_role_created_via_api_visible_in_ui(
         # test asserts the behaviour that lands with it.
         admin_page.goto(f"{frontend_url}/roles")
         admin_page.wait_for_load_state("networkidle")
-        expect(admin_page.get_by_text(role_name)).to_be_visible(timeout=10000)
+        expect(admin_page).not_to_have_url("**/login**")
+        expect(admin_page.get_by_text(role_name)).not_to_be_visible()
 
     finally:
         if cleanup_role:

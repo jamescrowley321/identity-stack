@@ -158,11 +158,12 @@ class TestAsyncTenantResourcesCRUD:
             base,
             data={"name": resource_name, "description": "E2E async migration test"},
         )
-        # 200/201 (created), 403 (not a member), or 409 (duplicate) are all non-5xx
+        # A 403 here is the admin token failing to carry tenant membership — the
+        # authorization path under test, not an environment quirk to step around.
         if resp.status == 403:
-            pytest.skip("Admin token not a member of test tenant — cannot create resources")
+            pytest.fail("Admin token not a member of test tenant — cannot create resources")
         if resp.status == 409:
-            pytest.skip("Resource name collision — retry would need different name")
+            pytest.fail(f"Resource name {resource_name!r} already exists — a previous run leaked it")
         assert resp.status in (200, 201), f"Create resource failed: {resp.status}"
 
         created = resp.json()
@@ -189,9 +190,9 @@ class TestAsyncTenantResourcesCRUD:
             data={"name": resource_name, "description": "first"},
         )
         if resp.status == 403:
-            pytest.skip("Admin token not a member of test tenant")
+            pytest.fail("Admin token not a member of test tenant")
         if resp.status not in (200, 201):
-            pytest.skip(f"First create failed unexpectedly: {resp.status}")
+            pytest.fail(f"First create failed unexpectedly: {resp.status}")
 
         try:
             # Duplicate should fail with 409
@@ -247,7 +248,7 @@ class TestAsyncDocumentCRUD:
             data={"title": title, "content": "Async migration test content"},
         )
         if resp.status == 502:
-            pytest.skip("FGA not operational — document creation requires FGA")
+            pytest.fail("FGA not operational — document creation requires FGA")
         assert resp.status == 201, f"Create document failed: {resp.status}"
 
         body = resp.json()
@@ -262,7 +263,7 @@ class TestAsyncDocumentCRUD:
         """GET /api/documents returns document list via async session.execute()."""
         doc = self._create_doc(admin_api_context, backend_url)
         if doc is None:
-            pytest.skip("FGA not operational — document creation failed")
+            pytest.fail("FGA not operational — document creation failed")
         doc_id = doc["id"]
 
         try:
@@ -280,7 +281,7 @@ class TestAsyncDocumentCRUD:
         """GET /api/documents/{id} returns document via async session.get()."""
         doc = self._create_doc(admin_api_context, backend_url)
         if doc is None:
-            pytest.skip("FGA not operational — document creation failed")
+            pytest.fail("FGA not operational — document creation failed")
         doc_id = doc["id"]
 
         try:
@@ -296,7 +297,7 @@ class TestAsyncDocumentCRUD:
         """PUT /api/documents/{id} updates document via async session commit + refresh."""
         doc = self._create_doc(admin_api_context, backend_url)
         if doc is None:
-            pytest.skip("FGA not operational — document creation failed")
+            pytest.fail("FGA not operational — document creation failed")
         doc_id = doc["id"]
 
         try:
@@ -321,7 +322,7 @@ class TestAsyncDocumentCRUD:
         """DELETE /api/documents/{id} removes document via async session.delete() + commit()."""
         doc = self._create_doc(admin_api_context, backend_url)
         if doc is None:
-            pytest.skip("FGA not operational — document creation failed")
+            pytest.fail("FGA not operational — document creation failed")
         doc_id = doc["id"]
 
         resp = admin_api_context.delete(f"{backend_url}/api/documents/{doc_id}")
@@ -348,7 +349,7 @@ class TestAsyncDocumentCRUD:
             data={"title": title, "content": "lifecycle start"},
         )
         if resp.status == 502:
-            pytest.skip("FGA not operational")
+            pytest.fail("FGA not operational")
         assert resp.status == 201
         doc_id = resp.json()["id"]
 
