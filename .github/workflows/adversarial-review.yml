@@ -1,32 +1,44 @@
-# Adversarial Review — fresh-context, diff-only AI PR review that fails the merge
-# on real defects. https://github.com/jamescrowley321/adversarial-review
+# Adversarial Review — fresh-context, diff-only AI PR review. ON DEMAND ONLY.
+# https://github.com/jamescrowley321/blind-peer-review (renamed; this pin is the
+# pre-rename v1.6.0 SHA, which GitHub still resolves through the redirect).
 #
-# Setup:
-#   1. Add repo secret OPENROUTER_API_KEY (an OpenRouter key with Anthropic access).
-#   2. After the first run, require the "Merge Gate" check in branch protection.
+# This does NOT run automatically on pull requests, and "Merge Gate" is NOT a
+# required check. Routine review happens locally, before the push, running the
+# same lens library as isolated Claude Code subagents:
 #
-# Toggle lenses in the ENABLED list in the `config` job — that one list drives
-# BOTH the parallel review matrix AND the gate.
+#     /plugin marketplace add jamescrowley321/blind-peer-review
+#     /plugin install blind-peer-review
+#     /blind-peer-review:check     # reviews the working diff against origin/main
 #
-# The action is pinned to a commit SHA (v1.6.0) for OpenSSF Scorecard.
+# This workflow stays for the times a cloud second opinion is wanted on an open
+# PR: run it from the Actions tab with the PR number.
+#
+# Why it is not automatic: the action posts a GitHub review per lens on every
+# run, and a lens with zero findings still posts one — it anchors a synthetic
+# "See the review summary." inline comment on the first changed line. There is
+# no input that suppresses posting, so six lenses times every push put review
+# comments on every PR regardless of whether anything was found. Nothing gated
+# on them: "Merge Gate" was never added to branch protection in this repo.
+#
+# Setup: repo secret OPENROUTER_API_KEY. Toggle lenses in the ENABLED list in the
+# `config` job — that one list drives BOTH the review matrix AND the gate.
 
 name: Adversarial Review
 
-# Security model: this is a `pull_request` (NOT pull_request_target) workflow, so
-# it never runs with secrets for fork PRs — GitHub withholds all secrets and makes
-# GITHUB_TOKEN read-only for forks. A forked PR that edits this file therefore
-# cannot read OPENROUTER_API_KEY or forge a check run. Combined with the owner-only
-# guard on `preflight` below, the secret-bearing lens jobs run only for the owner's
-# own PRs; everyone else fails closed at the gate.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Number of the open PR to review'
+        required: true
+        type: string
 
+# Keyed on the PR, not github.ref: a dispatch always runs on a branch ref (main,
+# normally), so keying on the ref would make two reviews of two different PRs
+# cancel each other.
 concurrency:
-  group: adversarial-review-${{ github.ref }}
+  group: adversarial-review-${{ inputs.pr_number }}
   cancel-in-progress: true
-
 # Least privilege by default: only the `review` job (the lens reviewer that
 # posts inline comments + per-lens check runs) is granted write, scoped on the
 # job below. config/preflight/gate keep narrower read-only scopes.
@@ -75,17 +87,16 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify({ include })}\n`);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `csv=${keys.join(",")}\n`);
 
-  # Don't spend the paid lenses until the cheap deterministic gates pass. Runs
-  # only for owner-authored PRs (guard below); forks, collaborators, and bots
-  # (e.g. Dependabot) skip the paid lenses and fail closed at the gate.
+  # Don't spend the paid lenses until the cheap deterministic gates pass.
   preflight:
     name: Preflight
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Auto-review runs ONLY for PRs authored by the repo owner. Collaborators,
-    # outside contributors, forks, and bots skip the paid lenses; the gate then
-    # fails closed (below), so those PRs require manual owner review + merge.
-    if: github.event.pull_request.author_association == 'OWNER'
+    # No owner/fork guard is needed any more: workflow_dispatch requires write
+    # access on this repo, so a fork, an outside contributor or a bot cannot
+    # start this workflow at all. The old guard read
+    # github.event.pull_request.author_association, which is empty on a dispatch
+    # — it would evaluate false and skip every lens.
     permissions:
       checks: read
       contents: read
@@ -96,6 +107,7 @@ jobs:
         with:
           mode: preflight
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          pr_number: ${{ inputs.pr_number }}
           # EXACT check-run names (job `name:` values) that must pass first.
           required_checks: "Lint, Unit Tests, Semgrep (SAST), Gitleaks (Secret Scanning)"
 
@@ -121,6 +133,7 @@ jobs:
           mode: lens
           lens: ${{ matrix.lens }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          pr_number: ${{ inputs.pr_number }}
           api_key: ${{ secrets.OPENROUTER_API_KEY }}
           # This is an auth/security app — use the sanctioned quality model for the
           # security-sensitive lenses. Overridable per repo.
@@ -145,22 +158,19 @@ jobs:
     needs: [config, preflight, review]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Always run so the required "Merge Gate" check is never absent or skipped.
-    # Branch protection treats a skipped required check as passing, so a gate
-    # that skips for non-owner PRs (whose review is skipped) would let them merge
-    # with zero review. Fail closed instead — non-owner PRs require manual review.
+    # Always run, so a dispatch whose lenses were skipped or crashed reports an
+    # explicit failure rather than quietly vanishing from the run summary.
     if: always()
     permissions:
       contents: read
       pull-requests: read
     steps:
-      # review is 'skipped' for non-owner PRs (only owner PRs are auto-reviewed)
-      # and 'failure' if a lens leg crashed. Either way, don't adjudicate a
-      # partial/absent lens set — fail closed so the owner reviews and merges.
+      # review is 'skipped' if preflight failed and 'failure' if a lens leg
+      # crashed. Either way, don't adjudicate a partial/absent lens set.
       - name: Fail closed when review did not complete
         if: needs.review.result != 'success'
         run: |
-          echo "::error::Adversarial review did not complete (non-owner PR, or a lens failed: review=${{ needs.review.result }}). Only owner PRs are auto-reviewed; others require manual owner review + merge. The Merge Gate fails closed."
+          echo "::error::Adversarial review did not complete (review=${{ needs.review.result }}): preflight failed, or one or more lenses crashed. Nothing was adjudicated — re-run the dispatch, or review locally with /blind-peer-review:check."
           exit 1
       - name: Adjudicate lenses
         if: needs.review.result == 'success'
@@ -169,3 +179,4 @@ jobs:
           mode: gate
           lenses: ${{ needs.config.outputs.csv }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          pr_number: ${{ inputs.pr_number }}
