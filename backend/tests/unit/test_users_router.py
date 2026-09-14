@@ -4,7 +4,6 @@ The members router calls the Descope Management API directly via
 request.app.state.descope_client -- no UserService / RoleService DI.
 """
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -191,72 +190,43 @@ async def test_deactivate_member(mock_validate, mock_descope, client):
 
 
 @pytest.mark.anyio
-@patch("app.routers.users.UserRepository")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_deactivate_member_by_canonical_id_resolves_the_login_id(mock_validate, mock_repo, mock_descope, client):
-    """The id this API hands out must work on the routes this API exposes.
+async def test_deactivate_member_forwards_the_id_this_api_hands_out(mock_validate, mock_descope, client):
+    """The member routes forward their path identifier to Descope unchanged.
 
-    POST /api/members/invite answers with a canonical user (a UUID `id`), but
-    Descope addresses users by loginId — so the UUID went upstream verbatim,
-    came back 404, and the route reported 502 as though Descope were down.
+    `canonical_user()` sets `id` to the Descope `userId`, so that is what
+    POST /api/members/invite and GET /api/members hand callers, and what the UI
+    sends back. Descope's user endpoints take `loginIDOrUserID` in the `loginId`
+    field, so a userId is a valid value there — probed live, `update/status` and
+    `update/tenant/remove` both return 200 for a userId.
+
+    Pinned because an earlier fix here resolved the path parameter through the
+    canonical database first, on the theory that this API hands out a Postgres
+    UUID. It does not, so the lookup never fired for any real caller while
+    adding an untenanted read to three admin routes.
     """
     mock_validate.return_value = ADMIN_CLAIMS
-    canonical_id = "3f1d2c4b-0000-4000-8000-00000000abcd"
-    mock_repo.return_value.get = AsyncMock(return_value=SimpleNamespace(email="member@test.com"))
+    descope_user_id = "U3J36liQh0rQ39NT2SdRqdEqb4Zs"
     mock_descope.update_user_status.return_value = None
 
-    response = await client.post(f"/api/members/{canonical_id}/deactivate", headers=AUTH_HEADER)
+    response = await client.post(f"/api/members/{descope_user_id}/deactivate", headers=AUTH_HEADER)
 
     assert response.status_code == 200
-    assert response.json()["user_id"] == canonical_id, "the caller's id is echoed, not the login id"
-    mock_descope.update_user_status.assert_awaited_once_with("member@test.com", "disabled")
+    assert response.json()["user_id"] == descope_user_id
+    mock_descope.update_user_status.assert_awaited_once_with(descope_user_id, "disabled")
 
 
 @pytest.mark.anyio
-@patch("app.routers.users.UserRepository")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_deactivate_member_unknown_canonical_id_is_404_not_502(mock_validate, mock_repo, mock_descope, client):
-    """A member this service has never heard of is the caller's error, not an outage."""
+async def test_remove_member_forwards_the_id_this_api_hands_out(mock_validate, mock_descope, client):
     mock_validate.return_value = ADMIN_CLAIMS
-    mock_repo.return_value.get = AsyncMock(return_value=None)
-
-    response = await client.post("/api/members/3f1d2c4b-0000-4000-8000-00000000dead/deactivate", headers=AUTH_HEADER)
-
-    assert response.status_code == 404
-    mock_descope.update_user_status.assert_not_awaited()
-
-
-@pytest.mark.anyio
-@patch("app.routers.users.UserRepository")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_deactivate_member_by_login_id_does_not_touch_the_database(
-    mock_validate, mock_repo, mock_descope, client
-):
-    """A caller already holding a Descope loginId keeps working, with no lookup."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    mock_descope.update_user_status.return_value = None
-
-    response = await client.post("/api/members/member@test.com/deactivate", headers=AUTH_HEADER)
-
-    assert response.status_code == 200
-    mock_repo.return_value.get.assert_not_called()
-    mock_descope.update_user_status.assert_awaited_once_with("member@test.com", "disabled")
-
-
-@pytest.mark.anyio
-@patch("app.routers.users.UserRepository")
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_remove_member_by_canonical_id_resolves_the_login_id(mock_validate, mock_repo, mock_descope, client):
-    mock_validate.return_value = ADMIN_CLAIMS
-    canonical_id = "3f1d2c4b-0000-4000-8000-00000000abcd"
-    mock_repo.return_value.get = AsyncMock(return_value=SimpleNamespace(email="member@test.com"))
+    descope_user_id = "U3J36liQh0rQ39NT2SdRqdEqb4Zs"
     mock_descope.remove_user_from_tenant.return_value = None
 
-    response = await client.delete(f"/api/members/{canonical_id}", headers=AUTH_HEADER)
+    response = await client.delete(f"/api/members/{descope_user_id}", headers=AUTH_HEADER)
 
     assert response.status_code == 200
-    args = mock_descope.remove_user_from_tenant.await_args[0]
-    assert args[0] == "member@test.com"
+    assert mock_descope.remove_user_from_tenant.await_args[0][0] == descope_user_id
 
 
 @pytest.mark.anyio
