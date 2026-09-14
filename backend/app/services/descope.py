@@ -424,13 +424,28 @@ class DescopeManagementClient:
         return bool(queries and queries[0].get("hasRelation"))
 
     async def invite_user(self, email: str, tenant_id: str, role_names: list[str] | None = None) -> dict:
-        """Create a user and assign them to a tenant with roles."""
-        tenants = [{"tenantId": tenant_id}]
+        """Create a user and assign them to a tenant with roles.
+
+        The tenant list is ``userTenants``. It used to be ``tenants``, a key
+        ``/v1/mgmt/user/create`` does not read — so it was accepted, ignored, and
+        every invited member landed with no tenant and no roles while this
+        service recorded them as a member of one. Probed against the live API:
+
+            "tenants":     [...] -> user.userTenants == []
+            "userTenants": [...] -> user.userTenants == [{tenantId, roleNames,
+                                     permissions, roleIds}]
+
+        Everything downstream inherited it. Removing such a member answered
+        ``401 E023003 "Tenant does not exist in the list"``, because they were
+        never in it. Same key as go-sdk's makeUpdateUserRequest, which is what
+        Descope's own SDKs send.
+        """
+        tenant: dict[str, object] = {"tenantId": tenant_id}
         if role_names:
-            tenants[0]["roleNames"] = role_names
+            tenant["roleNames"] = role_names
         resp = await self._request(
             "/v1/mgmt/user/create",
-            {"loginId": email, "email": email, "tenants": tenants},
+            {"loginId": email, "email": email, "userTenants": [tenant]},
         )
         return resp.json().get("user", {})
 
