@@ -323,8 +323,33 @@ class TestDescopeManagementClient:
         mock_http.post.assert_called_once_with(
             "https://api.descope.com/v1/mgmt/user/create",
             headers={"Authorization": "Bearer proj-123:mgmt-key-456"},
-            json={"loginId": "a@b.com", "email": "a@b.com", "tenants": [{"tenantId": "t1", "roleNames": ["member"]}]},
+            # userTenants, not tenants: /v1/mgmt/user/create ignores the latter,
+            # so this test used to assert a body that silently produced a user
+            # with no tenant and no roles. Verified live against both keys.
+            json={
+                "loginId": "a@b.com",
+                "email": "a@b.com",
+                "userTenants": [{"tenantId": "t1", "roleNames": ["member"]}],
+            },
         )
+
+    @pytest.mark.anyio
+    @patch("app.services.descope.httpx.AsyncClient")
+    async def test_invite_user_without_roles_still_assigns_the_tenant(self, mock_cls, client):
+        """No roles is not no tenant — the membership is the point of the invite."""
+        mock_http = AsyncMock()
+        mock_cls.return_value = mock_http
+        mock_http.post.return_value = MagicMock(
+            status_code=200,
+            raise_for_status=MagicMock(),
+            json=MagicMock(return_value={"user": {"userId": "u1"}}),
+        )
+
+        await client.invite_user("a@b.com", "t1")
+
+        body = mock_http.post.call_args[1]["json"]
+        assert body["userTenants"] == [{"tenantId": "t1"}]
+        assert "tenants" not in body, "the ignored key must not come back"
 
     @pytest.mark.anyio
     @patch("app.services.descope.httpx.AsyncClient")
