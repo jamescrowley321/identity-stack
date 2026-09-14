@@ -18,6 +18,36 @@ BACKEND_URL = os.environ.get("E2E_BACKEND_URL", "http://localhost:8000")
 _has_mgmt_key = bool(os.environ.get("DESCOPE_MANAGEMENT_KEY"))
 _has_client_creds = bool(os.environ.get("DESCOPE_CLIENT_ID") and os.environ.get("DESCOPE_CLIENT_SECRET"))
 
+#: Every credential the CI E2E job passes in. Locally these may be absent and the
+#: authenticated fixtures skip; in CI their absence is the failure this suite spent
+#: months hiding — 164 of 220 tests skipped on empty credentials while the job
+#: reported green. The workflow gates the step on DESCOPE_PROJECT_ID alone, so any
+#: OTHER variable going missing (renamed secret, expired client secret removed from
+#: the repo) silently re-hollows the suite.
+_CI_REQUIRED_ENV = (
+    "DESCOPE_PROJECT_ID",
+    "DESCOPE_MANAGEMENT_KEY",
+    "DESCOPE_CLIENT_ID",
+    "DESCOPE_CLIENT_SECRET",
+    "E2E_TEST_EMAIL",
+    "E2E_TEST_TENANT_ID",
+)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _credentials_are_present_in_ci():
+    """In CI, a missing credential fails the run instead of skipping the suite."""
+    if not os.environ.get("CI"):
+        return
+    missing = [name for name in _CI_REQUIRED_ENV if not os.environ.get(name)]
+    if missing:
+        pytest.fail(
+            "E2E credentials missing in CI: "
+            + ", ".join(missing)
+            + ". The authenticated tests would skip and the job would report green; "
+            "fix the secret rather than letting the gate go hollow."
+        )
+
 
 @pytest.fixture(scope="session")
 def frontend_url():
@@ -108,7 +138,7 @@ def test_user_id(_ensure_test_user) -> str:
     # Fallback to userId if loginIds not present
     user_id = _ensure_test_user.get("userId", "")
     if not user_id:
-        pytest.skip("Could not determine test user ID")
+        pytest.fail("Descope returned a test user with neither loginIds nor userId")
     return user_id
 
 

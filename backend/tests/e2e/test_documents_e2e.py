@@ -61,7 +61,7 @@ def test_create_document_creates_fga_owner(admin_api_context: APIRequestContext,
     """Creating a document establishes an FGA owner relation for the creator."""
     doc = _create_doc(admin_api_context, backend_url)
     if doc is None:
-        pytest.skip("FGA not operational — document creation failed")
+        pytest.fail("FGA not operational — document creation failed")
     doc_id = doc["id"]
 
     try:
@@ -92,7 +92,7 @@ def test_owner_has_all_permissions(admin_api_context: APIRequestContext, backend
         data={"resource_type": "document", "resource_id": resource_id, "relation": "owner", "target": target},
     )
     if resp.status in (400, 502):
-        pytest.skip(f"FGA not operational (status {resp.status})")
+        pytest.fail(f"FGA not operational (status {resp.status})")
     assert resp.status == 201
 
     try:
@@ -102,7 +102,7 @@ def test_owner_has_all_permissions(admin_api_context: APIRequestContext, backend
                 data={"resource_type": "document", "resource_id": resource_id, "relation": relation, "target": target},
             )
             if resp.status == 502:
-                pytest.skip("FGA check not operational")
+                pytest.fail("FGA check not operational")
             assert resp.status == 200, f"Check {relation} returned {resp.status}"
             _assert_fga_allowed(resp, True, f"Owner should have {relation}")
     finally:
@@ -123,7 +123,7 @@ def test_editor_has_view_and_edit_not_delete(admin_api_context: APIRequestContex
         data={"resource_type": "document", "resource_id": resource_id, "relation": "editor", "target": target},
     )
     if resp.status in (400, 502):
-        pytest.skip(f"FGA not operational (status {resp.status})")
+        pytest.fail(f"FGA not operational (status {resp.status})")
     assert resp.status == 201
 
     try:
@@ -134,7 +134,7 @@ def test_editor_has_view_and_edit_not_delete(admin_api_context: APIRequestContex
                 data={"resource_type": "document", "resource_id": resource_id, "relation": relation, "target": target},
             )
             if resp.status == 502:
-                pytest.skip("FGA check not operational")
+                pytest.fail("FGA check not operational")
             assert resp.status == 200
             _assert_fga_allowed(resp, True, f"Editor should have {relation}")
 
@@ -144,7 +144,7 @@ def test_editor_has_view_and_edit_not_delete(admin_api_context: APIRequestContex
             data={"resource_type": "document", "resource_id": resource_id, "relation": "can_delete", "target": target},
         )
         if resp.status == 502:
-            pytest.skip("FGA check not operational")
+            pytest.fail("FGA check not operational")
         assert resp.status == 200
         _assert_fga_allowed(resp, False, "Editor should NOT have can_delete")
     finally:
@@ -165,7 +165,7 @@ def test_viewer_has_view_only(admin_api_context: APIRequestContext, backend_url:
         data={"resource_type": "document", "resource_id": resource_id, "relation": "viewer", "target": target},
     )
     if resp.status in (400, 502):
-        pytest.skip(f"FGA not operational (status {resp.status})")
+        pytest.fail(f"FGA not operational (status {resp.status})")
     assert resp.status == 201
 
     try:
@@ -175,7 +175,7 @@ def test_viewer_has_view_only(admin_api_context: APIRequestContext, backend_url:
             data={"resource_type": "document", "resource_id": resource_id, "relation": "can_view", "target": target},
         )
         if resp.status == 502:
-            pytest.skip("FGA check not operational")
+            pytest.fail("FGA check not operational")
         assert resp.status == 200
         _assert_fga_allowed(resp, True, "Viewer should have can_view")
 
@@ -191,7 +191,7 @@ def test_viewer_has_view_only(admin_api_context: APIRequestContext, backend_url:
                 },
             )
             if resp.status == 502:
-                pytest.skip("FGA check not operational")
+                pytest.fail("FGA check not operational")
             assert resp.status == 200
             _assert_fga_allowed(resp, False, f"Viewer should NOT have {relation}")
     finally:
@@ -209,7 +209,7 @@ def test_document_get_allowed_for_owner(admin_api_context: APIRequestContext, ba
     """GET /api/documents/{id} returns 200 for owner, verifying FGA can_view works end-to-end."""
     doc = _create_doc(admin_api_context, backend_url)
     if doc is None:
-        pytest.skip("FGA not operational — document creation failed")
+        pytest.fail("FGA not operational — document creation failed")
     doc_id = doc["id"]
 
     try:
@@ -224,7 +224,7 @@ def test_document_update_allowed_for_owner(admin_api_context: APIRequestContext,
     """PUT /api/documents/{id} returns 200 for owner, verifying FGA can_edit works end-to-end."""
     doc = _create_doc(admin_api_context, backend_url)
     if doc is None:
-        pytest.skip("FGA not operational — document creation failed")
+        pytest.fail("FGA not operational — document creation failed")
     doc_id = doc["id"]
 
     try:
@@ -248,7 +248,7 @@ def test_permission_derivation_through_endpoints(admin_api_context: APIRequestCo
     """
     doc = _create_doc(admin_api_context, backend_url)
     if doc is None:
-        pytest.skip("FGA not operational — document creation failed")
+        pytest.fail("FGA not operational — document creation failed")
     doc_id = doc["id"]
 
     try:
@@ -268,7 +268,7 @@ def test_permission_derivation_through_endpoints(admin_api_context: APIRequestCo
             data={"resource_type": "document", "resource_id": doc_id, "relation": "editor", "target": editor_target},
         )
         if resp.status in (400, 502):
-            pytest.skip(f"FGA not operational for editor relation (status {resp.status})")
+            pytest.fail(f"FGA not operational for editor relation (status {resp.status})")
         assert resp.status == 201
 
         try:
@@ -285,7 +285,7 @@ def test_permission_derivation_through_endpoints(admin_api_context: APIRequestCo
                     data=check_data,
                 )
                 if resp.status == 502:
-                    pytest.skip("FGA check not operational")
+                    pytest.fail("FGA check not operational")
                 assert resp.status == 200
                 _assert_fga_allowed(resp, True, f"Editor should derive {relation}")
 
@@ -301,7 +301,7 @@ def test_permission_derivation_through_endpoints(admin_api_context: APIRequestCo
                 data=check_data,
             )
             if resp.status == 502:
-                pytest.skip("FGA check not operational")
+                pytest.fail("FGA check not operational")
             assert resp.status == 200
             _assert_fga_allowed(resp, False, "Editor should NOT derive can_delete")
         finally:
@@ -330,7 +330,7 @@ def test_document_fga_denies_without_relation(admin_api_context: APIRequestConte
     """Removing FGA owner relation causes document GET to be denied (403)."""
     doc = _create_doc(admin_api_context, backend_url)
     if doc is None:
-        pytest.skip("FGA not operational — document creation failed")
+        pytest.fail("FGA not operational — document creation failed")
     doc_id = doc["id"]
 
     # Find the owner relation target (the admin user's ID in FGA)
@@ -374,7 +374,7 @@ def test_document_delete_cleans_fga_relations(admin_api_context: APIRequestConte
     """DELETE /api/documents/{id} removes the document and cleans up FGA relations."""
     doc = _create_doc(admin_api_context, backend_url)
     if doc is None:
-        pytest.skip("FGA not operational — document creation failed")
+        pytest.fail("FGA not operational — document creation failed")
     doc_id = doc["id"]
 
     # Delete document (owner can delete)
@@ -398,7 +398,7 @@ def test_list_documents_returns_authorized(admin_api_context: APIRequestContext,
     """GET /api/documents returns documents the caller is authorized to view."""
     doc = _create_doc(admin_api_context, backend_url, title=unique_name("list-doc"))
     if doc is None:
-        pytest.skip("FGA not operational — document creation failed")
+        pytest.fail("FGA not operational — document creation failed")
     doc_id = doc["id"]
 
     try:
@@ -419,11 +419,11 @@ def test_list_documents_excludes_unauthorized(admin_api_context: APIRequestConte
     # Create two real documents via the API (both get owner relations for the admin)
     doc_a = _create_doc(admin_api_context, backend_url, title=unique_name("keep-doc"))
     if doc_a is None:
-        pytest.skip("FGA not operational — document creation failed")
+        pytest.fail("FGA not operational — document creation failed")
     doc_b = _create_doc(admin_api_context, backend_url, title=unique_name("revoke-doc"))
     if doc_b is None:
         _cleanup_doc(admin_api_context, backend_url, doc_a["id"])
-        pytest.skip("FGA not operational — second document creation failed")
+        pytest.fail("FGA not operational — second document creation failed")
 
     doc_a_id = doc_a["id"]
     doc_b_id = doc_b["id"]
@@ -477,7 +477,7 @@ def test_share_document_grants_access(admin_api_context: APIRequestContext, back
     """Sharing a document grants the target user FGA-level access."""
     doc = _create_doc(admin_api_context, backend_url)
     if doc is None:
-        pytest.skip("FGA not operational — document creation failed")
+        pytest.fail("FGA not operational — document creation failed")
     doc_id = doc["id"]
 
     try:
@@ -487,9 +487,9 @@ def test_share_document_grants_access(admin_api_context: APIRequestContext, back
             data={"user_id": test_user_id, "relation": "viewer"},
         )
         if resp.status == 404:
-            pytest.skip("Target user not found in Descope — share test requires E2E_TEST_EMAIL user")
+            pytest.fail("Target user not found in Descope — share test requires the E2E_TEST_EMAIL user")
         if resp.status == 403:
-            pytest.skip("Cannot share — caller may not be recognized as owner by Descope")
+            pytest.fail("Owner was refused a share — the grant path under test")
         assert resp.status == 200, f"Share failed: {resp.status}"
 
         # Verify via FGA check that the target user now has can_view
@@ -498,7 +498,7 @@ def test_share_document_grants_access(admin_api_context: APIRequestContext, back
             data={"resource_type": "document", "resource_id": doc_id, "relation": "can_view", "target": test_user_id},
         )
         if resp.status == 502:
-            pytest.skip("FGA check not operational")
+            pytest.fail("FGA check not operational")
         assert resp.status == 200
         _assert_fga_allowed(resp, True, f"Shared user {test_user_id} should have can_view")
     finally:
@@ -515,7 +515,7 @@ def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backen
     """Revoking a share removes the user's FGA-level access."""
     doc = _create_doc(admin_api_context, backend_url)
     if doc is None:
-        pytest.skip("FGA not operational — document creation failed")
+        pytest.fail("FGA not operational — document creation failed")
     doc_id = doc["id"]
 
     try:
@@ -525,7 +525,7 @@ def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backen
             data={"user_id": test_user_id, "relation": "viewer"},
         )
         if resp.status in (403, 404):
-            pytest.skip(f"Share prerequisite failed (status {resp.status})")
+            pytest.fail(f"Share prerequisite failed (status {resp.status})")
         assert resp.status == 200, f"Share failed: {resp.status}"
 
         # Verify access granted
@@ -534,7 +534,7 @@ def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backen
             data={"resource_type": "document", "resource_id": doc_id, "relation": "can_view", "target": test_user_id},
         )
         if resp.status == 502:
-            pytest.skip("FGA check not operational")
+            pytest.fail("FGA check not operational")
         assert resp.status == 200
         _assert_fga_allowed(resp, True, "User should have access after share")
 
@@ -543,7 +543,7 @@ def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backen
             f"{backend_url}/api/documents/{doc_id}/share/{test_user_id}",
         )
         if resp.status == 403:
-            pytest.skip("Cannot revoke — caller not recognized as owner")
+            pytest.fail("Owner was refused a revoke — the revocation path under test")
         assert resp.status == 200, f"Revoke failed: {resp.status}"
 
         # Verify access denied
@@ -552,7 +552,7 @@ def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backen
             data={"resource_type": "document", "resource_id": doc_id, "relation": "can_view", "target": test_user_id},
         )
         if resp.status == 502:
-            pytest.skip("FGA check not operational")
+            pytest.fail("FGA check not operational")
         assert resp.status == 200
         _assert_fga_allowed(resp, False, "User should be denied after revoke")
     finally:
@@ -577,7 +577,7 @@ def test_sequential_relation_revocation_no_stale_grants(admin_api_context: APIRe
     # Create the relation first to verify FGA is operational
     resp = admin_api_context.post(f"{backend_url}/api/fga/relations", data=base_body)
     if resp.status in (400, 502):
-        pytest.skip(f"FGA not operational (status {resp.status})")
+        pytest.fail(f"FGA not operational (status {resp.status})")
     assert resp.status == 201
 
     try:
@@ -598,7 +598,7 @@ def test_sequential_relation_revocation_no_stale_grants(admin_api_context: APIRe
                 },
             )
             if resp.status == 502:
-                pytest.skip("FGA check not operational")
+                pytest.fail("FGA check not operational")
             assert resp.status == 200
             _assert_fga_allowed(resp, False, "Should be denied after relation deleted")
 
