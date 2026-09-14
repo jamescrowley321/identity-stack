@@ -9,6 +9,7 @@ Requires DESCOPE_MANAGEMENT_KEY, DESCOPE_CLIENT_ID, DESCOPE_CLIENT_SECRET.
 
 import contextlib
 import os
+import re
 import uuid
 
 import pytest
@@ -98,7 +99,16 @@ def test_role_created_via_api_is_not_yet_visible_in_ui(
         # test asserts the behaviour that lands with it.
         admin_page.goto(f"{frontend_url}/roles")
         admin_page.wait_for_load_state("networkidle")
-        expect(admin_page).not_to_have_url("**/login**")
+        # A regex, not a glob. `expect(page).not_to_have_url` takes an exact
+        # string or a Pattern — it does not translate `**/login**`, so the glob
+        # form asserts "the URL is not literally that 11-character string" and
+        # can never fail. (Same form still sits in the assertions this test does
+        # not own.)
+        expect(admin_page).not_to_have_url(re.compile(r"/login"))
+        # Anchor on something the page must render BEFORE asserting the absence
+        # of the role, so the negative cannot resolve against a page that has
+        # not finished loading — which would pass whether or not #392 landed.
+        expect(admin_page.get_by_role("heading", name="Roles", level=1)).to_be_visible()
         expect(admin_page.get_by_text(role_name)).not_to_be_visible()
 
     finally:
