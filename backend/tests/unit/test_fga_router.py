@@ -217,8 +217,6 @@ async def test_create_relation_rejects_no_tenant(mock_validate, client):
 async def test_get_schema_success(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = _mock_client()
-    # get_fga_schema() already extracts .schema from the API response,
-    # so it returns the schema value directly (not a wrapper dict)
     mock_client.get_fga_schema.return_value = "type document {}"
     app.state.descope_client = mock_client
 
@@ -233,19 +231,18 @@ async def test_get_schema_success(mock_validate, client):
 async def test_get_schema_empty(mock_validate, client):
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = _mock_client()
-    mock_client.get_fga_schema.return_value = {}
+    mock_client.get_fga_schema.return_value = ""
     app.state.descope_client = mock_client
 
     response = await client.get("/api/fga/schema", headers=AUTH_HEADER)
     assert response.status_code == 200
-    # Empty dict is truthy so `or {}` keeps it; router wraps as {"schema": {}}
-    assert response.json() == {"schema": {}}
+    assert response.json() == {"schema": ""}
 
 
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_get_schema_none_result(mock_validate, client):
-    """get_fga_schema() returns None -> empty dict fallback via `or {}`, not crash."""
+    """get_fga_schema() returns None -> empty-string fallback via `or ""`, not crash."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = _mock_client()
     mock_client.get_fga_schema.return_value = None
@@ -253,23 +250,22 @@ async def test_get_schema_none_result(mock_validate, client):
 
     response = await client.get("/api/fga/schema", headers=AUTH_HEADER)
     assert response.status_code == 200
-    # None or {} = {}
-    assert response.json() == {"schema": {}}
+    assert response.json() == {"schema": ""}
 
 
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_get_schema_null_schema_value(mock_validate, client):
-    """get_fga_schema() returns dict with null value -> truthy, wraps as-is."""
+async def test_get_schema_returns_the_dsl_verbatim(mock_validate, client):
+    """The UI renders this into an editor and PUTs it back, so it must survive intact."""
     mock_validate.return_value = ADMIN_CLAIMS
     mock_client = _mock_client()
-    # Dict is truthy so `or {}` doesn't trigger; router wraps it directly
-    mock_client.get_fga_schema.return_value = {"schema": None}
+    dsl = "model AuthZ 1.0\n\ntype user\n\ntype document\n  relation owner: user"
+    mock_client.get_fga_schema.return_value = dsl
     app.state.descope_client = mock_client
 
     response = await client.get("/api/fga/schema", headers=AUTH_HEADER)
     assert response.status_code == 200
-    assert response.json() == {"schema": {"schema": None}}
+    assert response.json() == {"schema": dsl}
 
 
 @pytest.mark.anyio

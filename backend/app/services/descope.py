@@ -286,16 +286,28 @@ class DescopeManagementClient:
 
     # --- FGA (Fine-Grained Authorization) methods ---
 
-    async def get_fga_schema(self) -> dict:
-        """Load the current FGA schema definition."""
-        resp = await self._request("/v1/mgmt/authz/schema/load", {})
-        return resp.json().get("schema", {})
+    async def get_fga_schema(self) -> str:
+        """Load the current FGA schema, as the AuthZ 1.0 DSL.
+
+        ``/v1/mgmt/fga/schema``, not ``/v1/mgmt/authz/schema/load``. The two are
+        different APIs over the same project: the authz endpoint answers with the
+        older namespaces object, while an FGA project's schema *is* the DSL, and
+        the DSL is what the save endpoint accepts. Loading one representation and
+        saving the other is why PUT /api/fga/schema answered
+        ``E011001 Request is malformed`` for every round trip.
+
+        This is also the pair the Terraform provider uses for
+        ``descope_fga_schema`` (go-sdk ``FGA().LoadSchema`` / ``SaveSchema``), so
+        what this reads back is what infra/fga.tf declares.
+        """
+        resp = await self._get("/v1/mgmt/fga/schema")
+        return resp.json().get("dsl", "")
 
     async def update_fga_schema(self, schema: str) -> None:
-        """Save/update the FGA schema definition."""
+        """Save the FGA schema from the AuthZ 1.0 DSL. See get_fga_schema."""
         if not schema or not schema.strip():
             raise ValueError("schema must be a non-empty string")
-        await self._request("/v1/mgmt/authz/schema/save", {"schema": schema})
+        await self._request("/v1/mgmt/fga/schema", {"dsl": schema})
 
     # Every /v1/mgmt/authz/re/* endpoint below was verified against the live API on
     # 2026-09-13, because the previous shapes failed SILENTLY. `create` and `delete`
