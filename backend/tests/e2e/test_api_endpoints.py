@@ -144,74 +144,95 @@ class TestAdminEndpoints:
     """Verify admin-level endpoints respond correctly with admin token."""
 
     def test_roles_list_responds(self, admin_api_context: APIRequestContext, backend_url: str):
-        """Roles endpoint responds (200/403/502 depending on token scope and Descope API)."""
+        """Roles endpoint returns 200 for an owner+admin token.
+
+        Exactly 200. The admin fixture holds owner and admin and the route gates
+        on `require_role("owner", "admin")`, so 403 would be a regression in the
+        fixture or the gate; 502 would be a Descope outage. Accepting either made
+        this pass while proving nothing.
+        """
         resp = admin_api_context.get(f"{backend_url}/api/roles")
-        assert resp.status in (200, 403, 502), f"/api/roles returned {resp.status}"
+        assert resp.status == 200, f"/api/roles returned {resp.status}: {resp.text()[:200]}"
+        assert isinstance(resp.json().get("roles"), list)
 
     def test_permissions_list_responds(self, admin_api_context: APIRequestContext, backend_url: str):
+        """Exactly 200 — see test_roles_list_responds."""
         resp = admin_api_context.get(f"{backend_url}/api/permissions")
-        assert resp.status in (200, 403, 502), f"/api/permissions returned {resp.status}"
+        assert resp.status == 200, f"/api/permissions returned {resp.status}: {resp.text()[:200]}"
+        assert isinstance(resp.json().get("permissions"), list)
 
     def test_members_list_responds(self, admin_api_context: APIRequestContext, backend_url: str):
+        """Exactly 200 — see test_roles_list_responds."""
         resp = admin_api_context.get(f"{backend_url}/api/members")
-        assert resp.status in (200, 403, 502), f"/api/members returned {resp.status}"
+        assert resp.status == 200, f"/api/members returned {resp.status}: {resp.text()[:200]}"
+        assert isinstance(resp.json().get("members"), list)
 
     def test_keys_list_responds(self, admin_api_context: APIRequestContext, backend_url: str):
+        """Exactly 200 — see test_roles_list_responds."""
         resp = admin_api_context.get(f"{backend_url}/api/keys")
-        assert resp.status in (200, 403, 502), f"/api/keys returned {resp.status}"
+        assert resp.status == 200, f"/api/keys returned {resp.status}: {resp.text()[:200]}"
+        assert isinstance(resp.json().get("keys"), list)
 
-    def test_providers_list_responds(self, admin_api_context: APIRequestContext, backend_url: str):
-        """Providers endpoint responds (200/403 depending on token scope)."""
+    def test_providers_list_requires_operator(self, admin_api_context: APIRequestContext, backend_url: str):
+        """403 for an owner+admin token: this route gates on `operator`, which it lacks.
+
+        Deterministic, so asserted exactly. `in (200, 403)` covered both "the gate
+        works" and "the gate is gone" with one assertion.
+        """
         resp = admin_api_context.get(f"{backend_url}/api/providers")
-        assert resp.status in (200, 403), f"/api/providers returned {resp.status}"
+        assert resp.status == 403, f"/api/providers returned {resp.status}: {resp.text()[:200]}"
 
     def test_idp_links_responds(self, admin_api_context: APIRequestContext, backend_url: str):
         """IdP links endpoint responds (200/403/404 depending on user existence)."""
         fake_user = "00000000-0000-0000-0000-000000000000"
         resp = admin_api_context.get(f"{backend_url}/api/users/{fake_user}/idp-links")
-        # 404 is the documented answer for a user outside the caller's tenant, and
-        # this user id is deliberately one that does not exist. The assertion had
-        # omitted it while the docstring named it, so the only way to pass was the
-        # 500 the endpoint used to raise.
-        assert resp.status in (200, 403, 404), f"/api/users/{{id}}/idp-links returned {resp.status}"
+        # Exactly 404. This user id deliberately does not exist, so 200 would mean
+        # the tenant guard resolved a user it should not have — cross-tenant
+        # disclosure passing as a green test. 404 rather than 403 is deliberate:
+        # it does not leak whether the user exists.
+        assert resp.status == 404, f"/api/users/{{id}}/idp-links returned {resp.status}: {resp.text()[:200]}"
+        problem = resp.json()
+        assert problem.get("status") == 404, f"not an RFC 9457 problem detail: {problem}"
+        assert problem.get("title"), f"problem detail has no title: {problem}"
 
     def test_sync_status_responds(self, admin_api_context: APIRequestContext, backend_url: str):
         """Sync status endpoint responds (200 with operator role, 403 otherwise)."""
         resp = admin_api_context.get(f"{backend_url}/api/sync/status")
-        assert resp.status in (200, 403), f"/api/sync/status returned {resp.status}"
-        if resp.status == 200:
-            body = resp.json()
-            assert "providers" in body
-            assert isinstance(body["providers"], list)
-            assert "last_reconciliation" in body
+        # Gated on `operator`, which the admin fixture lacks. Deterministic 403.
+        assert resp.status == 403, f"/api/sync/status returned {resp.status}: {resp.text()[:200]}"
 
     def test_events_recent_responds(self, admin_api_context: APIRequestContext, backend_url: str):
         """Recent events endpoint responds (200 with operator role, 403 otherwise)."""
         resp = admin_api_context.get(f"{backend_url}/api/events/recent")
-        assert resp.status in (200, 403), f"/api/events/recent returned {resp.status}"
-        if resp.status == 200:
-            body = resp.json()
-            assert "events" in body
-            assert isinstance(body["events"], list)
+        # Gated on `operator`, which the admin fixture lacks. Deterministic 403.
+        assert resp.status == 403, f"/api/events/recent returned {resp.status}: {resp.text()[:200]}"
 
     def test_events_recent_rejects_invalid_limit(self, admin_api_context: APIRequestContext, backend_url: str):
-        """Limit out of range returns 422 even before role check on operator endpoint."""
-        resp = admin_api_context.get(f"{backend_url}/api/events/recent?limit=0")
-        assert resp.status in (403, 422), f"/api/events/recent?limit=0 returned {resp.status}"
-        resp = admin_api_context.get(f"{backend_url}/api/events/recent?limit=201")
-        assert resp.status in (403, 422), f"/api/events/recent?limit=201 returned {resp.status}"
+        """Limit out of range is refused — either by the operator gate or by validation.
+
+        Left permissive deliberately, unlike the assertions above. FastAPI solves
+        dependencies and validates query parameters in the same pass, so whether
+        `require_role("operator")` raises 403 before the `limit` bound produces
+        422 is an ordering detail of the framework, not a property of this API.
+        Both are a refusal; neither is 200.
+
+        The consequence worth naming: with only an owner+admin fixture available,
+        the 422 path is never reached, so the bound itself is effectively
+        untested. Fixing that needs an operator-roled fixture, which does not
+        exist yet.
+        """
+        for query in ("limit=0", "limit=201"):
+            resp = admin_api_context.get(f"{backend_url}/api/events/recent?{query}")
+            assert resp.status in (403, 422), f"/api/events/recent?{query} returned {resp.status}"
 
     def test_canonical_users_responds(self, admin_api_context: APIRequestContext, backend_url: str):
         """Canonical users endpoint responds (200 with operator role, 403 otherwise)."""
         resp = admin_api_context.get(f"{backend_url}/api/users")
-        assert resp.status in (200, 403), f"/api/users returned {resp.status}"
-        if resp.status == 200:
-            body = resp.json()
-            assert "users" in body
-            assert isinstance(body["users"], list)
+        # Gated on `operator`, which the admin fixture lacks. Deterministic 403.
+        assert resp.status == 403, f"/api/users returned {resp.status}: {resp.text()[:200]}"
 
     def test_canonical_users_rejects_invalid_status(self, admin_api_context: APIRequestContext, backend_url: str):
-        """Unknown status string returns 422."""
+        """Unknown status string is refused — see test_events_recent_rejects_invalid_limit."""
         resp = admin_api_context.get(f"{backend_url}/api/users?status=bogus")
         assert resp.status in (403, 422), f"/api/users?status=bogus returned {resp.status}"
 
@@ -228,8 +249,11 @@ class TestAdminEndpoints:
         ]
         for path in admin_only:
             resp = auth_api_context.get(f"{backend_url}{path}")
-            assert resp.status in (
-                200,
-                403,
-                502,
-            ), f"{path} returned {resp.status}, expected 200, 403, or 502"
+            # Exactly 403. Accepting 200 made this a security test that could not
+            # fail: a regression opening the entire admin surface to a non-admin
+            # token was as green as the gate working. 502 is also out — an
+            # authorization denial happens in the dependency, before any upstream
+            # call, so it cannot legitimately be an upstream error.
+            assert resp.status == 403, (
+                f"{path} returned {resp.status} to a non-admin token, expected 403: {resp.text()[:200]}"
+            )
