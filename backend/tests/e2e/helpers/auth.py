@@ -9,9 +9,9 @@ The test user is created via Management API with `test: True`.
 """
 
 import base64
-import contextlib
 import json
 import os
+import re
 from http import HTTPStatus
 
 import httpx
@@ -226,13 +226,29 @@ def get_admin_session_token(email: str = "", tenant_id: str = "") -> str:
             if not token:
                 raise RuntimeError(f"Access key exchange returned no sessionJwt: {data}")
     finally:
-        # Step 3: Clean up the temporary access key (best-effort)
-        with contextlib.suppress(Exception), httpx.Client(timeout=10) as client:
-            client.post(
-                _mgmt_url("/v1/mgmt/accesskey/delete"),
-                headers=_auth_header(),
-                json={"id": key_id},
-            )
+        # Step 3: delete the temporary access key.
+        #
+        # This runs in a `finally`, so it must not raise: doing so would replace
+        # whatever real failure brought us here. But it must not be silent
+        # either — the key carries owner+admin on the shared project and has no
+        # expiry, so a swallowed failure leaks a standing privileged credential,
+        # one per session. Report it loudly and leave the session sweep to
+        # collect it on the next run.
+        try:
+            with httpx.Client(timeout=10) as client:
+                delete_resp = client.post(
+                    _mgmt_url("/v1/mgmt/accesskey/delete"),
+                    headers=_auth_header(),
+                    json={"id": key_id},
+                )
+            if delete_resp.status_code != HTTPStatus.OK:
+                print(
+                    f"[E2E] LEAK: failed to delete admin access key {key_name} "
+                    f"({key_id}): HTTP {delete_resp.status_code}. It carries owner+admin "
+                    "and never expires; the next run's sweep should remove it."
+                )
+        except Exception as exc:  # noqa: BLE001 - never mask the original failure
+            print(f"[E2E] LEAK: error deleting admin access key {key_name} ({key_id}): {exc!r}")
 
     # Debug: log all decoded claims for CI diagnosis
     try:
@@ -315,4 +331,91 @@ def sweep_leaked_e2e_users() -> int:
 
     if removed:
         print(f"[E2E] user sweep: removed {removed} leaked user(s)")
+    return removed
+
+
+# Name prefix for the throwaway owner+admin key `get_admin_session_token` mints
+# once per session. The suffix is a uuid4 fragment, so a survivor can only be
+# litter from an earlier run.
+LEAKED_ACCESS_KEY_PREFIX = "e2e-admin-"
+
+# E2E-created roles and permissions all carry an `-e2e-<hex>` fragment from
+# `unique_name`. Matching on that rather than on a leading prefix, because the
+# fixtures use many different prefixes (list-, chain-, batch-, canon-, upd-, …)
+# and a prefix list would silently miss whichever one gets added next.
+_E2E_RBAC_MARKER = re.compile(r"-e2e-[0-9a-f]{6,}")
+
+
+def sweep_leaked_e2e_access_keys() -> int:
+    """Delete owner/admin access keys left behind by earlier runs.
+
+    `get_admin_session_token` mints one per session and deletes it in a
+    `finally`. A failed delete used to be swallowed whole, leaving a standing
+    owner+admin credential with no expiry on a shared project. This is the
+    backstop for that, and for runs killed before teardown.
+    """
+    if not (DESCOPE_PROJECT_ID and DESCOPE_MANAGEMENT_KEY and E2E_TEST_TENANT_ID):
+        return 0
+
+    removed = 0
+    with httpx.Client(timeout=30) as client:
+        response = client.post(
+            _mgmt_url("/v1/mgmt/accesskey/search"),
+            headers=_auth_header(),
+            json={"tenantIds": [E2E_TEST_TENANT_ID]},
+        )
+        if response.status_code != HTTPStatus.OK:
+            print(f"[E2E] access-key sweep: search returned {response.status_code}, skipping")
+            return 0
+
+        for key in response.json().get("keys", []):
+            name = key.get("name") or ""
+            key_id = key.get("id") or ""
+            if not key_id or not name.startswith(LEAKED_ACCESS_KEY_PREFIX):
+                continue
+            client.post(
+                _mgmt_url("/v1/mgmt/accesskey/delete"),
+                headers=_auth_header(),
+                json={"id": key_id},
+            )
+            removed += 1
+
+    if removed:
+        print(f"[E2E] access-key sweep: removed {removed} leaked admin key(s)")
+    return removed
+
+
+def sweep_leaked_e2e_rbac() -> int:
+    """Delete roles and permissions left behind by earlier runs.
+
+    Per-test cleanup deletes by name inside a `finally`, which never runs for a
+    cancelled run and is skipped whenever a test fails before the name is bound.
+    The debris is unbounded and it makes the project's real authorization model
+    unreadable. Only names carrying the `-e2e-<hex>` marker are touched, so the
+    real model (`Tenant Admin`, `viewer`, `projects.*`, …) is never at risk.
+    """
+    if not (DESCOPE_PROJECT_ID and DESCOPE_MANAGEMENT_KEY):
+        return 0
+
+    removed = 0
+    with httpx.Client(timeout=60) as client:
+        # Roles first: deleting a permission still referenced by a role can be
+        # refused, and every leaked role is itself disposable.
+        for kind, list_path, list_key, delete_path in (
+            ("role", "/v1/mgmt/role/all", "roles", "/v1/mgmt/role/delete"),
+            ("permission", "/v1/mgmt/permission/all", "permissions", "/v1/mgmt/permission/delete"),
+        ):
+            response = client.get(_mgmt_url(list_path), headers=_auth_header())
+            if response.status_code != HTTPStatus.OK:
+                print(f"[E2E] rbac sweep: {kind} list returned {response.status_code}, skipping")
+                continue
+            for item in response.json().get(list_key, []):
+                name = item.get("name") or ""
+                if not _E2E_RBAC_MARKER.search(name):
+                    continue
+                client.post(_mgmt_url(delete_path), headers=_auth_header(), json={"name": name})
+                removed += 1
+
+    if removed:
+        print(f"[E2E] rbac sweep: removed {removed} leaked role(s)/permission(s)")
     return removed
