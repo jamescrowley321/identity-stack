@@ -52,18 +52,13 @@ resource "github_actions_secret" "descope_expired_token" {
   plaintext_value = trimspace(data.local_file.expired_token.content)
 }
 
+# Sourced from the TF-minted management key (always valid, always populated) —
+# never from var.descope_management_key (defaulted "", silently blanked the
+# secret; a hand-filled stale .env key 401'd the mgmt API).
 resource "github_actions_secret" "descope_management_key" {
   repository      = var.github_repository
   secret_name     = "DESCOPE_MANAGEMENT_KEY"
-  plaintext_value = var.descope_management_key
-
-  # Fail loud rather than silently overwriting the live CI secret with "".
-  lifecycle {
-    precondition {
-      condition     = length(trimspace(var.descope_management_key)) > 0
-      error_message = "Refusing to push an empty DESCOPE_MANAGEMENT_KEY secret — set descope_management_key (env DESCOPE_MANAGEMENT_KEY)."
-    }
-  }
+  plaintext_value = descope_management_key.ci_e2e.cleartext
 }
 
 resource "github_actions_secret" "e2e_test_email" {
