@@ -1,5 +1,6 @@
 """Unit tests for the access keys router."""
 
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -8,9 +9,23 @@ from httpx import ASGITransport, AsyncClient
 from app.main import app
 
 
+# The API requires a bounded, future expiry, so every create needs one. Computed
+# per call rather than hardcoded: a fixed timestamp silently rots into the past.
+def future_expiry(days: int = 30) -> int:
+    return int(time.time()) + days * 86400
+
+
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    """This route is rate limited; without a reset the later tests 429."""
+    from app.middleware.rate_limit import limiter
+
+    limiter.reset()
 
 
 @pytest.fixture(autouse=True)
@@ -96,7 +111,7 @@ async def test_create_key(mock_validate, client):
     response = await client.post(
         "/api/keys",
         headers={"Authorization": "Bearer valid.token"},
-        json={"name": "My API Key"},
+        json={"name": "My API Key", "expire_time": future_expiry()},
     )
     assert response.status_code == 200
     data = response.json()
@@ -114,7 +129,7 @@ async def test_create_key_with_options(mock_validate, client):
     response = await client.post(
         "/api/keys",
         headers={"Authorization": "Bearer valid.token"},
-        json={"name": "Scoped Key", "expire_time": 1700000000, "role_names": ["viewer"]},
+        json={"name": "Scoped Key", "expire_time": future_expiry(), "role_names": ["admin"]},
     )
     assert response.status_code == 200
 
@@ -258,6 +273,175 @@ async def test_owner_may_mint_an_owner_key(mock_validate, client):
     response = await client.post(
         "/api/keys",
         headers={"Authorization": "Bearer valid.token"},
-        json={"name": "ok", "role_names": ["owner"]},
+        json={"name": "ok", "role_names": ["owner"], "expire_time": future_expiry()},
     )
     assert response.status_code == 200
+
+
+# --- Role containment (privilege escalation) ---
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_admin_cannot_mint_a_key_carrying_an_unheld_custom_role(mock_validate, client):
+    """The old guard special-cased `owner`, so any other role escalated freely."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    app.state.descope_client = mock_client
+
+    response = await client.post(
+        "/api/keys",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"name": "escalate", "role_names": ["billing-superuser"], "expire_time": future_expiry()},
+    )
+
+    assert response.status_code == 403
+    assert "billing-superuser" in response.json()["detail"]
+    mock_client.create_access_key.assert_not_called()
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_partial_escalation_is_refused_whole(mock_validate, client):
+    """One unheld role poisons the request; nothing is minted."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    app.state.descope_client = mock_client
+
+    response = await client.post(
+        "/api/keys",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"name": "mixed", "role_names": ["admin", "owner"], "expire_time": future_expiry()},
+    )
+
+    assert response.status_code == 403
+    mock_client.create_access_key.assert_not_called()
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_admin_may_mint_a_key_carrying_its_own_role(mock_validate, client):
+    """Scoping a key to roles the caller holds is the normal use of this endpoint."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.create_access_key.return_value = {"key": {"id": "k1"}, "cleartext": "x"}
+    app.state.descope_client = mock_client
+
+    response = await client.post(
+        "/api/keys",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"name": "scoped", "role_names": ["admin"], "expire_time": future_expiry()},
+    )
+
+    assert response.status_code == 200
+    mock_client.create_access_key.assert_called_once()
+
+
+# --- Expiry bounds (persistence) ---
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_omitted_expiry_is_refused(mock_validate, client):
+    """Omitting expire_time meant 'never expires', and was the UI's default."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    app.state.descope_client = mock_client
+
+    response = await client.post(
+        "/api/keys",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"name": "forever"},
+    )
+
+    assert response.status_code == 422
+    mock_client.create_access_key.assert_not_called()
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_zero_expiry_is_refused(mock_validate, client):
+    """Descope treats expireTime 0 as never expiring."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    app.state.descope_client = mock_client
+
+    response = await client.post(
+        "/api/keys",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"name": "forever", "expire_time": 0},
+    )
+
+    assert response.status_code == 422
+    mock_client.create_access_key.assert_not_called()
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_past_expiry_is_refused(mock_validate, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    app.state.descope_client = mock_client
+
+    response = await client.post(
+        "/api/keys",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"name": "stale", "expire_time": int(time.time()) - 60},
+    )
+
+    assert response.status_code == 422
+    mock_client.create_access_key.assert_not_called()
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_expiry_beyond_the_cap_is_refused(mock_validate, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    app.state.descope_client = mock_client
+
+    response = await client.post(
+        "/api/keys",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"name": "decade", "expire_time": future_expiry(days=366)},
+    )
+
+    assert response.status_code == 422
+    mock_client.create_access_key.assert_not_called()
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_expiry_at_the_cap_is_accepted(mock_validate, client):
+    """The boundary is inclusive, so the UI's longest option still works."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.create_access_key.return_value = {"key": {"id": "k1"}, "cleartext": "x"}
+    app.state.descope_client = mock_client
+
+    response = await client.post(
+        "/api/keys",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"name": "max", "expire_time": future_expiry(days=364)},
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_validated_expiry_is_what_reaches_descope(mock_validate, client):
+    """The value forwarded must be the caller's, not silently rewritten."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.create_access_key.return_value = {"key": {"id": "k1"}, "cleartext": "x"}
+    app.state.descope_client = mock_client
+    expiry = future_expiry(days=45)
+
+    await client.post(
+        "/api/keys",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"name": "forwarded", "expire_time": expiry},
+    )
+
+    assert mock_client.create_access_key.await_args.kwargs["expire_time"] == expiry
