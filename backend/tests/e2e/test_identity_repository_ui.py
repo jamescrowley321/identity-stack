@@ -30,14 +30,22 @@ def test_navigate_to_roles_page(auth_page: Page, frontend_url: str):
     """Navigate to /roles and verify the page loads without errors."""
     auth_page.goto(f"{frontend_url}/roles")
     auth_page.wait_for_load_state("networkidle")
-    expect(auth_page).not_to_have_url("**/login**")
+    # Anchor on what the page renders before asserting where we are not. A bare
+    # not_to_* resolves immediately, so on its own it passes against a page that
+    # has not finished loading — for the wrong reason.
+    expect(auth_page.get_by_role("heading", name="Role Management", level=1)).to_be_visible()
+    # A regex, not a glob: not_to_have_url takes an exact string or a Pattern and
+    # does not translate glob syntax, so "**/login**" asserted only that the URL
+    # is not that literal 11-character string, which can never fail.
+    expect(auth_page).not_to_have_url(re.compile(r"/login"))
 
 
 def test_navigate_to_members_page(auth_page: Page, frontend_url: str):
     """Navigate to /members and verify the page loads without errors."""
     auth_page.goto(f"{frontend_url}/members")
     auth_page.wait_for_load_state("networkidle")
-    expect(auth_page).not_to_have_url("**/login**")
+    expect(auth_page.get_by_role("heading", name="Members", level=1)).to_be_visible()
+    expect(auth_page).not_to_have_url(re.compile(r"/login"))
 
 
 def test_navigate_to_settings_page(admin_page: Page, frontend_url: str):
@@ -51,7 +59,7 @@ def test_navigate_to_settings_page(admin_page: Page, frontend_url: str):
     """
     admin_page.goto(f"{frontend_url}/settings")
     admin_page.wait_for_load_state("networkidle")
-    expect(admin_page).not_to_have_url("**/login**")
+    expect(admin_page).not_to_have_url(re.compile(r"/login"))
     # Scoped to the page's own <h1>: the sidebar and breadcrumb carry the same
     # words, so an unscoped match is both a strict-mode violation and no proof.
     expect(admin_page.get_by_role("heading", name="Tenant Settings", level=1)).to_be_visible()

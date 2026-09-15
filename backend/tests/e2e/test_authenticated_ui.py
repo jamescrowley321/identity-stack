@@ -5,6 +5,7 @@ Requires DESCOPE_CLIENT_ID, DESCOPE_CLIENT_SECRET, and DESCOPE_MANAGEMENT_KEY.
 """
 
 import os
+import re
 
 import pytest
 from playwright.sync_api import Page, Request, Response, expect
@@ -17,8 +18,12 @@ pytestmark = pytest.mark.skipif(
 
 def test_authenticated_user_sees_dashboard(auth_page: Page):
     """After login, user sees the dashboard (not /login)."""
-    expect(auth_page).not_to_have_url("**/login**")
+    # Positive anchor first: a bare not_to_* resolves immediately, so asserting
+    # it against a page that has not rendered yet passes for the wrong reason.
     expect(auth_page.get_by_text("Welcome")).to_be_visible(timeout=10000)
+    # A regex, not a glob — not_to_have_url takes an exact string or a Pattern
+    # and does not translate glob syntax, so "**/login**" could never fail.
+    expect(auth_page).not_to_have_url(re.compile(r"/login"))
 
 
 def test_sidebar_navigation_links(auth_page: Page):
