@@ -10,6 +10,8 @@ from tests.e2e.helpers.auth import (
     ensure_test_user,
     get_admin_session_token,
     get_oidc_access_token,
+    sweep_leaked_e2e_access_keys,
+    sweep_leaked_e2e_rbac,
     sweep_leaked_e2e_users,
 )
 
@@ -50,6 +52,20 @@ def _credentials_are_present_in_ci():
         )
 
 
+def _sweep_all() -> None:
+    """Remove every class of object the suite is known to strand.
+
+    Users, the per-session owner+admin access key, and the roles/permissions the
+    RBAC fixtures create. Each sweep is independent: one failing must not stop
+    the others, since they leak for different reasons and at different rates.
+    """
+    for sweep in (sweep_leaked_e2e_users, sweep_leaked_e2e_access_keys, sweep_leaked_e2e_rbac):
+        try:
+            sweep()
+        except Exception as exc:  # noqa: BLE001 - a sweep must never fail the run
+            print(f"[E2E] {sweep.__name__} failed: {exc!r}")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _sweep_leaked_users():
     """Remove users stranded by this or an earlier E2E run.
@@ -59,10 +75,10 @@ def _sweep_leaked_users():
     accumulate until someone noticed the project was at its user limit.
     """
     if _has_mgmt_key:
-        sweep_leaked_e2e_users()
+        _sweep_all()
     yield
     if _has_mgmt_key:
-        sweep_leaked_e2e_users()
+        _sweep_all()
 
 
 @pytest.fixture(scope="session")

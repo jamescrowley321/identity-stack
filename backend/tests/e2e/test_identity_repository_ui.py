@@ -7,7 +7,6 @@ the React frontend.
 Requires DESCOPE_MANAGEMENT_KEY, DESCOPE_CLIENT_ID, DESCOPE_CLIENT_SECRET.
 """
 
-import contextlib
 import os
 import re
 import uuid
@@ -113,8 +112,14 @@ def test_role_created_via_api_is_not_yet_visible_in_ui(
 
     finally:
         if cleanup_role:
-            with contextlib.suppress(Exception):
-                admin_api_context.delete(f"{backend_url}/api/roles/{cleanup_role}")
+            # Report a failed delete rather than swallowing it. The session sweep
+            # collects the leftover, but silence here made the leak invisible.
+            try:
+                resp = admin_api_context.delete(f"{backend_url}/api/roles/{cleanup_role}")
+                if resp.status not in (200, 204):
+                    print(f"[E2E] LEAK: role {cleanup_role} not deleted: HTTP {resp.status}")
+            except Exception as exc:  # noqa: BLE001 - never mask the test's own failure
+                print(f"[E2E] LEAK: error deleting role {cleanup_role}: {exc!r}")
 
 
 # --- Test 3: Error states — nonexistent resource URL ---
