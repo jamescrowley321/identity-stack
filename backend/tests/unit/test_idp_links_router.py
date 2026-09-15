@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from expression import Error, Ok
+from fastapi import Depends, Request
 from httpx import ASGITransport, AsyncClient
 
 from app.dependencies.identity import get_idp_link_service
@@ -117,7 +118,7 @@ def _mock_tenant_check_pass():
 
 
 def _mock_tenant_check_fail():
-    """Patch UserTenantRoleRepository so _verify_user_in_tenant fails (user not in tenant)."""
+    """Patch UserTenantRoleRepository so _require_user_in_tenant fails (user not in tenant)."""
     mock_repo_instance = AsyncMock()
     mock_repo_instance.list_by_user_tenant.return_value = []  # empty → 404
     return patch("app.routers.idp_links.UserTenantRoleRepository", return_value=mock_repo_instance)
@@ -496,3 +497,70 @@ async def test_delete_link_non_uuid_tenant_returns_404_not_500(mock_validate, cl
     body = response.json()
     assert body["detail"] == "User not found in tenant"
     assert "type" in body, f"tenant-guard 404 must be an RFC 9457 problem detail, got {body}"
+
+
+# --- The guard is fail-closed by construction ---
+
+
+@pytest.mark.anyio
+async def test_guard_raises_rather_than_returning_a_response():
+    """The point of the change: there is no return value a caller could drop.
+
+    While it handed back ``Response | None``, a route that called the guard and
+    ignored the result silently lost tenant isolation — no type error, no failing
+    test. Raising removes the thing that can be forgotten, so assert on the
+    mechanism and not merely on the 404 the existing tests already cover.
+    """
+    from app.errors.identity import IdentityErrorRaised
+    from app.errors.identity import NotFound as NotFoundError
+    from app.routers.idp_links import _require_user_in_tenant
+
+    request = MagicMock()
+    request.state.claims = {"dct": "not-a-uuid"}
+
+    with pytest.raises(IdentityErrorRaised) as exc_info:
+        await _require_user_in_tenant(uuid.UUID(USER_ID), request, AsyncMock())
+
+    assert isinstance(exc_info.value.error, NotFoundError)
+
+
+@pytest.mark.anyio
+async def test_guard_returns_none_when_the_check_passes():
+    """The success path must stay falsy-but-unused, not a response to propagate."""
+    from app.routers.idp_links import _require_user_in_tenant
+
+    request = MagicMock()
+    request.state.claims = {"dct": str(uuid.uuid4())}
+    with _mock_tenant_check_pass():
+        assert await _require_user_in_tenant(uuid.UUID(USER_ID), request, AsyncMock()) is None
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_a_route_that_ignores_the_guard_still_refuses(mock_validate, client):
+    """A future route that forgets to propagate must still be safe.
+
+    This is the regression the issue is actually about. It mounts a route that
+    calls the guard and discards whatever it produces — the exact mistake that
+    used to defeat the check — and asserts the request is still refused.
+    """
+    from app.errors.identity import IdentityErrorRaised
+    from app.errors.problem_detail import identity_error_raised_handler
+    from app.routers.idp_links import _require_user_in_tenant
+
+    @app.get("/api/__test_forgetful_route/{user_id}")
+    async def _forgetful(request: Request, user_id: str, session=Depends(get_async_session)):
+        await _require_user_in_tenant(uuid.UUID(user_id), request, session)
+        return {"leaked": "tenant isolation bypassed"}
+
+    app.add_exception_handler(IdentityErrorRaised, identity_error_raised_handler)
+    mock_validate.return_value = ADMIN_CLAIMS
+    try:
+        with _mock_tenant_check_fail():
+            response = await client.get(f"/api/__test_forgetful_route/{USER_ID}", headers=AUTH_HEADER)
+        assert response.status_code == 404
+        assert "leaked" not in response.text
+    finally:
+        app.router.routes = [
+            r for r in app.router.routes if getattr(r, "path", None) != "/api/__test_forgetful_route/{user_id}"
+        ]

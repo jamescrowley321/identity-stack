@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from expression import Result
+from expression import Error, Result
 from fastapi import Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
@@ -20,6 +20,7 @@ from app.errors.identity import (
     Conflict,
     Forbidden,
     IdentityError,
+    IdentityErrorRaised,
     NotFound,
     ProviderError,
     SyncFailed,
@@ -175,3 +176,16 @@ def _error_to_problem_detail(err: IdentityError, request: Request) -> JSONRespon
         status_code=http_status,
         media_type="application/problem+json",
     )
+
+
+async def identity_error_raised_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Render a raised ``IdentityErrorRaised`` as an RFC 9457 Problem Detail.
+
+    Registered on the app so a guard can raise instead of returning a response
+    the caller might drop. Goes through ``result_to_response`` rather than
+    building a response here, so a raised error and a returned one are
+    byte-identical.
+    """
+    if not isinstance(exc, IdentityErrorRaised):  # pragma: no cover - registered by type
+        raise exc
+    return result_to_response(Error(exc.error), request)
