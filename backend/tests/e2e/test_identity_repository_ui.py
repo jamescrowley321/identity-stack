@@ -128,11 +128,24 @@ def test_role_created_via_api_is_not_yet_visible_in_ui(
 # --- Test 3: Error states — nonexistent resource URL ---
 
 
-def test_nonexistent_route_shows_error(auth_page: Page, frontend_url: str):
-    """Navigate to a nonexistent route and verify the UI doesn't crash."""
+def test_nonexistent_route_redirects_to_the_app_root(auth_page: Page, frontend_url: str):
+    """An unknown route redirects into the app, and the app is still mounted.
+
+    `expect(body).not_to_be_empty()` could not detect the thing it was written to
+    catch. React mounts into `<div id="root">`, so a total unmount still leaves
+    body with that child — non-empty — and the assertion passed straight through
+    the SPA crash fixed in 38e6ab3.
+
+    Assert the two things that actually distinguish "recovered" from "crashed":
+    the router honoured `<Route path="*" element={<Navigate to="/" replace />}>`,
+    and the app shell rendered afterwards.
+    """
     fake_id = uuid.uuid4()
     auth_page.goto(f"{frontend_url}/admin/users/{fake_id}")
     auth_page.wait_for_load_state("networkidle")
 
-    body = auth_page.locator("body")
-    expect(body).not_to_be_empty()
+    # The shell, not the body: proves React is still mounted and rendering.
+    expect(auth_page.locator("[data-slot='sidebar']")).to_be_visible(timeout=10000)
+    # Redirected off the unknown path, and not bounced to login.
+    expect(auth_page).not_to_have_url(re.compile(str(fake_id)))
+    expect(auth_page).not_to_have_url(re.compile(r"/login"))
