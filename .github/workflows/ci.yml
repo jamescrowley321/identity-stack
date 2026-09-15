@@ -86,7 +86,25 @@ jobs:
   integration-tests:
     name: Integration Tests
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+    # Dependabot excluded deliberately. GitHub serves `pull_request` events raised
+    # by Dependabot from a separate secret store, so `secrets.DESCOPE_*` are empty
+    # on those runs — and since the credential gates in tests/e2e/conftest.py and
+    # tests/integration/conftest.py now FAIL rather than skip when a credential is
+    # missing, every Dependabot PR would fail these two jobs for a reason that says
+    # nothing about the dependency. Dependabot's branches live in this repo, so the
+    # `head.repo.full_name` check above does not exclude them.
+    #
+    # The trade-off, stated rather than hidden: a skipped job satisfies branch
+    # protection, so a Dependabot bump is not covered by the credentialed suites.
+    # That was already true — those tests skipped internally and the job went green
+    # anyway — but it is now visible as a skipped job instead of a green one. The
+    # durable fix is to populate the same values as *Dependabot* secrets
+    # (Settings → Secrets → Dependabot), after which this exclusion can be dropped.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request'
+       && github.event.pull_request.head.repo.full_name == github.repository
+       && github.event.pull_request.user.login != 'dependabot[bot]')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -124,7 +142,25 @@ jobs:
   e2e-tests:
     name: E2E Tests
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+    # Dependabot excluded deliberately. GitHub serves `pull_request` events raised
+    # by Dependabot from a separate secret store, so `secrets.DESCOPE_*` are empty
+    # on those runs — and since the credential gates in tests/e2e/conftest.py and
+    # tests/integration/conftest.py now FAIL rather than skip when a credential is
+    # missing, every Dependabot PR would fail these two jobs for a reason that says
+    # nothing about the dependency. Dependabot's branches live in this repo, so the
+    # `head.repo.full_name` check above does not exclude them.
+    #
+    # The trade-off, stated rather than hidden: a skipped job satisfies branch
+    # protection, so a Dependabot bump is not covered by the credentialed suites.
+    # That was already true — those tests skipped internally and the job went green
+    # anyway — but it is now visible as a skipped job instead of a green one. The
+    # durable fix is to populate the same values as *Dependabot* secrets
+    # (Settings → Secrets → Dependabot), after which this exclusion can be dropped.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request'
+       && github.event.pull_request.head.repo.full_name == github.repository
+       && github.event.pull_request.user.login != 'dependabot[bot]')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
