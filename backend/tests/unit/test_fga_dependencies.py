@@ -7,7 +7,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-from app.dependencies.fga import extract_user_id, require_fga
+from app.dependencies.fga import extract_user_id, require_fga, resolve_fga_user_target
 
 
 def _make_request(claims, path_params=None, descope_client=None):
@@ -198,3 +198,106 @@ class TestRequireFga:
             await dep(_make_request({"sub": "user-abc"}, {"document_id": "doc-123"}))
         assert exc_info.value.status_code == 403
         assert exc_info.value.detail == "No tenant context"
+
+
+CALLER_TENANT = "tenant-1"
+OTHER_TENANT = "tenant-2"
+VICTIM_USER_ID = "U3JvictimInternalId"
+
+
+def _client_returning(user):
+    client = MagicMock()
+    client.load_user = AsyncMock(return_value=user)
+    return client
+
+
+def _client_raising(exc):
+    client = MagicMock()
+    client.load_user = AsyncMock(side_effect=exc)
+    return client
+
+
+class TestResolveFgaUserTargetTenantScoping:
+    """The resolver must not turn /api/fga/* into a project-wide existence oracle."""
+
+    @pytest.mark.asyncio
+    async def test_resolves_user_inside_the_callers_tenant(self):
+        client = _client_returning({"userId": VICTIM_USER_ID, "userTenants": [{"tenantId": CALLER_TENANT}]})
+        result = await resolve_fga_user_target(client, "member@example.com", CALLER_TENANT)
+        assert result == VICTIM_USER_ID
+
+    @pytest.mark.asyncio
+    async def test_user_in_another_tenant_is_left_unresolved(self):
+        """A foreign-tenant hit must not leak the internal userId."""
+        client = _client_returning({"userId": VICTIM_USER_ID, "userTenants": [{"tenantId": OTHER_TENANT}]})
+        result = await resolve_fga_user_target(client, "victim@other-tenant.example", CALLER_TENANT)
+        assert result == "victim@other-tenant.example"
+        assert VICTIM_USER_ID not in result
+
+    @pytest.mark.asyncio
+    async def test_foreign_tenant_is_indistinguishable_from_nonexistent(self):
+        """The oracle closes only if both cases return the identical value."""
+        identifier = "probe@example.com"
+
+        foreign = await resolve_fga_user_target(
+            _client_returning({"userId": VICTIM_USER_ID, "userTenants": [{"tenantId": OTHER_TENANT}]}),
+            identifier,
+            CALLER_TENANT,
+        )
+        missing = await resolve_fga_user_target(
+            _client_raising(_make_http_status_error(404)), identifier, CALLER_TENANT
+        )
+        assert foreign == missing == identifier
+
+    @pytest.mark.asyncio
+    async def test_multi_tenant_user_resolves_when_one_membership_matches(self):
+        client = _client_returning(
+            {
+                "userId": VICTIM_USER_ID,
+                "userTenants": [{"tenantId": OTHER_TENANT}, {"tenantId": CALLER_TENANT}],
+            }
+        )
+        result = await resolve_fga_user_target(client, "shared@example.com", CALLER_TENANT)
+        assert result == VICTIM_USER_ID
+
+    @pytest.mark.asyncio
+    async def test_user_with_no_tenants_is_left_unresolved(self):
+        client = _client_returning({"userId": VICTIM_USER_ID, "userTenants": []})
+        result = await resolve_fga_user_target(client, "orphan@example.com", CALLER_TENANT)
+        assert result == "orphan@example.com"
+
+    @pytest.mark.asyncio
+    async def test_missing_user_tenants_key_is_left_unresolved(self):
+        """An absent userTenants must not be read as 'in every tenant'."""
+        client = _client_returning({"userId": VICTIM_USER_ID})
+        result = await resolve_fga_user_target(client, "nokey@example.com", CALLER_TENANT)
+        assert result == "nokey@example.com"
+
+    @pytest.mark.asyncio
+    async def test_malformed_tenant_entries_are_ignored(self):
+        client = _client_returning(
+            {"userId": VICTIM_USER_ID, "userTenants": ["not-a-dict", None, {"tenantId": CALLER_TENANT}]}
+        )
+        result = await resolve_fga_user_target(client, "odd@example.com", CALLER_TENANT)
+        assert result == VICTIM_USER_ID
+
+    @pytest.mark.asyncio
+    async def test_non_user_subject_passes_through(self):
+        """The admin surface must still accept subjects that are not users at all."""
+        client = _client_raising(_make_http_status_error(404))
+        result = await resolve_fga_user_target(client, "service-account-7", CALLER_TENANT)
+        assert result == "service-account-7"
+
+    @pytest.mark.asyncio
+    async def test_upstream_fault_is_not_swallowed(self):
+        client = _client_raising(_make_http_status_error(500))
+        with pytest.raises(HTTPException) as exc_info:
+            await resolve_fga_user_target(client, "member@example.com", CALLER_TENANT)
+        assert exc_info.value.status_code == 502
+
+    @pytest.mark.asyncio
+    async def test_network_error_is_not_swallowed(self):
+        client = _client_raising(_make_request_error())
+        with pytest.raises(HTTPException) as exc_info:
+            await resolve_fga_user_target(client, "member@example.com", CALLER_TENANT)
+        assert exc_info.value.status_code == 502

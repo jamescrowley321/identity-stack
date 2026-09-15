@@ -148,7 +148,7 @@ async def create_relation(
     """Create an FGA relation tuple. Requires owner or admin role."""
     prefixed_id = _prefix_resource_id(tenant_id, body.resource_id)
     client = request.app.state.descope_client
-    target = await resolve_fga_user_target(client, body.target)
+    target = await resolve_fga_user_target(client, body.target, tenant_id)
     try:
         await client.create_relation(body.resource_type, prefixed_id, body.relation, target)
         return {
@@ -188,7 +188,7 @@ async def delete_relation(
     """Delete an FGA relation tuple. Requires owner or admin role."""
     prefixed_id = _prefix_resource_id(tenant_id, body.resource_id)
     client = request.app.state.descope_client
-    target = await resolve_fga_user_target(client, body.target)
+    target = await resolve_fga_user_target(client, body.target, tenant_id)
     try:
         await client.delete_relation(body.resource_type, prefixed_id, body.relation, target)
         return {"status": "deleted"}
@@ -269,7 +269,7 @@ async def check_permission(
     """Check an FGA permission. Requires owner or admin role. Fail-closed: errors deny access."""
     prefixed_id = _prefix_resource_id(tenant_id, body.resource_id)
     client = request.app.state.descope_client
-    target = await resolve_fga_user_target(client, body.target)
+    target = await resolve_fga_user_target(client, body.target, tenant_id)
     try:
         allowed = bool(await client.check_permission(body.resource_type, prefixed_id, body.relation, target))
         return {"allowed": allowed}

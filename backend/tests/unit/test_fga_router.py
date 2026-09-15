@@ -38,11 +38,32 @@ async def client():
 # the raw identifier fails instead of passing by coincidence.
 RESOLVED_TARGET = "U1ResolvedUserId000000000001"
 
+# Resolution is tenant-scoped, so the fixture user has to actually be a member of
+# the tenant the caller is acting in or it is left unresolved by design. It is a
+# member of both tenants used in this module because the same mock serves callers
+# in each.
+FIXTURE_USER_TENANTS = [{"tenantId": "tenant-abc"}, {"tenantId": "tenant-xyz"}]
+
 
 def _mock_client(**kwargs) -> AsyncMock:
     """A Descope client mock whose load_user resolves any identifier to a userId."""
     mock_client = AsyncMock(**kwargs)
-    mock_client.load_user.return_value = {"userId": RESOLVED_TARGET, "loginIds": ["u1@example.com"]}
+    mock_client.load_user.return_value = {
+        "userId": RESOLVED_TARGET,
+        "loginIds": ["u1@example.com"],
+        "userTenants": FIXTURE_USER_TENANTS,
+    }
+    return mock_client
+
+
+def _foreign_tenant_client(**kwargs) -> AsyncMock:
+    """A client whose load_user answers with a real user in some *other* tenant."""
+    mock_client = AsyncMock(**kwargs)
+    mock_client.load_user.return_value = {
+        "userId": RESOLVED_TARGET,
+        "loginIds": ["victim@other-tenant.example"],
+        "userTenants": [{"tenantId": "tenant-somewhere-else"}],
+    }
     return mock_client
 
 
@@ -1172,3 +1193,100 @@ async def test_an_upstream_fault_resolving_a_target_is_not_mistaken_for_no_such_
 
     assert response.status_code == 502
     mock_client.check_permission.assert_not_called()
+
+
+# --- Cross-tenant target resolution (security) ---
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_create_relation_does_not_resolve_foreign_tenant_target(mock_validate, client):
+    """An admin must not be able to turn /api/fga/relations into an existence oracle.
+
+    Resolving project-wide echoed the victim's Descope userId back to the caller
+    and wrote a grant keyed on a subject in another tenant. The identifier must
+    come back untouched instead.
+    """
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = _foreign_tenant_client()
+    app.state.descope_client = mock_client
+
+    body = {
+        "resource_type": "document",
+        "resource_id": "doc-1",
+        "relation": "viewer",
+        "target": "victim@other-tenant.example",
+    }
+    response = await client.post("/api/fga/relations", headers=AUTH_HEADER, json=body)
+
+    assert response.status_code == 201
+    assert response.json()["target"] == "victim@other-tenant.example"
+    assert RESOLVED_TARGET not in response.text
+    mock_client.create_relation.assert_called_once_with(
+        "document", "tenant-abc:doc-1", "viewer", "victim@other-tenant.example"
+    )
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_foreign_tenant_and_unknown_target_are_indistinguishable(mock_validate, client):
+    """Hit and miss must be byte-identical, or the oracle survives in the response."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    body = {
+        "resource_type": "document",
+        "resource_id": "doc-1",
+        "relation": "viewer",
+        "target": "probe@example.com",
+    }
+
+    app.state.descope_client = _foreign_tenant_client()
+    foreign = await client.post("/api/fga/relations", headers=AUTH_HEADER, json=body)
+
+    app.state.descope_client = _unresolving_client()
+    unknown = await client.post("/api/fga/relations", headers=AUTH_HEADER, json=body)
+
+    assert foreign.status_code == unknown.status_code
+    assert foreign.json() == unknown.json()
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_check_permission_does_not_resolve_foreign_tenant_target(mock_validate, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = _foreign_tenant_client()
+    mock_client.check_permission.return_value = False
+    app.state.descope_client = mock_client
+
+    body = {
+        "resource_type": "document",
+        "resource_id": "doc-1",
+        "relation": "can_view",
+        "target": "victim@other-tenant.example",
+    }
+    response = await client.post("/api/fga/check", headers=AUTH_HEADER, json=body)
+
+    assert response.status_code == 200
+    mock_client.check_permission.assert_called_once_with(
+        "document", "tenant-abc:doc-1", "can_view", "victim@other-tenant.example"
+    )
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_delete_relation_does_not_resolve_foreign_tenant_target(mock_validate, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = _foreign_tenant_client()
+    app.state.descope_client = mock_client
+
+    body = {
+        "resource_type": "document",
+        "resource_id": "doc-1",
+        "relation": "viewer",
+        "target": "victim@other-tenant.example",
+    }
+    response = await client.request("DELETE", "/api/fga/relations", headers=AUTH_HEADER, json=body)
+
+    assert response.status_code == 200
+    mock_client.delete_relation.assert_called_once_with(
+        "document", "tenant-abc:doc-1", "viewer", "victim@other-tenant.example"
+    )
