@@ -27,10 +27,28 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 
+def _unavailable(reason: str) -> None:
+    """Skip locally, fail in CI.
+
+    Skipping is right on a laptop: not every contributor has Descope credentials
+    or a test stack up. In CI it is the wrong answer — a skip there lets the
+    ``Integration Tests`` job report green with nothing exercised, which is the
+    same hollow gate the E2E suite had for months. So when ``CI`` is set, a
+    missing credential or dependency is a failure, not a skip.
+    """
+    if os.environ.get("CI"):
+        pytest.fail(
+            f"{reason}. In CI this fails rather than skips: a skip here would let the "
+            "Integration Tests job report green without exercising anything. Fix the "
+            "secret or the test stack rather than letting the gate go hollow."
+        )
+    pytest.skip(reason)
+
+
 def _require_env(name: str) -> str:
     value = os.environ.get(name, "")
     if not value:
-        pytest.skip(f"{name} not set — skipping integration tests")
+        _unavailable(f"{name} is not set")
     return value
 
 
@@ -110,7 +128,7 @@ async def client():
 def postgres_url() -> str:
     url = os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL")
     if not url:
-        pytest.skip(
+        _unavailable(
             "TEST_DATABASE_URL (or DATABASE_URL) not set — bring up test stack with "
             "`docker compose -f docker-compose.test.yml up -d --wait` and set "
             "TEST_DATABASE_URL=postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test"
@@ -196,7 +214,7 @@ async def redis_client():
 
     url = os.environ.get("TEST_REDIS_URL") or os.environ.get("REDIS_URL")
     if not url:
-        pytest.skip(
+        _unavailable(
             "TEST_REDIS_URL (or REDIS_URL) not set — bring up test stack with "
             "`docker compose -f docker-compose.test.yml up -d --wait` and set "
             "TEST_REDIS_URL=redis://localhost:16379/0"

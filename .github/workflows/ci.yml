@@ -103,7 +103,11 @@ jobs:
         run: docker compose -f docker-compose.test.yml up -d --wait
 
       - name: Run integration tests
-        if: env.DESCOPE_PROJECT_ID != ''
+        # Deliberately unguarded. A step-level `if:` on a credential meant that an
+        # empty secret skipped the step and the job still reported green with
+        # nothing exercised. The credential check now lives in
+        # tests/integration/conftest.py, which fails rather than skips when CI is
+        # set — so a missing secret turns this job red instead of hollow.
         run: cd backend && python -m pytest tests/integration/ -v
         env:
           DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
@@ -219,7 +223,9 @@ jobs:
           sleep 2
 
       - name: Run E2E tests
-        if: env.DESCOPE_PROJECT_ID != ''
+        # Deliberately unguarded, as above: the `_credentials_are_present_in_ci`
+        # fixture in tests/e2e/conftest.py fails the run when a secret is missing,
+        # and a skipped step would mean that gate never executes at all.
         # Screenshots + traces on failure, for the same reason the backend log is
         # kept: a Playwright assertion failure reports only which locator it
         # waited for, never what the page actually showed, so a UI failure is
