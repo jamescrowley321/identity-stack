@@ -79,10 +79,18 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
         try:
             authenticated = await self._authenticate(token)
         except Exception:
-            logger.debug("token authentication failed", exc_info=True)
+            # WARNING, not DEBUG: this is the terminal rejection, not one of the
+            # per-candidate misses below. At DEBUG a production 401 left no
+            # evidence of why a token was refused, so an outage and a bad token
+            # were indistinguishable from the logs.
+            logger.warning("token authentication failed", exc_info=True)
             authenticated = None
 
         if authenticated is None:
+            # Reached either from the except above or from _authenticate
+            # exhausting every candidate provider without raising, which
+            # previously logged nothing at all.
+            logger.warning("rejecting request: no configured provider accepted the token")
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
         claims, principal = authenticated
