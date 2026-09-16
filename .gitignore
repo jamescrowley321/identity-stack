@@ -44,6 +44,11 @@ infra/expired_token.txt
 
 # Ralph
 .ralph/
+# The active loop prompt: copied in from identity-stack-planning at launch and
+# rewritten as the loop consumes its queue. The planning repo holds the source
+# of truth, so a committed copy here would be a stale fork of it.
+PROMPT.md
+.claude/worktrees/
 
 # OS
 .DS_Store
