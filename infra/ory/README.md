@@ -124,3 +124,26 @@ registry module or a `git::`-sourced module; until then, vendor/symlink it per r
 - **Develop tier:** free, EU-homed, rate-limited, **no PII storage** and **no Organizations** — hence
   canonical-side tenancy. Move to a paid/Production workspace before storing real user PII or using
   Ory Organizations.
+
+## Testing against this project
+
+The backend's Ory end-to-end suite
+(`backend/tests/integration/test_ory_end_to_end.py`) does **not** use this
+project by default. It mints real tokens from the `hydra-test` container in
+`docker-compose.test.yml`, so it runs on a laptop and on every CI PR without a
+credential. Ory Network's OAuth2 surface is Ory Hydra, so the middleware,
+discovery, JWKS verification, issuer allow-list and audience checks under test
+are the same code either way.
+
+To point the suite at this project instead, set every `ORY_TEST_*` variable in
+`backend/.env.example`. That needs two things this root does not yet provision:
+
+- an OAuth2 client with the `authorization_code` grant and the test callback in
+  its `redirect_uris` — the SPA client here is public (PKCE, no secret) and
+  cannot be used for a server-side code exchange;
+- an Ory workspace API key with OAuth2 admin scope, so the tests can accept the
+  login and consent challenges through the admin API instead of a browser
+  (tracked as identity-stack#375, key rotation).
+
+A partially set `ORY_TEST_*` group fails the suite rather than silently falling
+back to the local container.
