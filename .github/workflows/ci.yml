@@ -69,7 +69,7 @@ jobs:
           cd backend
           pip install -e ".[dev]"
 
-      - name: Start test stack (postgres + redis)
+      - name: Start test stack (postgres + redis + hydra)
         run: docker compose -f docker-compose.test.yml up -d --wait
 
       - name: Run unit tests
@@ -117,7 +117,7 @@ jobs:
           cd backend
           pip install -e ".[dev]"
 
-      - name: Start test stack (postgres + redis)
+      - name: Start test stack (postgres + redis + hydra)
         run: docker compose -f docker-compose.test.yml up -d --wait
 
       - name: Run integration tests
@@ -126,6 +126,11 @@ jobs:
         # nothing exercised. The credential check now lives in
         # tests/integration/conftest.py, which fails rather than skips when CI is
         # set — so a missing secret turns this job red instead of hollow.
+        #
+        # No ORY_* secrets here on purpose: the Ory end-to-end suite mints real
+        # tokens from the hydra-test container brought up above, so it runs on
+        # every PR with no credential at all. Setting the ORY_TEST_* group (see
+        # backend/.env.example) points the same tests at a live Ory project.
         run: cd backend && python -m pytest tests/integration/ -v
         env:
           DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
@@ -191,7 +196,7 @@ jobs:
         env:
           VITE_DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
 
-      - name: Start test stack (postgres + redis)
+      - name: Start test stack (postgres + redis + hydra)
         run: docker compose -f docker-compose.test.yml up -d --wait
 
       - name: Apply database schema
