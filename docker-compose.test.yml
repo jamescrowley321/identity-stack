@@ -36,3 +36,47 @@ services:
       timeout: 3s
       retries: 30
       start_period: 2s
+
+  # Local OIDC provider for the Ory end-to-end suite (backend/tests/integration/
+  # test_ory_end_to_end.py). Ory Network's OAuth2 surface *is* Ory Hydra, so a
+  # token this mints travels exactly the code path a live Ory token travels:
+  # discovery -> JWKS -> signature -> iss -> aud -> to_principal. That makes the
+  # capstone a real cryptographic test rather than a patched-`validate_token`
+  # one, and it runs without credentials — see ORY_TEST_* in backend/.env.example
+  # to point the same suite at a live Ory project instead.
+  #
+  # Storage is in-memory (DSN=memory): every `up` starts with no clients and a
+  # freshly generated signing key.
+  hydra-test:
+    image: oryd/hydra:v2.2.0
+    # --dev permits plain HTTP. This is a throwaway, loopback-bound test server;
+    # it never holds a real credential.
+    command: serve all --dev
+    ports:
+      - "127.0.0.1:14444:4444" # public: discovery, JWKS, /oauth2/auth, /oauth2/token
+      - "127.0.0.1:14445:4445" # admin: client registration, login/consent accept
+    environment:
+      DSN: memory
+      # No trailing slash, deliberately: app.middleware.providers.ory_config
+      # rstrips the configured issuer, and the middleware's allow-list check is
+      # exact string equality against the token's `iss`. Hydra echoes this value
+      # verbatim, so a trailing slash here would 401 every token.
+      URLS_SELF_ISSUER: http://127.0.0.1:14444
+      # JWT access tokens (Ory Network's default), not opaque ones — the backend
+      # validates signatures, so an opaque token would exercise nothing.
+      STRATEGIES_ACCESS_TOKEN: jwt
+      SECRETS_SYSTEM: test-only-hydra-system-secret-not-a-credential
+      # Never fetched: the suite accepts the login and consent challenges through
+      # the admin API instead of a browser. Hydra still requires the URLs to be set.
+      URLS_LOGIN: http://127.0.0.1:14444/login-stub
+      URLS_CONSENT: http://127.0.0.1:14444/consent-stub
+      # Promote the identity claims the consent step sets into top-level access
+      # token claims, which is where IdentityProvisioningService reads them.
+      OAUTH2_ALLOWED_TOP_LEVEL_CLAIMS: email,email_verified,given_name,family_name
+      LOG_LEVEL: warn
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4444/health/ready"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+      start_period: 3s
