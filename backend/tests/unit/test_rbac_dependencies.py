@@ -154,6 +154,7 @@ class _StubResolver:
     def __init__(self, result):
         self._result = result
         self.calls: list[tuple[str, str]] = []
+        self.constructed_with: dict = {}
 
     async def resolve(self, *, provider: str, sub: str):
         self.calls.append((provider, sub))
@@ -162,13 +163,21 @@ class _StubResolver:
 
 @pytest.fixture
 def stub_resolver(monkeypatch):
-    """Patch in a resolver whose result each test sets via ``install(...)``."""
-    holder: dict[str, _StubResolver] = {}
+    """Patch in a resolver whose result each test sets via ``install(...)``.
+
+    The keyword arguments the dependency constructs the resolver with are kept on
+    ``resolver.constructed_with``: one of them (``redis_client``) is a security
+    control in its own right, so it has to be observable.
+    """
 
     def install(result) -> _StubResolver:
         resolver = _StubResolver(result)
-        holder["resolver"] = resolver
-        monkeypatch.setattr(rbac, "IdentityResolutionService", lambda **_kwargs: resolver)
+
+        def _factory(**kwargs):
+            resolver.constructed_with = kwargs
+            return resolver
+
+        monkeypatch.setattr(rbac, "IdentityResolutionService", _factory)
         return resolver
 
     return install
@@ -201,6 +210,12 @@ class TestCanonicalRoleResolution:
         with pytest.raises(HTTPException) as exc_info:
             await dep(_make_request(ORY_CLAIMS, auth_type="Ory"), session=MagicMock())
         assert exc_info.value.status_code == 403
+        # The *reason* matters, not just the code: a caller with no canonical
+        # identity must be denied by the resolution branch. Removing that branch
+        # and letting an empty role list fall through to the comparison below
+        # also produces a 403, so a status-only assertion cannot tell the two
+        # apart — and would keep passing with the fail-closed branch deleted.
+        assert exc_info.value.detail == "No tenant context"
 
     async def test_ory_principal_without_database_fails_closed(self, stub_resolver):
         """No database means no canonical answer — 403, never a 500 or an allow."""
@@ -209,6 +224,7 @@ class TestCanonicalRoleResolution:
         with pytest.raises(HTTPException) as exc_info:
             await dep(_make_request(ORY_CLAIMS, auth_type="Ory"), session=None)
         assert exc_info.value.status_code == 403
+        assert exc_info.value.detail == "No tenant context"
 
     async def test_ory_principal_without_subject_is_unauthenticated(self, stub_resolver):
         stub_resolver(_grants((TENANT_A, "operator", [])))
@@ -218,12 +234,19 @@ class TestCanonicalRoleResolution:
         assert exc_info.value.status_code == 401
 
     async def test_ambiguous_multi_tenant_membership_is_rejected(self, stub_resolver):
-        """Two tenants and nothing in the token to choose — picking one would be a guess."""
+        """Two tenants and nothing in the token to choose — picking one would be a guess.
+
+        Asserting the reason is what makes this test able to fail. Replace the
+        deny with "pick one" and the outcome depends on which tenant comes out of
+        a set first: sometimes an allow, sometimes a different 403. Pinning the
+        detail catches both halves of that coin.
+        """
         stub_resolver(_grants((TENANT_A, "operator", []), (TENANT_B, "member", [])))
         dep = require_role("operator")
         with pytest.raises(HTTPException) as exc_info:
             await dep(_make_request(ORY_CLAIMS, auth_type="Ory"), session=MagicMock())
         assert exc_info.value.status_code == 403
+        assert exc_info.value.detail == "No tenant context"
 
     async def test_dct_selects_among_multiple_canonical_tenants(self, stub_resolver):
         stub_resolver(_grants((TENANT_A, "operator", []), (TENANT_B, "member", [])))
@@ -239,6 +262,9 @@ class TestCanonicalRoleResolution:
         with pytest.raises(HTTPException) as exc_info:
             await dep(_make_request(claims, auth_type="Ory"), session=MagicMock())
         assert exc_info.value.status_code == 403
+        # Denied because the token named a tenant the canonical model does not
+        # grant — not merely because the role list came out empty afterwards.
+        assert exc_info.value.detail == "No tenant context"
 
     async def test_roles_from_other_tenants_do_not_leak(self, stub_resolver):
         """An `admin` grant in tenant B must not authorize an admin route in tenant A."""
@@ -262,6 +288,20 @@ class TestCanonicalRoleResolution:
         result = await dep(_make_request(claims, auth_type="Ory"), session=MagicMock())
         assert sorted(result) == ["events.read", "sync.read"]
         assert "billing.manage" not in result
+
+    async def test_authorization_never_reads_the_identity_cache(self, stub_resolver):
+        """Roles for an authz decision are resolved uncached, deliberately.
+
+        ``GET /api/identity`` may serve a cached identity up to IDENTITY_CACHE_TTL
+        seconds old. An authorization decision may not: a revoked role has to stop
+        authorizing when it is revoked, not when a cache entry expires. Handing the
+        resolver a Redis client here would silently reintroduce that window, and
+        nothing else in this file would notice.
+        """
+        resolver = stub_resolver(_grants((TENANT_A, "operator", [])))
+        dep = require_role("operator")
+        await dep(_make_request(ORY_CLAIMS, auth_type="Ory"), session=MagicMock())
+        assert resolver.constructed_with["redis_client"] is None
 
 
 class TestDescopePathIsUnchanged:
