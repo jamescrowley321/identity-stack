@@ -1,0 +1,138 @@
+# Terraform plan + drift detection for the Descope root (infra/).
+#
+# There was no Terraform CI in this repo at all, and it cost us: `main`'s
+# configuration silently diverged from the live `identity-stack-dev` state for
+# eleven days. Applying it would have destroyed `descope_management_key.ci_e2e`
+# — the key CI itself authenticates with — because the resource existed in state
+# and not in configuration. Nothing would have said so until an apply.
+#
+# The same plan is also the cheapest FGA-wipe detector we have: when a run of
+# another repo's tests overwrites the shared project's singleton
+# `descope_fga_schema`, it shows up here as a diff on that resource.
+#
+# The gate is deliberately narrow: a plan with ANY destroy fails the job. Plans
+# that only add or change are reported, not blocked — there is legitimately
+# unapplied drift today (the project rename), and a "plan must be empty" gate
+# would be red from day one and get ignored.
+name: Terraform
+
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - ".github/workflows/terraform.yml"
+  schedule:
+    # Daily drift check against main. Nothing applies automatically — the
+    # workspace is auto-apply:false with no VCS connection — so this is purely
+    # "has the live project drifted from what we think it is".
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # GitHub OIDC -> HCP workload identity federation
+
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    name: Plan (identity-stack-dev)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    env:
+      TF_WORKSPACE: identity-stack-dev
+      TF_IN_AUTOMATION: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Fail loudly rather than skip. A missing identity provider must not read
+      # as "no drift" — that is the failure mode this whole workflow exists to
+      # stop, and a skipped job is indistinguishable from a clean one.
+      - name: Require the workload identity provider
+        env:
+          HCP_WIP: ${{ vars.HCP_WORKLOAD_IDENTITY_PROVIDER }}
+        run: |
+          if [ -z "$HCP_WIP" ]; then
+            echo "::error::Repository variable HCP_WORKLOAD_IDENTITY_PROVIDER is not set." \
+                 "Expected iam/project/<PROJECT_ID>/service-principal/<SP>/workload-identity-provider/<NAME>."
+            exit 1
+          fi
+
+      # `data.local_file.expired_token` reads infra/expired_token.txt, which is
+      # gitignored — so it is absent from a fresh checkout and from the config
+      # directory uploaded to HCP Terraform, and the plan dies with
+      # "file cannot be read". Materialise it from the secret that already
+      # holds the same value.
+      - name: Materialise the gitignored expired-token fixture
+        env:
+          DESCOPE_EXPIRED_TOKEN: ${{ secrets.DESCOPE_EXPIRED_TOKEN }}
+        run: printf '%s' "$DESCOPE_EXPIRED_TOKEN" > expired_token.txt
+
+      - name: Authenticate to HCP via GitHub OIDC
+        uses: hashicorp/hcp-auth-action@b11d0bff4bbe76283448ddca08a4a4e93c5ed4b9 # v0.1.0
+        with:
+          workload_identity_provider: ${{ vars.HCP_WORKLOAD_IDENTITY_PROVIDER }}
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.14.6
+
+      - name: Format check
+        run: terraform fmt -check -recursive
+
+      - name: Init
+        run: terraform init -input=false
+
+      - name: Validate
+        run: terraform validate -no-color
+
+      # Execution mode is remote: provider credentials come from the workspace's
+      # own variables, so nothing here needs a Descope or GitHub token.
+      - name: Plan
+        id: plan
+        run: |
+          set -o pipefail
+          terraform plan -input=false -no-color -var-file=environments/dev.tfvars 2>&1 | tee plan.txt
+
+      - name: Gate on destroys
+        run: |
+          # Parse Terraform's own summary rather than grepping the body: the
+          # summary is authoritative and "No changes" has no Plan: line at all.
+          if grep -q "^No changes\." plan.txt; then
+            echo "No changes. Configuration matches the live workspace." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          summary="$(grep -E '^Plan: [0-9]+ to add' plan.txt | tail -1)"
+          if [ -z "$summary" ]; then
+            echo "::error::Could not find a plan summary — treating as a failure rather than a pass."
+            exit 1
+          fi
+
+          destroy="$(printf '%s' "$summary" | sed -nE 's/.*, ([0-9]+) to destroy\./\1/p')"
+          {
+            echo "### Terraform plan — \`identity-stack-dev\`"
+            echo
+            echo "\`\`\`"
+            printf '%s\n' "$summary"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${destroy:-0}" -gt 0 ]; then
+            {
+              echo
+              echo "**Blocked: this configuration would destroy ${destroy} resource(s).**"
+              echo
+              echo "\`\`\`"
+              grep -E "will be destroyed|# .* is not in configuration" plan.txt || true
+              echo "\`\`\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Plan destroys ${destroy} resource(s) — see the job summary."
+            exit 1
+          fi
+
+          echo "Plan contains no destroys." >> "$GITHUB_STEP_SUMMARY"
