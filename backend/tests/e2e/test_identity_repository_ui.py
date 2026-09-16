@@ -67,26 +67,53 @@ def test_navigate_to_settings_page(admin_page: Page, frontend_url: str):
 # --- Test 2: Data display — create role via API, verify in UI ---
 
 
-def test_role_created_via_api_is_not_yet_visible_in_ui(
+def test_role_created_via_api_is_invisible_to_an_access_key_session(
     admin_page: Page,
     admin_api_context: APIRequestContext,
     backend_url: str,
     frontend_url: str,
 ):
-    """Create a role via API, navigate to /roles, and pin what the UI does today.
+    """A role created through the admin API stays invisible to THIS browser session.
 
-    This used to be ``xfail(strict=True)`` on the documented useRBAC gap. An
-    xfail covers the whole call phase, so it also swallowed the precondition:
-    verified locally that a fixture setup error and a failing
-    ``assert resp.status == 201`` BOTH report XFAIL with exit code 0. A 500 from
-    ``POST /api/roles``, a broken admin token, or a frontend that never came up
-    would all have shipped green here.
+    This is a statement about the fixture's identity, not about where useRBAC
+    reads roles from. ``get_admin_session_token`` mints a tenant-scoped access
+    key, exchanges it for a session JWT and deletes the key, so the JWT's ``sub``
+    is the access key id (``K...``) rather than a Descope user id (``U...``).
 
-    So the gap is asserted instead of marked. The role must be created (a real
-    assertion), and the table must still not show it — which is the behavior
-    #392 changes. When sourcing useRBAC from ``GET /api/identity`` lands, this
-    test fails and is rewritten to assert visibility.
+    ``GET /api/identity`` answers from the canonical model — provider row, then
+    an IdP link on ``external_sub`` — and IdP links only ever come from Descope
+    *users* (``scripts/seed_descope.import_idp_links``). An access key is not a
+    user and cannot have one, and Descope is not in ``JIT_ENABLED_PROVIDERS``
+    (default ``{"ory"}``), so nothing provisions one on the fly. The endpoint
+    404s for this subject however the database is seeded. IdentityContext fails
+    closed on that, useTenants stays empty, ``useRBAC().isAdmin`` is false, and
+    the admin-gated ``Role Definitions`` card — the only place a role nobody is
+    assigned would show up — never renders.
+
+    An earlier version promised this test would start failing once #392 sourced
+    useRBAC from ``GET /api/identity``. It could not: #392 changed which payload
+    the client reads, and this session has no canonical identity to read from.
+    Verified live in #455.
+
+    So the 404 is asserted outright instead of being left implicit. If an
+    access-key session ever does resolve to a canonical identity, this test fails
+    on that assertion, and that is the point to rewrite it into a visibility
+    assertion. Browser-level coverage of #392 needs a session whose subject is a
+    canonical user — tracked in #458.
     """
+    # The mechanism, asserted before anything that depends on it. Matched on the
+    # detail too: a bare 404 would also be what a renamed or unmounted route
+    # returns, and this must fail if the identity resolves — not if it moves.
+    identity_resp = admin_api_context.get(f"{backend_url}/api/identity")
+    assert identity_resp.status == 404, (
+        "This session is expected to have no canonical identity, but "
+        f"GET /api/identity returned {identity_resp.status}. If access-key "
+        "sessions now resolve, rewrite this test to assert the role IS visible."
+    )
+    assert identity_resp.json().get("detail") == "Identity not found", (
+        f"Expected the endpoint's own 404, got body {identity_resp.text()!r}"
+    )
+
     role_name = unique_name("ui-role")
     cleanup_role = None
 
@@ -98,25 +125,23 @@ def test_role_created_via_api_is_not_yet_visible_in_ui(
         assert resp.status == 201, f"Create role failed: {resp.status}"
         cleanup_role = role_name
 
-        # The roles table is gated on useRBAC().isAdmin, which reads roles out of
-        # the JWT's `tenants` claim. For this identity that claim carries the
-        # tenant but no roles, so the page renders "Roles: None" beside
-        # "Server-confirmed: owner, admin" — the client cannot see what the server
-        # can. Sourcing useRBAC from the canonical GET /api/identity is #392; this
-        # test asserts the behaviour that lands with it.
         admin_page.goto(f"{frontend_url}/roles")
         admin_page.wait_for_load_state("networkidle")
         # A regex, not a glob. `expect(page).not_to_have_url` takes an exact
         # string or a Pattern — it does not translate `**/login**`, so the glob
         # form asserts "the URL is not literally that 11-character string" and
-        # can never fail. (Same form still sits in the assertions this test does
-        # not own.)
+        # can never fail.
         expect(admin_page).not_to_have_url(re.compile(r"/login"))
-        # Anchor on something the page must render BEFORE asserting the absence
-        # of the role, so the negative cannot resolve against a page that has
-        # not finished loading — which would pass whether or not #392 landed.
+        # Anchor on what the page must render before asserting any absence, so a
+        # negative cannot resolve against a page that has not finished loading.
         expect(admin_page.get_by_role("heading", name="Role Management", level=1)).to_be_visible()
-        expect(admin_page.get_by_text(role_name)).not_to_be_visible()
+        expect(admin_page.locator("[data-slot='card-title']").filter(has_text="Your Roles")).to_have_count(1)
+
+        # The card is absent, not merely hidden — it is gated on isAdmin and is
+        # never mounted. Asserting its count pins the cause; asserting only the
+        # role's absence would also pass if the card rendered empty.
+        expect(admin_page.locator("[data-slot='card-title']").filter(has_text="Role Definitions")).to_have_count(0)
+        expect(admin_page.get_by_text(role_name)).to_have_count(0)
 
     finally:
         if cleanup_role:
