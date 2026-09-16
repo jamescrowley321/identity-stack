@@ -30,7 +30,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write # GitHub OIDC -> HCP workload identity federation
 
 concurrency:
   group: terraform-${{ github.ref }}
@@ -49,19 +48,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Fail loudly rather than skip. A missing identity provider must not read
-      # as "no drift" — that is the failure mode this whole workflow exists to
-      # stop, and a skipped job is indistinguishable from a clean one.
-      - name: Require the workload identity provider
-        env:
-          HCP_WIP: ${{ vars.HCP_WORKLOAD_IDENTITY_PROVIDER }}
-        run: |
-          if [ -z "$HCP_WIP" ]; then
-            echo "::error::Repository variable HCP_WORKLOAD_IDENTITY_PROVIDER is not set." \
-                 "Expected iam/project/<PROJECT_ID>/service-principal/<SP>/workload-identity-provider/<NAME>."
-            exit 1
-          fi
-
       # `data.local_file.expired_token` reads infra/expired_token.txt, which is
       # gitignored — so it is absent from a fresh checkout and from the config
       # directory uploaded to HCP Terraform, and the plan dies with
@@ -72,14 +58,31 @@ jobs:
           DESCOPE_EXPIRED_TOKEN: ${{ secrets.DESCOPE_EXPIRED_TOKEN }}
         run: printf '%s' "$DESCOPE_EXPIRED_TOKEN" > expired_token.txt
 
-      - name: Authenticate to HCP via GitHub OIDC
-        uses: hashicorp/hcp-auth-action@b11d0bff4bbe76283448ddca08a4a4e93c5ed4b9 # v0.1.0
-        with:
-          workload_identity_provider: ${{ vars.HCP_WORKLOAD_IDENTITY_PROVIDER }}
-
+      # Auth is a static TF_API_TOKEN team token, deliberately.
+      #
+      # You cannot OIDC-federate INTO HCP Terraform's own API: HCP Terraform is
+      # an OIDC *issuer* (for TFC->Vault and TFC->HCP Dynamic Provider
+      # Credentials), never a relying party for GitHub's OIDC token. See
+      # identity-stack-planning `_bmad-output/planning-artifacts/architecture-vault-oidc.md`.
+      # The mitigation is a narrowly-scoped, rotated team token — not "OIDC".
+      #
+      # This is the one static CI secret this workflow needs, and VAULT-3 (#402)
+      # retires it: once the HVD jwt-github backend exists, this step becomes
+      #
+      #   - uses: hashicorp/vault-action@v3
+      #     with:
+      #       url: ${{ vars.VAULT_ADDR }}
+      #       namespace: ${{ vars.VAULT_NAMESPACE }}
+      #       method: jwt
+      #       path: jwt-github
+      #       role: identity-stack-ci
+      #       secrets: kv/data/identity-stack/dev TF_API_TOKEN | TF_API_TOKEN
+      #
+      # with `id-token: write` added back for the GitHub->Vault exchange.
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: 1.14.6
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
 
       - name: Format check
         run: terraform fmt -check -recursive
