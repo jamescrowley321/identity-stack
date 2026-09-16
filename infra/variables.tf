@@ -14,6 +14,25 @@ variable "e2e_test_email" {
   }
 }
 
+variable "descope_expired_token" {
+  description = <<-EOT
+    A Descope session JWT that has already expired, written to the
+    DESCOPE_EXPIRED_TOKEN GitHub Actions secret and consumed by the negative
+    auth tests. An expired token stays expired, so this is a static fixture —
+    mint a fresh one only if the project's signing keys change.
+
+    No default, for the same reason as descope_management_key: a blank value
+    here silently disables the tests that depend on it rather than failing.
+  EOT
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = length(trimspace(var.descope_expired_token)) > 0
+    error_message = "descope_expired_token must be non-empty; refusing to overwrite the CI secret with a blank value."
+  }
+}
+
 # GitHub Actions
 variable "github_repository" {
   description = "GitHub repository name (without owner) for CI secrets"
