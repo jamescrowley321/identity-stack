@@ -204,6 +204,17 @@ jobs:
         env:
           DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
 
+      # JIT provisioning resolves the caller's provider through the canonical
+      # `providers` registry, so an Ory principal cannot be provisioned until the
+      # row exists. Seeded with the shipped script, the same way a real deployment
+      # does it — a test-only INSERT here would leave scripts/seed_ory.py
+      # unexercised and let it rot.
+      - name: Register the Ory provider
+        run: cd backend && python -m scripts.seed_ory
+        env:
+          DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
+          ORY_ISSUER_URL: http://127.0.0.1:14444
+
       # The backend must run against a schema-bearing database. It previously ran
       # on sqlite :memory:, which passes the startup connectivity check but has no
       # tables, so every canonical-repository route raised "no such table".
@@ -249,6 +260,13 @@ jobs:
           DESCOPE_MANAGEMENT_KEY: ${{ secrets.DESCOPE_MANAGEMENT_KEY }}
           DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
           REDIS_URL: redis://localhost:16379/0
+          # Ory as a *configured* provider, alongside Descope rather than instead
+          # of it — which is the property tests/e2e/test_ory_sso_e2e.py exists to
+          # hold. The issuer is the hydra-test container from the test stack; no
+          # trailing slash, because the middleware's allow-list check is exact
+          # string equality against the token's `iss`.
+          ORY_ISSUER_URL: http://127.0.0.1:14444
+          ORY_AUDIENCE: identity-stack-api
           # The rate-limit key is the authenticated `sub`, and the whole E2E suite
           # shares one access-key identity — so the default 10/minute write budget
           # is consumed by the first few tests and the rest 429. That is an artifact
@@ -289,6 +307,13 @@ jobs:
           E2E_TEST_TENANT_ID: ${{ secrets.E2E_TEST_TENANT_ID }}
           E2E_FRONTEND_URL: "http://localhost:3000"
           E2E_BACKEND_URL: "http://localhost:8000"
+          # Must match ORY_ISSUER_URL above: the suite fails fast rather than
+          # emitting tokens the backend was never going to accept.
+          E2E_ORY_ISSUER_URL: http://127.0.0.1:14444
+          # Granting a canonical role has no API an Ory principal can reach
+          # (POST /api/roles/assign depends on the Descope `dct` claim), so the
+          # tier-3 authorization test writes the grant directly.
+          E2E_DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
 
       # This repository is public, so its artifacts are world-readable. The
       # backend is not supposed to log credentials, but an unhandled traceback
