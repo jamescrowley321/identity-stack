@@ -2,20 +2,43 @@ import { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
 import { useApiClient } from "@/hooks/useApiClient";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
+// No "Never" option: the API rejects an unbounded key, and offering it here made
+// a permanent credential the default choice. 365 is the ceiling the API enforces
+// (MAX_ACCESS_KEY_LIFETIME_SECONDS).
 const EXPIRATION_OPTIONS = [
-  { label: "Never", value: "0" },
   { label: "30 days", value: "30" },
   { label: "90 days", value: "90" },
   { label: "365 days", value: "365" },
 ];
+
+const DEFAULT_EXPIRATION_DAYS = "90";
 
 interface AccessKey {
   id: string;
@@ -29,7 +52,7 @@ export default function AccessKeys() {
   const { apiFetch } = useApiClient();
   const [keys, setKeys] = useState<AccessKey[]>([]);
   const [name, setName] = useState("");
-  const [expirationDays, setExpirationDays] = useState("0");
+  const [expirationDays, setExpirationDays] = useState(DEFAULT_EXPIRATION_DAYS);
   const [newKeySecret, setNewKeySecret] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -49,11 +72,13 @@ export default function AccessKeys() {
   const handleCreate = useCallback(async () => {
     if (!name.trim()) return;
     setNewKeySecret(null);
-    const body: Record<string, unknown> = { name: name.trim() };
-    const days = Number(expirationDays);
-    if (days > 0) {
-      body.expire_time = Math.floor(Date.now() / 1000) + days * 86400;
-    }
+    // Always send an expiry. Omitting it used to mean "never expires", which the
+    // API now refuses.
+    const days = Number(expirationDays) || Number(DEFAULT_EXPIRATION_DAYS);
+    const body: Record<string, unknown> = {
+      name: name.trim(),
+      expire_time: Math.floor(Date.now() / 1000) + days * 86400,
+    };
     try {
       const res = await apiFetch("/api/keys", {
         method: "POST",
@@ -128,7 +153,10 @@ export default function AccessKeys() {
 
   return (
     <>
-      <PageHeader title="Access Keys" description="Create and manage API access keys" />
+      <PageHeader
+        title="Access Keys"
+        description="Create and manage API access keys"
+      />
       <div className="p-8 space-y-6">
         <Card>
           <CardHeader>
@@ -148,11 +176,15 @@ export default function AccessKeys() {
                 </SelectTrigger>
                 <SelectContent>
                   {EXPIRATION_OPTIONS.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                    <SelectItem key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-              <Button onClick={handleCreate} disabled={!name.trim()}>Create</Button>
+              <Button onClick={handleCreate} disabled={!name.trim()}>
+                Create
+              </Button>
             </div>
           </CardContent>
         </Card>
@@ -175,11 +207,15 @@ export default function AccessKeys() {
         <Card>
           <CardHeader>
             <CardTitle>Keys</CardTitle>
-            <CardDescription>{keys.length} key{keys.length !== 1 ? "s" : ""}</CardDescription>
+            <CardDescription>
+              {keys.length} key{keys.length !== 1 ? "s" : ""}
+            </CardDescription>
           </CardHeader>
           <CardContent>
             {keys.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No access keys yet.</p>
+              <p className="text-sm text-muted-foreground">
+                No access keys yet.
+              </p>
             ) : (
               <Table>
                 <TableHeader>
@@ -195,19 +231,42 @@ export default function AccessKeys() {
                     <TableRow key={k.id}>
                       <TableCell className="font-medium">{k.name}</TableCell>
                       <TableCell>
-                        <Badge variant={k.status === "active" ? "secondary" : "destructive"}>
+                        <Badge
+                          variant={
+                            k.status === "active" ? "secondary" : "destructive"
+                          }
+                        >
                           {k.status}
                         </Badge>
                       </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">{k.id}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {k.id}
+                      </TableCell>
                       <TableCell className="text-right">
                         <div className="flex gap-1 justify-end">
                           {k.status === "active" ? (
-                            <Button variant="ghost" size="sm" onClick={() => handleDeactivate(k.id)}>Revoke</Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleDeactivate(k.id)}
+                            >
+                              Revoke
+                            </Button>
                           ) : (
-                            <Button variant="ghost" size="sm" onClick={() => handleActivate(k.id)}>Activate</Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleActivate(k.id)}
+                            >
+                              Activate
+                            </Button>
                           )}
-                          <Button variant="ghost" size="sm" className="text-destructive" onClick={() => handleDelete(k.id)}>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-destructive"
+                            onClick={() => handleDelete(k.id)}
+                          >
                             Delete
                           </Button>
                         </div>

@@ -282,3 +282,62 @@ async def test_real_handler_sets_retry_after():
         assert response.status_code == 429
         assert "Retry-After" in response.headers
         assert response.headers["Retry-After"].isdigit()
+
+
+# --- Version-cap gate: router-included routes must stay rate limited ---
+#
+# `pyproject.toml` caps `fastapi<0.137`. FastAPI 0.137 changed `include_router`
+# to append a lazy `fastapi.routing._IncludedRouter` proxy to `app.routes`
+# instead of flattening the child routes into it. slowapi 0.1.10's
+# `SlowAPIMiddleware` only matches top-level routes exposing an `.endpoint`, so
+# under 0.137+ every router-included route becomes "unmatched" and is **silently
+# exempted** — default rate limiting stops enforcing, in production, with no
+# error anywhere. Verified still broken on fastapi 0.141.1 with slowapi 0.1.10
+# (the newest slowapi release); 0.136 enforces, 0.137 does not.
+#
+# Every route in this service is mounted through `include_router`, so that
+# failure mode disables rate limiting wholesale. These two tests are the gate
+# that stops a future bump from re-enabling it silently: they fail loudly instead.
+
+
+async def test_included_route_is_rate_limited_not_silently_exempted():
+    """A route mounted via include_router must actually be limited.
+
+    This is the fastapi<0.137 cap's reason for existing, asserted rather than
+    trusted. If a bump lifts the cap while slowapi still cannot match the new
+    inclusion model, the requests below all return 200 and this fails — instead
+    of rate limiting quietly ceasing to exist.
+    """
+    app = _create_test_app(default_limit="2/minute")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        statuses = [(await client.get("/data")).status_code for _ in range(4)]
+
+    assert 429 in statuses, (
+        "no request was rate limited: SlowAPIMiddleware did not match a route mounted "
+        "via include_router, so every included route is silently exempt. "
+        f"statuses={statuses}. See the fastapi<0.137 cap in pyproject.toml."
+    )
+    assert statuses[:2] == [200, 200], f"limit engaged too early: {statuses}"
+
+
+async def test_limiter_matches_routes_even_when_app_routes_holds_a_proxy():
+    """Enforcement must not depend on `app.routes` being flat.
+
+    The 0.137 regression is structural: `app.routes` stops containing the child
+    routes and holds a proxy object instead. Asserting only "429 happens" would
+    not say *why* a future failure occurred, so pin the structure too — if this
+    ever reports a proxy while the test above fails, the cause is the inclusion
+    model rather than the limiter configuration.
+    """
+    app = _create_test_app(default_limit="2/minute")
+    route_types = {type(r).__name__ for r in app.routes}
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        statuses = [(await client.get("/data")).status_code for _ in range(4)]
+
+    assert 429 in statuses, (
+        f"included routes unmatched by the limiter; app.routes contains {sorted(route_types)}. "
+        "A '_IncludedRouter' entry here means fastapi's inclusion model changed under us."
+    )

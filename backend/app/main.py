@@ -9,6 +9,8 @@ from fastapi import FastAPI
 from scalar_fastapi import get_scalar_api_reference
 from slowapi.errors import RateLimitExceeded
 
+from app.errors.identity import IdentityErrorRaised
+from app.errors.problem_detail import identity_error_raised_handler
 from app.logging_config import setup_logging
 from app.middleware.factory import configure_middleware
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
@@ -160,6 +162,9 @@ app = FastAPI(title="Descope SaaS Starter API", docs_url=None, redoc_url="/redoc
 # gateway mode to prevent import errors from @limiter decorators on routes.
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+# Lets routing-layer guards raise a domain error instead of returning a response
+# the caller has to remember to propagate. See IdentityErrorRaised.
+app.add_exception_handler(IdentityErrorRaised, identity_error_raised_handler)
 
 # Middleware stack — configured by deployment mode (standalone vs gateway)
 configure_middleware(app)

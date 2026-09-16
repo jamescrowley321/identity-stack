@@ -1,13 +1,13 @@
 import uuid
 
-from expression import Error, Ok
+from expression import Ok
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies.identity import get_idp_link_service
 from app.dependencies.rbac import require_role
-from app.errors.identity import NotFound
+from app.errors.identity import IdentityErrorRaised, NotFound
 from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.models.database import get_async_session
@@ -45,23 +45,28 @@ def _parse_uuid(value: str, field_name: str) -> uuid.UUID:
 _NOT_IN_TENANT = "User not found in tenant"
 
 
-async def _verify_user_in_tenant(
+async def _require_user_in_tenant(
     user_uuid: uuid.UUID,
     request: Request,
     session: AsyncSession,
-) -> Response | None:
-    """Verify the target user belongs to the caller's tenant.
+) -> None:
+    """Verify the target user belongs to the caller's tenant, or refuse the request.
 
-    Returns an RFC 9457 Problem Detail 404 response when they do not, and None
-    when the check passes. 404 rather than 403 so the reply does not leak whether
-    the user exists. Callers must return a non-None result unchanged; the shape
-    matches every other error this router emits via ``result_to_response``,
-    rather than the bare ``{"detail": ...}`` a raised HTTPException produces.
+    Raises ``IdentityErrorRaised(NotFound)`` when they do not — 404 rather than
+    403, so the reply does not leak whether the user exists. The central handler
+    renders it through ``result_to_response``, so the body is the same RFC 9457
+    Problem Detail every other error in this router produces.
+
+    This raises rather than returning a response on purpose. The previous version
+    handed back a ``Response | None`` that each caller had to test and propagate,
+    which is fail-open by construction: a new route that calls the guard and
+    ignores its return value silently loses IdP-link tenant isolation, with no
+    type error and no failing test. There is now no return value to drop.
     """
     claims = getattr(request.state, "claims", None)
     tenant_id = claims.get("dct") if claims else None
     if not tenant_id:
-        return result_to_response(Error(NotFound(message=_NOT_IN_TENANT)), request)
+        raise IdentityErrorRaised(NotFound(message=_NOT_IN_TENANT))
     # `dct` is the IdP's own opaque tenant id — a Descope tenant id looks like
     # "T3Bj8QOcyflY8V0bvSu1eEoHmjk6" — while user_tenant_roles.tenant_id is a
     # canonical UUID foreign key. A `dct` that is not a UUID therefore cannot
@@ -71,12 +76,11 @@ async def _verify_user_in_tenant(
     try:
         tenant_uuid = uuid.UUID(tenant_id)
     except (AttributeError, TypeError, ValueError):
-        return result_to_response(Error(NotFound(message=_NOT_IN_TENANT)), request)
+        raise IdentityErrorRaised(NotFound(message=_NOT_IN_TENANT)) from None
     assignment_repo = UserTenantRoleRepository(session)
     assignments = await assignment_repo.list_by_user_tenant(user_uuid, tenant_uuid)
     if not assignments:
-        return result_to_response(Error(NotFound(message=_NOT_IN_TENANT)), request)
-    return None
+        raise IdentityErrorRaised(NotFound(message=_NOT_IN_TENANT))
 
 
 @router.get("/users/{user_id}/idp-links")
@@ -89,8 +93,7 @@ async def list_user_idp_links(
 ):
     """List all IdP links for a user."""
     user_uuid = _parse_uuid(user_id, "user_id")
-    if (denied := await _verify_user_in_tenant(user_uuid, request, session)) is not None:
-        return denied
+    await _require_user_in_tenant(user_uuid, request, session)
     result = await idp_link_service.get_user_idp_links(user_id=user_uuid)
     if result.is_ok():
         result = Ok({"idp_links": result.ok})
@@ -109,8 +112,7 @@ async def create_idp_link(
 ):
     """Create an IdP link between a user and an external identity."""
     user_uuid = _parse_uuid(user_id, "user_id")
-    if (denied := await _verify_user_in_tenant(user_uuid, request, session)) is not None:
-        return denied
+    await _require_user_in_tenant(user_uuid, request, session)
     result = await idp_link_service.create_idp_link(
         user_id=user_uuid,
         provider_id=body.provider_id,
@@ -133,8 +135,7 @@ async def delete_idp_link(
 ):
     """Delete an IdP link."""
     user_uuid = _parse_uuid(user_id, "user_id")
-    if (denied := await _verify_user_in_tenant(user_uuid, request, session)) is not None:
-        return denied
+    await _require_user_in_tenant(user_uuid, request, session)
     link_uuid = _parse_uuid(link_id, "link_id")
     result = await idp_link_service.delete_idp_link(link_id=link_uuid, user_id=user_uuid)
     if result.is_ok():

@@ -59,3 +59,22 @@ class ProviderError(IdentityError):
 @dataclass(frozen=True, unsafe_hash=False)
 class Forbidden(IdentityError):
     """Caller lacks permission for the requested operation."""
+
+
+class IdentityErrorRaised(Exception):
+    """Raise a domain ``IdentityError`` from a place that cannot return a Result.
+
+    Services return ``Result`` and never raise — that contract is unchanged. This
+    exists for *guard* helpers in the routing layer, where returning a value the
+    caller has to remember to check is fail-open by construction: a guard whose
+    result is dropped silently stops guarding, with no type error and no test
+    failure. Raising removes the thing that can be forgotten.
+
+    ``app.errors.problem_detail.identity_error_raised_handler`` turns it into the
+    same RFC 9457 Problem Detail that ``result_to_response`` produces, so the
+    response shape is identical whether the error was returned or raised.
+    """
+
+    def __init__(self, error: IdentityError) -> None:
+        self.error = error
+        super().__init__(error.message)

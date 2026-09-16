@@ -9,7 +9,6 @@ The test user is created via Management API with `test: True`.
 """
 
 import base64
-import contextlib
 import json
 import os
 from http import HTTPStatus
@@ -17,20 +16,23 @@ from http import HTTPStatus
 import httpx
 from playwright.sync_api import BrowserContext
 
-DESCOPE_BASE_URL = os.environ.get("DESCOPE_BASE_URL", "https://api.descope.com")
-DESCOPE_PROJECT_ID = os.environ.get("DESCOPE_PROJECT_ID", "")
-DESCOPE_MANAGEMENT_KEY = os.environ.get("DESCOPE_MANAGEMENT_KEY", "")
-
-E2E_TEST_EMAIL = os.environ.get("E2E_TEST_EMAIL", "")
-E2E_TEST_TENANT_ID = os.environ.get("E2E_TEST_TENANT_ID", "")
-
-
-def _auth_header() -> dict[str, str]:
-    return {"Authorization": f"Bearer {DESCOPE_PROJECT_ID}:{DESCOPE_MANAGEMENT_KEY}"}
-
-
-def _mgmt_url(path: str) -> str:
-    return f"{DESCOPE_BASE_URL}{path}"
+# Management-API surface and the leak sweeps live in descope_mgmt so they can be
+# unit-tested without importing playwright. Re-exported here because conftest and
+# the E2E suite import them from this module.
+from tests.e2e.helpers.descope_mgmt import (  # noqa: F401 - re-exported for callers
+    DESCOPE_BASE_URL,
+    DESCOPE_MANAGEMENT_KEY,
+    DESCOPE_PROJECT_ID,
+    E2E_TEST_EMAIL,
+    E2E_TEST_TENANT_ID,
+    LEAKED_ACCESS_KEY_PREFIX,
+    LEAKED_USER_PREFIXES,
+    _auth_header,
+    _mgmt_url,
+    sweep_leaked_e2e_access_keys,
+    sweep_leaked_e2e_rbac,
+    sweep_leaked_e2e_users,
+)
 
 
 def ensure_test_user(
@@ -226,13 +228,29 @@ def get_admin_session_token(email: str = "", tenant_id: str = "") -> str:
             if not token:
                 raise RuntimeError(f"Access key exchange returned no sessionJwt: {data}")
     finally:
-        # Step 3: Clean up the temporary access key (best-effort)
-        with contextlib.suppress(Exception), httpx.Client(timeout=10) as client:
-            client.post(
-                _mgmt_url("/v1/mgmt/accesskey/delete"),
-                headers=_auth_header(),
-                json={"id": key_id},
-            )
+        # Step 3: delete the temporary access key.
+        #
+        # This runs in a `finally`, so it must not raise: doing so would replace
+        # whatever real failure brought us here. But it must not be silent
+        # either — the key carries owner+admin on the shared project and has no
+        # expiry, so a swallowed failure leaks a standing privileged credential,
+        # one per session. Report it loudly and leave the session sweep to
+        # collect it on the next run.
+        try:
+            with httpx.Client(timeout=10) as client:
+                delete_resp = client.post(
+                    _mgmt_url("/v1/mgmt/accesskey/delete"),
+                    headers=_auth_header(),
+                    json={"id": key_id},
+                )
+            if delete_resp.status_code != HTTPStatus.OK:
+                print(
+                    f"[E2E] LEAK: failed to delete admin access key {key_name} "
+                    f"({key_id}): HTTP {delete_resp.status_code}. It carries owner+admin "
+                    "and never expires; the next run's sweep should remove it."
+                )
+        except Exception as exc:  # noqa: BLE001 - never mask the original failure
+            print(f"[E2E] LEAK: error deleting admin access key {key_name} ({key_id}): {exc!r}")
 
     # Debug: log all decoded claims for CI diagnosis
     try:
@@ -262,57 +280,3 @@ def cleanup_test_user(email: str = "") -> None:
             headers=_auth_header(),
             json={"loginId": email},
         )
-
-
-# Login-id prefixes for users the E2E suite creates as fixtures. Anything
-# matching these is disposable by construction — the suffix is a random uuid4
-# fragment, so a surviving one can only be litter from an earlier run.
-LEAKED_USER_PREFIXES = ("e2e-invite-", "e2e-lifecycle-")
-
-
-def sweep_leaked_e2e_users() -> int:
-    """Delete users left behind by earlier E2E runs. Returns the count removed.
-
-    Per-test cleanup deletes by user id, which means it cannot run when the
-    invite response does not carry one — notably the 207 path, where Descope
-    has already created the user but the body is an RFC 9457 Problem Detail.
-    Those users then survive forever and count against the project's user
-    limit. This sweeps by login-id prefix instead, so it also catches users
-    stranded by a crashed or cancelled run.
-
-    Never touches E2E_TEST_EMAIL: that user is provisioned deliberately and is
-    reused across runs.
-    """
-    if not (DESCOPE_PROJECT_ID and DESCOPE_MANAGEMENT_KEY):
-        return 0
-
-    removed = 0
-    with httpx.Client(timeout=30) as client:
-        response = client.post(
-            _mgmt_url("/v2/mgmt/user/search"),
-            headers=_auth_header(),
-            json={"limit": 500, "page": 0},
-        )
-        if response.status_code != HTTPStatus.OK:
-            print(f"[E2E] user sweep: search returned {response.status_code}, skipping")
-            return 0
-
-        for user in response.json().get("users", []):
-            login_ids = user.get("loginIds") or []
-            if not login_ids:
-                continue
-            login_id = login_ids[0]
-            if login_id == E2E_TEST_EMAIL:
-                continue
-            if not login_id.startswith(LEAKED_USER_PREFIXES):
-                continue
-            client.post(
-                _mgmt_url("/v1/mgmt/user/delete"),
-                headers=_auth_header(),
-                json={"loginId": login_id},
-            )
-            removed += 1
-
-    if removed:
-        print(f"[E2E] user sweep: removed {removed} leaked user(s)")
-    return removed
