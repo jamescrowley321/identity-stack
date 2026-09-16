@@ -11,26 +11,28 @@ The test user is created via Management API with `test: True`.
 import base64
 import json
 import os
-import re
 from http import HTTPStatus
 
 import httpx
 from playwright.sync_api import BrowserContext
 
-DESCOPE_BASE_URL = os.environ.get("DESCOPE_BASE_URL", "https://api.descope.com")
-DESCOPE_PROJECT_ID = os.environ.get("DESCOPE_PROJECT_ID", "")
-DESCOPE_MANAGEMENT_KEY = os.environ.get("DESCOPE_MANAGEMENT_KEY", "")
-
-E2E_TEST_EMAIL = os.environ.get("E2E_TEST_EMAIL", "")
-E2E_TEST_TENANT_ID = os.environ.get("E2E_TEST_TENANT_ID", "")
-
-
-def _auth_header() -> dict[str, str]:
-    return {"Authorization": f"Bearer {DESCOPE_PROJECT_ID}:{DESCOPE_MANAGEMENT_KEY}"}
-
-
-def _mgmt_url(path: str) -> str:
-    return f"{DESCOPE_BASE_URL}{path}"
+# Management-API surface and the leak sweeps live in descope_mgmt so they can be
+# unit-tested without importing playwright. Re-exported here because conftest and
+# the E2E suite import them from this module.
+from tests.e2e.helpers.descope_mgmt import (  # noqa: F401 - re-exported for callers
+    DESCOPE_BASE_URL,
+    DESCOPE_MANAGEMENT_KEY,
+    DESCOPE_PROJECT_ID,
+    E2E_TEST_EMAIL,
+    E2E_TEST_TENANT_ID,
+    LEAKED_ACCESS_KEY_PREFIX,
+    LEAKED_USER_PREFIXES,
+    _auth_header,
+    _mgmt_url,
+    sweep_leaked_e2e_access_keys,
+    sweep_leaked_e2e_rbac,
+    sweep_leaked_e2e_users,
+)
 
 
 def ensure_test_user(
@@ -278,144 +280,3 @@ def cleanup_test_user(email: str = "") -> None:
             headers=_auth_header(),
             json={"loginId": email},
         )
-
-
-# Login-id prefixes for users the E2E suite creates as fixtures. Anything
-# matching these is disposable by construction — the suffix is a random uuid4
-# fragment, so a surviving one can only be litter from an earlier run.
-LEAKED_USER_PREFIXES = ("e2e-invite-", "e2e-lifecycle-")
-
-
-def sweep_leaked_e2e_users() -> int:
-    """Delete users left behind by earlier E2E runs. Returns the count removed.
-
-    Per-test cleanup deletes by user id, which means it cannot run when the
-    invite response does not carry one — notably the 207 path, where Descope
-    has already created the user but the body is an RFC 9457 Problem Detail.
-    Those users then survive forever and count against the project's user
-    limit. This sweeps by login-id prefix instead, so it also catches users
-    stranded by a crashed or cancelled run.
-
-    Never touches E2E_TEST_EMAIL: that user is provisioned deliberately and is
-    reused across runs.
-    """
-    if not (DESCOPE_PROJECT_ID and DESCOPE_MANAGEMENT_KEY):
-        return 0
-
-    removed = 0
-    with httpx.Client(timeout=30) as client:
-        response = client.post(
-            _mgmt_url("/v2/mgmt/user/search"),
-            headers=_auth_header(),
-            json={"limit": 500, "page": 0},
-        )
-        if response.status_code != HTTPStatus.OK:
-            print(f"[E2E] user sweep: search returned {response.status_code}, skipping")
-            return 0
-
-        for user in response.json().get("users", []):
-            login_ids = user.get("loginIds") or []
-            if not login_ids:
-                continue
-            login_id = login_ids[0]
-            if login_id == E2E_TEST_EMAIL:
-                continue
-            if not login_id.startswith(LEAKED_USER_PREFIXES):
-                continue
-            client.post(
-                _mgmt_url("/v1/mgmt/user/delete"),
-                headers=_auth_header(),
-                json={"loginId": login_id},
-            )
-            removed += 1
-
-    if removed:
-        print(f"[E2E] user sweep: removed {removed} leaked user(s)")
-    return removed
-
-
-# Name prefix for the throwaway owner+admin key `get_admin_session_token` mints
-# once per session. The suffix is a uuid4 fragment, so a survivor can only be
-# litter from an earlier run.
-LEAKED_ACCESS_KEY_PREFIX = "e2e-admin-"
-
-# E2E-created roles and permissions all carry an `-e2e-<hex>` fragment from
-# `unique_name`. Matching on that rather than on a leading prefix, because the
-# fixtures use many different prefixes (list-, chain-, batch-, canon-, upd-, …)
-# and a prefix list would silently miss whichever one gets added next.
-_E2E_RBAC_MARKER = re.compile(r"-e2e-[0-9a-f]{6,}")
-
-
-def sweep_leaked_e2e_access_keys() -> int:
-    """Delete owner/admin access keys left behind by earlier runs.
-
-    `get_admin_session_token` mints one per session and deletes it in a
-    `finally`. A failed delete used to be swallowed whole, leaving a standing
-    owner+admin credential with no expiry on a shared project. This is the
-    backstop for that, and for runs killed before teardown.
-    """
-    if not (DESCOPE_PROJECT_ID and DESCOPE_MANAGEMENT_KEY and E2E_TEST_TENANT_ID):
-        return 0
-
-    removed = 0
-    with httpx.Client(timeout=30) as client:
-        response = client.post(
-            _mgmt_url("/v1/mgmt/accesskey/search"),
-            headers=_auth_header(),
-            json={"tenantIds": [E2E_TEST_TENANT_ID]},
-        )
-        if response.status_code != HTTPStatus.OK:
-            print(f"[E2E] access-key sweep: search returned {response.status_code}, skipping")
-            return 0
-
-        for key in response.json().get("keys", []):
-            name = key.get("name") or ""
-            key_id = key.get("id") or ""
-            if not key_id or not name.startswith(LEAKED_ACCESS_KEY_PREFIX):
-                continue
-            client.post(
-                _mgmt_url("/v1/mgmt/accesskey/delete"),
-                headers=_auth_header(),
-                json={"id": key_id},
-            )
-            removed += 1
-
-    if removed:
-        print(f"[E2E] access-key sweep: removed {removed} leaked admin key(s)")
-    return removed
-
-
-def sweep_leaked_e2e_rbac() -> int:
-    """Delete roles and permissions left behind by earlier runs.
-
-    Per-test cleanup deletes by name inside a `finally`, which never runs for a
-    cancelled run and is skipped whenever a test fails before the name is bound.
-    The debris is unbounded and it makes the project's real authorization model
-    unreadable. Only names carrying the `-e2e-<hex>` marker are touched, so the
-    real model (`Tenant Admin`, `viewer`, `projects.*`, …) is never at risk.
-    """
-    if not (DESCOPE_PROJECT_ID and DESCOPE_MANAGEMENT_KEY):
-        return 0
-
-    removed = 0
-    with httpx.Client(timeout=60) as client:
-        # Roles first: deleting a permission still referenced by a role can be
-        # refused, and every leaked role is itself disposable.
-        for kind, list_path, list_key, delete_path in (
-            ("role", "/v1/mgmt/role/all", "roles", "/v1/mgmt/role/delete"),
-            ("permission", "/v1/mgmt/permission/all", "permissions", "/v1/mgmt/permission/delete"),
-        ):
-            response = client.get(_mgmt_url(list_path), headers=_auth_header())
-            if response.status_code != HTTPStatus.OK:
-                print(f"[E2E] rbac sweep: {kind} list returned {response.status_code}, skipping")
-                continue
-            for item in response.json().get(list_key, []):
-                name = item.get("name") or ""
-                if not _E2E_RBAC_MARKER.search(name):
-                    continue
-                client.post(_mgmt_url(delete_path), headers=_auth_header(), json={"name": name})
-                removed += 1
-
-    if removed:
-        print(f"[E2E] rbac sweep: removed {removed} leaked role(s)/permission(s)")
-    return removed
