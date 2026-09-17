@@ -53,3 +53,6 @@ PROMPT.md
 # OS
 .DS_Store
 Thumbs.db
+
+# Pinned checkout of the blind-peer-review plugin (see .github/workflows/claude.yml)
+.review-plugin/
