@@ -280,8 +280,15 @@ async def test_tampered_ory_token_is_rejected(db_session, ory_token_source):
     await _seed_ory_provider(db_session, ory_token_source.issuer)
     token = ory_token_source.mint(sub=_unique_subject("ory-tampered"), email="tampered@example.com")
     header, payload, signature = token.split(".")
-    flipped = "A" if signature[-1] != "A" else "B"
-    tampered = f"{header}.{payload}.{signature[:-1]}{flipped}"
+    # Mutate the FIRST signature character, not the last. For an RS256 signature
+    # (256 bytes, length 1 mod 3) the final base64url character carries two
+    # significant bits plus four bits of padding, so a canonical encoder emits only
+    # "A", "Q", "g" or "w" there — and swapping "A" for "B" changes padding alone,
+    # which the decoder discards. The signature then still verifies and the request
+    # returns 200. Character 0 carries six significant bits, so changing it always
+    # changes the decoded bytes.
+    flipped = "A" if signature[0] != "A" else "B"
+    tampered = f"{header}.{payload}.{flipped}{signature[1:]}"
     app = _build_app(db_session, issuer=ory_token_source.issuer, audience=ory_token_source.audience)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
