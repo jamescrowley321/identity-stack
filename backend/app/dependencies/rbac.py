@@ -33,6 +33,7 @@ from fastapi import Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import get_session_factory
+from app.models.identity.user import UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
@@ -117,10 +118,32 @@ async def _canonical_grants(
         logger.debug("canonical role resolution found no identity for sub=%r", sub)
         raise HTTPException(status_code=403, detail="No tenant context")
 
+    # Deactivation is the only revocation signal that reaches this path. Every
+    # control that offboards a user — ``UserService.deactivate_user``, the Descope
+    # ``user.deleted`` webhook, and reconciliation's ``disabled``/``invited`` mapping
+    # — sets ``status`` and leaves the ``user_tenant_roles`` rows intact. For a
+    # provider in ``CANONICAL_RBAC_PROVIDERS`` the canonical model is the sole
+    # authorization source and nothing disables the upstream account, so a non-active
+    # user must be refused here or offboarding revokes nothing at all. Unknown values
+    # are refused for the same reason: this fails closed.
+    user_status = (result.ok.get("user") or {}).get("status")
+    if user_status != UserStatus.active.value:
+        logger.warning(
+            "canonical role resolution refused a non-active user (status=%r)",
+            user_status,
+        )
+        raise HTTPException(status_code=403, detail="No tenant context")
+
     grants = result.ok.get("roles", [])
     tenant_ids = {grant["tenant_id"] for grant in grants}
 
     claimed_tenant = claims.get("dct")
+    if claimed_tenant is not None and not isinstance(claimed_tenant, str):
+        # ``dct`` arrives straight from the token. A list or dict raises
+        # ``TypeError: unhashable type`` on the membership test below and surfaces as
+        # a 500 out of an auth dependency — the one branch here that would not fail
+        # closed.
+        raise HTTPException(status_code=403, detail="No tenant context")
     if claimed_tenant:
         # A provider in this set does not normally emit `dct`, but if a token does
         # carry one it must name a tenant the canonical model actually grants.
