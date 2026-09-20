@@ -183,8 +183,20 @@ def stub_resolver(monkeypatch):
     return install
 
 
-def _grants(*entries) -> Ok:
-    return Ok({"roles": [{"tenant_id": t, "role_name": r, "permissions": list(p)} for t, r, p in entries]})
+def _grants(*entries, status: str = "active") -> Ok:
+    """Mirror the real resolver payload, user block included.
+
+    ``IdentityResolutionService`` returns ``user`` alongside ``roles`` and the
+    authorization path reads ``status`` from it. A stub that omitted the user block
+    is how a missing status check stayed invisible, so it is built in here rather
+    than added per test.
+    """
+    return Ok(
+        {
+            "user": {"id": "canonical-user-1", "status": status},
+            "roles": [{"tenant_id": t, "role_name": r, "permissions": list(p)} for t, r, p in entries],
+        }
+    )
 
 
 class TestCanonicalRoleResolution:
@@ -247,6 +259,52 @@ class TestCanonicalRoleResolution:
             await dep(_make_request(ORY_CLAIMS, auth_type="Ory"), session=MagicMock())
         assert exc_info.value.status_code == 403
         assert exc_info.value.detail == "No tenant context"
+
+    async def test_deactivated_user_is_refused_despite_holding_the_role(self, stub_resolver):
+        """Offboarding sets `status` and leaves the role rows intact.
+
+        `UserService.deactivate_user`, the Descope `user.deleted` webhook and
+        reconciliation's `disabled` mapping all flip status only. Nothing disables the
+        upstream Ory account, so if this path ignores status the user keeps every
+        role-gated route and can refresh tokens indefinitely. Asserting the reason
+        keeps a later "roles came back empty" refactor from passing vacuously.
+        """
+        stub_resolver(_grants((TENANT_A, "operator", ["sync.read"]), status="inactive"))
+        dep = require_role("operator")
+        with pytest.raises(HTTPException) as exc_info:
+            await dep(_make_request(ORY_CLAIMS, auth_type="Ory"), session=MagicMock())
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.detail == "No tenant context"
+
+    async def test_invited_user_is_refused(self, stub_resolver):
+        """`provisioned` is what reconciliation maps Descope `invited` to — not yet active."""
+        stub_resolver(_grants((TENANT_A, "operator", []), status="provisioned"))
+        dep = require_role("operator")
+        with pytest.raises(HTTPException) as exc_info:
+            await dep(_make_request(ORY_CLAIMS, auth_type="Ory"), session=MagicMock())
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.detail == "No tenant context"
+
+    async def test_unknown_or_absent_status_is_refused(self, stub_resolver):
+        """An unrecognised status must deny, not fall through to the role check."""
+        stub_resolver(Ok({"roles": [{"tenant_id": TENANT_A, "role_name": "operator", "permissions": []}]}))
+        dep = require_role("operator")
+        with pytest.raises(HTTPException) as exc_info:
+            await dep(_make_request(ORY_CLAIMS, auth_type="Ory"), session=MagicMock())
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.detail == "No tenant context"
+
+    async def test_non_string_dct_is_refused_rather_than_crashing(self, stub_resolver):
+        """`dct` is attacker-adjacent input. A list is unhashable, and the membership
+        test below it would raise TypeError out of an auth dependency as a 500 —
+        the one branch of this path that would not fail closed."""
+        stub_resolver(_grants((TENANT_A, "operator", [])))
+        dep = require_role("operator")
+        for bad in ([TENANT_A], {"tenant": TENANT_A}):
+            with pytest.raises(HTTPException) as exc_info:
+                await dep(_make_request({**ORY_CLAIMS, "dct": bad}, auth_type="Ory"), session=MagicMock())
+            assert exc_info.value.status_code == 403
+            assert exc_info.value.detail == "No tenant context"
 
     async def test_dct_selects_among_multiple_canonical_tenants(self, stub_resolver):
         stub_resolver(_grants((TENANT_A, "operator", []), (TENANT_B, "member", [])))
