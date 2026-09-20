@@ -295,8 +295,15 @@ def test_tampered_ory_jwt_is_rejected(ory_tokens, bearer_context):
     """One flipped signature byte → 401. Proves the running backend verifies, not decodes."""
     sub, email = _new_principal()
     header, payload, signature = ory_tokens.mint(sub=sub, email=email, email_verified=True).split(".")
-    flipped = "A" if signature[-1] != "A" else "B"
-    context = bearer_context(f"{header}.{payload}.{signature[:-1]}{flipped}")
+    # Mutate the FIRST signature character, not the last. For an RS256 signature
+    # (256 bytes, length 1 mod 3) the final base64url character carries two
+    # significant bits plus four bits of padding, so a canonical encoder emits only
+    # "A", "Q", "g" or "w" there — and swapping "A" for "B" changes padding alone,
+    # which the decoder discards. The signature then still verifies and the request
+    # returns 200. Character 0 carries six significant bits, so changing it always
+    # changes the decoded bytes.
+    flipped = "A" if signature[0] != "A" else "B"
+    context = bearer_context(f"{header}.{payload}.{flipped}{signature[1:]}")
 
     assert context.get("/api/identity").status == 401
 
