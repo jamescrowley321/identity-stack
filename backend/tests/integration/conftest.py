@@ -26,6 +26,13 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from tests.helpers.ory import (
+    OryTokenSource,
+    OryTokenSourceMisconfigured,
+    OryTokenSourceUnavailable,
+    build_ory_token_source,
+)
+
 
 def _unavailable(reason: str) -> None:
     """Skip locally, fail in CI.
@@ -222,3 +229,25 @@ async def redis_client():
     client = Redis.from_url(url, decode_responses=True)
     yield client
     await client.aclose()
+
+
+# ──────────────────────────────────────────────
+# Ory fixtures — real provider-signed tokens
+# ──────────────────────────────────────────────
+#
+# The token source itself lives in tests/helpers/ory.py: the E2E suite mints the
+# same tokens against the real running backend, and neither suite should have to
+# import the other's conftest to get them. Only the skip-or-fail policy — which
+# differs by suite — is decided here.
+
+
+@pytest.fixture(scope="session")
+def ory_token_source() -> OryTokenSource:
+    """An Ory token source: a live project when configured, else local Hydra."""
+    try:
+        return build_ory_token_source()
+    except OryTokenSourceMisconfigured as exc:
+        # Not an absence — someone set half a credential group. Always loud.
+        pytest.fail(str(exc))
+    except OryTokenSourceUnavailable as exc:
+        _unavailable(str(exc))

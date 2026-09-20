@@ -27,6 +27,11 @@ _has_client_creds = bool(os.environ.get("DESCOPE_CLIENT_ID") and os.environ.get(
 #: reported green. The workflow gates the step on DESCOPE_PROJECT_ID alone, so any
 #: OTHER variable going missing (renamed secret, expired client secret removed from
 #: the repo) silently re-hollows the suite.
+#
+# E2E_ORY_ISSUER_URL and E2E_DATABASE_URL are listed for the same reason, one step
+# further on: test_ory_sso_e2e.py skips its whole module without the first and its
+# tier-3 authorization test without the second, so either going missing would
+# silently retire the Ory end-to-end coverage (FR-21) while the job stayed green.
 _CI_REQUIRED_ENV = (
     "DESCOPE_PROJECT_ID",
     "DESCOPE_MANAGEMENT_KEY",
@@ -34,6 +39,8 @@ _CI_REQUIRED_ENV = (
     "DESCOPE_CLIENT_SECRET",
     "E2E_TEST_EMAIL",
     "E2E_TEST_TENANT_ID",
+    "E2E_ORY_ISSUER_URL",
+    "E2E_DATABASE_URL",
 )
 
 
