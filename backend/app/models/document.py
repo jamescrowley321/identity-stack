@@ -1,7 +1,10 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
+import sqlalchemy as sa
 from sqlmodel import Field, SQLModel
+
+from app.models.types import UTCDateTime
 
 
 class Document(SQLModel, table=True):
@@ -14,4 +17,9 @@ class Document(SQLModel, table=True):
     title: str
     content: str = ""
     created_by: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    # Explicit column so the type does not depend on the installed sqlmodel's
+    # default mapping for `datetime`; matches migration 001 (timestamptz NOT NULL).
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=sa.Column(UTCDateTime(), nullable=False, server_default=sa.func.now()),
+    )
