@@ -15,21 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-
-      # Install exactly what backend/uv.lock pins. `pip install -e ".[dev]"`
-      # ignored the lockfile and re-resolved every run, so an upstream release
-      # (sqlmodel 0.0.47) broke unrelated PRs without any change in this repo.
-      # --locked also fails the job if uv.lock is stale against pyproject.toml.
-      - name: Install backend dependencies
-        run: |
-          cd backend
-          uv sync --locked --python 3.12
-          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/setup-backend
 
       - name: Ruff check
         run: cd backend && ruff check .
@@ -67,18 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-
-      # Locked install from backend/uv.lock; see the Lint job.
-      - name: Install backend dependencies
-        run: |
-          cd backend
-          uv sync --locked --python 3.12
-          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/setup-backend
 
       - name: Start test stack (postgres + redis + hydra)
         run: docker compose -f docker-compose.test.yml up -d --wait
@@ -119,18 +94,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-
-      # Locked install from backend/uv.lock; see the Lint job.
-      - name: Install backend dependencies
-        run: |
-          cd backend
-          uv sync --locked --python 3.12
-          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/setup-backend
 
       - name: Start test stack (postgres + redis + hydra)
         run: docker compose -f docker-compose.test.yml up -d --wait
@@ -184,25 +148,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-
-      # Locked install from backend/uv.lock; see the Lint job. pytest-playwright
-      # comes from the locked dev dependency group.
-      - name: Install backend dependencies
-        run: |
-          cd backend
-          uv sync --locked --python 3.12
-          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/setup-backend
 
       - name: Install Playwright browsers
         run: playwright install --with-deps chromium

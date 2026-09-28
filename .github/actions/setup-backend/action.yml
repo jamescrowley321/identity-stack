@@ -1,0 +1,27 @@
+name: Set up backend
+description: Python 3.12 + uv, then a locked install of backend/uv.lock onto PATH.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: "3.12"
+
+    # Cache uv's package cache keyed on the lockfile, so each job links the
+    # locked wheels from the cache instead of re-downloading them.
+    - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      with:
+        enable-cache: true
+        cache-dependency-glob: backend/uv.lock
+
+    # Install exactly what backend/uv.lock pins. `pip install -e ".[dev]"`
+    # ignored the lockfile and re-resolved every run, so an upstream release
+    # (sqlmodel 0.0.47) broke unrelated PRs without any change in this repo.
+    # --locked also fails the job if uv.lock is stale against pyproject.toml.
+    - name: Install backend dependencies
+      shell: bash
+      run: |
+        cd backend
+        uv sync --locked --python 3.12
+        echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
