@@ -10,7 +10,7 @@ help: ## show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 setup: ## install all dependencies
-	cd backend && python -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
+	cd backend && uv sync --locked
 	cd frontend && npm install
 
 lint: ## run linters
