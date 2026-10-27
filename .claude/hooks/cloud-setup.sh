@@ -11,10 +11,18 @@ root=$PWD
 
 note() { echo "cloud-setup: $*"; }
 
+# Later commands in the session run in a fresh shell. Put directories on its
+# PATH through CLAUDE_ENV_FILE when the harness provides one.
+persist_path() {
+  [[ -n "${CLAUDE_ENV_FILE:-}" ]] && echo "export PATH=\"$1:\$PATH\"" >> "$CLAUDE_ENV_FILE"
+  return 0
+}
+
 # uv runs the backend's Python.
 if ! command -v uv > /dev/null; then
   curl -LsSf https://astral.sh/uv/install.sh 2> /dev/null | sh > /dev/null 2>&1
   export PATH="$HOME/.local/bin:$PATH"
+  persist_path "$HOME/.local/bin"
 fi
 if command -v uv > /dev/null; then
   note "uv $(uv --version 2>&1)"
@@ -32,9 +40,7 @@ fi
 if (cd backend && uv sync --locked --python 3.12 > /dev/null 2>&1); then
   note "backend deps synced (backend/.venv)"
   # Put ruff and pytest on PATH for the whole session.
-  if [[ -n "${CLAUDE_ENV_FILE:-}" ]]; then
-    echo "export PATH=\"$root/backend/.venv/bin:\$PATH\"" >> "$CLAUDE_ENV_FILE"
-  fi
+  persist_path "$root/backend/.venv/bin"
 else
   note "uv sync failed; backend deps are missing"
 fi
@@ -43,6 +49,8 @@ fi
 node_major() { node --version 2> /dev/null | sed -E 's/^v([0-9]+).*/\1/'; }
 if [[ "$(node_major)" != 22 ]]; then
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  # nvm does not support nounset, so relax it around nvm only.
+  set +u
   # shellcheck disable=SC1091
   [[ -s "$NVM_DIR/nvm.sh" ]] && . "$NVM_DIR/nvm.sh" > /dev/null 2>&1
   if command -v nvm > /dev/null; then
@@ -50,9 +58,11 @@ if [[ "$(node_major)" != 22 ]]; then
   elif command -v npm > /dev/null; then
     npm install -g n > /dev/null 2>&1 && n 22 > /dev/null 2>&1 && hash -r
   fi
+  set -u
 fi
 if [[ "$(node_major)" == 22 ]]; then
   note "node $(node --version)"
+  persist_path "$(dirname "$(command -v node)")"
 else
   note "node 22 is not available (found: $(node --version 2>&1)); frontend checks may differ from CI"
 fi
