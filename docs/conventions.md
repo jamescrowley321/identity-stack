@@ -263,9 +263,39 @@ either. They **SHOULD** construct a repository, as `routers/idp_links.py` does.
 
 *Enforcement:* test (`test_queries_live_in_repositories`).
 
+## Tracing
+
+### 20. Every public service method opens its own span
+
+Every module in `app/services/` that spans **MUST** create its tracer at module level with
+`tracer = trace.get_tracer(__name__)` (`from opentelemetry import trace`). Every public
+method of a class in `app/services/` **MUST** open a span named `<Class>.<method>` with
+`with tracer.start_as_current_span("<Class>.<method>"):` around its body, for example
+`UserService.create_user` or `DescopeManagementClient.load_tenant`. A public module-level
+function **MUST** open a span named `<module>.<function>`. The logout strategies, which are
+private functions reached through `LOGOUT_STRATEGIES`, **MUST** open a span named
+`logout.<logout_kind>` (`logout.management`, `logout.rp_initiated`). A method **MAY** set
+attributes on its span. Attributes are identifiers and counts, never credentials (§9). See
+[ADR-0007](adr/0007-a-span-per-service-method.md).
+
+- Exception: abstract methods, such as those of the `IdentityService` interface in
+  `services/identity.py`. A concrete implementation is traced.
+- Exception: `DescopeManagementClient.close`, a lifecycle method that closes the owned
+  HTTP client.
+- Exception: `canonical_user` and `canonical_tenant` in `services/canonical.py`, which are
+  pure dict-shaping helpers with no I/O.
+- Exception: `run_cache_invalidation_subscriber` in `services/identity_resolution.py`, a
+  background loop for the life of the process whose span would never end.
+- Exception: the provider sync adapters in `services/adapters/`. They keep their own
+  `<provider>.<operation>` span names (`descope.sync_user`, `ory.sync_tenant`) and span
+  only the operations that reach the provider.
+
+*Enforcement:* test (`test_public_service_methods_open_their_own_span`,
+`test_logout_strategies_open_a_span_per_logout_kind`).
+
 ## Changing the rules
 
-### 20. A rule change is recorded
+### 21. A rule change is recorded
 
 A change that adds, removes or reverses a **MUST** rule **SHOULD** come with an ADR in
 [`docs/adr/`](adr/README.md). An ADR that replaces an earlier one marks the earlier one
