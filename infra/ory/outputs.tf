@@ -24,7 +24,7 @@ output "spa_client_id" {
 }
 
 output "project_api_key" {
-  description = "Terraform-managed project API key (sensitive). Route to Infisical/HCP for the backend OrySyncAdapter; never commit."
+  description = "Terraform-managed project API key (sensitive). Lives only in Terraform state: nothing routes it to the backend OrySyncAdapter yet (infra/PROVIDERS.md, gap 5). Never commit."
   value       = module.identity_stack_dev.project_api_key
   sensitive   = true
 }
