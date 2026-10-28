@@ -6,6 +6,11 @@ from opentelemetry import trace
 from app.outbound import OutboundClient, OutboundResponse, outbound_client
 
 tracer = trace.get_tracer(__name__)
+# Spans in this client never record an exception or set ERROR status. Callers
+# routinely treat an UpstreamStatusError as an answer (a 404 from load_user, a
+# 400/404 from delete_relation during revoke), so whether a call failed is the
+# caller's decision, and the httpx client span beneath records the HTTP status.
+# See docs/conventions.md §20.
 
 # Default timeout for Descope API calls (seconds)
 _DEFAULT_TIMEOUT = 30.0
@@ -88,7 +93,9 @@ class DescopeManagementClient:
         self_provisioning_domains: list[str] | None = None,
     ) -> dict:
         """Create a new tenant in Descope. Returns the tenant object with its ID."""
-        with tracer.start_as_current_span("DescopeManagementClient.create_tenant"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.create_tenant", record_exception=False, set_status_on_exception=False
+        ):
             body: dict = {"name": name}
             if self_provisioning_domains:
                 body["selfProvisioningDomains"] = self_provisioning_domains
@@ -97,13 +104,17 @@ class DescopeManagementClient:
 
     async def list_tenants(self) -> list[dict]:
         """List all tenants in the Descope project."""
-        with tracer.start_as_current_span("DescopeManagementClient.list_tenants"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.list_tenants", record_exception=False, set_status_on_exception=False
+        ):
             resp = await self._request("/v1/mgmt/tenant/search", {})
             return resp.json().get("tenants", [])
 
     async def load_tenant(self, tenant_id: str) -> dict:
         """Load a single tenant by ID via search endpoint."""
-        with tracer.start_as_current_span("DescopeManagementClient.load_tenant"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.load_tenant", record_exception=False, set_status_on_exception=False
+        ):
             resp = await self._request("/v1/mgmt/tenant/search", {"tenantIds": [tenant_id]})
             tenants = resp.json().get("tenants", [])
             if not tenants:
@@ -112,12 +123,16 @@ class DescopeManagementClient:
 
     async def delete_tenant(self, tenant_id: str) -> None:
         """Delete a tenant by ID."""
-        with tracer.start_as_current_span("DescopeManagementClient.delete_tenant"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.delete_tenant", record_exception=False, set_status_on_exception=False
+        ):
             await self._request("/v1/mgmt/tenant/delete", {"id": tenant_id})
 
     async def add_user_to_tenant(self, user_id: str, tenant_id: str) -> None:
         """Add a user to a tenant."""
-        with tracer.start_as_current_span("DescopeManagementClient.add_user_to_tenant"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.add_user_to_tenant", record_exception=False, set_status_on_exception=False
+        ):
             await self._request(
                 "/v1/mgmt/user/update/tenant/add",
                 {"loginId": user_id, "tenantId": tenant_id},
@@ -125,7 +140,9 @@ class DescopeManagementClient:
 
     async def assign_roles(self, user_id: str, tenant_id: str, role_names: list[str]) -> None:
         """Assign roles to a user within a specific tenant."""
-        with tracer.start_as_current_span("DescopeManagementClient.assign_roles"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.assign_roles", record_exception=False, set_status_on_exception=False
+        ):
             await self._request(
                 "/v1/mgmt/user/update/role/add",
                 {"loginId": user_id, "tenantId": tenant_id, "roleNames": role_names},
@@ -133,7 +150,9 @@ class DescopeManagementClient:
 
     async def remove_roles(self, user_id: str, tenant_id: str, role_names: list[str]) -> None:
         """Remove roles from a user within a specific tenant."""
-        with tracer.start_as_current_span("DescopeManagementClient.remove_roles"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.remove_roles", record_exception=False, set_status_on_exception=False
+        ):
             await self._request(
                 "/v1/mgmt/user/update/role/remove",
                 {"loginId": user_id, "tenantId": tenant_id, "roleNames": role_names},
@@ -159,7 +178,9 @@ class DescopeManagementClient:
         * The search **omits Descope test users unless asked**, and the E2E suite's own
           account is one. Without ``withTestUser`` it reports no such user.
         """
-        with tracer.start_as_current_span("DescopeManagementClient.load_user"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.load_user", record_exception=False, set_status_on_exception=False
+        ):
             first = "userIds" if self._DESCOPE_USER_ID.match(identifier) else "loginIds"
             second = "loginIds" if first == "userIds" else "userIds"
             for key in (first, second):
@@ -182,7 +203,9 @@ class DescopeManagementClient:
 
         Raises ValueError if the user has no loginIds.
         """
-        with tracer.start_as_current_span("DescopeManagementClient.resolve_login_id"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.resolve_login_id", record_exception=False, set_status_on_exception=False
+        ):
             user = await self.load_user(user_id)
             login_ids = user.get("loginIds", [])
             if not login_ids:
@@ -193,7 +216,11 @@ class DescopeManagementClient:
         self, user_id: str, attribute_key: str, attribute_value: str | int | bool | float | None
     ) -> None:
         """Set a single custom attribute on a user."""
-        with tracer.start_as_current_span("DescopeManagementClient.update_user_custom_attribute"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.update_user_custom_attribute",
+            record_exception=False,
+            set_status_on_exception=False,
+        ):
             await self._request(
                 "/v1/mgmt/user/update/customAttribute",
                 {"loginId": user_id, "attributeKey": attribute_key, "attributeValue": attribute_value},
@@ -201,7 +228,11 @@ class DescopeManagementClient:
 
     async def update_tenant_custom_attributes(self, tenant_id: str, custom_attributes: dict) -> None:
         """Update custom attributes on a tenant."""
-        with tracer.start_as_current_span("DescopeManagementClient.update_tenant_custom_attributes"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.update_tenant_custom_attributes",
+            record_exception=False,
+            set_status_on_exception=False,
+        ):
             await self._request(
                 "/v1/mgmt/tenant/update",
                 {"id": tenant_id, "customAttributes": custom_attributes},
@@ -220,7 +251,9 @@ class DescopeManagementClient:
         a tenant and its roles. Without this, the key is created but has
         no tenant associations and won't appear in tenant-scoped searches.
         """
-        with tracer.start_as_current_span("DescopeManagementClient.create_access_key"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.create_access_key", record_exception=False, set_status_on_exception=False
+        ):
             key_tenant: dict = {"tenantId": tenant_id}
             if role_names:
                 key_tenant["roleNames"] = role_names
@@ -232,29 +265,39 @@ class DescopeManagementClient:
 
     async def search_access_keys(self, tenant_id: str) -> list[dict]:
         """List access keys filtered by tenant."""
-        with tracer.start_as_current_span("DescopeManagementClient.search_access_keys"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.search_access_keys", record_exception=False, set_status_on_exception=False
+        ):
             resp = await self._request("/v1/mgmt/accesskey/search", {"tenantIds": [tenant_id]})
             return resp.json().get("keys", [])
 
     async def load_access_key(self, key_id: str) -> dict:
         """Load a single access key by ID."""
-        with tracer.start_as_current_span("DescopeManagementClient.load_access_key"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.load_access_key", record_exception=False, set_status_on_exception=False
+        ):
             resp = await self._request("/v1/mgmt/accesskey/load", {"id": key_id})
             return resp.json().get("key", {})
 
     async def deactivate_access_key(self, key_id: str) -> None:
         """Deactivate (revoke) an access key."""
-        with tracer.start_as_current_span("DescopeManagementClient.deactivate_access_key"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.deactivate_access_key", record_exception=False, set_status_on_exception=False
+        ):
             await self._request("/v1/mgmt/accesskey/deactivate", {"id": key_id})
 
     async def activate_access_key(self, key_id: str) -> None:
         """Reactivate a previously deactivated access key."""
-        with tracer.start_as_current_span("DescopeManagementClient.activate_access_key"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.activate_access_key", record_exception=False, set_status_on_exception=False
+        ):
             await self._request("/v1/mgmt/accesskey/activate", {"id": key_id})
 
     async def delete_access_key(self, key_id: str) -> None:
         """Permanently delete an access key."""
-        with tracer.start_as_current_span("DescopeManagementClient.delete_access_key"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.delete_access_key", record_exception=False, set_status_on_exception=False
+        ):
             await self._request("/v1/mgmt/accesskey/delete", {"id": key_id})
 
     async def list_permissions(self) -> list[dict]:
@@ -263,36 +306,48 @@ class DescopeManagementClient:
         Unlike tenants and roles whose ``/search`` endpoint accepts POST,
         permissions only expose a ``/all`` endpoint that requires GET.
         """
-        with tracer.start_as_current_span("DescopeManagementClient.list_permissions"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.list_permissions", record_exception=False, set_status_on_exception=False
+        ):
             resp = await self._get("/v1/mgmt/permission/all")
             return resp.json().get("permissions", [])
 
     async def create_permission(self, name: str, description: str = "") -> None:
         """Create a new permission definition."""
-        with tracer.start_as_current_span("DescopeManagementClient.create_permission"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.create_permission", record_exception=False, set_status_on_exception=False
+        ):
             await self._request("/v1/mgmt/permission/create", {"name": name, "description": description})
 
     async def update_permission(self, name: str, new_name: str, description: str = "") -> None:
         """Update an existing permission definition."""
-        with tracer.start_as_current_span("DescopeManagementClient.update_permission"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.update_permission", record_exception=False, set_status_on_exception=False
+        ):
             await self._request(
                 "/v1/mgmt/permission/update", {"name": name, "newName": new_name, "description": description}
             )
 
     async def delete_permission(self, name: str) -> None:
         """Delete a permission definition by name."""
-        with tracer.start_as_current_span("DescopeManagementClient.delete_permission"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.delete_permission", record_exception=False, set_status_on_exception=False
+        ):
             await self._request("/v1/mgmt/permission/delete", {"name": name})
 
     async def list_roles(self) -> list[dict]:
         """List all role definitions in the Descope project."""
-        with tracer.start_as_current_span("DescopeManagementClient.list_roles"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.list_roles", record_exception=False, set_status_on_exception=False
+        ):
             resp = await self._request("/v1/mgmt/role/search", {})
             return resp.json().get("roles") or []
 
     async def create_role(self, name: str, description: str = "", permission_names: list[str] | None = None) -> None:
         """Create a new role definition with optional permission mappings."""
-        with tracer.start_as_current_span("DescopeManagementClient.create_role"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.create_role", record_exception=False, set_status_on_exception=False
+        ):
             body: dict = {"name": name, "description": description}
             if permission_names is not None:
                 body["permissionNames"] = permission_names
@@ -302,7 +357,9 @@ class DescopeManagementClient:
         self, name: str, new_name: str, description: str | None = None, permission_names: list[str] | None = None
     ) -> None:
         """Update an existing role definition."""
-        with tracer.start_as_current_span("DescopeManagementClient.update_role"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.update_role", record_exception=False, set_status_on_exception=False
+        ):
             body: dict = {"name": name, "newName": new_name}
             if description is not None:
                 body["description"] = description
@@ -312,7 +369,9 @@ class DescopeManagementClient:
 
     async def delete_role(self, name: str) -> None:
         """Delete a role definition by name."""
-        with tracer.start_as_current_span("DescopeManagementClient.delete_role"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.delete_role", record_exception=False, set_status_on_exception=False
+        ):
             await self._request("/v1/mgmt/role/delete", {"name": name})
 
     # --- FGA (Fine-Grained Authorization) methods ---
@@ -331,13 +390,17 @@ class DescopeManagementClient:
         ``descope_fga_schema`` (go-sdk ``FGA().LoadSchema`` / ``SaveSchema``), so
         what this reads back is what infra/fga.tf declares.
         """
-        with tracer.start_as_current_span("DescopeManagementClient.get_fga_schema"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.get_fga_schema", record_exception=False, set_status_on_exception=False
+        ):
             resp = await self._get("/v1/mgmt/fga/schema")
             return resp.json().get("dsl", "")
 
     async def update_fga_schema(self, schema: str) -> None:
         """Save the FGA schema from the AuthZ 1.0 DSL. See get_fga_schema."""
-        with tracer.start_as_current_span("DescopeManagementClient.update_fga_schema"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.update_fga_schema", record_exception=False, set_status_on_exception=False
+        ):
             if not schema or not schema.strip():
                 raise ValueError("schema must be a non-empty string")
             await self._request("/v1/mgmt/fga/schema", {"dsl": schema})
@@ -368,7 +431,9 @@ class DescopeManagementClient:
 
     async def create_relation(self, resource_type: str, resource_id: str, relation: str, target: str) -> None:
         """Create an FGA relation tuple."""
-        with tracer.start_as_current_span("DescopeManagementClient.create_relation"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.create_relation", record_exception=False, set_status_on_exception=False
+        ):
             self._validate_fga_param(resource_type, "resource_type")
             self._validate_fga_param(resource_id, "resource_id")
             self._validate_fga_param(relation, "relation")
@@ -380,7 +445,9 @@ class DescopeManagementClient:
 
     async def delete_relation(self, resource_type: str, resource_id: str, relation: str, target: str) -> None:
         """Delete an FGA relation tuple."""
-        with tracer.start_as_current_span("DescopeManagementClient.delete_relation"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.delete_relation", record_exception=False, set_status_on_exception=False
+        ):
             self._validate_fga_param(resource_type, "resource_type")
             self._validate_fga_param(resource_id, "resource_id")
             self._validate_fga_param(relation, "relation")
@@ -401,7 +468,9 @@ class DescopeManagementClient:
         relations exist. Narrowing is done here because the endpoint does not take
         those filters.
         """
-        with tracer.start_as_current_span("DescopeManagementClient.list_relations"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.list_relations", record_exception=False, set_status_on_exception=False
+        ):
             self._validate_fga_param(resource_type, "resource_type")
             self._validate_fga_param(resource_id, "resource_id")
             if relation is not None:
@@ -421,7 +490,9 @@ class DescopeManagementClient:
 
     async def list_all_relations(self, resource_type: str, resource_id: str) -> list[dict]:
         """Every relation tuple on a resource. One call; see list_relations."""
-        with tracer.start_as_current_span("DescopeManagementClient.list_all_relations"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.list_all_relations", record_exception=False, set_status_on_exception=False
+        ):
             return await self.list_relations(resource_type, resource_id)
 
     async def list_user_resources(self, resource_type: str, relation: str, target: str) -> list[dict]:
@@ -431,7 +502,9 @@ class DescopeManagementClient:
         relation the target holds in the namespace, so the filter is applied here —
         without it a can_view query also answers with can_edit, can_delete and owner.
         """
-        with tracer.start_as_current_span("DescopeManagementClient.list_user_resources"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.list_user_resources", record_exception=False, set_status_on_exception=False
+        ):
             self._validate_fga_param(resource_type, "resource_type")
             self._validate_fga_param(relation, "relation")
             self._validate_fga_param(target, "target")
@@ -452,7 +525,9 @@ class DescopeManagementClient:
         Raises UpstreamTransportError on network/transport errors.
         Callers should handle these for fail-closed behavior.
         """
-        with tracer.start_as_current_span("DescopeManagementClient.check_permission"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.check_permission", record_exception=False, set_status_on_exception=False
+        ):
             self._validate_fga_param(resource_type, "resource_type")
             self._validate_fga_param(resource_id, "resource_id")
             self._validate_fga_param(relation, "relation")
@@ -481,7 +556,9 @@ class DescopeManagementClient:
         never in it. Same key as go-sdk's makeUpdateUserRequest, which is what
         Descope's own SDKs send.
         """
-        with tracer.start_as_current_span("DescopeManagementClient.invite_user"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.invite_user", record_exception=False, set_status_on_exception=False
+        ):
             tenant: dict[str, object] = {"tenantId": tenant_id}
             if role_names:
                 tenant["roleNames"] = role_names
@@ -493,7 +570,9 @@ class DescopeManagementClient:
 
     async def search_all_users(self, *, max_pages: int = 1000) -> list[dict]:
         """Search for all users in the Descope project, with pagination."""
-        with tracer.start_as_current_span("DescopeManagementClient.search_all_users"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.search_all_users", record_exception=False, set_status_on_exception=False
+        ):
             all_users: list[dict] = []
             limit = 100
             for page in range(max_pages):
@@ -509,7 +588,9 @@ class DescopeManagementClient:
 
     async def search_tenant_users(self, tenant_id: str) -> list[dict]:
         """Search for users belonging to a specific tenant."""
-        with tracer.start_as_current_span("DescopeManagementClient.search_tenant_users"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.search_tenant_users", record_exception=False, set_status_on_exception=False
+        ):
             resp = await self._request("/v1/mgmt/user/search", {"tenantIds": [tenant_id]})
             return resp.json().get("users", [])
 
@@ -524,12 +605,16 @@ class DescopeManagementClient:
         the same body. Matches go-sdk's ManagementUserUpdateStatus, which is what
         the Terraform provider and Descope's own SDKs use.
         """
-        with tracer.start_as_current_span("DescopeManagementClient.update_user_status"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.update_user_status", record_exception=False, set_status_on_exception=False
+        ):
             await self._request("/v1/mgmt/user/update/status", {"loginId": user_id, "status": status})
 
     async def remove_user_from_tenant(self, user_id: str, tenant_id: str) -> None:
         """Remove a user from a specific tenant (does not delete the user globally)."""
-        with tracer.start_as_current_span("DescopeManagementClient.remove_user_from_tenant"):
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.remove_user_from_tenant", record_exception=False, set_status_on_exception=False
+        ):
             await self._request(
                 "/v1/mgmt/user/update/tenant/remove",
                 {"loginId": user_id, "tenantId": tenant_id},
