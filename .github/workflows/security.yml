@@ -14,6 +14,23 @@ jobs:
   pip-audit:
     name: pip-audit (Python SCA)
     runs-on: ubuntu-latest
+    env:
+      # Suppressed pip-audit findings, space-separated vuln IDs (CVE, PYSEC or
+      # GHSA). The project rule is that CVEs are fixed, not ignored: an entry
+      # here is a dated exception that must be justified, not an allowlist.
+      # Keep this list identical to PIP_AUDIT_IGNORES in the Makefile; the job
+      # fails if the two drift.
+      #
+      # Every entry needs a comment line directly above this variable:
+      #   <ID> - <package> <version> - why it can't be fixed or isn't
+      #   reachable - assessed <YYYY-MM-DD> - remove when <condition>
+      #
+      # Currently none. Removed 2026-10-28 after re-assessment:
+      #   CVE-2026-4539 - pygments ReDoS in the AdlLexer, fixed in 2.20.0;
+      #     uv.lock resolves pygments 2.21.0 (dev-only, via pytest and rich).
+      #   CVE-2026-3219 - pip accepted concatenated ZIP/tar archives, fixed in
+      #     26.1; this job installs pip>=26.1 and uv.lock pins pip 26.2.1.
+      PIP_AUDIT_IGNORES: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -28,8 +45,92 @@ jobs:
           pip install -e ".[dev]"
           pip install pip-audit
 
+      - name: Check suppressions match the Makefile
+        run: |
+          make_ignores=$(make --no-print-directory --eval='print-pip-audit-ignores: ; @echo $(PIP_AUDIT_IGNORES)' print-pip-audit-ignores)
+          if [ "$(xargs -n1 <<<"$make_ignores" | sort)" != "$(xargs -n1 <<<"$PIP_AUDIT_IGNORES" | sort)" ]; then
+            echo "::error::PIP_AUDIT_IGNORES differs: security.yml='${PIP_AUDIT_IGNORES}' Makefile='${make_ignores}'"
+            exit 1
+          fi
+
+      # pip-audit runs without any --ignore-vuln flags so suppressed findings
+      # are still seen; the suppression is applied below, and every suppressed
+      # finding is listed in the job summary. On the daily scheduled run a
+      # suppression fails the job once a fixed version exists or once the
+      # finding is gone, so a stale entry can't sit here unnoticed.
       - name: Run pip-audit
-        run: pip-audit --desc --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219
+        run: |
+          set +e
+          pip-audit --desc --format json --output pip-audit.json
+          status=$?
+          set -e
+          if [ ! -s pip-audit.json ]; then
+            echo "::error::pip-audit exited $status without writing a report"
+            exit 1
+          fi
+          python - <<'EOF'
+          import json
+          import os
+          import sys
+
+          ignores = set(os.environ["PIP_AUDIT_IGNORES"].split())
+          scheduled = os.environ["GITHUB_EVENT_NAME"] == "schedule"
+          with open("pip-audit.json") as f:
+              report = json.load(f)
+
+          findings, matched, seen = [], set(), set()
+          for dep in report["dependencies"]:
+              for vuln in dep.get("vulns", []):
+                  ids = {vuln["id"], *vuln.get("aliases", [])}
+                  # The same vulnerability can come back once per database
+                  # (PYSEC and GHSA), each listing the other as an alias.
+                  key = (dep["name"], frozenset(ids))
+                  if key in seen:
+                      continue
+                  seen.add(key)
+                  hit = ids & ignores
+                  matched |= hit
+                  findings.append((dep["name"], dep["version"], vuln, sorted(hit)))
+
+          unsuppressed = [f for f in findings if not f[3]]
+          fixable = [f for f in findings if f[3] and f[2].get("fix_versions")]
+          stale = sorted(ignores - matched)
+
+          lines = ["## pip-audit", ""]
+          if findings:
+              lines += [
+                  "| Package | Version | Vulnerability | Fixed in | Suppressed |",
+                  "|---|---|---|---|---|",
+              ]
+              for name, version, vuln, hit in findings:
+                  ids = ", ".join([vuln["id"], *vuln.get("aliases", [])])
+                  fixed = ", ".join(vuln.get("fix_versions", [])) or "no fix"
+                  mark = f"yes ({', '.join(hit)})" if hit else "no"
+                  lines.append(f"| {name} | {version} | {ids} | {fixed} | {mark} |")
+          else:
+              lines.append("No known vulnerabilities found.")
+          lines += ["", f"Suppressions (PIP_AUDIT_IGNORES): {', '.join(sorted(ignores)) or 'none'}"]
+          if stale:
+              lines.append(f"Suppressions matching no finding (remove them): {', '.join(stale)}")
+          summary = "\n".join(lines) + "\n"
+          print(summary)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(summary)
+
+          failed = False
+          for name, version, vuln, _ in unsuppressed:
+              print(f"::error::{name} {version}: {vuln['id']} {vuln.get('description', '')[:200]}")
+              failed = True
+          for name, version, vuln, hit in fixable:
+              level = "error" if scheduled else "warning"
+              print(f"::{level}::Suppressed {', '.join(hit)} in {name} {version} now has a fix ({', '.join(vuln['fix_versions'])}): upgrade and remove the suppression")
+              failed |= scheduled
+          for vuln_id in stale:
+              level = "error" if scheduled else "warning"
+              print(f"::{level}::Suppressed {vuln_id} no longer matches any finding: remove it from PIP_AUDIT_IGNORES")
+              failed |= scheduled
+          sys.exit(1 if failed else 0)
+          EOF
 
   npm-audit:
     name: npm audit (JS SCA)
