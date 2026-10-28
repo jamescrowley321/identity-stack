@@ -1,8 +1,10 @@
 import logging
-import os
 from typing import Any
 
 from pythonjsonlogger.json import JsonFormatter
+
+from app.knobs import knob
+from app.logbook import logbook
 
 
 class _OTelAwareJsonFormatter(JsonFormatter):
@@ -23,11 +25,15 @@ class _OTelAwareJsonFormatter(JsonFormatter):
 
 
 def setup_logging() -> None:
-    """Configure structured logging. JSON in production, human-readable in development."""
-    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
-    environment = os.getenv("ENVIRONMENT", "development")
+    """Configure structured logging. JSON in production, human-readable in development.
 
-    root = logging.getLogger()
+    The only place handlers, formatters and levels are set. Modules obtain their
+    logger with ``app.logbook.logbook(__name__)`` and never configure it.
+    """
+    log_level = knob("LOG_LEVEL", "INFO").upper()
+    environment = knob("ENVIRONMENT", "development")
+
+    root = logging.root
     root.setLevel(log_level)
 
     # Remove existing handlers to avoid duplicates on reload
@@ -53,11 +59,6 @@ def setup_logging() -> None:
     root.addHandler(handler)
 
     # Suppress noisy third-party loggers
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
-
-
-def get_logger(name: str) -> logging.Logger:
-    """Get a named logger."""
-    return logging.getLogger(name)
+    logbook("httpx").setLevel(logging.WARNING)
+    logbook("httpcore").setLevel(logging.WARNING)
+    logbook("uvicorn.access").setLevel(logging.WARNING)

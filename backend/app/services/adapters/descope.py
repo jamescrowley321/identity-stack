@@ -5,16 +5,16 @@ Wraps DescopeManagementClient with Result[None, SyncError] returns and OTel span
 
 from __future__ import annotations
 
-import logging
 import uuid
 
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
+from app.logbook import logbook
 from app.services.adapters.base import IdentityProviderAdapter, SyncError
 from app.services.descope import DescopeManagementClient
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
 
 _STATUS_MAP: dict[str, str] = {
