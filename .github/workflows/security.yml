@@ -78,22 +78,33 @@ jobs:
           with open("pip-audit.json") as f:
               report = json.load(f)
 
-          findings, matched, seen = [], set(), set()
+          # The same vulnerability can come back once per database (PYSEC and
+          # GHSA) with differing alias lists, so records for a package that
+          # share any ID are merged into one finding.
+          findings = []
           for dep in report["dependencies"]:
+              merged = []
               for vuln in dep.get("vulns", []):
-                  ids = {vuln["id"], *vuln.get("aliases", [])}
-                  # The same vulnerability can come back once per database
-                  # (PYSEC and GHSA), each listing the other as an alias.
-                  key = (dep["name"], frozenset(ids))
-                  if key in seen:
-                      continue
-                  seen.add(key)
-                  hit = ids & ignores
-                  matched |= hit
-                  findings.append((dep["name"], dep["version"], vuln, sorted(hit)))
+                  finding = {
+                      "name": dep["name"],
+                      "version": dep["version"],
+                      "ids": {vuln["id"], *vuln.get("aliases", [])},
+                      "fixes": set(vuln.get("fix_versions", [])),
+                      "desc": " ".join(vuln.get("description", "").split()),
+                  }
+                  for other in [m for m in merged if m["ids"] & finding["ids"]]:
+                      merged.remove(other)
+                      finding["ids"] |= other["ids"]
+                      finding["fixes"] |= other["fixes"]
+                      finding["desc"] = finding["desc"] or other["desc"]
+                  merged.append(finding)
+              findings += merged
+          for finding in findings:
+              finding["hit"] = sorted(finding["ids"] & ignores)
 
-          unsuppressed = [f for f in findings if not f[3]]
-          fixable = [f for f in findings if f[3] and f[2].get("fix_versions")]
+          matched = {i for f in findings for i in f["hit"]}
+          unsuppressed = [f for f in findings if not f["hit"]]
+          fixable = [f for f in findings if f["hit"] and f["fixes"]]
           stale = sorted(ignores - matched)
 
           lines = ["## pip-audit", ""]
@@ -102,11 +113,10 @@ jobs:
                   "| Package | Version | Vulnerability | Fixed in | Suppressed |",
                   "|---|---|---|---|---|",
               ]
-              for name, version, vuln, hit in findings:
-                  ids = ", ".join([vuln["id"], *vuln.get("aliases", [])])
-                  fixed = ", ".join(vuln.get("fix_versions", [])) or "no fix"
-                  mark = f"yes ({', '.join(hit)})" if hit else "no"
-                  lines.append(f"| {name} | {version} | {ids} | {fixed} | {mark} |")
+              for f in findings:
+                  fixed = ", ".join(sorted(f["fixes"])) or "no fix"
+                  mark = f"yes ({', '.join(f['hit'])})" if f["hit"] else "no"
+                  lines.append(f"| {f['name']} | {f['version']} | {', '.join(sorted(f['ids']))} | {fixed} | {mark} |")
           else:
               lines.append("No known vulnerabilities found.")
           lines += ["", f"Suppressions (PIP_AUDIT_IGNORES): {', '.join(sorted(ignores)) or 'none'}"]
@@ -114,16 +124,16 @@ jobs:
               lines.append(f"Suppressions matching no finding (remove them): {', '.join(stale)}")
           summary = "\n".join(lines) + "\n"
           print(summary)
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
-              f.write(summary)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as out:
+              out.write(summary)
 
           failed = False
-          for name, version, vuln, _ in unsuppressed:
-              print(f"::error::{name} {version}: {vuln['id']} {vuln.get('description', '')[:200]}")
+          for f in unsuppressed:
+              print(f"::error::{f['name']} {f['version']}: {', '.join(sorted(f['ids']))} {f['desc'][:200]}")
               failed = True
-          for name, version, vuln, hit in fixable:
+          for f in fixable:
               level = "error" if scheduled else "warning"
-              print(f"::{level}::Suppressed {', '.join(hit)} in {name} {version} now has a fix ({', '.join(vuln['fix_versions'])}): upgrade and remove the suppression")
+              print(f"::{level}::Suppressed {', '.join(f['hit'])} in {f['name']} {f['version']} now has a fix ({', '.join(sorted(f['fixes']))}): upgrade and remove the suppression")
               failed |= scheduled
           for vuln_id in stale:
               level = "error" if scheduled else "warning"
