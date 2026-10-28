@@ -80,9 +80,13 @@ A route handler that catches `UpstreamStatusError` **MUST** also catch
   `get_tenant_settings` and `update_tenant_settings` in `routers/attributes.py`. They catch
   only `UpstreamStatusError`, so a transport failure surfaces as 500. That predates #512, and
   changing those answers to 502 is a behaviour change left for a follow-up.
+- Exception: `routers/accesskeys.py`. No handler in it catches an upstream failure, so every
+  Descope error and timeout there surfaces as 500. That also predates #512 and is left for the
+  same follow-up.
 
-*Enforcement:* Ruff (TID251 on `httpx`), plus a test
-(`test_handlers_that_catch_upstream_status_also_catch_transport`).
+*Enforcement:* Ruff (TID251 on `httpx`), plus tests
+(`test_handlers_that_catch_upstream_status_also_catch_transport` and
+`test_routers_that_call_descope_handle_upstream_failures`).
 
 ### 5. The Descope Management API is called through `DescopeManagementClient`
 
@@ -299,7 +303,15 @@ method of a class in `app/services/` **MUST** open a span named `<Class>.<method
 function **MUST** open a span named `<module>.<function>`. The logout strategies, which are
 private functions reached through `LOGOUT_STRATEGIES`, **MUST** open a span named
 `logout.<logout_kind>` (`logout.management`, `logout.rp_initiated`). A method **MAY** set
-attributes on its span. Attributes are identifiers and counts, never credentials (§9). See
+attributes on its span. Attributes are identifiers and counts, never credentials (§9). A
+method **MAY** return before opening its span when it has nothing to do, as
+`CacheInvalidationPublisher.publish` does when Redis is not configured.
+
+`DescopeManagementClient` spans **MUST** pass `record_exception=False` and
+`set_status_on_exception=False`. Callers routinely treat an `UpstreamStatusError` as an
+answer, such as a 404 from `load_user` or a 400/404 from `delete_relation` during a revoke.
+Whether the call failed is therefore the caller's decision, and the httpx client span
+beneath records the HTTP status. Service spans keep OpenTelemetry's defaults. See
 [ADR-0007](adr/0007-a-span-per-service-method.md).
 
 - Exception: abstract methods, such as those of the `IdentityService` interface in
@@ -315,7 +327,8 @@ attributes on its span. Attributes are identifiers and counts, never credentials
   only the operations that reach the provider.
 
 *Enforcement:* test (`test_public_service_methods_open_their_own_span`,
-`test_logout_strategies_open_a_span_per_logout_kind`).
+`test_logout_strategies_open_a_span_per_logout_kind`,
+`test_descope_client_spans_leave_status_to_the_caller`).
 
 ## Changing the rules
 

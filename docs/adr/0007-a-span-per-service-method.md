@@ -34,3 +34,11 @@ OpenTelemetry httpx instrumentor, with nothing naming the operation.
 - Wrapping a body in `with tracer.start_as_current_span(...)` records an exception that
   escapes the method on its span and re-raises it unchanged. Callers see the same
   exceptions as before.
+- `DescopeManagementClient` spans are the exception to OpenTelemetry's default error
+  handling. Many callers expect and tolerate an upstream 4xx, so these spans record neither
+  the exception nor an ERROR status. Otherwise a successful revoke, or a lookup answered with
+  defaults, would show up in traces as a failure. The httpx client span beneath still
+  records the HTTP status.
+- A method with nothing to do (`CacheInvalidationPublisher.publish` without Redis) returns
+  before opening its span, so single-instance deployments do not emit an empty span per
+  mutation.

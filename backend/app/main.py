@@ -66,7 +66,6 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("Cannot connect to database — verify DATABASE_URL and that the database is running") from exc
 
     init_telemetry(engine=engine)
-    http_client = outbound_client(timeout=30.0)
     try:
         project_id = required_knob("DESCOPE_PROJECT_ID")
         management_key = required_knob("DESCOPE_MANAGEMENT_KEY")
@@ -75,6 +74,8 @@ async def lifespan(app: FastAPI):
             f"Required environment variable {exc} is not set — "
             "ensure DESCOPE_PROJECT_ID and DESCOPE_MANAGEMENT_KEY are configured"
         ) from exc
+    # Built after the reads above so a missing credential cannot leave it unclosed.
+    http_client = outbound_client(timeout=30.0)
     base_url = knob("DESCOPE_BASE_URL", "https://api.descope.com")
     app.state.descope_client = DescopeManagementClient(project_id, management_key, base_url, http_client=http_client)
 

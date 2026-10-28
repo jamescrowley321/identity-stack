@@ -394,3 +394,48 @@ def test_handlers_that_catch_upstream_status_also_catch_transport():
         f"§4: catch UpstreamTransportError too and answer 502. New: {sorted(found - expected)}; "
         f"stale exceptions: {sorted(expected - found)}"
     )
+
+
+# Router modules that call Descope without catching any upstream failure.
+UNHANDLED_UPSTREAM_ROUTERS = {
+    "routers/accesskeys.py": "predates #512; every Descope failure surfaces as 500 (follow-up)",
+}
+
+_UPSTREAM_CATCHES = {"UpstreamStatusError", "UpstreamTransportError", "Exception"}
+
+
+def test_routers_that_call_descope_handle_upstream_failures():
+    """§4: catches the module the status-only check cannot see, one that catches nothing at all."""
+    found = set()
+    for path in _modules("routers"):
+        source = path.read_text()
+        if "descope_client" not in source:
+            continue
+        caught = set()
+        for node in ast.walk(_tree(path)):
+            if isinstance(node, ast.ExceptHandler):
+                caught |= _caught_names(node) if node.type is not None else {"Exception"}
+        if not caught & _UPSTREAM_CATCHES:
+            found.add(_rel(path))
+    expected = UNHANDLED_UPSTREAM_ROUTERS.keys()
+    assert found == expected, (
+        f"§4: handle upstream failures. New: {sorted(found - expected)}; stale exceptions: {sorted(expected - found)}"
+    )
+
+
+def test_descope_client_spans_leave_status_to_the_caller():
+    """§20: every DescopeManagementClient span passes record_exception=False and set_status_on_exception=False."""
+    offenders = []
+    for node in ast.walk(_tree(APP / "services" / "descope.py")):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "start_as_current_span"
+        ):
+            continue
+        kwargs = {kw.arg: kw.value for kw in node.keywords}
+        for name in ("record_exception", "set_status_on_exception"):
+            value = kwargs.get(name)
+            if not (isinstance(value, ast.Constant) and value.value is False):
+                offenders.append(f"line {node.lineno}: {name}")
+    assert not offenders, f"§20: {offenders}"
