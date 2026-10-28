@@ -7,20 +7,20 @@ OTel spans on every method.
 
 from __future__ import annotations
 
-import logging
 import uuid
 
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
 from app.errors.identity import Conflict, IdentityError, NotFound
+from app.logbook import logbook
 from app.models.identity.user import IdPLink
 from app.repositories.base import RepositoryConflictError
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
 from app.repositories.user import UserRepository
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
 
 

@@ -1,8 +1,6 @@
 import json
-import logging
 from typing import Annotated, Literal
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Path, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,11 +9,13 @@ from sqlmodel import select
 
 from app.dependencies.fga import extract_user_id, require_fga
 from app.dependencies.tenant import get_tenant_id
+from app.logbook import logbook
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.models.database import get_async_session
 from app.models.document import Document
+from app.outbound import UpstreamStatusError, UpstreamTransportError
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 
 router = APIRouter(tags=["documents"])
 
@@ -90,7 +90,7 @@ async def create_document(
         # DescopeManagementClient validates FGA identifiers and raises ValueError.
         # A rejected identifier is a malformed request, not a server fault.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+    except (UpstreamStatusError, UpstreamTransportError) as exc:
         logger.error(
             "Failed to create FGA owner relation for doc %s: %s",
             document.id,
@@ -162,7 +162,7 @@ async def list_documents(
         # DescopeManagementClient validates FGA identifiers and raises ValueError.
         # A rejected identifier is a malformed request, not a server fault.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+    except (UpstreamStatusError, UpstreamTransportError) as exc:
         logger.error(
             "FGA list_user_resources failed for user %s: %s",
             user_id,
@@ -280,7 +280,7 @@ async def delete_document(
         # DescopeManagementClient validates FGA identifiers and raises ValueError.
         # A rejected identifier is a malformed request, not a server fault.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+    except (UpstreamStatusError, UpstreamTransportError) as exc:
         logger.error("FGA cleanup failed for doc %s: %s", document_id, type(exc).__name__)
         raise HTTPException(status_code=502, detail="Failed to clean up document permissions") from exc
 
@@ -310,7 +310,7 @@ async def delete_document(
         # A rejected identifier is a malformed request, not a server fault.
         await _restore_relations(client, prefixed_id, deleted_relations, document_id)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+    except (UpstreamStatusError, UpstreamTransportError) as exc:
         # A 429 or 5xx partway through leaves the document with a partially
         # stripped ACL: the caller sees 502, the row is still there, and the owner
         # is locked out of a document nothing can restore. Put back what this
@@ -367,7 +367,7 @@ async def share_document(
     try:
         client = request.app.state.descope_client
         target_user = await client.load_user(body.user_id)
-    except httpx.HTTPStatusError as exc:
+    except UpstreamStatusError as exc:
         if exc.response.status_code == 404:
             raise HTTPException(status_code=404, detail="Target user not found") from exc
         logger.error(
@@ -376,7 +376,7 @@ async def share_document(
             exc.response.status_code,
         )
         raise HTTPException(status_code=502, detail="Failed to verify target user") from exc
-    except httpx.RequestError as exc:
+    except UpstreamTransportError as exc:
         logger.error(
             "Network error verifying target user %s: %s",
             body.user_id,
@@ -417,7 +417,7 @@ async def share_document(
         # DescopeManagementClient validates FGA identifiers and raises ValueError.
         # A rejected identifier is a malformed request, not a server fault.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+    except (UpstreamStatusError, UpstreamTransportError) as exc:
         logger.error(
             "Failed to create share relation for doc %s: %s",
             document_id,
@@ -460,7 +460,7 @@ async def revoke_share(
     # Verify target user exists and is in the same tenant
     try:
         target_user = await client.load_user(target_user_id)
-    except httpx.HTTPStatusError as exc:
+    except UpstreamStatusError as exc:
         if exc.response.status_code == 404:
             raise HTTPException(status_code=404, detail="Target user not found") from exc
         logger.error(
@@ -469,7 +469,7 @@ async def revoke_share(
             exc.response.status_code,
         )
         raise HTTPException(status_code=502, detail="Failed to verify target user") from exc
-    except httpx.RequestError as exc:
+    except UpstreamTransportError as exc:
         logger.error(
             "Network error verifying target user %s: %s",
             target_user_id,
@@ -495,7 +495,7 @@ async def revoke_share(
     for relation in ("viewer", "editor"):
         try:
             await client.delete_relation("document", prefixed_id, relation, resolved_target_id)
-        except httpx.HTTPStatusError as exc:
+        except UpstreamStatusError as exc:
             # Relation may not exist — tolerate 400/404 from Descope
             if exc.response.status_code not in (400, 404):
                 logger.error(
@@ -509,7 +509,7 @@ async def revoke_share(
                     status_code=502,
                     detail="Failed to revoke document access",
                 ) from exc
-        except httpx.RequestError as exc:
+        except UpstreamTransportError as exc:
             logger.error(
                 "Network error revoking %s for user %s on doc %s: %s",
                 relation,

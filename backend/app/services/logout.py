@@ -20,16 +20,15 @@ than adding new OIDC logic (NFR-4).
 
 from __future__ import annotations
 
-import os
-
-import httpx
 from fastapi import HTTPException
 from py_identity_model import DiscoveryDocumentRequest, build_end_session_url
 from py_identity_model.aio import get_discovery_document
 
+from app.knobs import knob
 from app.middleware.providers import ProviderTokenConfig
+from app.outbound import outbound_client
 
-DESCOPE_BASE_URL = os.getenv("DESCOPE_BASE_URL", "https://api.descope.com")
+DESCOPE_BASE_URL = knob("DESCOPE_BASE_URL", "https://api.descope.com")
 
 
 async def _descope_management_logout(provider: ProviderTokenConfig, claims: dict, id_token: str | None) -> dict:
@@ -38,12 +37,12 @@ async def _descope_management_logout(provider: ProviderTokenConfig, claims: dict
     Unchanged from the pre-ORY-5.1 behavior: same endpoint, headers, body, and
     response shape (NFR-8). ``id_token`` is unused — Descope revokes server-side.
     """
-    project_id = os.getenv("DESCOPE_PROJECT_ID", "")
-    management_key = os.getenv("DESCOPE_MANAGEMENT_KEY", "")
+    project_id = knob("DESCOPE_PROJECT_ID", "")
+    management_key = knob("DESCOPE_MANAGEMENT_KEY", "")
     user_id = claims.get("sub")
 
     if user_id and management_key:
-        async with httpx.AsyncClient() as client:
+        async with outbound_client(timeout=5.0) as client:
             await client.post(
                 f"{DESCOPE_BASE_URL}/v1/mgmt/user/logout",
                 headers={"Authorization": f"Bearer {project_id}:{management_key}"},
@@ -60,8 +59,8 @@ def _default_post_logout_redirect_uri() -> str:
     MUST be registered in the Ory OAuth2 client's ``post_logout_redirect_uris``
     (Epic 1) or the provider rejects the redirect.
     """
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
-    return os.getenv("ORY_POST_LOGOUT_REDIRECT_URI") or f"{frontend_url}/login"
+    frontend_url = knob("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+    return knob("ORY_POST_LOGOUT_REDIRECT_URI") or f"{frontend_url}/login"
 
 
 async def _ory_rp_initiated_logout(provider: ProviderTokenConfig, claims: dict, id_token: str | None) -> dict:
@@ -85,7 +84,7 @@ async def _ory_rp_initiated_logout(provider: ProviderTokenConfig, claims: dict, 
     logout_url = build_end_session_url(
         end_session_endpoint,
         id_token_hint=id_token,
-        client_id=os.getenv("ORY_CLIENT_ID") or provider.audience,
+        client_id=knob("ORY_CLIENT_ID") or provider.audience,
         post_logout_redirect_uri=_default_post_logout_redirect_uri(),
     )
     return {"status": "logout_redirect", "logout_url": logout_url, "sub": claims.get("sub")}

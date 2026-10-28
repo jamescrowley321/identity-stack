@@ -1,7 +1,7 @@
-import os
-
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+
+from app.knobs import knob
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -22,7 +22,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             " img-src 'self' https://fastapi.tiangolo.com https://cdn.redoc.ly data:;"
             " worker-src blob:"
         )
-        csp_value = os.getenv(
+        csp_value = knob(
             "CSP_POLICY",
             "default-src 'self'" if self.is_production else dev_csp,
         )

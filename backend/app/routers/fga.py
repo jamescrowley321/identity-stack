@@ -1,16 +1,16 @@
 import json
-import logging
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from app.dependencies.fga import resolve_fga_user_target
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
+from app.logbook import logbook
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
+from app.outbound import UpstreamStatusError, UpstreamTransportError
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 
 router = APIRouter(tags=["fga"])
 
@@ -84,12 +84,12 @@ async def get_fga_schema(
         # it into the editor); it was handed a namespaces object instead.
         schema = await client.get_fga_schema() or ""
         return {"schema": schema}
-    except httpx.HTTPStatusError as exc:
+    except UpstreamStatusError as exc:
         logger.warning("Descope API error loading FGA schema: %s %s", exc.response.status_code, exc.response.text[:500])
         if exc.response.status_code == 400:
             raise HTTPException(status_code=400, detail=_sanitize_error_detail(exc.response.text)) from exc
         raise HTTPException(status_code=502, detail="Failed to load FGA schema from Descope") from exc
-    except httpx.RequestError as exc:
+    except UpstreamTransportError as exc:
         logger.error("Network error loading FGA schema: %s", exc)
         raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
 
@@ -113,13 +113,13 @@ async def update_fga_schema(
         # stops "" but not "   ", so this fifth route was the one that still let a
         # blank body through to an unhandled 500 — the other four already guard it.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except httpx.HTTPStatusError as exc:
+    except UpstreamStatusError as exc:
         resp_body = exc.response.text[:500]
         logger.warning("Descope API error updating FGA schema: %s %s", exc.response.status_code, resp_body)
         if exc.response.status_code == 400:
             raise HTTPException(status_code=400, detail=_sanitize_error_detail(exc.response.text)) from exc
         raise HTTPException(status_code=502, detail="Failed to update FGA schema in Descope") from exc
-    except httpx.RequestError as exc:
+    except UpstreamTransportError as exc:
         logger.error("Network error updating FGA schema: %s", exc)
         raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
 
@@ -129,7 +129,7 @@ async def update_fga_schema(
     # had in fact succeeded.
     try:
         return {"schema": await client.get_fga_schema() or body.schema_}
-    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+    except (UpstreamStatusError, UpstreamTransportError) as exc:
         logger.warning("FGA schema updated but read-back failed: %s", exc)
         return {"schema": body.schema_}
 
@@ -167,12 +167,12 @@ async def create_relation(
         # malformed request, not a server fault — uncaught it escaped the handler and
         # Starlette turned it into an unhandled 500.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except httpx.HTTPStatusError as exc:
+    except UpstreamStatusError as exc:
         logger.warning("Descope API error creating relation: %s %s", exc.response.status_code, exc.response.text[:500])
         if exc.response.status_code == 400:
             raise HTTPException(status_code=400, detail=_sanitize_error_detail(exc.response.text)) from exc
         raise HTTPException(status_code=502, detail="Failed to create relation in Descope") from exc
-    except httpx.RequestError as exc:
+    except UpstreamTransportError as exc:
         logger.error("Network error creating relation: %s", exc)
         raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
 
@@ -202,12 +202,12 @@ async def delete_relation(
         # malformed request, not a server fault — uncaught it escaped the handler and
         # Starlette turned it into an unhandled 500.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except httpx.HTTPStatusError as exc:
+    except UpstreamStatusError as exc:
         logger.warning("Descope API error deleting relation: %s %s", exc.response.status_code, exc.response.text[:500])
         if exc.response.status_code == 400:
             raise HTTPException(status_code=400, detail=_sanitize_error_detail(exc.response.text)) from exc
         raise HTTPException(status_code=502, detail="Failed to delete relation in Descope") from exc
-    except httpx.RequestError as exc:
+    except UpstreamTransportError as exc:
         logger.error("Network error deleting relation: %s", exc)
         raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
 
@@ -248,12 +248,12 @@ async def list_relations(
         # malformed request, not a server fault — uncaught it escaped the handler and
         # Starlette turned it into an unhandled 500.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except httpx.HTTPStatusError as exc:
+    except UpstreamStatusError as exc:
         logger.warning("Descope API error listing relations: %s %s", exc.response.status_code, exc.response.text[:500])
         if exc.response.status_code == 400:
             raise HTTPException(status_code=400, detail=_sanitize_error_detail(exc.response.text)) from exc
         raise HTTPException(status_code=502, detail="Failed to list relations from Descope") from exc
-    except httpx.RequestError as exc:
+    except UpstreamTransportError as exc:
         logger.error("Network error listing relations: %s", exc)
         raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
 
@@ -283,12 +283,12 @@ async def check_permission(
         # malformed request, not a server fault — uncaught it escaped the handler and
         # Starlette turned it into an unhandled 500.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except httpx.HTTPStatusError as exc:
+    except UpstreamStatusError as exc:
         resp_body = exc.response.text[:500]
         logger.warning("Descope API error checking permission: %s %s", exc.response.status_code, resp_body)
         if exc.response.status_code == 400:
             raise HTTPException(status_code=400, detail=_sanitize_error_detail(exc.response.text)) from exc
         raise HTTPException(status_code=502, detail="Failed to check permission in Descope") from exc
-    except httpx.RequestError as exc:
+    except UpstreamTransportError as exc:
         logger.error("Network error checking permission: %s", exc)
         raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc

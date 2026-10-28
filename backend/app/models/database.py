@@ -4,9 +4,9 @@ Uses a factory pattern so the engine is not constructed at import time.
 This allows tests to override DATABASE_URL and avoids import-time failures in CI.
 """
 
-import os
-
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+
+from app.knobs import knob
 
 _async_engine: AsyncEngine | None = None
 _async_session_factory: async_sessionmaker[AsyncSession] | None = None
@@ -36,7 +36,7 @@ def get_engine() -> AsyncEngine:
     """
     global _async_engine  # noqa: PLW0603
     if _async_engine is None:
-        database_url = os.environ.get("DATABASE_URL")
+        database_url = knob("DATABASE_URL")
         if not database_url:
             raise RuntimeError(
                 "DATABASE_URL environment variable is required. "

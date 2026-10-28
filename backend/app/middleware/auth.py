@@ -1,11 +1,10 @@
-import logging
-
 from py_identity_model import TokenValidationConfig, to_principal
 from py_identity_model.aio import validate_token
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from app.logbook import logbook
 from app.middleware.providers import (
     audience_rejected,
     build_provider_configs,
@@ -15,7 +14,7 @@ from app.middleware.providers import (
     unverified_issuer,
 )
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 
 
 class TokenValidationMiddleware(BaseHTTPMiddleware):
