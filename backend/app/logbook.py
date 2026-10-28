@@ -26,6 +26,10 @@ import logging
 def logbook(name: str) -> logging.Logger:
     """Return the logger for module ``name``; call it as ``logbook(__name__)``.
 
+    The one other sanctioned use is ``app.logging_config.setup_logging``, which
+    fetches third-party loggers by name (``logbook("httpx")``) to set their level,
+    and reaches the root logger as ``logging.root``.
+
     Returns the standard-library logger itself, so ``caplog``, ``patch(...logger)``
     and the OTel logging instrumentor behave exactly as they do for
     ``logging.getLogger``.

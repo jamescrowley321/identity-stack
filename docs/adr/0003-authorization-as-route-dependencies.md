@@ -28,7 +28,10 @@ not need it.
 
 ## Consequences
 
-- Whether a route is protected can be read from its signature, and checked mechanically.
+- For a route that takes its tenant from `get_tenant_id` or `get_tenant_claims`, whether it
+  is protected can be read from its signature and checked mechanically. A route that takes a
+  tenant from a path parameter (`/tenants/{tenant_id}/resources`) is not covered by that
+  check. Its in-body membership guard is covered by its own router tests.
   `tests/unit/test_router_authorization.py` walks every route's dependency tree and fails a
   tenant-scoped route that has no authorization dependency.
 - Routes that any tenant member may call are a real category, such as reading your own
