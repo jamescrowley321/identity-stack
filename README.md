@@ -150,6 +150,7 @@ Detailed docs live in [`docs/`](docs/):
 - [Deployment](docs/deployment.md) — standalone vs. gateway + Terraform
 - [Environment variables](docs/environment-variables.md) — full reference with defaults
 - [Security](docs/security.md) — token validation, RBAC/FGA, headers, rate limiting, CI scanning
+- [Conventions](docs/conventions.md) — the backend's numbered house rules, with [ADRs](docs/adr/README.md)
 - [Gateway (Tyk)](tyk/README.md) — gateway config + routing
 
 ## API Endpoints

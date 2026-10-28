@@ -1,6 +1,6 @@
 # Environment Variables
 
-Defaults below are the values baked into the code (`backend/app/...`). Copy `backend/.env.example` and `frontend/.env.example` as starting points.
+Defaults below are the values baked into the code (`backend/app/...`). The backend reads every variable through `app/knobs.py` ([conventions §1–§2](conventions.md#1-configuration-is-read-only-through-appknobs)), and `tests/unit/test_house_rules.py` fails if a variable it reads is missing from the backend table or documented with a different default. Copy `backend/.env.example` and `frontend/.env.example` as starting points.
 
 ## Backend
 
@@ -24,6 +24,16 @@ Defaults below are the values baked into the code (`backend/app/...`). Copy `bac
 | `ENVIRONMENT` | `development` | Environment name; influences security-header strictness. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `""` | OTLP endpoint; empty disables telemetry export. |
 | `OTEL_SERVICE_NAME` | `identity-stack` | OpenTelemetry service name. |
+| `CSP_POLICY` | `default-src 'self'` in production; a localhost-friendly policy otherwise | `Content-Security-Policy` header value (`middleware/security.py`). |
+| `ORY_ISSUER_URL` | `""` | Ory issuer URL. Set ⇒ Ory is added as a configured token provider alongside Descope (`middleware/providers.py`). |
+| `ORY_AUDIENCE` | — | Ory access-token audience to enforce. Required when `ORY_ISSUER_URL` is set and audience validation is on. |
+| `ORY_REQUIRE_AUDIENCE` | `true` | Ory audience validation switch. Only `false`, `0` or `no` turn it off; any other value leaves it on (`knob_flag`). |
+| `ORY_CLIENT_ID` | — | OAuth2 client id sent on Ory RP-initiated logout. Unset or empty ⇒ `ORY_AUDIENCE`. |
+| `ORY_POST_LOGOUT_REDIRECT_URI` | — | Where Ory sends the browser after logout. Unset or empty ⇒ `FRONTEND_URL` + `/login`. Must be registered on the Ory client. |
+| `JIT_ENABLED_PROVIDERS` | `ory` | Comma-separated providers whose first-login users are provisioned just in time by `GET /api/identity`. |
+| `CANONICAL_RBAC_PROVIDERS` | `ory` | Comma-separated providers whose roles and permissions come from the canonical model rather than token claims. Descope is excluded by default. |
+
+> `py-identity-model` (token validation, OIDC discovery and JWKS) reads `HTTP_TIMEOUT` itself, default `30` seconds. The backend never reads it, so it is not in the table above.
 
 > The three internal-endpoint secrets (`DESCOPE_WEBHOOK_SECRET`, `DESCOPE_FLOW_SYNC_SECRET`, `INTERNAL_IDENTITY_KEY`) do **not** block startup — the app logs a warning and the corresponding endpoint refuses traffic until the secret is set (`main.py:_warn_missing_secrets`).
 
