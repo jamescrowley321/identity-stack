@@ -1,6 +1,6 @@
 # Environment Variables
 
-Defaults below are the values baked into the code (`backend/app/...`). The backend reads every variable through `app/knobs.py` ([conventions §1–§2](conventions.md#1-configuration-is-read-only-through-appknobs)), and `tests/unit/test_house_rules.py` fails if a variable it reads is missing from the backend table or documented with a different default. Copy `backend/.env.example` and `frontend/.env.example` as starting points.
+Defaults below are the values baked into the code (`backend/app/...`). The backend reads every variable through `app/knobs.py` ([conventions §1–§2](conventions.md#1-configuration-is-read-only-through-appknobs)), and `tests/unit/test_house_rules.py` fails if a variable it reads is missing from the Backend table, or is documented there with a different literal default. Copy `backend/.env.example` and `frontend/.env.example` as starting points.
 
 ## Backend
 
@@ -33,7 +33,7 @@ Defaults below are the values baked into the code (`backend/app/...`). The backe
 | `JIT_ENABLED_PROVIDERS` | `ory` | Comma-separated providers whose first-login users are provisioned just in time by `GET /api/identity`. |
 | `CANONICAL_RBAC_PROVIDERS` | `ory` | Comma-separated providers whose roles and permissions come from the canonical model rather than token claims. Descope is excluded by default. |
 
-> **Never set `OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_CLIENT_REQUEST` or `OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_CLIENT_RESPONSE`.** The OpenTelemetry httpx instrumentor reads them itself and would record outbound headers as span attributes. That includes the `Authorization: Bearer <project>:<management key>` header on every Descope management call. The backend's span hook overwrites only the `authorization` attribute ([conventions §9](conventions.md#9-no-secrets-in-logs)).
+> **Never set any `OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_*` variable** (`_CLIENT_REQUEST`, `_CLIENT_RESPONSE`, `_SERVER_REQUEST`, `_SERVER_RESPONSE`). The OpenTelemetry httpx and FastAPI instrumentors read them themselves and would record headers as span attributes. Outbound, that includes the `Authorization: Bearer <project>:<management key>` header on every Descope management call. Inbound, it includes callers' bearer tokens and the internal-endpoint secrets (`X-Identity-Key`, `X-Flow-Secret`, `X-Descope-Webhook-S256`). The backend's span hook overwrites only the `authorization` attribute ([conventions §9](conventions.md#9-no-secrets-in-logs)).
 
 > `py-identity-model` (token validation, OIDC discovery and JWKS) reads `HTTP_TIMEOUT` itself, default `30` seconds. The backend never reads it, so it is not in the table above.
 

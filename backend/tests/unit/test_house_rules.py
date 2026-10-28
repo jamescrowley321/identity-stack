@@ -77,36 +77,59 @@ def test_only_knobs_reads_the_environment():
 
 # --- §2: every variable the app reads is documented ---------------------------
 
-_KNOB_CALL = re.compile(
-    r"\b(knob|required_knob|knob_flag|knob_set)\(\s*\"([A-Z][A-Z0-9_]*)\"(?:,\s*\"([^\"]*)\"\s*\))?"
-)
+_KNOB_HELPERS = ("knob", "required_knob", "knob_flag", "knob_set")
 
 
 def _knob_reads() -> list[tuple[str, str, str | None, str]]:
-    """(helper, name, literal default or None, location) for every knob read in app/."""
+    """(helper, name, literal default or None, location) for every knob call in app/.
+
+    Parsed with ``ast`` so docstrings and comments that mention a knob are not reads,
+    and so a call's formatting (multi-line, trailing comma) cannot hide its default.
+    A non-literal name fails loudly instead of being skipped.
+    """
     reads = []
     for path in _modules():
         if path == APP / "knobs.py":
             continue
-        for match in _KNOB_CALL.finditer(path.read_text()):
-            helper, name, default = match.groups()
-            reads.append((helper, name, default, _rel(path)))
+        for node in ast.walk(_tree(path)):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _KNOB_HELPERS):
+                continue
+            where = f"{_rel(path)}:{node.lineno}"
+            name_arg = node.args[0] if node.args else None
+            assert isinstance(name_arg, ast.Constant) and isinstance(name_arg.value, str), (
+                f"§2: {where} passes a non-literal variable name to {node.func.id}"
+            )
+            default_arg = node.args[1] if len(node.args) > 1 else None
+            default = default_arg.value if isinstance(default_arg, ast.Constant) else None
+            reads.append((node.func.id, name_arg.value, default, where))
     return reads
 
 
 def _documented_rows() -> dict[str, str]:
+    """Rows of the Backend table only, so a backend variable documented elsewhere does not count."""
     rows = {}
+    in_backend = False
     for line in ENV_DOC.read_text().splitlines():
+        if line.startswith("## "):
+            in_backend = line.strip() == "## Backend"
+            continue
         match = re.match(r"\|\s*`([A-Z][A-Z0-9_]*)`\s*\|", line)
-        if match:
+        if in_backend and match:
             rows[match.group(1)] = line
     return rows
 
 
 def test_knob_reads_are_found():
-    """Guard the regex: if it silently matched nothing, the doc check below would pass vacuously."""
+    """Guard the scan: if it silently matched nothing, the doc check below would pass vacuously."""
     names = {name for _, name, _, _ in _knob_reads()}
-    assert {"DATABASE_URL", "DEPLOYMENT_MODE", "ORY_REQUIRE_AUDIENCE", "JIT_ENABLED_PROVIDERS"} <= names
+    assert {"DATABASE_URL", "DEPLOYMENT_MODE", "ORY_REQUIRE_AUDIENCE", "JIT_ENABLED_PROVIDERS", "CSP_POLICY"} <= names
+
+
+def test_docstring_mentions_are_not_reads():
+    """middleware/factory.py's module docstring quotes a knob call; only real calls count."""
+    wheres = [where for _, name, _, where in _knob_reads() if name == "DEPLOYMENT_MODE"]
+    # One real call; the docstring's quoted knob("DEPLOYMENT_MODE", ...) would make it two.
+    assert len(wheres) == 1, wheres
 
 
 def test_every_knob_is_documented_with_its_default():
@@ -115,7 +138,7 @@ def test_every_knob_is_documented_with_its_default():
     for helper, name, default, where in _knob_reads():
         row = rows.get(name)
         if row is None:
-            problems.append(f"{name} ({where}) is not in docs/environment-variables.md")
+            problems.append(f"{name} ({where}) is not in the Backend table of docs/environment-variables.md")
             continue
         default_cell = row.split("|")[2].strip()
         if helper == "required_knob" or default is None:
@@ -124,6 +147,18 @@ def test_every_knob_is_documented_with_its_default():
         if expected not in default_cell:
             problems.append(f"{name} ({where}) defaults to {expected}, doc says {default_cell}")
     assert not problems, "§2: " + "; ".join(problems)
+
+
+# --- §3: knob_flag switches are named for their secure state -------------------
+
+_INSECURE_FLAG_WORDS = ("SKIP", "DISABLE", "ALLOW_INSECURE", "INSECURE", "BYPASS", "NO_VERIFY")
+
+
+def test_knob_flag_switches_are_named_for_the_secure_state():
+    flags = [(name, where) for helper, name, _, where in _knob_reads() if helper == "knob_flag"]
+    assert flags, "no knob_flag call sites found"
+    offenders = [f"{name} ({where})" for name, where in flags if any(w in name for w in _INSECURE_FLAG_WORDS)]
+    assert not offenders, f"§3: a knob_flag switch must be named for its secure state: {offenders}"
 
 
 # --- §10: service classes return Result ---------------------------------------
@@ -263,7 +298,10 @@ def test_router_code_does_not_read_request_state():
 
 # (module, qualified name) -> why it opens no span of its own.
 UNTRACED_SERVICE_CALLABLES = {
-    ("services/descope.py", "DescopeManagementClient.close"): "lifecycle: closes the owned HTTP client",
+    (
+        "services/descope.py",
+        "DescopeManagementClient.close",
+    ): "lifecycle: closes an injected HTTP client; never called in app/",
     ("services/canonical.py", "canonical_user"): "pure dict-shaping helper, no I/O",
     ("services/canonical.py", "canonical_tenant"): "pure dict-shaping helper, no I/O",
     ("services/identity_resolution.py", "run_cache_invalidation_subscriber"): "a background loop for the process "
@@ -359,68 +397,82 @@ def test_abstract_identity_service_has_no_implementation_to_trace():
     assert IdentityService.__abstractmethods__
 
 
-# --- §4: a handler that catches UpstreamStatusError also catches the transport error ---
+# --- §4: every router function that calls Descope handles both upstream failures ---
 
-# (module, handler) -> why a transport failure still surfaces as 500 here.
-STATUS_ONLY_UPSTREAM_HANDLERS = {
-    ("routers/users.py", name): "predates #512; answering 502 is a follow-up behaviour change"
-    for name in ("list_members", "invite_member", "deactivate_member", "activate_member", "remove_member")
-} | {
-    ("routers/attributes.py", name): "predates #512; answering 502 is a follow-up behaviour change"
-    for name in ("update_profile_attribute", "get_tenant_settings", "update_tenant_settings")
+_STATUS_ONLY = "predates #512: catches UpstreamStatusError only, so a transport failure is a 500 (follow-up)"
+_UNHANDLED = "predates #512: catches no upstream failure, so every Descope error is a 500 (follow-up)"
+
+# (module, function) -> why it does not catch both UpstreamStatusError and UpstreamTransportError.
+UPSTREAM_HANDLING_EXCEPTIONS = {
+    **{
+        ("routers/users.py", name): _STATUS_ONLY
+        for name in ("list_members", "invite_member", "deactivate_member", "activate_member", "remove_member")
+    },
+    **{
+        ("routers/attributes.py", name): _STATUS_ONLY
+        for name in ("update_profile_attribute", "get_tenant_settings", "update_tenant_settings")
+    },
+    **{
+        ("routers/accesskeys.py", name): _UNHANDLED
+        for name in (
+            "_verify_key_tenant",
+            "create_access_key",
+            "list_access_keys",
+            "get_access_key",
+            "deactivate_access_key",
+            "activate_access_key",
+            "delete_access_key",
+        )
+    },
+    ("routers/users.py", "_get_descope_client"): "returns the client; makes no call itself",
 }
 
 
 def _caught_names(handler: ast.ExceptHandler) -> set[str]:
+    """Exception names an ``except`` clause catches; a bare ``except:`` counts as ``Exception``."""
     if handler.type is None:
-        return set()
+        return {"Exception"}
     nodes = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
-    return {node.id for node in nodes if isinstance(node, ast.Name)}
+    # Last dotted segment, so ``app.outbound.UpstreamStatusError`` reads like the plain name.
+    return {ast.unparse(node).rsplit(".", 1)[-1] for node in nodes}
 
 
-def test_handlers_that_catch_upstream_status_also_catch_transport():
+def _handles_both_upstream_failures(func: ast.AST) -> bool:
+    caught = set().union(*(_caught_names(h) for h in ast.walk(func) if isinstance(h, ast.ExceptHandler)))
+    return "Exception" in caught or {"UpstreamStatusError", "UpstreamTransportError"} <= caught
+
+
+def test_router_functions_that_call_descope_handle_upstream_failures():
+    """Per function, not per module: one compliant handler cannot hide a non-compliant neighbour.
+
+    A function "calls Descope" when it reads ``descope_client`` or calls a function in
+    the same module that does.
+    """
     found = set()
     for path in _modules("routers"):
         tree = _tree(path)
-        owner = _enclosing_functions(tree)
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Try):
-                continue
-            caught = set().union(*(_caught_names(h) for h in node.handlers)) if node.handlers else set()
-            if "UpstreamStatusError" in caught and "UpstreamTransportError" not in caught:
-                found.add((_rel(path), owner[node]))
-    expected = STATUS_ONLY_UPSTREAM_HANDLERS.keys()
+        functions = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        direct = {name for name, func in functions.items() if "descope_client" in ast.unparse(func)}
+        for name, func in functions.items():
+            calls_helper = any(
+                isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id in direct - {name}
+                for c in ast.walk(func)
+            )
+            if (name in direct or calls_helper) and not _handles_both_upstream_failures(func):
+                found.add((_rel(path), name))
+    expected = UPSTREAM_HANDLING_EXCEPTIONS.keys()
     assert found == expected, (
-        f"§4: catch UpstreamTransportError too and answer 502. New: {sorted(found - expected)}; "
-        f"stale exceptions: {sorted(expected - found)}"
+        f"§4: catch UpstreamStatusError and UpstreamTransportError and answer 502. "
+        f"New: {sorted(found - expected)}; stale exceptions: {sorted(expected - found)}"
     )
 
 
-# Router modules that call Descope without catching any upstream failure.
-UNHANDLED_UPSTREAM_ROUTERS = {
-    "routers/accesskeys.py": "predates #512; every Descope failure surfaces as 500 (follow-up)",
-}
-
-_UPSTREAM_CATCHES = {"UpstreamStatusError", "UpstreamTransportError", "Exception"}
-
-
-def test_routers_that_call_descope_handle_upstream_failures():
-    """§4: catches the module the status-only check cannot see, one that catches nothing at all."""
-    found = set()
-    for path in _modules("routers"):
-        source = path.read_text()
-        if "descope_client" not in source:
-            continue
-        caught = set()
-        for node in ast.walk(_tree(path)):
-            if isinstance(node, ast.ExceptHandler):
-                caught |= _caught_names(node) if node.type is not None else {"Exception"}
-        if not caught & _UPSTREAM_CATCHES:
-            found.add(_rel(path))
-    expected = UNHANDLED_UPSTREAM_ROUTERS.keys()
-    assert found == expected, (
-        f"§4: handle upstream failures. New: {sorted(found - expected)}; stale exceptions: {sorted(expected - found)}"
+def test_caught_names_reads_dotted_and_bare_handlers():
+    tree = ast.parse(
+        "try:\n    pass\nexcept app.outbound.UpstreamStatusError:\n    pass\ntry:\n    pass\nexcept:\n    pass\n"
     )
+    handlers = [h for h in ast.walk(tree) if isinstance(h, ast.ExceptHandler)]
+    assert [_caught_names(h) for h in handlers] == [{"UpstreamStatusError"}, {"Exception"}]
 
 
 def test_descope_client_spans_leave_status_to_the_caller():
