@@ -63,9 +63,9 @@ class CacheInvalidationPublisher:
         tenant_id: UUID | str | None = None,
     ) -> None:
         """Publish a single change event. Silent on failure (AC-3.3.2)."""
+        if self._redis is None:
+            return
         with tracer.start_as_current_span("CacheInvalidationPublisher.publish"):
-            if self._redis is None:
-                return
             event = self._build_event(entity_type, entity_id, operation, tenant_id)
             try:
                 await self._redis.publish(CHANNEL, json.dumps(event))
@@ -79,9 +79,9 @@ class CacheInvalidationPublisher:
         stats: dict[str, Any],
     ) -> None:
         """Publish a single batch event for reconciliation. Silent on failure."""
+        if self._redis is None:
+            return
         with tracer.start_as_current_span("CacheInvalidationPublisher.publish_batch"):
-            if self._redis is None:
-                return
             event = self._build_event("batch", "reconciliation", operation, None)
             event["stats"] = stats
             try:
