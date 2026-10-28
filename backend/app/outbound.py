@@ -1,6 +1,6 @@
 """The one place the backend constructs an HTTP client.
 
-Outbound HTTP from ``app/`` goes through this module (docs/conventions.md §6–§8):
+Outbound HTTP from ``app/`` goes through this module (docs/conventions.md §4–§6):
 build clients with ``outbound_client`` and catch upstream failures with
 ``UpstreamStatusError`` and ``UpstreamTransportError``. No other module in
 ``app/`` imports ``httpx``; Ruff's ``banned-api`` rule (TID251) enforces it.

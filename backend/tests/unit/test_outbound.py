@@ -1,4 +1,4 @@
-"""Unit tests for app.outbound — the HTTP client helper (docs/conventions.md §6–§8)."""
+"""Unit tests for app.outbound — the HTTP client helper (docs/conventions.md §4–§6)."""
 
 import inspect
 
@@ -22,7 +22,7 @@ class TestOutboundClient:
             assert client.timeout == httpx.Timeout(7.5)
 
     def test_timeout_is_required_and_keyword_only(self):
-        """§8: no call site can fall back to an implicit timeout."""
+        """§6: no call site can fall back to an implicit timeout."""
         param = inspect.signature(outbound_client).parameters["timeout"]
         assert param.kind is inspect.Parameter.KEYWORD_ONLY
         assert param.default is inspect.Parameter.empty
