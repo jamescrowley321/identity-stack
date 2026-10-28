@@ -1,8 +1,7 @@
-import os
-
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.dependencies.auth import get_claims
+from app.knobs import knob, knob_flag
 from app.middleware.providers import build_provider_configs
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.logout import LOGOUT_STRATEGIES
@@ -12,11 +11,11 @@ router = APIRouter(tags=["Auth"])
 
 def _configured_providers():
     """Build the configured provider list from env — mirrors middleware/factory.py."""
-    ory_require_audience = os.getenv("ORY_REQUIRE_AUDIENCE", "true").strip().lower() not in ("false", "0", "no")
+    ory_require_audience = knob_flag("ORY_REQUIRE_AUDIENCE", "true")
     return build_provider_configs(
-        descope_project_id=os.getenv("DESCOPE_PROJECT_ID", ""),
-        ory_issuer_url=os.getenv("ORY_ISSUER_URL", ""),
-        ory_audience=os.getenv("ORY_AUDIENCE") or None,
+        descope_project_id=knob("DESCOPE_PROJECT_ID", ""),
+        ory_issuer_url=knob("ORY_ISSUER_URL", ""),
+        ory_audience=knob("ORY_AUDIENCE") or None,
         ory_require_audience=ory_require_audience,
     )
 

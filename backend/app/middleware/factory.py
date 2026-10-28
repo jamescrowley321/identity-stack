@@ -85,29 +85,28 @@ not the "Tyk in front but compromised" mode.
 
 ## v2 upgrade path
 
-Replace `os.getenv("DEPLOYMENT_MODE")` with
+Replace `knob("DEPLOYMENT_MODE", "standalone")` with
 `OpenFeature client.get_string_value("deployment_mode", "standalone")`
 for hot-toggle and per-feature flag support without restarting the
 backend container.
 """
-
-import logging
-import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi.middleware import SlowAPIMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from app.knobs import knob, knob_flag
+from app.logbook import logbook
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.security import SecurityHeadersMiddleware
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 
 VALID_MODES = ("standalone", "gateway")
 
-DEPLOYMENT_MODE = os.getenv("DEPLOYMENT_MODE", "standalone")
+DEPLOYMENT_MODE = knob("DEPLOYMENT_MODE", "standalone")
 if DEPLOYMENT_MODE not in VALID_MODES:
     raise ValueError(f"Invalid DEPLOYMENT_MODE={DEPLOYMENT_MODE!r}. Must be one of {VALID_MODES}.")
 
@@ -122,12 +121,12 @@ def configure_middleware(app: FastAPI) -> None:
     by GatewayClaimsMiddleware, which base64-decodes the pre-validated JWT to
     populate request.state.claims for downstream RBAC dependencies.
     """
-    trusted_proxy_hosts = os.getenv("TRUSTED_PROXY_HOSTS", "127.0.0.1").split(",")
+    trusted_proxy_hosts = knob("TRUSTED_PROXY_HOSTS", "127.0.0.1").split(",")
 
     # 1. CORS — innermost (always)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[os.getenv("FRONTEND_URL", "http://localhost:3000")],
+        allow_origins=[knob("FRONTEND_URL", "http://localhost:3000")],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -150,14 +149,14 @@ def configure_middleware(app: FastAPI) -> None:
     # Ory is added as a configured provider when ORY_ISSUER_URL is set; Descope
     # stays configured via DESCOPE_PROJECT_ID. Both middlewares select a provider
     # by the token's issuer (see app.middleware.providers).
-    ory_issuer_url = os.getenv("ORY_ISSUER_URL", "")
-    ory_audience = os.getenv("ORY_AUDIENCE") or None
+    ory_issuer_url = knob("ORY_ISSUER_URL", "")
+    ory_audience = knob("ORY_AUDIENCE") or None
     # Ory access-token audience validation is required by default (fail closed).
-    ory_require_audience = os.getenv("ORY_REQUIRE_AUDIENCE", "true").strip().lower() not in ("false", "0", "no")
+    ory_require_audience = knob_flag("ORY_REQUIRE_AUDIENCE", "true")
     if DEPLOYMENT_MODE == "standalone":
         app.add_middleware(
             TokenValidationMiddleware,
-            descope_project_id=os.getenv("DESCOPE_PROJECT_ID", ""),
+            descope_project_id=knob("DESCOPE_PROJECT_ID", ""),
             excluded_paths=excluded_paths,
             excluded_prefixes=excluded_prefixes,
             ory_issuer_url=ory_issuer_url,
@@ -168,7 +167,7 @@ def configure_middleware(app: FastAPI) -> None:
     else:
         app.add_middleware(
             GatewayClaimsMiddleware,
-            descope_project_id=os.getenv("DESCOPE_PROJECT_ID", ""),
+            descope_project_id=knob("DESCOPE_PROJECT_ID", ""),
             excluded_paths=excluded_paths,
             excluded_prefixes=excluded_prefixes,
             ory_issuer_url=ory_issuer_url,
@@ -185,7 +184,7 @@ def configure_middleware(app: FastAPI) -> None:
         logger.info("Middleware excluded: SlowAPIMiddleware (gateway mode)")
 
     # 4. Security headers — always
-    app.add_middleware(SecurityHeadersMiddleware, environment=os.getenv("ENVIRONMENT", "development"))
+    app.add_middleware(SecurityHeadersMiddleware, environment=knob("ENVIRONMENT", "development"))
     logger.info("Middleware included: SecurityHeadersMiddleware")
 
     # 5. Proxy headers — outermost (always)

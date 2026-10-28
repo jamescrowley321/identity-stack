@@ -25,13 +25,13 @@ Every branch of the canonical path that cannot produce an unambiguous answer fai
 closed with 403. An authorization decision is never made on a guess.
 """
 
-import logging
-import os
 from collections.abc import AsyncIterator
 
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.knobs import knob_set
+from app.logbook import logbook
 from app.models.database import get_session_factory
 from app.models.identity.user import UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
@@ -42,14 +42,12 @@ from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 from app.services.identity_resolution import IdentityResolutionService
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 
 # Providers whose tokens carry no authorization claims — their roles and
 # permissions come from the canonical model. Descope is excluded by default:
 # it signs its own `dct`/`tenants` claims and those stay authoritative.
-CANONICAL_RBAC_PROVIDERS = {
-    name.strip().lower() for name in os.getenv("CANONICAL_RBAC_PROVIDERS", "ory").split(",") if name.strip()
-}
+CANONICAL_RBAC_PROVIDERS = knob_set("CANONICAL_RBAC_PROVIDERS", "ory")
 
 
 async def get_rbac_session() -> AsyncIterator[AsyncSession | None]:

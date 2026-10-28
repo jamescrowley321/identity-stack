@@ -1,7 +1,7 @@
 import re
 from typing import Literal
 
-import httpx
+from app.outbound import OutboundClient, OutboundResponse, outbound_client
 
 # Default timeout for Descope API calls (seconds)
 _DEFAULT_TIMEOUT = 30.0
@@ -10,7 +10,7 @@ _DEFAULT_TIMEOUT = 30.0
 class DescopeManagementClient:
     """Client for Descope Management API tenant operations.
 
-    Accepts an httpx.AsyncClient for connection reuse. The caller is responsible
+    Accepts an OutboundClient for connection reuse. The caller is responsible
     for closing the client (typically via FastAPI lifespan).
     """
 
@@ -21,7 +21,7 @@ class DescopeManagementClient:
         project_id: str,
         management_key: str,
         base_url: str = "https://api.descope.com",
-        http_client: httpx.AsyncClient | None = None,
+        http_client: OutboundClient | None = None,
     ):
         self.base_url = base_url
         self._auth_header = f"Bearer {project_id}:{management_key}"
@@ -31,10 +31,10 @@ class DescopeManagementClient:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": self._auth_header}
 
-    def _get_client(self) -> httpx.AsyncClient:
+    def _get_client(self) -> OutboundClient:
         if self._http_client is not None:
             return self._http_client
-        return httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT)
+        return outbound_client(timeout=_DEFAULT_TIMEOUT)
 
     def _validate_fga_param(self, value: str, name: str) -> None:
         """Validate FGA identifier: non-empty, max 200 chars, safe characters only."""
@@ -45,7 +45,7 @@ class DescopeManagementClient:
         if not self._FGA_IDENTIFIER_PATTERN.match(value):
             raise ValueError(f"{name} contains invalid characters (allowed: alphanumeric, _, :, ., -)")
 
-    async def _request(self, path: str, body: dict) -> httpx.Response:
+    async def _request(self, path: str, body: dict) -> OutboundResponse:
         """Send a POST request to the Descope Management API."""
         client = self._get_client()
         try:
@@ -60,7 +60,7 @@ class DescopeManagementClient:
             if self._owns_client or self._http_client is None:
                 await client.aclose()
 
-    async def _get(self, path: str) -> httpx.Response:
+    async def _get(self, path: str) -> OutboundResponse:
         """Send a GET request to the Descope Management API.
 
         Some Descope endpoints (notably /v1/mgmt/permission/all) only
@@ -408,8 +408,8 @@ class DescopeManagementClient:
     async def check_permission(self, resource_type: str, resource_id: str, relation: str, target: str) -> bool:
         """Whether a target holds a relation (direct or derived) on a resource.
 
-        Raises httpx.HTTPStatusError on API errors (4xx/5xx).
-        Raises httpx.RequestError on network/transport errors.
+        Raises UpstreamStatusError on API errors (4xx/5xx).
+        Raises UpstreamTransportError on network/transport errors.
         Callers should handle these for fail-closed behavior.
         """
         self._validate_fga_param(resource_type, "resource_type")

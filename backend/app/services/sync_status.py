@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import uuid
 from datetime import datetime
 from typing import Any
@@ -11,12 +10,13 @@ from expression import Ok, Result
 from opentelemetry import trace
 
 from app.errors.identity import IdentityError
+from app.logbook import logbook
 from app.models.identity.sync_event import SyncEvent, SyncEventVerb
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
 from app.repositories.sync_event import SyncEventRepository
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
 
 

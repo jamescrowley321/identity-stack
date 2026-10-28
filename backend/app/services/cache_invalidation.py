@@ -26,15 +26,16 @@ Key patterns for consumers:
 from __future__ import annotations
 
 import json
-import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from app.logbook import logbook
+
 if TYPE_CHECKING:
     from redis.asyncio import Redis
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 
 CHANNEL = "identity:changes"
 
