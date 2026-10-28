@@ -10,7 +10,7 @@ Thanks for your interest in contributing.
 
 ## Local development
 
-- The frontend supports **Node.js 22 or newer**, matching the Node 22 that CI runs. The repo-root `.nvmrc` names it, so `nvm use` or `fnm use` picks it up, and CI's `setup-node` steps read the same file. Use a current 22.x patch release: some dependencies set their own, higher floor (at the time of writing, 22.22.2).
+- The frontend supports **Node.js 22.22.2 or newer** (`^22.22.2 || ^24.15.0 || >=26.0.0` in `frontend/package.json`), matching the Node 22 that CI runs. The floor follows the strictest `engines` range among the dependencies, so it may rise when they do. The repo-root `.nvmrc` says `22`, so `nvm use` or `fnm use` picks the latest 22.x, and CI's `setup-node` steps read the same file.
 - `frontend/.npmrc` sets `engine-strict=true`, so `npm ci` on an older Node stops with an engine error instead of installing and leaving tests to fail for reasons that have nothing to do with your change.
 
 ## AI-Assisted Contributions
