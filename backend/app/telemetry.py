@@ -78,7 +78,12 @@ def _instrument_fastapi() -> None:
 
 
 def _sanitize_httpx_request(span, request) -> None:
-    """Remove sensitive headers from httpx span attributes."""
+    """Overwrite the ``http.request.header.authorization`` span attribute with ``[REDACTED]``.
+
+    This is not a general header filter. Header capture through
+    ``OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_CLIENT_*`` must stay off
+    (docs/conventions.md §9).
+    """
     if span.is_recording():
         span.set_attribute("http.request.header.authorization", "[REDACTED]")
 

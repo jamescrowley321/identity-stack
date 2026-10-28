@@ -45,14 +45,20 @@ literal default given at the call site. A variable's name or default **MUST NOT*
 unless the row changes in the same commit, because names and defaults are part of the
 deployment contract.
 
-*Enforcement:* test (`test_every_knob_is_documented_with_its_default`).
+*Enforcement:* test (`test_every_knob_is_documented_with_its_default`). The test checks the
+default only when the call site passes a string literal. A computed default, such as
+`CSP_POLICY`'s, is checked by name only and its row is kept accurate by review.
 
 ### 3. Switches and provider lists use the typed helpers
 
 An on/off switch **MUST** be read with `knob_flag`. It treats only `false`, `0` and `no`
-as off, so a mistyped value leaves a security check on. A comma-separated list of provider
-names **MUST** be read with `knob_set`, which strips and lowercases the entries. Code
-**MUST NOT** parse either shape by hand.
+as off. Every other value, including `off`, an empty string and a typo, is on. That is
+fail-closed only when "on" is the secure state, so a switch read with `knob_flag` **MUST** be
+named for the secure behaviour, as `ORY_REQUIRE_AUDIENCE` is (`REQUIRE_`, `ENFORCE_`). It
+**MUST NOT** be named for the insecure one (`SKIP_`, `DISABLE_`, `ALLOW_INSECURE_`), because
+a mistyped value would then switch the check off. A comma-separated list of provider names
+**MUST** be read with `knob_set`, which strips and lowercases the entries. Code **MUST NOT**
+parse either shape by hand.
 
 *Enforcement:* review.
 
@@ -61,12 +67,22 @@ names **MUST** be read with `knob_set`, which strips and lowercases the entries.
 ### 4. HTTP clients come from `app.outbound`
 
 Code in `app/` **MUST** build HTTP clients with `app.outbound.outbound_client`. It **MUST**
-catch upstream failures as `UpstreamStatusError` (a non-2xx response) and
-`UpstreamTransportError` (no response). No module in `app/` other than `app/outbound.py`
-imports `httpx`. In particular, routers **MUST NOT** import `httpx`. See
+name upstream failures by their `app.outbound` aliases: `UpstreamStatusError` for a non-2xx
+response and `UpstreamTransportError` for no response at all. No module in `app/` other than
+`app/outbound.py` imports `httpx`. In particular, routers **MUST NOT** import `httpx`. See
 [ADR-0006](adr/0006-outbound-http-and-logging-helpers.md).
 
-*Enforcement:* Ruff (TID251 on `httpx`).
+A route handler that catches `UpstreamStatusError` **MUST** also catch
+`UpstreamTransportError` and answer it with 502, as `documents.py`, `fga.py` and
+`attributes.py::get_profile` do. Otherwise a Descope outage surfaces as an unhandled 500.
+
+- Exception: the five handlers in `routers/users.py`, plus `update_profile_attribute`,
+  `get_tenant_settings` and `update_tenant_settings` in `routers/attributes.py`. They catch
+  only `UpstreamStatusError`, so a transport failure surfaces as 500. That predates #512, and
+  changing those answers to 502 is a behaviour change left for a follow-up.
+
+*Enforcement:* Ruff (TID251 on `httpx`), plus a test
+(`test_handlers_that_catch_upstream_status_also_catch_transport`).
 
 ### 5. The Descope Management API is called through `DescopeManagementClient`
 
@@ -123,8 +139,16 @@ Log records **MUST NOT** contain credentials. That covers bearer tokens, the Des
 management key, `DESCOPE_WEBHOOK_SECRET`, `DESCOPE_FLOW_SYNC_SECRET`,
 `INTERNAL_IDENTITY_KEY` and raw `Authorization` headers. Log identifiers instead, such as a
 user id, tenant id, provider name or HTTP status. An upstream response body **MUST** be
-truncated to 500 characters before it is logged (`exc.response.text[:500]`). Telemetry
-strips sensitive headers from httpx spans (`app.telemetry._sanitize_httpx_request`).
+truncated to 500 characters before it is logged (`exc.response.text[:500]`).
+
+The same applies to spans. `app.telemetry._sanitize_httpx_request` overwrites one span
+attribute, `http.request.header.authorization`, with `[REDACTED]`, and does nothing else. It
+is not a general header filter. Outbound Descope calls carry the management key in their
+`Authorization` header, so a deployment that exports telemetry **MUST NOT** set
+`OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_CLIENT_REQUEST` or
+`OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_CLIENT_RESPONSE`. The OpenTelemetry httpx
+instrumentor reads those variables itself and records every matching header as a span
+attribute.
 
 *Enforcement:* review.
 
