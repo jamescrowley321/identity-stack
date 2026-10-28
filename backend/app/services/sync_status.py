@@ -88,17 +88,18 @@ class SyncStatusService:
         occurred_at: datetime | None = None,
     ) -> SyncEvent:
         """Append a sync event. Caller is responsible for the transaction commit."""
-        event = SyncEvent(
-            provider_id=provider_id,
-            verb=verb,
-            subject_type=subject_type,
-            subject_id=subject_id,
-            external_sub=external_sub,
-            detail=detail,
-        )
-        if occurred_at is not None:
-            event.occurred_at = occurred_at
-        return await self._event_repo.create(event)
+        with tracer.start_as_current_span("SyncStatusService.record_event"):
+            event = SyncEvent(
+                provider_id=provider_id,
+                verb=verb,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                external_sub=external_sub,
+                detail=detail,
+            )
+            if occurred_at is not None:
+                event.occurred_at = occurred_at
+            return await self._event_repo.create(event)
 
 
 def _serialise_event(event: SyncEvent) -> dict[str, Any]:
