@@ -14,6 +14,8 @@ jobs:
   pip-audit:
     name: pip-audit (Python SCA)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     env:
       # Suppressed pip-audit findings, space-separated vuln IDs (CVE, PYSEC or
       # GHSA). The project rule is that CVEs are fixed, not ignored: an entry
@@ -21,7 +23,7 @@ jobs:
       # Keep this list identical to PIP_AUDIT_IGNORES in the Makefile; the job
       # fails if the two drift.
       #
-      # Every entry needs a comment line directly above this variable:
+      # Document each entry in a comment block here, in this form:
       #   <ID> - <package> <version> - why it can't be fixed or isn't
       #   reachable - assessed <YYYY-MM-DD> - remove when <condition>
       #
@@ -33,6 +35,8 @@ jobs:
       PIP_AUDIT_IGNORES: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -47,8 +51,10 @@ jobs:
 
       - name: Check suppressions match the Makefile
         run: |
-          make_ignores=$(make --no-print-directory --eval='print-pip-audit-ignores: ; @echo $(PIP_AUDIT_IGNORES)' print-pip-audit-ignores)
-          if [ "$(xargs -n1 <<<"$make_ignores" | sort)" != "$(xargs -n1 <<<"$PIP_AUDIT_IGNORES" | sort)" ]; then
+          # Unset the job's copy so make can only report the Makefile's own value.
+          make_ignores=$(env -u PIP_AUDIT_IGNORES make --no-print-directory --eval='print-pip-audit-ignores: ; @echo $(PIP_AUDIT_IGNORES)' print-pip-audit-ignores)
+          normalize() { tr -s ' ' '\n' <<<"$1" | sed '/^$/d' | sort; }
+          if [ "$(normalize "$make_ignores")" != "$(normalize "$PIP_AUDIT_IGNORES")" ]; then
             echo "::error::PIP_AUDIT_IGNORES differs: security.yml='${PIP_AUDIT_IGNORES}' Makefile='${make_ignores}'"
             exit 1
           fi
@@ -60,22 +66,29 @@ jobs:
       # finding is gone, so a stale entry can't sit here unnoticed.
       - name: Run pip-audit
         run: |
+          # The report goes outside the checkout so a committed file can't stand in for it.
+          report="$RUNNER_TEMP/pip-audit.json"
+          rm -f "$report"
           set +e
-          pip-audit --desc --format json --output pip-audit.json
+          pip-audit --desc --format json --output "$report"
           status=$?
           set -e
-          if [ ! -s pip-audit.json ]; then
+          if [ ! -s "$report" ]; then
             echo "::error::pip-audit exited $status without writing a report"
             exit 1
           fi
-          python - <<'EOF'
+          PIP_AUDIT_REPORT="$report" PIP_AUDIT_STATUS="$status" python - <<'EOF'
           import json
           import os
           import sys
 
-          ignores = set(os.environ["PIP_AUDIT_IGNORES"].split())
+          # IDs are compared case-insensitively, so cve-/CVE- spellings both match.
+          def upper(ids):
+              return {i.upper() for i in ids}
+
+          ignores = upper(os.environ["PIP_AUDIT_IGNORES"].split())
           scheduled = os.environ["GITHUB_EVENT_NAME"] == "schedule"
-          with open("pip-audit.json") as f:
+          with open(os.environ["PIP_AUDIT_REPORT"]) as f:
               report = json.load(f)
 
           # The same vulnerability can come back once per database (PYSEC and
@@ -90,9 +103,9 @@ jobs:
                       "version": dep["version"],
                       "ids": {vuln["id"], *vuln.get("aliases", [])},
                       "fixes": set(vuln.get("fix_versions", [])),
-                      "desc": " ".join(vuln.get("description", "").split()),
+                      "desc": " ".join((vuln.get("description") or "").split()),
                   }
-                  for other in [m for m in merged if m["ids"] & finding["ids"]]:
+                  for other in [m for m in merged if upper(m["ids"]) & upper(finding["ids"])]:
                       merged.remove(other)
                       finding["ids"] |= other["ids"]
                       finding["fixes"] |= other["fixes"]
@@ -100,12 +113,13 @@ jobs:
                   merged.append(finding)
               findings += merged
           for finding in findings:
-              finding["hit"] = sorted(finding["ids"] & ignores)
+              finding["hit"] = sorted(i for i in finding["ids"] if i.upper() in ignores)
 
-          matched = {i for f in findings for i in f["hit"]}
+          matched = {i.upper() for f in findings for i in f["hit"]}
           unsuppressed = [f for f in findings if not f["hit"]]
           fixable = [f for f in findings if f["hit"] and f["fixes"]]
           stale = sorted(ignores - matched)
+          skipped = [d for d in report["dependencies"] if d.get("skip_reason")]
 
           lines = ["## pip-audit", ""]
           if findings:
@@ -119,6 +133,9 @@ jobs:
                   lines.append(f"| {f['name']} | {f['version']} | {', '.join(sorted(f['ids']))} | {fixed} | {mark} |")
           else:
               lines.append("No known vulnerabilities found.")
+          if skipped:
+              lines += ["", "Not audited:"]
+              lines += [f"- {d['name']}: {' '.join(d['skip_reason'].split())}" for d in skipped]
           lines += ["", f"Suppressions (PIP_AUDIT_IGNORES): {', '.join(sorted(ignores)) or 'none'}"]
           if stale:
               lines.append(f"Suppressions matching no finding (remove them): {', '.join(stale)}")
@@ -128,6 +145,11 @@ jobs:
               out.write(summary)
 
           failed = False
+          # pip-audit exits non-zero when it finds vulnerabilities, but also when
+          # it fails part-way; a non-zero exit with no findings is the latter.
+          if os.environ["PIP_AUDIT_STATUS"] != "0" and not findings:
+              print(f"::error::pip-audit exited {os.environ['PIP_AUDIT_STATUS']} but reported no vulnerabilities")
+              failed = True
           for f in unsuppressed:
               print(f"::error::{f['name']} {f['version']}: {', '.join(sorted(f['ids']))} {f['desc'][:200]}")
               failed = True
