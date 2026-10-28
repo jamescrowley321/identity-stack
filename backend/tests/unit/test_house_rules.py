@@ -357,3 +357,40 @@ def test_abstract_identity_service_has_no_implementation_to_trace():
     from app.services.identity import IdentityService
 
     assert IdentityService.__abstractmethods__
+
+
+# --- §4: a handler that catches UpstreamStatusError also catches the transport error ---
+
+# (module, handler) -> why a transport failure still surfaces as 500 here.
+STATUS_ONLY_UPSTREAM_HANDLERS = {
+    ("routers/users.py", name): "predates #512; answering 502 is a follow-up behaviour change"
+    for name in ("list_members", "invite_member", "deactivate_member", "activate_member", "remove_member")
+} | {
+    ("routers/attributes.py", name): "predates #512; answering 502 is a follow-up behaviour change"
+    for name in ("update_profile_attribute", "get_tenant_settings", "update_tenant_settings")
+}
+
+
+def _caught_names(handler: ast.ExceptHandler) -> set[str]:
+    if handler.type is None:
+        return set()
+    nodes = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    return {node.id for node in nodes if isinstance(node, ast.Name)}
+
+
+def test_handlers_that_catch_upstream_status_also_catch_transport():
+    found = set()
+    for path in _modules("routers"):
+        tree = _tree(path)
+        owner = _enclosing_functions(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            caught = set().union(*(_caught_names(h) for h in node.handlers)) if node.handlers else set()
+            if "UpstreamStatusError" in caught and "UpstreamTransportError" not in caught:
+                found.add((_rel(path), owner[node]))
+    expected = STATUS_ONLY_UPSTREAM_HANDLERS.keys()
+    assert found == expected, (
+        f"§4: catch UpstreamTransportError too and answer 502. New: {sorted(found - expected)}; "
+        f"stale exceptions: {sorted(expected - found)}"
+    )

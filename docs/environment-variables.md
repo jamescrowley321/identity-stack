@@ -33,6 +33,8 @@ Defaults below are the values baked into the code (`backend/app/...`). The backe
 | `JIT_ENABLED_PROVIDERS` | `ory` | Comma-separated providers whose first-login users are provisioned just in time by `GET /api/identity`. |
 | `CANONICAL_RBAC_PROVIDERS` | `ory` | Comma-separated providers whose roles and permissions come from the canonical model rather than token claims. Descope is excluded by default. |
 
+> **Never set `OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_CLIENT_REQUEST` or `OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_CLIENT_RESPONSE`.** The OpenTelemetry httpx instrumentor reads them itself and would record outbound headers as span attributes. That includes the `Authorization: Bearer <project>:<management key>` header on every Descope management call. The backend's span hook overwrites only the `authorization` attribute ([conventions §9](conventions.md#9-no-secrets-in-logs)).
+
 > `py-identity-model` (token validation, OIDC discovery and JWKS) reads `HTTP_TIMEOUT` itself, default `30` seconds. The backend never reads it, so it is not in the table above.
 
 > The three internal-endpoint secrets (`DESCOPE_WEBHOOK_SECRET`, `DESCOPE_FLOW_SYNC_SECRET`, `INTERNAL_IDENTITY_KEY`) do **not** block startup — the app logs a warning and the corresponding endpoint refuses traffic until the secret is set (`main.py:_warn_missing_secrets`).

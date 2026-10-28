@@ -25,8 +25,8 @@ import os
 from typing import overload
 
 # The spellings ``knob_flag`` treats as "off". Anything else, including an empty
-# string, is "on". This is deliberately fail-closed for security switches such
-# as ORY_REQUIRE_AUDIENCE: a typo leaves the check enabled.
+# string, is "on". That is fail-closed only for a switch whose "on" state is the
+# secure one, such as ORY_REQUIRE_AUDIENCE: a typo leaves the check enabled.
 _FLAG_OFF = frozenset({"false", "0", "no"})
 
 
@@ -64,8 +64,12 @@ def knob_flag(name: str, default: str) -> bool:
 
     Rule: a flag is off only when its value, stripped and lowercased, is one of
     ``false``, ``0`` or ``no``. Every other value — ``true``, ``1``, ``yes``,
-    ``off``, an empty string, a typo — is on. Security switches MUST be read
-    with this helper so a mistyped value never silently disables a check.
+    ``off``, an empty string, a typo — is on.
+
+    That makes a typo fail closed only when "on" is the secure state, so a switch
+    read with this helper MUST be named for the secure behaviour (``REQUIRE_``,
+    ``ENFORCE_``), never for the insecure one (``SKIP_``, ``DISABLE_``,
+    ``ALLOW_INSECURE_``). See docs/conventions.md §3.
     """
     return knob(name, default).strip().lower() not in _FLAG_OFF
 
