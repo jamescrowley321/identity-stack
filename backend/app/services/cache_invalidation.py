@@ -30,12 +30,15 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from opentelemetry import trace
+
 from app.logbook import logbook
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
 
 logger = logbook(__name__)
+tracer = trace.get_tracer(__name__)
 
 CHANNEL = "identity:changes"
 
@@ -60,13 +63,14 @@ class CacheInvalidationPublisher:
         tenant_id: UUID | str | None = None,
     ) -> None:
         """Publish a single change event. Silent on failure (AC-3.3.2)."""
-        if self._redis is None:
-            return
-        event = self._build_event(entity_type, entity_id, operation, tenant_id)
-        try:
-            await self._redis.publish(CHANNEL, json.dumps(event))
-        except Exception:
-            logger.error("Redis publish failed for %s/%s", entity_type, entity_id, exc_info=True)
+        with tracer.start_as_current_span("CacheInvalidationPublisher.publish"):
+            if self._redis is None:
+                return
+            event = self._build_event(entity_type, entity_id, operation, tenant_id)
+            try:
+                await self._redis.publish(CHANNEL, json.dumps(event))
+            except Exception:
+                logger.error("Redis publish failed for %s/%s", entity_type, entity_id, exc_info=True)
 
     async def publish_batch(
         self,
@@ -75,14 +79,15 @@ class CacheInvalidationPublisher:
         stats: dict[str, Any],
     ) -> None:
         """Publish a single batch event for reconciliation. Silent on failure."""
-        if self._redis is None:
-            return
-        event = self._build_event("batch", "reconciliation", operation, None)
-        event["stats"] = stats
-        try:
-            await self._redis.publish(CHANNEL, json.dumps(event))
-        except Exception:
-            logger.error("Redis publish failed for batch/%s", operation, exc_info=True)
+        with tracer.start_as_current_span("CacheInvalidationPublisher.publish_batch"):
+            if self._redis is None:
+                return
+            event = self._build_event("batch", "reconciliation", operation, None)
+            event["stats"] = stats
+            try:
+                await self._redis.publish(CHANNEL, json.dumps(event))
+            except Exception:
+                logger.error("Redis publish failed for batch/%s", operation, exc_info=True)
 
     @staticmethod
     def _build_event(

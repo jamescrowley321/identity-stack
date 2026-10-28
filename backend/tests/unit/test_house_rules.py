@@ -257,3 +257,103 @@ def test_router_code_does_not_read_request_state():
         f"New: {sorted(found - REQUEST_STATE_READERS.keys())}; "
         f"stale exceptions: {sorted(REQUEST_STATE_READERS.keys() - found)}"
     )
+
+
+# --- §20: every public service method opens its own span ----------------------
+
+# (module, qualified name) -> why it opens no span of its own.
+UNTRACED_SERVICE_CALLABLES = {
+    ("services/descope.py", "DescopeManagementClient.close"): "lifecycle: closes the owned HTTP client",
+    ("services/canonical.py", "canonical_user"): "pure dict-shaping helper, no I/O",
+    ("services/canonical.py", "canonical_tenant"): "pure dict-shaping helper, no I/O",
+    ("services/identity_resolution.py", "run_cache_invalidation_subscriber"): "a background loop for the process "
+    "lifetime; a span around it would never end",
+}
+
+
+def _span_names(func: ast.AST) -> set[str]:
+    """Names passed to ``tracer.start_as_current_span("...")`` in a ``with`` inside ``func``."""
+    names = set()
+    for node in ast.walk(func):
+        if not isinstance(node, (ast.With, ast.AsyncWith)):
+            continue
+        for item in node.items:
+            call = item.context_expr
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "start_as_current_span"
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "tracer"
+                and call.args
+                and isinstance(call.args[0], ast.Constant)
+            ):
+                names.add(call.args[0].value)
+    return names
+
+
+def _has_module_tracer(tree: ast.Module) -> bool:
+    return any(
+        isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "tracer" for t in node.targets)
+        and ast.unparse(node.value) == "trace.get_tracer(__name__)"
+        for node in tree.body
+    )
+
+
+def _is_abstract(func: ast.AST) -> bool:
+    return any(ast.unparse(d).endswith("abstractmethod") for d in func.decorator_list)
+
+
+def _service_modules() -> list[Path]:
+    return [path for path in _modules("services") if not path.is_relative_to(APP / "services" / "adapters")]
+
+
+def test_public_service_methods_open_their_own_span():
+    missing, untraced = [], set()
+    for path in _service_modules():
+        tree = _tree(path)
+        module = _rel(path)
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                members = [
+                    (f"{node.name}.{f.name}", f)
+                    for f in node.body
+                    if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and not f.name.startswith("_")
+                    and not _is_abstract(f)
+                ]
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not node.name.startswith("_"):
+                members = [(node.name, node)]
+            else:
+                continue
+            for qualname, func in members:
+                if (module, qualname) in UNTRACED_SERVICE_CALLABLES:
+                    untraced.add((module, qualname))
+                    continue
+                expected = qualname if "." in qualname else f"{path.stem}.{qualname}"
+                if expected not in _span_names(func):
+                    missing.append(f"{module}::{qualname} (expected span {expected!r})")
+                elif not _has_module_tracer(tree):
+                    missing.append(f"{module} has spans but no module-level tracer = trace.get_tracer(__name__)")
+    stale = UNTRACED_SERVICE_CALLABLES.keys() - untraced
+    assert not missing, f"§20: {missing}"
+    assert not stale, f"§20: stale exceptions: {sorted(stale)}"
+
+
+def test_logout_strategies_open_a_span_per_logout_kind():
+    """The logout strategies are private functions reached through LOGOUT_STRATEGIES."""
+    from app.services.logout import LOGOUT_STRATEGIES
+
+    tree = _tree(APP / "services" / "logout.py")
+    functions = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assert _has_module_tracer(tree)
+    for kind, strategy in LOGOUT_STRATEGIES.items():
+        assert f"logout.{kind}" in _span_names(functions[strategy.__name__]), f"§20: {strategy.__name__}"
+
+
+def test_abstract_identity_service_has_no_implementation_to_trace():
+    """§20 skips abstract methods; if IdentityService gains a concrete subclass, that subclass is traced."""
+    from app.services.identity import IdentityService
+
+    assert IdentityService.__abstractmethods__

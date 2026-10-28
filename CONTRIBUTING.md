@@ -7,7 +7,7 @@ Thanks for your interest in contributing.
 - Work on a feature branch with a type prefix (`feat/`, `fix/`, `docs/`, `refactor/`, `test/`, `chore/`, `ci/`).
 - Follow [Conventional Commits](https://www.conventionalcommits.org/).
 - Keep pull requests focused, explain what and why, and update docs and tests alongside your change.
-- Backend code follows the numbered house rules in [docs/conventions.md](docs/conventions.md). A change to a rule updates that file, its enforcement and its named exceptions together (§20).
+- Backend code follows the numbered house rules in [docs/conventions.md](docs/conventions.md). A change to a rule updates that file, its enforcement and its named exceptions together (§21).
 
 ## AI-Assisted Contributions
 
