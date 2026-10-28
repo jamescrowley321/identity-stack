@@ -60,7 +60,8 @@ a mistyped value would then switch the check off. A comma-separated list of prov
 **MUST** be read with `knob_set`, which strips and lowercases the entries. Code **MUST NOT**
 parse either shape by hand.
 
-*Enforcement:* review.
+*Enforcement:* test (`test_knob_flag_switches_are_named_for_the_secure_state` rejects a
+`knob_flag` name containing `SKIP`, `DISABLE`, `INSECURE`, `BYPASS` or `NO_VERIFY`).
 
 ## Outbound HTTP
 
@@ -72,21 +73,25 @@ response and `UpstreamTransportError` for no response at all. No module in `app/
 `app/outbound.py` imports `httpx`. In particular, routers **MUST NOT** import `httpx`. See
 [ADR-0006](adr/0006-outbound-http-and-logging-helpers.md).
 
-A route handler that catches `UpstreamStatusError` **MUST** also catch
-`UpstreamTransportError` and answer it with 502, as `documents.py`, `fga.py` and
-`attributes.py::get_profile` do. Otherwise a Descope outage surfaces as an unhandled 500.
+A router function that calls Descope **MUST** catch both `UpstreamStatusError` and
+`UpstreamTransportError` and answer them with 502, as `documents.py`, `fga.py` and
+`attributes.py::get_profile` do. Otherwise a Descope outage surfaces as an unhandled 500. A
+function that catches `Exception` counts as handling both.
 
 - Exception: the five handlers in `routers/users.py`, plus `update_profile_attribute`,
   `get_tenant_settings` and `update_tenant_settings` in `routers/attributes.py`. They catch
   only `UpstreamStatusError`, so a transport failure surfaces as 500. That predates #512, and
   changing those answers to 502 is a behaviour change left for a follow-up.
-- Exception: `routers/accesskeys.py`. No handler in it catches an upstream failure, so every
-  Descope error and timeout there surfaces as 500. That also predates #512 and is left for the
-  same follow-up.
+- Exception: every function in `routers/accesskeys.py` (its six handlers and
+  `_verify_key_tenant`). None of them catches an upstream failure, so every Descope error and
+  timeout there surfaces as 500. That also predates #512 and is left for the same follow-up.
+- Exception: `routers/users.py::_get_descope_client`, which only returns the client and makes
+  no call.
 
-*Enforcement:* Ruff (TID251 on `httpx`), plus tests
-(`test_handlers_that_catch_upstream_status_also_catch_transport` and
-`test_routers_that_call_descope_handle_upstream_failures`).
+*Enforcement:* Ruff (TID251 on `httpx`), plus a test
+(`test_router_functions_that_call_descope_handle_upstream_failures`). The test checks each
+router function that reads `descope_client` or calls a same-module helper that does, and keys
+its exceptions by module and function.
 
 ### 5. The Descope Management API is called through `DescopeManagementClient`
 
@@ -111,7 +116,8 @@ implicit default.
   builds its own clients with a timeout taken from its `HTTP_TIMEOUT` environment variable
   (default 30 seconds). The backend does not read that variable.
 
-*Enforcement:* the helper's signature, plus a test (`test_outbound.py`).
+*Enforcement:* the helper's signature, plus tests (`test_outbound.py`, including one that pins
+`logout.py`'s `timeout=5.0`).
 
 ## Logging
 
@@ -148,11 +154,13 @@ truncated to 500 characters before it is logged (`exc.response.text[:500]`).
 The same applies to spans. `app.telemetry._sanitize_httpx_request` overwrites one span
 attribute, `http.request.header.authorization`, with `[REDACTED]`, and does nothing else. It
 is not a general header filter. Outbound Descope calls carry the management key in their
-`Authorization` header, so a deployment that exports telemetry **MUST NOT** set
-`OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_CLIENT_REQUEST` or
-`OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_CLIENT_RESPONSE`. The OpenTelemetry httpx
-instrumentor reads those variables itself and records every matching header as a span
-attribute.
+`Authorization` header. Inbound requests carry callers' bearer tokens, and the
+`/api/internal/*` endpoints receive shared secrets in `X-Identity-Key`, `X-Flow-Secret` and
+`X-Descope-Webhook-S256`. A deployment that exports telemetry therefore **MUST NOT** set any
+`OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_*` variable: `_CLIENT_REQUEST`, `_CLIENT_RESPONSE`,
+`_SERVER_REQUEST` or `_SERVER_RESPONSE`. The OpenTelemetry httpx and FastAPI instrumentors read
+those variables themselves and record every matching header as a span attribute. Nothing in
+the backend redacts inbound headers.
 
 *Enforcement:* review.
 
@@ -316,8 +324,9 @@ beneath records the HTTP status. Service spans keep OpenTelemetry's defaults. Se
 
 - Exception: abstract methods, such as those of the `IdentityService` interface in
   `services/identity.py`. A concrete implementation is traced.
-- Exception: `DescopeManagementClient.close`, a lifecycle method that closes the owned
-  HTTP client.
+- Exception: `DescopeManagementClient.close`, a lifecycle method that closes an *injected*
+  HTTP client. Nothing in `app/` calls it, because `main.lifespan` owns the shared client and
+  closes it.
 - Exception: `canonical_user` and `canonical_tenant` in `services/canonical.py`, which are
   pure dict-shaping helpers with no I/O.
 - Exception: `run_cache_invalidation_subscriber` in `services/identity_resolution.py`, a

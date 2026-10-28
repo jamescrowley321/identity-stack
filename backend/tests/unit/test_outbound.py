@@ -29,9 +29,25 @@ class TestOutboundClient:
         with pytest.raises(TypeError):
             outbound_client()  # type: ignore[call-arg]
 
-    def test_five_seconds_matches_httpx_implicit_default(self):
-        """logout.py passes 5.0 to keep the timeout it had when it relied on httpx's default."""
-        assert httpx.AsyncClient().timeout == httpx.Timeout(5.0)
+    @pytest.mark.anyio
+    async def test_descope_logout_passes_an_explicit_five_second_timeout(self, monkeypatch):
+        """logout.py passes 5.0, the timeout it used to get implicitly from httpx (§6)."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.middleware.providers import descope_config
+        from app.services import logout
+
+        monkeypatch.setenv("DESCOPE_PROJECT_ID", "proj")
+        monkeypatch.setenv("DESCOPE_MANAGEMENT_KEY", "key")
+        client = AsyncMock()
+        factory = MagicMock()
+        factory.return_value.__aenter__.return_value = client
+        monkeypatch.setattr(logout, "outbound_client", factory)
+
+        await logout.LOGOUT_STRATEGIES["management"](descope_config("proj"), {"sub": "U1"}, None)
+
+        factory.assert_called_once_with(timeout=5.0)
+        client.post.assert_awaited_once()
 
 
 class TestAliases:

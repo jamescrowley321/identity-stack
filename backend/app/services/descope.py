@@ -621,6 +621,12 @@ class DescopeManagementClient:
             )
 
     async def close(self) -> None:
-        """Close the underlying HTTP client if we own it."""
+        """Close an *injected* HTTP client; a client this instance built per call is already closed.
+
+        Nothing in ``app/`` calls this. The process-wide client is injected by
+        ``main.lifespan``, which owns it and closes it at shutdown (see
+        ``app.outbound``), so calling this on ``app.state.descope_client`` would
+        close that shared client under in-flight requests.
+        """
         if self._http_client is not None and not self._owns_client:
             await self._http_client.aclose()

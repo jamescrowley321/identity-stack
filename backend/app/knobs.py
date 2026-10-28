@@ -52,9 +52,10 @@ def knob(name: str, default: str | None = None) -> str | None:
 def required_knob(name: str) -> str:
     """Return environment variable ``name``, raising ``KeyError(name)`` if it is unset.
 
-    An empty value counts as set. Only ``main.lifespan`` uses this, for the two
-    Descope credentials the app refuses to start without; its error message is
-    built from the ``KeyError``.
+    An empty value counts as set: this guarantees the variable is *present*, not
+    that it is usable, so ``DESCOPE_PROJECT_ID=`` still starts the app. Only
+    ``main.lifespan`` uses this, for the two Descope credentials it refuses to
+    start without; its error message is built from the ``KeyError``.
     """
     return os.environ[name]
 

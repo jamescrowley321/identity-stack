@@ -6,8 +6,8 @@
 
 ## Context
 
-At `fc01974`, eight modules in `backend/app` imported `httpx`, three of them routers
-(`users.py`, `documents.py`, `attributes.py`), and 28 modules imported `logging`. The
+At `fc01974`, eight modules in `backend/app` imported `httpx`, four of them routers
+(`users.py`, `documents.py`, `attributes.py`, `fga.py`), and 28 modules imported `logging`. The
 routers used `httpx` only to name the exceptions `DescopeManagementClient` lets through.
 That still let any router open its own client, and one call site, the Descope logout,
 relied on httpx's implicit 5-second timeout without saying so.
