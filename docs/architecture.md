@@ -52,6 +52,9 @@ These secrets are **not** required for the app to boot, but each guarded endpoin
 
 ```
 backend/app/
+  knobs.py        # the only reader of the environment (conventions §1)
+  outbound.py     # the only importer of httpx: outbound_client + Upstream* errors (§4)
+  logbook.py      # logbook(__name__): the only source of loggers (§7)
   middleware/     # token validation, claims, rate limiting, security headers, factory
   routers/        # API routes (auth, tenants, roles, fga, internal, ...)
   services/       # provider sync, descope client, reconciliation, identity resolution
@@ -60,3 +63,5 @@ frontend/         # React + Vite SPA
 infra/            # Terraform (Descope project config)
 tyk/              # gateway config + init sidecar
 ```
+
+The rules the backend code follows (configuration, outbound HTTP, logging, results and errors, authorization, data access) are in [conventions.md](conventions.md). The decisions behind them are in [adr/](adr/README.md).
