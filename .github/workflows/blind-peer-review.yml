@@ -50,9 +50,7 @@ jobs:
             owasp_llm
           default_model: google/gemini-3.8-flash
 
-  # No spend on PRs from other repositories (no secret anyway) or from bots
-  # (Dependabot, Release Please): a bot-authored PR pushed by a bot. A bot pushing
-  # to a human's PR is still reviewed.
+  # No spend on PRs from other repositories (no secret anyway) or Dependabot.
   # Compared by name, not head.repo.fork: a repo that is itself a fork reports fork=true on its own PRs.
   preflight:
     name: Preflight
@@ -61,7 +59,7 @@ jobs:
     if: >-
       vars.RUN_LENSES == 'true' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      !(endsWith(github.event.pull_request.user.login, '[bot]') && endsWith(github.actor, '[bot]'))
+      github.actor != 'dependabot[bot]'
     permissions:
       checks: read
       contents: read
@@ -119,12 +117,12 @@ jobs:
       pull-requests: read
     steps:
       - name: Record exempt PR
-        if: github.event.pull_request.head.repo.full_name != github.repository || (endsWith(github.event.pull_request.user.login, '[bot]') && endsWith(github.actor, '[bot]'))
-        run: echo "Blind peer review is intentionally exempt for PRs from other repositories and bots."
+        if: github.event.pull_request.head.repo.full_name != github.repository || github.actor == 'dependabot[bot]'
+        run: echo "Blind peer review is intentionally exempt for PRs from other repositories and Dependabot."
       - name: Fail closed when prerequisites did not succeed
         if: >-
           github.event.pull_request.head.repo.full_name == github.repository &&
-          !(endsWith(github.event.pull_request.user.login, '[bot]') && endsWith(github.actor, '[bot]')) &&
+          github.actor != 'dependabot[bot]' &&
           (needs.config.result != 'success' || needs.preflight.result != 'success' || needs.review.result != 'success')
         env:
           CONFIG_RESULT: ${{ needs.config.result }}
@@ -136,7 +134,7 @@ jobs:
       - name: Adjudicate lenses
         if: >-
           github.event.pull_request.head.repo.full_name == github.repository &&
-          !(endsWith(github.event.pull_request.user.login, '[bot]') && endsWith(github.actor, '[bot]')) &&
+          github.actor != 'dependabot[bot]' &&
           needs.config.result == 'success' && needs.preflight.result == 'success' && needs.review.result == 'success'
         uses: jamescrowley321/blind-peer-review@439e22c6dcfdaefc6c1713d9f5b3d259ee38cf19 # v3.10.0
         with:
