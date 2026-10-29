@@ -40,20 +40,6 @@
 # someone else's PR, comment "@claude review this PR" yourself — a maintainer
 # asking IS the approval.
 #
-#   1. The `if:` on the job below requires author_association == 'OWNER'. GitHub
-#      evaluates that BEFORE scheduling anything, so a stranger's "@claude" never
-#      allocates a runner, never checks out the repo, and never reaches the model.
-#   2. claude-code-action then requires the commenter to hold write access and
-#      refuses bots (`allowed_non_write_users` and `allowed_bots` both unset).
-#      That check runs INSIDE the action — by the time it rejects someone, the
-#      job has already started.
-#
-# Gate 2 alone protects the subscription but not your inbox: every drive-by
-# "@claude" would still spawn a job run and a notification. Gate 1 is what stops
-# that, and it is the one carrying the weight. To let collaborators use it, add
-# 'MEMBER' and 'COLLABORATOR' to the association test — deliberately, not as a
-# side effect of editing something else.
-#
 # REVIEW PATH
 #
 # The blind-peer-review plugin is installed into the CI session from its own
