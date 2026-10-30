@@ -15,7 +15,7 @@ dependencies = [
     # Floor at 3.8.5: first release that requires cryptography>=50, which carries
     # the fixes for PYSEC-2026-3552/3553/3554. Older py-identity-model caps
     # cryptography<49 and would hold us on a vulnerable build.
-    "py-identity-model>=3.8.5,<4",
+    "py-identity-model>=3.8.5,<5",
     "sqlmodel>=0.0.22,<1",
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.31.0",
