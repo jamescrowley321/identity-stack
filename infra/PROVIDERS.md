@@ -35,7 +35,6 @@ Ory `ORY_WORKSPACE_API_KEY` + `ORY_WORKSPACE_ID`.
 | `DESCOPE_MANAGEMENT_KEY` | `descope_management_key.ci_e2e.cleartext` (TF-minted) | resource | CI e2e, backend | ✅ fixed in #410 — was `var` default `""` (the root cause of the E2E gap); now self-provisioning, always valid. (Provider *auth* still uses the workspace env var — separate.) |
 | `E2E_TEST_EMAIL` | `var.e2e_test_email` (default now synthetic) | var | CI e2e | ✅ fixed in #410 — default set to a synthetic non-deliverable address; no longer blanks |
 | `E2E_TEST_TENANT_ID` | `descope_tenant.acme.id` | resource | CI e2e | ok |
-| `OPENROUTER_API_KEY` | manual GH secret | manual | adversarial-review lenses | not in TF |
 | GitHub provider token | manual TFC env var | manual | `terraform apply` | not codified |
 | `ORY_WORKSPACE_API_KEY` | manual env / TFC var | manual | Ory provider auth | not in TF; rotation pending (#375) |
 | `ory_project_api_key.tf` | `ory_project_api_key` resource | resource | (intended) backend OrySyncAdapter | **state-only; no route to runtime** |
