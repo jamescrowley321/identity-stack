@@ -1,16 +1,15 @@
-import logging
-
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
 
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
+from app.logbook import logbook
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
+from app.outbound import UpstreamStatusError
 from app.services.canonical import canonical_user
 
 router = APIRouter(tags=["Users"])
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 
 
 class InviteUserRequest(BaseModel):
@@ -53,7 +52,7 @@ async def list_members(
                 }
             )
         return {"members": members}
-    except httpx.HTTPStatusError as exc:
+    except UpstreamStatusError as exc:
         logger.warning("Descope API error listing members: %s", exc.response.status_code)
         raise HTTPException(status_code=502, detail="Failed to list members from Descope") from exc
 
@@ -78,7 +77,7 @@ async def invite_member(
             role_names=body.role_names,
         )
         return {"status": "invited", "email": body.email, "user": canonical_user(result)}
-    except httpx.HTTPStatusError as exc:
+    except UpstreamStatusError as exc:
         if exc.response.status_code == 400:
             detail = exc.response.json().get("errorDescription", "Bad request")
             raise HTTPException(status_code=400, detail=detail) from exc
@@ -98,7 +97,7 @@ async def deactivate_member(
     try:
         await client.update_user_status(user_id, "disabled")
         return {"status": "deactivated", "user_id": user_id}
-    except httpx.HTTPStatusError as exc:
+    except UpstreamStatusError as exc:
         logger.warning("Descope API error deactivating member: %s", exc.response.status_code)
         raise HTTPException(status_code=502, detail="Failed to deactivate member via Descope") from exc
 
@@ -115,7 +114,7 @@ async def activate_member(
     try:
         await client.update_user_status(user_id, "enabled")
         return {"status": "activated", "user_id": user_id}
-    except httpx.HTTPStatusError as exc:
+    except UpstreamStatusError as exc:
         logger.warning("Descope API error activating member: %s", exc.response.status_code)
         raise HTTPException(status_code=502, detail="Failed to activate member via Descope") from exc
 
@@ -132,6 +131,6 @@ async def remove_member(
     try:
         await client.remove_user_from_tenant(user_id, tenant_id)
         return {"status": "removed", "user_id": user_id}
-    except httpx.HTTPStatusError as exc:
+    except UpstreamStatusError as exc:
         logger.warning("Descope API error removing member: %s", exc.response.status_code)
         raise HTTPException(status_code=502, detail="Failed to remove member via Descope") from exc

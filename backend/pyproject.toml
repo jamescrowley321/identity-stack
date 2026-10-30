@@ -54,10 +54,24 @@ line-length = 120
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W", "S"]
+# TID251 enforces the house rules in docs/conventions.md; G004/G010 keep log calls lazy.
+select = ["E", "F", "I", "W", "S", "TID251", "G004", "G010"]
+
+# docs/conventions.md §1, §4 and §7. Each helper module is the one exception to
+# its own ban and is listed under per-file-ignores below.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"os.environ".msg = "Read configuration through app.knobs (docs/conventions.md §1)."
+"os.getenv".msg = "Read configuration through app.knobs (docs/conventions.md §1)."
+"httpx".msg = "Build clients with app.outbound.outbound_client and catch its Upstream* errors (docs/conventions.md §4)."
+"logging.getLogger".msg = "Get a logger with app.logbook.logbook(__name__) (docs/conventions.md §7)."
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S105", "S106"]  # assert, hardcoded passwords OK in tests
+"tests/**" = ["S101", "S105", "S106", "TID251"]  # assert, hardcoded passwords OK in tests; house bans cover app/ only
+"app/knobs.py" = ["TID251"]  # the settings module: the one reader of os.environ
+"app/outbound.py" = ["TID251"]  # the HTTP client helper: the one importer of httpx
+"app/logbook.py" = ["TID251"]  # the logging helper: the one caller of logging.getLogger
+"scripts/**" = ["TID251"]  # operator scripts run outside the app process
+"migrations/**" = ["TID251"]  # Alembic env.py runs under the alembic CLI and reads DATABASE_URL itself
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

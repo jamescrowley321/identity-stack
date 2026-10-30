@@ -8,13 +8,13 @@ All methods return Result[T, IdentityError]. OTel spans on every method.
 from __future__ import annotations
 
 import hashlib
-import logging
 import uuid as uuid_mod
 
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
 from app.errors.identity import Conflict, IdentityError, NotFound, ValidationError
+from app.logbook import logbook
 from app.models.identity.provider import ProviderType
 from app.models.identity.sync_event import SyncEvent, SyncEventVerb
 from app.models.identity.user import IdPLink, User, UserStatus
@@ -25,7 +25,7 @@ from app.repositories.sync_event import SyncEventRepository
 from app.repositories.user import UserRepository
 from app.services.cache_invalidation import CacheInvalidationPublisher
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
 
 

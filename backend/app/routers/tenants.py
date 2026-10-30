@@ -1,5 +1,3 @@
-import logging
-
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
@@ -10,12 +8,13 @@ from app.dependencies.auth import get_claims
 from app.dependencies.identity import get_tenant_service
 from app.dependencies.tenant import get_tenant_claims, get_tenant_id
 from app.errors.problem_detail import result_to_response
+from app.logbook import logbook
 from app.models.database import get_async_session
 from app.models.tenant import TenantResource
 from app.services.canonical import canonical_tenant
 from app.services.tenant import TenantService
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 
 router = APIRouter(tags=["Tenants"])
 

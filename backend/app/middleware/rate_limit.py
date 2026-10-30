@@ -1,6 +1,3 @@
-import logging
-import os
-
 from limits import parse_many
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
@@ -8,10 +5,13 @@ from slowapi.util import get_remote_address
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-logger = logging.getLogger(__name__)
+from app.knobs import knob
+from app.logbook import logbook
 
-RATE_LIMIT_DEFAULT = os.getenv("RATE_LIMIT_DEFAULT", "60/minute")
-RATE_LIMIT_AUTH = os.getenv("RATE_LIMIT_AUTH", "10/minute")
+logger = logbook(__name__)
+
+RATE_LIMIT_DEFAULT = knob("RATE_LIMIT_DEFAULT", "60/minute")
+RATE_LIMIT_AUTH = knob("RATE_LIMIT_AUTH", "10/minute")
 
 
 def _validate_rate_limit(value: str, name: str) -> None:

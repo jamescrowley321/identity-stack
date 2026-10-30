@@ -1,5 +1,3 @@
-import os
-
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from py_identity_model import TokenValidationConfig
 from py_identity_model.aio import validate_token
@@ -11,21 +9,20 @@ from app.dependencies.identity import (
     get_identity_resolution_service,
 )
 from app.errors.identity import NotFound, ValidationError
+from app.knobs import knob, knob_set
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
 
 router = APIRouter(tags=["Protected"])
 
-DESCOPE_PROJECT_ID = os.getenv("DESCOPE_PROJECT_ID", "")
+DESCOPE_PROJECT_ID = knob("DESCOPE_PROJECT_ID", "")
 DISCO_ADDRESS = f"https://api.descope.com/{DESCOPE_PROJECT_ID}/.well-known/openid-configuration"
 
 # Providers eligible for just-in-time provisioning on first login. Ory is
 # greenfield (every user is JIT-provisioned); Descope users are pre-provisioned
 # via the seed, so Descope is intentionally excluded by default.
-JIT_ENABLED_PROVIDERS = {
-    name.strip().lower() for name in os.getenv("JIT_ENABLED_PROVIDERS", "ory").split(",") if name.strip()
-}
+JIT_ENABLED_PROVIDERS = knob_set("JIT_ENABLED_PROVIDERS", "ory")
 
 
 def _serialize_principal(principal: ClaimsPrincipal) -> dict:

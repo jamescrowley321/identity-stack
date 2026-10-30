@@ -1,10 +1,11 @@
-import logging
 import re
 
-import httpx
 from fastapi import HTTPException, Request
 
-logger = logging.getLogger(__name__)
+from app.logbook import logbook
+from app.outbound import UpstreamStatusError, UpstreamTransportError
+
+logger = logbook(__name__)
 
 
 def extract_user_id(request: Request) -> str:
@@ -80,12 +81,12 @@ async def resolve_fga_user_target(client, identifier: str, tenant_id: str) -> st
     """
     try:
         user = await client.load_user(identifier)
-    except httpx.HTTPStatusError as exc:
+    except UpstreamStatusError as exc:
         if exc.response.status_code == 404:
             return identifier
         logger.error("Failed to resolve FGA target: HTTP %s", exc.response.status_code)
         raise HTTPException(status_code=502, detail="Failed to resolve target user") from exc
-    except httpx.RequestError as exc:
+    except UpstreamTransportError as exc:
         logger.error("Network error resolving FGA target: %s", type(exc).__name__)
         raise HTTPException(status_code=502, detail="Failed to resolve target user") from exc
 
@@ -142,7 +143,7 @@ def require_fga(
         try:
             client = request.app.state.descope_client
             allowed = await client.check_permission(resource_type, prefixed_id, relation, user_id)
-        except httpx.HTTPStatusError as exc:
+        except UpstreamStatusError as exc:
             # Include the upstream body. Without it a 400 here says only "the
             # authz store refused", and the reason — a relation the schema does
             # not define, a malformed identifier — is nowhere in the logs, which
@@ -157,7 +158,7 @@ def require_fga(
                 exc.response.text[:500],
             )
             raise HTTPException(status_code=502, detail="Authorization check failed") from exc
-        except httpx.RequestError as exc:
+        except UpstreamTransportError as exc:
             logger.error(
                 "FGA check network error user=%s resource=%s:%s relation=%s",
                 user_id,

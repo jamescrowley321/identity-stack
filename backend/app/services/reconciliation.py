@@ -13,7 +13,6 @@ AC-3.2.5: Failed sync retry (drift detection covers prior failures)
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +20,7 @@ from expression import Error, Ok, Result
 from opentelemetry import trace
 
 from app.errors.identity import IdentityError, ProviderError
+from app.logbook import logbook
 from app.models.identity.provider import ProviderType
 from app.models.identity.role import Permission, Role
 from app.models.identity.tenant import Tenant, TenantStatus
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
 
 # Descope status → canonical UserStatus mapping

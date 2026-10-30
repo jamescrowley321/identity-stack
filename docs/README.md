@@ -8,6 +8,8 @@ Deeper reference for the identity-stack platform. Start with the [project README
 | [local-development.md](local-development.md) | The `make` workflow, Compose profiles, and the isolated test stack |
 | [deployment.md](deployment.md) | Standalone vs. gateway deployment, the Terraform `infra/` apply flow, and the required-secrets matrix |
 | [environment-variables.md](environment-variables.md) | Every environment variable the backend and frontend read, with defaults |
+| [conventions.md](conventions.md) | The backend's numbered house rules (MUST/SHOULD/MAY), their named exceptions and how each is enforced |
+| [adr/](adr/README.md) | Architecture decision records behind the larger conventions, including superseded ones |
 | [security.md](security.md) | Token validation, RBAC/FGA authorization, security headers, rate limiting, and the CI scanning stack |
 
 The API gateway component has its own reference: [`tyk/README.md`](../tyk/README.md).
