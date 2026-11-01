@@ -10,7 +10,7 @@ There are **two separate Terraform roots**, each with its own state:
 | Root | Providers | TFC workspace | State in-repo? |
 |------|-----------|---------------|----------------|
 | `infra/` | descope (fork `jamescrowley321/descope` `~>1.0`), github (`~>6.0`) | `jamescrowley321/identity-stack-dev` | yes (`main.tf` `cloud{}`) |
-| `infra/ory/` | ory (`ory/ory` `~>26.3`) | `auth-stack` (comment only) | **no `cloud{}`/`backend{}` block** — effectively local state |
+| `infra/ory/` | ory (`ory/ory` `~>26.3`) | tags `identity-stack` + `ory` (`identity-stack-ory-dev`/`-prod`) | yes (`versions.tf` `cloud{}`); the bootstrap state was local — one-time `terraform init -migrate-state` |
 
 Provider **auth is entirely out-of-band** (hand-set TFC workspace env vars, not
 codified): Descope `DESCOPE_MANAGEMENT_KEY`; GitHub `GITHUB_TOKEN`/`GH_TOKEN`;
@@ -77,6 +77,5 @@ paid cluster.)
    `DESCOPE_FLOW_SYNC_SECRET`, `INTERNAL_IDENTITY_KEY` have *no* source today —
    generate them as TF resources / variable-set entries and deliver to the
    backend.
-5. **Link the two roots.** Give `infra/ory/` a real state backend and propagate
-   its outputs (issuer, `client_id`, project API key) to backend/frontend config
-   automatically, killing the manual-copy drift on `ORY_ISSUER_URL`/`ORY_AUDIENCE`.
+5. **Link the two roots.** Propagate `infra/ory/`'s outputs (issuer,
+   `client_id`, project API key) to backend/frontend config automatically, killing the manual-copy drift on `ORY_ISSUER_URL`/`ORY_AUDIENCE`.
