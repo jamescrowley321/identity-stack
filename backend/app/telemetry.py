@@ -4,10 +4,10 @@ Configures OTLP exporter, auto-instrumentors for FastAPI, httpx, SQLAlchemy,
 and logging. Gracefully degrades when OTEL_EXPORTER_OTLP_ENDPOINT is unset.
 """
 
-import logging
-import os
+from app.knobs import knob
+from app.logbook import logbook
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 
 
 def init_telemetry(*, engine=None) -> None:
@@ -20,7 +20,7 @@ def init_telemetry(*, engine=None) -> None:
     Args:
         engine: Optional SQLAlchemy async engine for query tracing.
     """
-    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
+    endpoint = knob("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
     if not endpoint:
         logger.info("OTel disabled: OTEL_EXPORTER_OTLP_ENDPOINT is not set")
         return
@@ -36,7 +36,7 @@ def init_telemetry(*, engine=None) -> None:
         return
 
     try:
-        service_name = os.getenv("OTEL_SERVICE_NAME", "identity-stack")
+        service_name = knob("OTEL_SERVICE_NAME", "identity-stack")
         resource = Resource.create({"service.name": service_name})
         provider = TracerProvider(resource=resource)
         insecure = not endpoint.startswith("https://")
@@ -78,7 +78,12 @@ def _instrument_fastapi() -> None:
 
 
 def _sanitize_httpx_request(span, request) -> None:
-    """Remove sensitive headers from httpx span attributes."""
+    """Overwrite the ``http.request.header.authorization`` span attribute with ``[REDACTED]``.
+
+    This is not a general header filter. Header capture through
+    ``OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_CLIENT_*`` must stay off
+    (docs/conventions.md §9).
+    """
     if span.is_recording():
         span.set_attribute("http.request.header.authorization", "[REDACTED]")
 

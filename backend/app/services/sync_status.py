@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import uuid
 from datetime import datetime
 from typing import Any
@@ -11,12 +10,13 @@ from expression import Ok, Result
 from opentelemetry import trace
 
 from app.errors.identity import IdentityError
+from app.logbook import logbook
 from app.models.identity.sync_event import SyncEvent, SyncEventVerb
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
 from app.repositories.sync_event import SyncEventRepository
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
 
 
@@ -88,17 +88,18 @@ class SyncStatusService:
         occurred_at: datetime | None = None,
     ) -> SyncEvent:
         """Append a sync event. Caller is responsible for the transaction commit."""
-        event = SyncEvent(
-            provider_id=provider_id,
-            verb=verb,
-            subject_type=subject_type,
-            subject_id=subject_id,
-            external_sub=external_sub,
-            detail=detail,
-        )
-        if occurred_at is not None:
-            event.occurred_at = occurred_at
-        return await self._event_repo.create(event)
+        with tracer.start_as_current_span("SyncStatusService.record_event"):
+            event = SyncEvent(
+                provider_id=provider_id,
+                verb=verb,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                external_sub=external_sub,
+                detail=detail,
+            )
+            if occurred_at is not None:
+                event.occurred_at = occurred_at
+            return await self._event_repo.create(event)
 
 
 def _serialise_event(event: SyncEvent) -> dict[str, Any]:

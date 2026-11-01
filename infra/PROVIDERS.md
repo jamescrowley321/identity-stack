@@ -35,7 +35,6 @@ Ory `ORY_WORKSPACE_API_KEY` + `ORY_WORKSPACE_ID`.
 | `DESCOPE_MANAGEMENT_KEY` | `descope_management_key.ci_e2e.cleartext` (TF-minted, `infra/management_key.tf`) | resource | CI e2e | ok — always populated; rotate by tainting `descope_management_key.ci_e2e`. Was a `var` defaulting to `""` (the root cause of the E2E gap) until #410. Provider *auth* still uses the hand-set workspace env var — separate |
 | `E2E_TEST_EMAIL` | `var.e2e_test_email` (no default) | var | CI e2e | ok — `validation` refuses a blank value |
 | `E2E_TEST_TENANT_ID` | `descope_tenant.acme.id` | resource | CI e2e | ok |
-| `OPENROUTER_API_KEY` | manual GH secret | manual | adversarial-review lenses | not in TF |
 | GitHub provider token | manual TFC env var | manual | `terraform apply` | not codified |
 | `ORY_WORKSPACE_API_KEY` | manual env / TFC var | manual | Ory provider auth | not in TF; rotation pending (#375) |
 | `ory_project_api_key.tf` | `ory_project_api_key` resource | resource | (intended) backend OrySyncAdapter | **state-only; no route to runtime** |

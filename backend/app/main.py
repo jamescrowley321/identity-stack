@@ -1,9 +1,6 @@
 import asyncio
-import logging
-import os
 from contextlib import asynccontextmanager
 
-import httpx
 import sqlalchemy
 from fastapi import FastAPI
 from scalar_fastapi import get_scalar_api_reference
@@ -11,10 +8,13 @@ from slowapi.errors import RateLimitExceeded
 
 from app.errors.identity import IdentityErrorRaised
 from app.errors.problem_detail import identity_error_raised_handler
+from app.knobs import knob, required_knob
+from app.logbook import logbook
 from app.logging_config import setup_logging
 from app.middleware.factory import configure_middleware
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.models.database import get_engine
+from app.outbound import outbound_client
 from app.routers import (
     accesskeys,
     attributes,
@@ -38,18 +38,16 @@ from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.descope import DescopeManagementClient
 from app.telemetry import init_telemetry, shutdown_telemetry
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 
 
 def _warn_missing_secrets() -> None:
     """Log warnings for internal endpoint secrets missing at startup."""
-    import os
-
-    if not os.getenv("DESCOPE_WEBHOOK_SECRET"):
+    if not knob("DESCOPE_WEBHOOK_SECRET"):
         logger.warning("DESCOPE_WEBHOOK_SECRET not set — webhook endpoint will reject all requests")
-    if not os.getenv("DESCOPE_FLOW_SYNC_SECRET"):
+    if not knob("DESCOPE_FLOW_SYNC_SECRET"):
         logger.warning("DESCOPE_FLOW_SYNC_SECRET not set — flow sync endpoint will reject all requests")
-    if not os.getenv("INTERNAL_IDENTITY_KEY"):
+    if not knob("INTERNAL_IDENTITY_KEY"):
         logger.warning("INTERNAL_IDENTITY_KEY not set — identity resolution endpoint will reject all requests")
 
 
@@ -68,21 +66,22 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("Cannot connect to database — verify DATABASE_URL and that the database is running") from exc
 
     init_telemetry(engine=engine)
-    http_client = httpx.AsyncClient(timeout=30.0)
     try:
-        project_id = os.environ["DESCOPE_PROJECT_ID"]
-        management_key = os.environ["DESCOPE_MANAGEMENT_KEY"]
+        project_id = required_knob("DESCOPE_PROJECT_ID")
+        management_key = required_knob("DESCOPE_MANAGEMENT_KEY")
     except KeyError as exc:
         raise RuntimeError(
             f"Required environment variable {exc} is not set — "
             "ensure DESCOPE_PROJECT_ID and DESCOPE_MANAGEMENT_KEY are configured"
         ) from exc
-    base_url = os.getenv("DESCOPE_BASE_URL", "https://api.descope.com")
+    # Built after the reads above so a missing credential cannot leave it unclosed.
+    http_client = outbound_client(timeout=30.0)
+    base_url = knob("DESCOPE_BASE_URL", "https://api.descope.com")
     app.state.descope_client = DescopeManagementClient(project_id, management_key, base_url, http_client=http_client)
 
     # Redis for cache invalidation pub/sub — optional, degrades gracefully
     redis_client = None
-    redis_url = os.getenv("REDIS_URL")
+    redis_url = knob("REDIS_URL")
     if redis_url:
         from urllib.parse import urlparse
 

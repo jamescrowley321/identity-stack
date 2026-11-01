@@ -7,13 +7,13 @@ OTel spans on every method. Sync failure → log warning, still return Ok.
 
 from __future__ import annotations
 
-import logging
 import uuid
 
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
 from app.errors.identity import Conflict, Forbidden, IdentityError, NotFound
+from app.logbook import logbook
 from app.models.identity.user import User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.base import RepositoryConflictError
@@ -21,7 +21,7 @@ from app.repositories.user import UserRepository
 from app.services.adapters.base import IdentityProviderAdapter, SyncError
 from app.services.cache_invalidation import CacheInvalidationPublisher
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
 
 

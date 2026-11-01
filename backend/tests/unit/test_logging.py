@@ -3,13 +3,18 @@
 import logging
 from unittest.mock import patch
 
-from app.logging_config import _OTelAwareJsonFormatter, get_logger, setup_logging
+from app.logbook import logbook
+from app.logging_config import _OTelAwareJsonFormatter, setup_logging
 
 
-class TestGetLogger:
+class TestLogbook:
     def test_returns_logger_with_name(self):
-        logger = get_logger("test.module")
+        logger = logbook("test.module")
         assert logger.name == "test.module"
+
+    def test_returns_the_stdlib_logger_itself(self):
+        """caplog and patch(...logger) rely on this being logging.getLogger's object."""
+        assert logbook("test.module") is logging.getLogger("test.module")
 
 
 class TestSetupLogging:

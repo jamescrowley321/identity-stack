@@ -6,7 +6,6 @@ and HTTP responses. Routers call this instead of constructing responses manually
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,8 +25,9 @@ from app.errors.identity import (
     SyncFailed,
     ValidationError,
 )
+from app.logbook import logbook
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 
 
 class ProblemDetailResponse(BaseModel):

@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
-import os
 import uuid
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -22,6 +20,8 @@ from expression import Error, Ok, Result
 from opentelemetry import trace
 
 from app.errors.identity import IdentityError, NotFound
+from app.knobs import knob
+from app.logbook import logbook
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
@@ -32,11 +32,11 @@ from app.repositories.user import UserRepository
 if TYPE_CHECKING:
     from redis.asyncio import Redis
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
 
 try:
-    IDENTITY_CACHE_TTL = int(os.getenv("IDENTITY_CACHE_TTL", "300"))
+    IDENTITY_CACHE_TTL = int(knob("IDENTITY_CACHE_TTL", "300"))
 except (ValueError, TypeError):
     logger.warning("Invalid IDENTITY_CACHE_TTL value, using default 300s")
     IDENTITY_CACHE_TTL = 300
