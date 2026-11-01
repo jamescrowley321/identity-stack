@@ -1,10 +1,11 @@
 # Security Policy
 
 `identity-stack` is an identity platform — a FastAPI backend and Vite/React
-frontend that authenticate users and issue/validate security tokens against
-Descope. A vulnerability here can compromise the authentication and
-authorization decisions of a deployed instance, so reports are taken seriously
-and triaged promptly.
+frontend that authenticate users and validate security tokens issued by the
+configured identity providers (Descope, and Ory when configured). A
+vulnerability here can compromise the authentication and authorization
+decisions of a deployed instance, so reports are taken seriously and triaged
+promptly.
 
 ## Reporting a vulnerability
 
@@ -43,8 +44,8 @@ time. Run the latest `main` to stay current on fixes.
 ## Scope
 
 In scope: the application code that ships and runs — the FastAPI backend
-(`backend/`), the React frontend (`frontend/`), and the deployment/infra
-definitions (`infra/`) that configure how the platform is exposed.
+(`backend/`), the React frontend (`frontend/`), and the Terraform definitions
+(`infra/`) that provision the identity providers and their credentials.
 
 Out of scope: the test suites (`**/tests/**`, E2E harnesses), local development
 fixtures and sample `.env` files, and issues that require a pre-compromised host

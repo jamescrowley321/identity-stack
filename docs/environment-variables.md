@@ -8,8 +8,8 @@ Defaults below are the values baked into the code (`backend/app/...`). The backe
 |----------|---------|-------------|
 | `DATABASE_URL` | — (**required**) | SQLAlchemy database URL. The app raises at startup if unset or unreachable (`models/database.py`). |
 | `DEPLOYMENT_MODE` | `standalone` | `standalone` (backend validates tokens) or `gateway` (Tyk terminates auth at the edge). Selects the middleware stack (`middleware/factory.py`). |
-| `DESCOPE_PROJECT_ID` | `""` | Descope project ID; required for token validation and management calls. |
-| `DESCOPE_MANAGEMENT_KEY` | `""` | Descope management key; required for provider sync and management operations. |
+| `DESCOPE_PROJECT_ID` | `""` | Descope project ID; required for token validation and management calls. The app refuses to start when it is unset (`main.py` lifespan). |
+| `DESCOPE_MANAGEMENT_KEY` | `""` | Descope management key; required for provider sync and management operations. The app refuses to start when it is unset (`main.py` lifespan). |
 | `DESCOPE_BASE_URL` | `https://api.descope.com` | Descope API base URL (override for custom domains/testing). |
 | `DESCOPE_WEBHOOK_SECRET` | `""` | Shared secret guarding `POST /api/internal/webhooks/descope`. Unset ⇒ the endpoint rejects all requests. |
 | `DESCOPE_FLOW_SYNC_SECRET` | `""` | Shared secret guarding `POST /api/internal/users/sync`. Unset ⇒ the endpoint rejects all requests. |
@@ -19,9 +19,9 @@ Defaults below are the values baked into the code (`backend/app/...`). The backe
 | `RATE_LIMIT_AUTH` | `10/minute` | Rate limit for auth-sensitive routes. |
 | `TRUSTED_PROXY_HOSTS` | `127.0.0.1` | Comma-separated proxy hosts trusted for forwarded headers. |
 | `FRONTEND_URL` | `http://localhost:3000` | CORS allowed origin. |
-| `REDIS_URL` | — | Redis URL for cross-instance cache invalidation. Unset ⇒ cache invalidation disabled (single-instance only). |
+| `REDIS_URL` | — | Redis URL (`redis://` or `rediss://`) for cross-instance cache invalidation. Unset, another scheme or unreachable ⇒ cache invalidation disabled (single-instance only). |
 | `LOG_LEVEL` | `INFO` | Log level. |
-| `ENVIRONMENT` | `development` | Environment name; influences security-header strictness. |
+| `ENVIRONMENT` | `development` | `production` turns on HSTS and the strict default CSP, and switches logs to JSON (`middleware/security.py`, `logging_config.py`). |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `""` | OTLP endpoint; empty disables telemetry export. |
 | `OTEL_SERVICE_NAME` | `identity-stack` | OpenTelemetry service name. |
 | `CSP_POLICY` | `default-src 'self'` in production; a localhost-friendly policy otherwise | `Content-Security-Policy` header value (`middleware/security.py`). |
@@ -39,12 +39,14 @@ Defaults below are the values baked into the code (`backend/app/...`). The backe
 
 > The three internal-endpoint secrets (`DESCOPE_WEBHOOK_SECRET`, `DESCOPE_FLOW_SYNC_SECRET`, `INTERNAL_IDENTITY_KEY`) do **not** block startup — the app logs a warning and the corresponding endpoint refuses traffic until the secret is set (`main.py:_warn_missing_secrets`).
 
-## Compose-level (required to run the stack, not read by the app)
+## Compose-level (read by Compose, not by the app)
 
 | Variable | Required for | Notes |
 |----------|--------------|-------|
 | `POSTGRES_PASSWORD` | any `docker compose up` | Hard-guarded with `${POSTGRES_PASSWORD:?}` — Compose **aborts** if unset. |
-| `TYK_GATEWAY_SECRET` | gateway profile | Gateway admin/API secret (see [`tyk/README.md`](../tyk/README.md)). |
+| `TYK_GATEWAY_SECRET` | gateway profile | Gateway admin/API secret (see [`tyk/README.md`](../tyk/README.md)). Compose aborts without it when the gateway profile is on. |
+| `REDIS_PASSWORD` | optional | Password for the `redis` service (`infra` profile) and the backend's `REDIS_URL`. Defaults to `changeme`. |
+| `TYK_REDIS_PASSWORD` | optional | Password for `tyk-redis` (gateway profile). Defaults to `changeme`. |
 
 ## Frontend (Vite — inlined at build time)
 
