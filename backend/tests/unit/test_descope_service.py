@@ -25,7 +25,7 @@ def client():
 
 class TestDescopeManagementClient:
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_create_tenant(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -44,7 +44,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_create_tenant_without_domains(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -59,7 +59,7 @@ class TestDescopeManagementClient:
         assert "selfProvisioningDomains" not in call_json
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_list_tenants(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -73,7 +73,7 @@ class TestDescopeManagementClient:
         assert result == [{"id": "t1", "name": "Acme"}]
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_load_tenant(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -92,7 +92,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_load_tenant_not_found(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -106,7 +106,7 @@ class TestDescopeManagementClient:
         assert result == {}
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_delete_tenant(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -123,7 +123,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_add_user_to_tenant(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -140,7 +140,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_assign_roles(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -157,7 +157,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_remove_roles(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -174,7 +174,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_load_user(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -196,7 +196,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_load_user_by_login_id(self, mock_cls, client):
         """An email must go in loginIds — userIds 400s on anything non-alphanumeric.
 
@@ -219,7 +219,7 @@ class TestDescopeManagementClient:
         assert body["withTestUser"] is True
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_update_user_custom_attribute(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -233,7 +233,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_update_tenant_custom_attributes(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -247,7 +247,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_create_access_key(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -266,7 +266,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_search_access_keys(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -280,7 +280,7 @@ class TestDescopeManagementClient:
         assert len(result) == 1
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_deactivate_access_key(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -294,7 +294,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_delete_access_key(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -308,7 +308,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_invite_user(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -334,7 +334,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_invite_user_without_roles_still_assigns_the_tenant(self, mock_cls, client):
         """No roles is not no tenant — the membership is the point of the invite."""
         mock_http = AsyncMock()
@@ -352,7 +352,7 @@ class TestDescopeManagementClient:
         assert "tenants" not in body, "the ignored key must not come back"
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_search_all_users(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -372,7 +372,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_search_all_users_paginates(self, mock_cls, client):
         """Verifies pagination when first page is full."""
         mock_http = AsyncMock()
@@ -402,7 +402,7 @@ class TestDescopeManagementClient:
         assert second_call[1]["json"] == {"limit": 100, "page": 1}
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_search_tenant_users(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -416,7 +416,7 @@ class TestDescopeManagementClient:
         assert len(result) == 1
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_update_user_status(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -434,7 +434,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_remove_user_from_tenant(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -448,7 +448,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_list_permissions(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -466,7 +466,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_create_permission(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -480,7 +480,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_update_permission(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -494,7 +494,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_delete_permission(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -508,7 +508,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_list_roles(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -527,7 +527,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_create_role(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -541,7 +541,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_create_role_without_permissions(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -553,7 +553,7 @@ class TestDescopeManagementClient:
         assert call_json["name"] == "viewer"
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_update_role(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -572,7 +572,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_update_role_without_description(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -586,7 +586,7 @@ class TestDescopeManagementClient:
         assert call_json["newName"] == "senior-editor"
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_update_role_without_permissions(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -597,7 +597,7 @@ class TestDescopeManagementClient:
         assert "permissionNames" not in call_json
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_delete_role(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -621,7 +621,7 @@ class TestDescopeManagementClient:
     # uses (go-sdk FGA().LoadSchema / SaveSchema), keyed "dsl".
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_get_fga_schema_reads_the_dsl_from_the_fga_api(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -639,7 +639,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_get_fga_schema_without_a_dsl_key_is_empty(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -649,7 +649,7 @@ class TestDescopeManagementClient:
         assert await client.get_fga_schema() == ""
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_update_fga_schema_posts_the_dsl_to_the_fga_api(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -663,7 +663,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_what_load_returns_is_what_save_accepts(self, mock_cls, client):
         """The round trip the FGA admin page performs, and the one that 400'd."""
         mock_http = AsyncMock()
@@ -682,7 +682,7 @@ class TestDescopeManagementClient:
         assert post_body == {"dsl": FGA_DSL}, "saved verbatim, not re-encoded"
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_create_relation(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -705,7 +705,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_delete_relation(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -728,7 +728,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_list_relations(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -755,7 +755,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_list_relations_empty(self, mock_cls, client):
         """AC: list_relations on resource with no relations returns empty list."""
         mock_http = AsyncMock()
@@ -770,7 +770,7 @@ class TestDescopeManagementClient:
         assert result == []
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_list_user_resources(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -804,7 +804,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_list_user_resources_empty(self, mock_cls, client):
         """AC: list_user_resources for user with no resources returns empty list."""
         mock_http = AsyncMock()
@@ -819,7 +819,7 @@ class TestDescopeManagementClient:
         assert result == []
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_check_permission_allowed(self, mock_cls, client):
         """AC: check_permission returns True when Descope returns allowed: true."""
         mock_http = AsyncMock()
@@ -853,7 +853,7 @@ class TestDescopeManagementClient:
         )
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_check_permission_denied(self, mock_cls, client):
         """AC: check_permission returns False when Descope returns allowed: false."""
         mock_http = AsyncMock()
@@ -880,7 +880,7 @@ class TestDescopeManagementClient:
             ("check_permission", ["document", "doc-1", "can_view", "user:u1"]),
         ],
     )
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_fga_method_propagates_http_error(self, mock_cls, client, method_name, args):
         """All FGA methods propagate HTTPStatusError from Descope."""
         mock_http = AsyncMock()
@@ -911,7 +911,7 @@ class TestDescopeManagementClient:
             ("check_permission", ["document", "doc-1", "can_view", "user:u1"]),
         ],
     )
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_fga_method_propagates_network_error(self, mock_cls, client, method_name, args):
         """All FGA methods propagate RequestError on network failure."""
         mock_http = AsyncMock()
@@ -923,7 +923,7 @@ class TestDescopeManagementClient:
             await getattr(client, method_name)(*args)
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_check_permission_missing_allowed_field(self, mock_cls, client):
         """Edge case: an empty body reads as denied (fail-closed).
 
@@ -941,7 +941,7 @@ class TestDescopeManagementClient:
         assert result is False
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_check_permission_null_allowed_field(self, mock_cls, client):
         """Edge case: a null hasRelation reads as denied, coerced to bool."""
         mock_http = AsyncMock()
@@ -957,7 +957,7 @@ class TestDescopeManagementClient:
         assert isinstance(result, bool)
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_list_relations_null_value(self, mock_cls, client):
         """Edge case: a null relations list reads as no relations."""
         mock_http = AsyncMock()
@@ -972,7 +972,7 @@ class TestDescopeManagementClient:
         assert result == []
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_list_user_resources_null_value(self, mock_cls, client):
         """Edge case: a null relations list reads as no resources."""
         mock_http = AsyncMock()
@@ -997,7 +997,7 @@ class TestFgaWireContractRegressions:
     """
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_relation_writes_are_never_sent_flat(self, mock_cls, client):
         mock_http = AsyncMock()
         mock_cls.return_value = mock_http
@@ -1014,7 +1014,7 @@ class TestFgaWireContractRegressions:
             assert "resourceType" not in body["relations"][0]
 
     @pytest.mark.anyio
-    @patch("app.services.descope.httpx.AsyncClient")
+    @patch("app.outbound.httpx.AsyncClient")
     async def test_check_permission_denies_on_the_empty_shape(self, mock_cls, client):
         """The response the malformed request used to produce must not read as allowed."""
         mock_http = AsyncMock()

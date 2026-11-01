@@ -10,26 +10,26 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import logging
-import os
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, EmailStr
 
 from app.dependencies.identity import get_identity_resolution_service, get_inbound_sync_service
 from app.errors.problem_detail import result_to_response
+from app.knobs import knob
+from app.logbook import logbook
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.identity_resolution import IdentityResolutionService
 from app.services.inbound_sync import InboundSyncService
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 
 router = APIRouter(tags=["Internal"])
 
 # Read secrets once at import time; validated at startup in lifespan.
-_FLOW_SYNC_SECRET = os.getenv("DESCOPE_FLOW_SYNC_SECRET", "")
-_WEBHOOK_SECRET = os.getenv("DESCOPE_WEBHOOK_SECRET", "")
-_IDENTITY_KEY = os.getenv("INTERNAL_IDENTITY_KEY", "")
+_FLOW_SYNC_SECRET = knob("DESCOPE_FLOW_SYNC_SECRET", "")
+_WEBHOOK_SECRET = knob("DESCOPE_WEBHOOK_SECRET", "")
+_IDENTITY_KEY = knob("INTERNAL_IDENTITY_KEY", "")
 
 
 # --- Request models ---

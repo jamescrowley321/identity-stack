@@ -87,7 +87,7 @@ async def test_logout_rejects_invalid_token(client):
 
 
 @pytest.mark.anyio
-@patch("app.services.logout.httpx.AsyncClient")
+@patch("app.outbound.httpx.AsyncClient")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_logout_succeeds_with_valid_token(mock_validate, mock_httpx_cls, client):
     """Logout should return 200, call Descope logout API, and return the user's sub."""
@@ -139,7 +139,7 @@ async def test_logout_returns_null_sub_when_missing(mock_validate, client):
 
 
 @pytest.mark.anyio
-@patch("app.services.logout.httpx.AsyncClient")
+@patch("app.outbound.httpx.AsyncClient")
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_logout_skips_api_call_without_management_key(mock_validate, mock_httpx_cls, client, monkeypatch):
     """Logout should skip the Descope API call when management key is not set."""

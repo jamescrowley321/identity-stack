@@ -1,14 +1,13 @@
-import logging
-
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from app.dependencies.auth import get_claims
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
+from app.logbook import logbook
+from app.outbound import UpstreamStatusError, UpstreamTransportError
 
-logger = logging.getLogger(__name__)
+logger = logbook(__name__)
 
 router = APIRouter(tags=["Attributes"])
 
@@ -43,7 +42,7 @@ async def get_profile(request: Request, claims: dict = Depends(get_claims)):
             "email": user.get("email", ""),
             "custom_attributes": user.get("customAttributes", {}),
         }
-    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+    except (UpstreamStatusError, UpstreamTransportError) as exc:
         # Degrade gracefully — profile is informational, not critical.
         # In CI the Descope credentials are fake so every call 401s;
         # in production a transient Descope outage shouldn't crash the
@@ -75,7 +74,7 @@ async def update_profile_attribute(
         login_id = await client.resolve_login_id(user_id)
         await client.update_user_custom_attribute(login_id, body.key, body.value)
         return {"status": "updated", "key": body.key, "value": body.value}
-    except httpx.HTTPStatusError as exc:
+    except UpstreamStatusError as exc:
         logger.warning(
             "Descope API error updating attribute %s for %s: %s", body.key, user_id, exc.response.status_code
         )
@@ -99,7 +98,7 @@ async def get_tenant_settings(request: Request, tenant_id: str = Depends(get_ten
             "name": tenant.get("name", ""),
             "custom_attributes": tenant.get("customAttributes", {}),
         }
-    except httpx.HTTPStatusError as exc:
+    except UpstreamStatusError as exc:
         if exc.response.status_code == 404:
             return {
                 "tenant_id": tenant_id,
@@ -128,6 +127,6 @@ async def update_tenant_settings(
         client = request.app.state.descope_client
         await client.update_tenant_custom_attributes(tenant_id, body.custom_attributes)
         return {"status": "updated", "tenant_id": tenant_id, "custom_attributes": body.custom_attributes}
-    except httpx.HTTPStatusError as exc:
+    except UpstreamStatusError as exc:
         logger.warning("Descope API error updating tenant %s: %s", tenant_id, exc.response.status_code)
         raise HTTPException(status_code=502, detail="Failed to update tenant settings in identity provider")
