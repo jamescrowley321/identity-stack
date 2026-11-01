@@ -1,6 +1,6 @@
 # Architecture
 
-identity-stack is an identity platform built around a **canonical identity store** (PostgreSQL) that the application owns, kept in sync with an external identity provider (Descope). The application is provider-agnostic at its boundaries — token validation and the data model are written against OIDC/OAuth2 concepts, not a specific vendor SDK.
+identity-stack is an identity platform built around a **canonical identity store** (PostgreSQL) that the application owns, kept in sync with an external identity provider (Descope). Ory can be configured as a second token provider (`ORY_ISSUER_URL`). The application is provider-agnostic at its boundaries — token validation and the data model are written against OIDC/OAuth2 concepts, not a specific vendor SDK.
 
 ## Components
 
@@ -40,11 +40,12 @@ Token validation is delegated to [`py-identity-model`](https://github.com/jamesc
 
 The canonical store is the source of truth for the application; Descope is kept consistent with it through two flows:
 
-1. **Outbound (API write → canonical store → provider).** Writes through the API persist to PostgreSQL and are pushed to Descope via the provider service (`backend/app/services/provider.py`, `descope.py`).
-2. **Inbound (provider event → reconciliation → canonical store).** Descope flow/webhook events reach the internal endpoints and reconcile the canonical store (`backend/app/routers/internal.py`, `backend/app/services/reconciliation.py`):
-   - `POST /api/internal/users/sync` — flow-driven user sync (guarded by `DESCOPE_FLOW_SYNC_SECRET`).
-   - `POST /api/internal/webhooks/descope` — Descope webhooks (guarded by `DESCOPE_WEBHOOK_SECRET`).
-   - `GET /api/internal/identity` — identity resolution (guarded by `INTERNAL_IDENTITY_KEY`; results cached for `IDENTITY_CACHE_TTL` seconds).
+1. **Outbound (API write → canonical store → provider).** Writes through the API persist to PostgreSQL, and the canonical services (`backend/app/services/user.py`, `role.py`, `permission.py`, `tenant.py`) push them to Descope through a sync adapter (`backend/app/services/adapters/descope.py`, wired in `backend/app/dependencies/identity.py`). A failed sync is logged and the write still succeeds; reconciliation catches the drift.
+2. **Inbound (provider event → canonical store).** Descope flow/webhook events reach the internal endpoints and update the canonical store (`backend/app/routers/internal.py`, `backend/app/services/inbound_sync.py`), and a reconciliation pass repairs drift (`backend/app/routers/reconciliation.py`, `backend/app/services/reconciliation.py`):
+   - `POST /api/internal/users/sync` — flow-driven user sync (guarded by `DESCOPE_FLOW_SYNC_SECRET`, sent as `X-Flow-Secret`).
+   - `POST /api/internal/webhooks/descope` — Descope webhooks (guarded by `DESCOPE_WEBHOOK_SECRET`, checked against `X-Descope-Webhook-S256`).
+   - `GET /api/internal/identity` — identity resolution (guarded by `INTERNAL_IDENTITY_KEY`, sent as `X-Identity-Key`; results cached for `IDENTITY_CACHE_TTL` seconds).
+   - `POST /api/internal/reconciliation/run` — a full reconciliation between Postgres and Descope (guarded by `DESCOPE_FLOW_SYNC_SECRET`).
 
 These secrets are **not** required for the app to boot, but each guarded endpoint rejects all requests until its secret is set (`backend/app/main.py:_warn_missing_secrets`).
 
@@ -57,10 +58,14 @@ backend/app/
   logbook.py      # logbook(__name__): the only source of loggers (§7)
   middleware/     # token validation, claims, rate limiting, security headers, factory
   routers/        # API routes (auth, tenants, roles, fga, internal, ...)
-  services/       # provider sync, descope client, reconciliation, identity resolution
+  dependencies/   # auth, tenant, RBAC and FGA guards; service wiring
+  errors/         # IdentityError kinds + RFC 9457 problem details
+  repositories/   # SQL against the canonical model (§19)
+  services/       # canonical services, sync adapters, descope client, reconciliation, identity resolution
   models/         # canonical DB models (identity/: tenant, role, provider, ...)
+backend/migrations/ # Alembic migrations
 frontend/         # React + Vite SPA
-infra/            # Terraform (Descope project config)
+infra/            # Terraform (Descope project config; infra/ory/ for Ory)
 tyk/              # gateway config + init sidecar
 ```
 
