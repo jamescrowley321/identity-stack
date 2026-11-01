@@ -77,7 +77,9 @@ jobs:
             echo "::error::pip-audit exited $status without writing a report"
             exit 1
           fi
-          PIP_AUDIT_REPORT="$report" PIP_AUDIT_STATUS="$status" python - <<'EOF'
+          # -I keeps the checkout off sys.path, so a committed json.py can't
+          # shadow the standard library here.
+          PIP_AUDIT_REPORT="$report" PIP_AUDIT_STATUS="$status" python -I - <<'EOF'
           import json
           import os
           import sys
@@ -145,10 +147,15 @@ jobs:
               out.write(summary)
 
           failed = False
-          # pip-audit exits non-zero when it finds vulnerabilities, but also when
-          # it fails part-way; a non-zero exit with no findings is the latter.
-          if os.environ["PIP_AUDIT_STATUS"] != "0" and not findings:
-              print(f"::error::pip-audit exited {os.environ['PIP_AUDIT_STATUS']} but reported no vulnerabilities")
+          # pip-audit exits 1 when it finds vulnerabilities, but also when it
+          # fails part-way; exit 1 with no findings is the latter, and any
+          # status other than 0 or 1 is an error outright.
+          status = os.environ["PIP_AUDIT_STATUS"]
+          if status not in ("0", "1"):
+              print(f"::error::pip-audit exited {status}")
+              failed = True
+          elif status == "1" and not findings:
+              print("::error::pip-audit exited 1 but reported no vulnerabilities")
               failed = True
           for f in unsuppressed:
               print(f"::error::{f['name']} {f['version']}: {', '.join(sorted(f['ids']))} {f['desc'][:200]}")
