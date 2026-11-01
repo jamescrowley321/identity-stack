@@ -1,6 +1,6 @@
 # Identity Stack
 
-A comprehensive reference project demonstrating a provider-independent identity platform — a canonical Postgres identity store with pluggable identity-provider adapters, built on vendor-agnostic libraries (py-identity-model, terraform-provider-descope).
+A comprehensive reference project demonstrating a provider-independent identity platform — a canonical Postgres identity store with pluggable identity-provider adapters, built on vendor-agnostic libraries (py-identity-model, terraform-provider-descope). Descope is the primary provider; Ory is supported as a second OIDC provider.
 
 ## Architecture
 
@@ -10,7 +10,7 @@ A comprehensive reference project demonstrating a provider-independent identity 
 │  - Tailwind CSS v4 + shadcn/ui     │
 │  - Sidebar layout + dark mode      │
 │  - react-oidc-context (OIDC auth)  │
-│  - Tenant-aware routing            │
+│  - Tenant switcher                 │
 │  - Role-based UI rendering         │
 └───────────────┬────────────────────┘
                 │ REST API
@@ -19,7 +19,7 @@ A comprehensive reference project demonstrating a provider-independent identity 
 │  - py-identity-model (token authN) │
 │  - RBAC + Descope FGA (authZ)      │
 │  - Canonical identity store +      │
-│    IdP sync adapters (PRD 5)       │
+│    IdP sync adapters               │
 │  - Multi-tenant data isolation     │
 └───────┬───────────────────┬────────┘
         │                   │
@@ -32,7 +32,7 @@ A comprehensive reference project demonstrating a provider-independent identity 
 └────────────────┘  └─────────────────────┘
 ```
 
-Identity providers are **sync targets** behind an adapter interface: API-originated writes go to Postgres first, then sync to the provider; out-of-band changes (console edits, SCIM) arrive via webhooks and reconciliation. Swapping or adding a provider means implementing one adapter — not rewriting the application.
+Identity providers are **sync targets** behind an adapter interface: API-originated writes go to Postgres first, then sync to the provider; out-of-band changes (console edits, SCIM) arrive via webhooks and reconciliation. Adapters live in `backend/app/services/adapters/` (Descope, Ory and a no-op; the services are wired to the Descope adapter today). Adding a provider means implementing one adapter, not rewriting the application.
 
 The backend runs in one of two **deployment modes** (`DEPLOYMENT_MODE`): *standalone* (it validates tokens itself) or *gateway* (a [Tyk](tyk/README.md) gateway terminates auth at the edge). See [docs/deployment.md](docs/deployment.md).
 
@@ -47,17 +47,17 @@ The backend runs in one of two **deployment modes** (`DEPLOYMENT_MODE`): *standa
 | Backend | FastAPI (Python 3.12+) | REST API |
 | Auth (Backend) | py-identity-model (>=3.8.5,<4) | Vendor-agnostic token validation; the >=3.8.5 floor pulls cryptography>=50 (PYSEC-2026-3552/3553/3554 fixes) |
 | Data | PostgreSQL + SQLModel / SQLAlchemy 2 + Alembic | Canonical identity store, migrations |
-| Observability | OpenTelemetry | Tracing and metrics |
+| Observability | OpenTelemetry | Tracing (OTLP export) |
 | IaC | Terraform + descope provider (fork) | Descope project configuration |
 | Testing | Vitest (frontend) · pytest + Playwright (backend) | Unit and E2E |
 
 ## Prerequisites
 
 - Node.js 22+
-- Python 3.12+
-- PostgreSQL 15+ (or use Docker Compose, which provisions it)
-- Go 1.22+ (for building the Terraform provider)
-- Terraform 1.5+
+- Python 3.12+ and [uv](https://docs.astral.sh/uv/)
+- PostgreSQL (or use Docker Compose, which runs `postgres:16-alpine`)
+- Docker, for `make test-unit`, `make test-integration` and the Compose stack
+- Terraform 1.6+ and an HCP Terraform login (`infra/main.tf` uses a `cloud {}` block)
 - A Descope account with a management key
 
 ## Getting Started
@@ -69,41 +69,39 @@ git clone git@github.com:jamescrowley321/identity-stack.git
 cd identity-stack
 ```
 
-### 2. Build the Terraform provider (fork)
+### 2. Provision the Descope project
 
-```bash
-cd ~/repos/terraform-provider-descope
-make dev  # installs binary + creates ~/.terraformrc with dev_overrides
-```
-
-### 3. Provision Descope project
+`terraform init` downloads the [descope provider fork](https://github.com/jamescrowley321/terraform-provider-descope) from the registry (`jamescrowley321/descope ~> 1.0`); you only need to build it yourself to work on the provider.
 
 ```bash
 cd infra
 export DESCOPE_MANAGEMENT_KEY=your-management-key
+export TF_VAR_descope_project_id=your-project-id   # required, no default
 terraform init
-terraform apply -var-file=environments/dev.tfvars
+TF_WORKSPACE=identity-stack-dev terraform apply -var-file=environments/dev.tfvars
 ```
 
-Terraform provisions the full project config including an OIDC application and access key for integration tests. After applying, retrieve the test credentials:
+`e2e_test_email` and `descope_expired_token` have no defaults either, so Terraform asks for them unless they are set (`infra/variables.tf`). Terraform imports the existing project and manages its settings, tenants, permissions and roles, the FGA schema, access keys and the CI secrets (`infra/github.tf`). After applying, retrieve the integration-test credentials:
 
 ```bash
 terraform output integration_test_access_key_id         # → DESCOPE_CLIENT_ID
 terraform output integration_test_access_key_cleartext   # → DESCOPE_CLIENT_SECRET
 ```
 
-### 4. Run the backend
+### 3. Run the backend
 
 ```bash
 cd backend
 cp .env.example .env
-# Edit .env with your DESCOPE_PROJECT_ID
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-uvicorn app.main:app --reload
+# Edit .env: DATABASE_URL, DESCOPE_PROJECT_ID and DESCOPE_MANAGEMENT_KEY are
+# required, and the app refuses to start without them.
+uv sync --locked
+uv run uvicorn app.main:app --reload --env-file .env
 ```
 
-### 5. Run the frontend
+The backend reads only the process environment, so pass `--env-file` (or export the variables) when you run it outside Compose. `make dev-backend` does not load `backend/.env` either.
+
+### 4. Run the frontend
 
 ```bash
 cd frontend
@@ -155,18 +153,22 @@ Detailed docs live in [`docs/`](docs/):
 
 ## API Endpoints
 
+The tables below cover the main routes. The full, current list is in the interactive docs at `/docs` (Scalar) and `/redoc`, or in `/openapi.json`.
+
 ### Authentication
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/auth/logout` | Revoke user sessions via Descope Management API |
+| POST | `/api/auth/logout` | Log out with the provider that issued the token: Descope management logout, or Ory RP-initiated logout |
 | POST | `/api/validate-id-token` | Validate an ID token server-side |
 | GET | `/api/me` | Return ClaimsPrincipal from py-identity-model |
 | GET | `/api/claims` | Return raw access token claims |
+| GET | `/api/identity` | Resolve the caller to their canonical identity (just-in-time provisioning for `JIT_ENABLED_PROVIDERS`) |
+| GET | `/api/health` | Health check |
 
 ### Tenant Management
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/tenants` | Create a new tenant (Descope Management API) |
+| POST | `/api/tenants` | Create a new tenant (requires a project-level `owner`/`admin` role) |
 | GET | `/api/tenants` | List tenants the current user belongs to (from JWT) |
 | GET | `/api/tenants/current` | Get current tenant context (`dct` claim) |
 | GET | `/api/tenants/{id}/resources` | List tenant-scoped resources |
@@ -178,6 +180,10 @@ Detailed docs live in [`docs/`](docs/):
 | GET | `/api/roles/me` | Get current user's roles and permissions in active tenant |
 | POST | `/api/roles/assign` | Assign roles to a user (requires owner/admin) |
 | POST | `/api/roles/remove` | Remove roles from a user (requires owner/admin) |
+| GET, POST | `/api/roles` | List or create role definitions (requires owner/admin) |
+| PUT, DELETE | `/api/roles/{name}` | Update or delete a role definition (requires owner/admin) |
+| GET, POST | `/api/permissions` | List or create permission definitions (requires owner/admin) |
+| PUT, DELETE | `/api/permissions/{name}` | Update or delete a permission definition (requires owner/admin) |
 
 ### User Profile & Attributes
 | Method | Path | Description |
@@ -191,7 +197,7 @@ Detailed docs live in [`docs/`](docs/):
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/keys` | Create an access key (returns secret once, requires owner/admin) |
-| GET | `/api/keys` | List access keys for current tenant |
+| GET | `/api/keys` | List access keys for the current tenant |
 | GET | `/api/keys/{id}` | Load a single access key |
 | POST | `/api/keys/{id}/deactivate` | Revoke an access key |
 | POST | `/api/keys/{id}/activate` | Reactivate an access key |
@@ -202,29 +208,42 @@ All access key operations require owner/admin role and verify the key belongs to
 ### Member Management
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/members` | List members in current tenant (requires owner/admin) |
+| GET | `/api/members` | List members in current tenant |
 | POST | `/api/members/invite` | Invite user by email with role assignment |
 | POST | `/api/members/{id}/deactivate` | Deactivate a member |
 | POST | `/api/members/{id}/activate` | Reactivate a member |
 | DELETE | `/api/members/{id}` | Remove a member permanently |
 
+All member operations require the owner/admin role.
+
+### Documents (FGA demo)
+| Method | Path | Description |
+|--------|------|-------------|
+| POST, GET | `/api/documents` | Create a document, or list the ones the caller can view |
+| GET, PUT, DELETE | `/api/documents/{id}` | Read, update or delete a document (FGA `can_view` / `can_edit` / `can_delete`) |
+| POST | `/api/documents/{id}/share` | Share a document (FGA `owner`) |
+| DELETE | `/api/documents/{id}/share/{user_id}` | Revoke a share (FGA `owner`) |
+
 Tenant isolation is enforced via the `dct` (Descope current tenant) JWT claim. Users can only access resources belonging to their active tenant.
 
-### Canonical Identity & Provider Sync (PRD 5)
+### Canonical Identity & Provider Sync
 
 The backend owns a canonical Postgres identity store; identity providers are sync targets behind an adapter interface. These endpoints manage the canonical model and its provider integrations:
 
-| Area | Router | Description |
+| Area | Routes | Description |
 |------|--------|-------------|
-| Providers | `providers` | Register/list IdP configurations and claim mappings |
-| Canonical Users | `canonical_users` | Canonical user records with multi-provider identity links |
-| IdP Links | `idp_links` | Link/unlink runtime sign-ins to canonical users |
-| Sync Status | `sync_status` | Per-entity sync state and drift detection |
-| Reconciliation | `reconciliation` | Reconcile out-of-band provider changes (console edits, SCIM) |
+| Providers | `GET`/`POST /api/providers`, `PATCH /api/providers/{id}`, `GET /api/providers/{id}/capabilities` | Register, list and deactivate IdP configurations; read a provider's capabilities (requires `operator`) |
+| Canonical Users | `GET /api/users` | List canonical users, optionally filtered by status (requires `operator`) |
+| IdP Links | `GET`/`POST /api/users/{id}/idp-links`, `DELETE /api/users/{id}/idp-links/{link_id}` | List, create and delete a canonical user's links to external identities (requires owner/admin) |
+| Sync Status | `GET /api/sync/status`, `GET /api/events/recent` | Per-provider sync state, last reconciliation time and recent inbound sync events (requires `operator`) |
+| Reconciliation | `POST /api/internal/reconciliation/run` | Run a full reconciliation between Postgres and Descope (guarded by `DESCOPE_FLOW_SYNC_SECRET`) |
+| Internal sync | `POST /api/internal/users/sync`, `POST /api/internal/webhooks/descope`, `GET /api/internal/identity` | Flow sync, Descope webhooks and identity resolution, each guarded by a shared secret (see [docs/architecture.md](docs/architecture.md#sync-flows)) |
 
-Fine-grained authorization (ReBAC) is proxied to Descope FGA via the `/api/fga` endpoints and enforced with `require_fga(...)` dependencies.
+The `operator` role is not one of the roles Terraform defines (`infra/rbac.tf`).
 
-> **Frontend note:** the admin UI for these areas (Providers, Sync Dashboard, Inbound Events, Identity Correlation, Provisional Users) is being built under PRD 5b — the backend surface is live; the pages are in progress.
+Fine-grained authorization (ReBAC) is managed through the `/api/fga` endpoints (schema, relations, check; owner/admin only) and enforced with `require_fga(...)` dependencies.
+
+> **Frontend note:** the SPA has no pages for these areas yet. Its pages are the dashboard, roles, profile, tenant settings, access keys, members and FGA management.
 
 ### RBAC
 
@@ -234,7 +253,7 @@ Four roles are defined via Terraform (`infra/rbac.tf`):
 |------|-------------|-----------------|
 | `owner` | Full access including billing | All permissions |
 | `admin` | Full access except billing | All except `billing.manage` |
-| `member` | Standard read/write access | Read/write documents, invite members |
+| `member` | Standard read/write access | Read and update projects, read/write documents, invite members |
 | `viewer` | Read-only access | Read projects and documents |
 
 Backend endpoints enforce authorization via `require_role()` and `require_permission()` dependency factories. Frontend uses `<RequireRole>` and `<RequirePermission>` components for conditional UI rendering.
@@ -260,11 +279,11 @@ API endpoints are rate limited via [slowapi](https://github.com/laurentS/slowapi
 
 | Tier | Limit | Endpoints |
 |------|-------|-----------|
-| Auth-sensitive | 10/minute | `POST /api/auth/logout`, `POST /api/validate-id-token`, `POST /api/keys`, `POST /api/members/invite` |
+| Auth-sensitive | 10/minute | Every route decorated with `@limiter.limit(RATE_LIMIT_AUTH)`: logout, `POST /api/validate-id-token`, the internal sync endpoints, and most write routes (keys, member invites, roles, permissions, providers, IdP links, documents, FGA) |
 | Default | 60/minute | All other API endpoints |
 | Exempt | No limit | `GET /api/health` |
 
-Rate limits are applied per-route per-key. Authenticated requests are keyed by user `sub` claim; unauthenticated requests are keyed by client IP.
+Rate limits are applied per-route per-key. The key is the user's `sub` claim when the request already carries validated claims, and the client IP otherwise (`middleware/rate_limit.py`). In `gateway` mode the backend does not add `SlowAPIMiddleware`, since Tyk handles rate limiting.
 
 When a limit is exceeded, the API returns `429 Too Many Requests` with a `Retry-After` header.
 
@@ -283,10 +302,12 @@ identity-stack/
 │   ├── src/
 │   │   ├── pages/     # Route pages
 │   │   ├── components/# UI components
+│   │   │   ├── auth/  # RequireRole, RequirePermission
 │   │   │   ├── layout/# App shell, sidebar, header
 │   │   │   └── ui/   # shadcn/ui components
-│   │   ├── hooks/     # Custom React hooks
-│   │   └── api/       # Backend API client
+│   │   ├── config/    # OIDC configuration
+│   │   ├── contexts/  # Identity context
+│   │   └── hooks/     # Custom React hooks, including the API client (useApiClient)
 │   └── ...
 ├── backend/           # FastAPI + py-identity-model
 │   ├── app/
@@ -294,18 +315,27 @@ identity-stack/
 │   │   ├── dependencies/# Auth dependencies
 │   │   ├── routers/   # API routes
 │   │   ├── models/    # DB models
-│   │   └── services/  # Business logic
+│   │   ├── repositories/ # SQL against the canonical model
+│   │   ├── errors/    # IdentityError + RFC 9457 problem details
+│   │   └── services/  # Business logic + provider sync adapters
+│   ├── migrations/    # Alembic
 │   └── ...
 ├── infra/             # Terraform (descope provider fork)
 │   ├── main.tf
 │   ├── project.tf
 │   ├── access_key.tf
+│   ├── management_key.tf
 │   ├── tenants.tf     # Default tenant definitions
 │   ├── rbac.tf        # Permissions and role definitions
 │   ├── fga.tf         # Fine-grained authorization (ReBAC) schema
 │   ├── github.tf
 │   ├── variables.tf
 │   ├── outputs.tf
-│   └── environments/
-└── docker-compose.yml
+│   ├── environments/
+│   └── ory/           # separate Terraform root for the Ory project
+├── tyk/               # Tyk gateway config (gateway mode)
+├── scripts/           # Profile integration test scripts
+├── docker-compose.yml
+├── docker-compose.gateway.yml
+└── docker-compose.test.yml
 ```
