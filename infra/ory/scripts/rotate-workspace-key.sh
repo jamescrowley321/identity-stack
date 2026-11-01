@@ -130,4 +130,4 @@ else
 fi
 
 log "Done. Rotated $SECRET_NAME."
-log "Next: migrate infra/ory state local → HCP so the key lives in HCP/Infisical (identity-stack#376)."
+log "Next: move ORY_WORKSPACE_API_KEY into an HCP Terraform variable set (identity-stack#418)."
