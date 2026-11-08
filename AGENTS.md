@@ -34,9 +34,8 @@ docstring before you call it in a new way.
 
 - Name no client or outside project in commits, PRs, issues or docs. Say
   "another project".
-- Fill in the PR template's AI provenance block: tick both boxes, give the
-  harness (`Claude Code`) and the model ID. James has delegated the tick of
-  "A human has reviewed this change and is accountable for it" for agent PRs.
+- Fill in the PR template's AI provenance block: tick "This PR was AI-assisted"
+  and give the harness (`Claude Code`) and the model ID.
 - Commit no secrets, keys or tokens.
 
 ## Before you push
