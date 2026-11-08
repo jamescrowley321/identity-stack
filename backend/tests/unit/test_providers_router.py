@@ -187,7 +187,7 @@ async def test_register_provider(mock_validate, mock_provider_service, client):
     response = await client.post(
         "/api/providers",
         headers=AUTH_HEADER,
-        json={"name": "descope-prod", "type": "descope", "config_ref": "infisical://secret"},
+        json={"name": "descope-prod", "type": "descope", "config_ref": "secret://secret"},
     )
     assert response.status_code == 201
     data = response.json()

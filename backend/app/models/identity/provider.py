@@ -17,7 +17,12 @@ class ProviderType(str, enum.Enum):
 
 
 class Provider(SQLModel, table=True):
-    """Registered IdP configuration. No credentials stored — config_ref points to Infisical."""
+    """Registered IdP configuration. No credentials stored.
+
+    config_ref is an opaque, caller-supplied string naming where this provider's
+    credentials live outside Postgres (e.g. a secret name). Nothing resolves it
+    yet; it is persisted as-is and stripped from every API response.
+    """
 
     __tablename__ = "providers"
 

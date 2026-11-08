@@ -330,7 +330,7 @@ class TestProviderModel:
         assert isinstance(col.type, sa.JSON)
 
     def test_config_ref_present(self):
-        """config_ref points to Infisical — never stores credentials."""
+        """config_ref is an opaque pointer to credentials — never stores them."""
         col = _col(Provider, "config_ref")
         assert not col.nullable
 

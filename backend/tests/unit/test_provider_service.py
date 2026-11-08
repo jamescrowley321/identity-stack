@@ -28,7 +28,7 @@ def _make_provider(**overrides) -> Provider:
         "issuer_url": "https://api.descope.com/P123",
         "base_url": "https://api.descope.com",
         "capabilities": ["sso", "mfa", "rbac"],
-        "config_ref": "infisical://descope-prod",
+        "config_ref": "secret://descope-prod",
         "active": True,
     }
     defaults.update(overrides)
@@ -153,7 +153,7 @@ class TestListProviders:
         provider = _make_provider(
             name="test-provider",
             capabilities=["sso", "mfa"],
-            config_ref="infisical://secret",
+            config_ref="secret://secret",
         )
         repo.list_all.return_value = [provider]
 
