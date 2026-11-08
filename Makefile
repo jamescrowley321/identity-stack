@@ -40,8 +40,14 @@ test-e2e: ## run e2e tests (requires running frontend + backend)
 
 test-all: lint test-unit test-frontend test-integration ## run all checks
 
+# Suppressed pip-audit findings. Must match PIP_AUDIT_IGNORES in
+# .github/workflows/security.yml, where each entry is documented (CVE, package,
+# version, reason, date assessed, removal condition); CI fails if they drift.
+# Currently none: CVE-2026-4539 and CVE-2026-3219 were removed 2026-10-28.
+PIP_AUDIT_IGNORES :=
+
 security: ## run security scans (pip-audit, npm audit)
-	cd backend && pip-audit --desc --ignore-vuln CVE-2026-4539
+	cd backend && pip-audit --desc $(foreach id,$(PIP_AUDIT_IGNORES),--ignore-vuln $(id))
 	cd frontend && npm audit --omit=dev --audit-level=high
 
 dev-backend: ## start backend dev server
