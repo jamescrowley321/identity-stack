@@ -43,7 +43,7 @@ First start creates everything below from `ZITADEL_FIRSTINSTANCE_*` settings. An
 | Login V2 service user | `login-client`; its token is on the same volume |
 | Human admin | `zitadel-admin@zitadel.zitadel.localhost` / `Local-only-Passw0rd!`, `IAM_OWNER`, email verified |
 
-**Every secret in the compose file is a local-only throwaway**: the masterkey, the Login V2 cookie secret, the database password and the human admin's password. They are committed on purpose, protect nothing, and must not be reused anywhere. The tokens on the volume are minted per instance and die with `make zitadel-reset`.
+**Every secret in the compose file is a local-only throwaway**: the masterkey, the Login V2 cookie secret, the database password and the human admin's password. They are committed on purpose, protect nothing, and must not be reused anywhere. Do not run the profile on a shared host: the human admin is `IAM_OWNER` behind a password anyone can read here. The tokens on the volume are minted per instance and die with `make zitadel-reset`.
 
 ## What the instance does
 
