@@ -58,6 +58,7 @@ The base `docker-compose.yml` composes with profiles for the larger topologies:
 | `-f docker-compose.yml -f docker-compose.gateway.yml --profile gateway` | the gateway topology with the backend in `gateway` mode and the frontend built against Tyk (what `make dev-gateway` runs) |
 | `--profile full` | the same services as `gateway` (a placeholder for future services) |
 | `--profile infra` | adds Redis and the Aspire dashboard (OTLP traces on `localhost:4317`, UI on `localhost:18888`) |
+| `--profile zitadel` | adds a local Zitadel issuer at `http://zitadel.localhost:8480`. Start it alone with `make zitadel-up`; see [zitadel.md](zitadel.md) |
 
 The backend's `REDIS_URL` points at the `redis` service, which only runs with `--profile infra`; without it the backend logs that Redis is unreachable and runs with cache invalidation disabled.
 

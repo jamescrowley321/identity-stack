@@ -1,0 +1,24 @@
+{
+  "email": "zitadel-admin@zitadel.zitadel.localhost",
+  "email_verified": true,
+  "family_name": "Admin",
+  "given_name": "ZITADEL",
+  "locale": "en",
+  "name": "ZITADEL Admin",
+  "preferred_username": "zitadel-admin@zitadel.zitadel.localhost",
+  "sub": "399781146147897347",
+  "updated_at": 1794784133,
+  "urn:zitadel:iam:org:project:399781183140937731:roles": {
+    "viewer": {
+      "399781146147241987": "zitadel.zitadel.localhost"
+    }
+  },
+  "urn:zitadel:iam:org:project:roles": {
+    "viewer": {
+      "399781146147241987": "zitadel.zitadel.localhost"
+    }
+  },
+  "urn:zitadel:iam:user:resourceowner:id": "399781146147241987",
+  "urn:zitadel:iam:user:resourceowner:name": "ZITADEL",
+  "urn:zitadel:iam:user:resourceowner:primary_domain": "zitadel.zitadel.localhost"
+}

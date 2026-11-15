@@ -1,10 +1,19 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup lint test-up test-down test-unit test-frontend test-integration test-e2e test-all security dev-backend dev-frontend dev test-gateway-proxy dev-gateway test-integration-standalone test-integration-gateway seed
+.PHONY: help setup lint test-up test-down test-unit test-frontend test-integration test-e2e test-all security dev-backend dev-frontend dev test-gateway-proxy dev-gateway test-integration-standalone test-integration-gateway seed zitadel-up zitadel-reset zitadel-admin-pat
 
 COMPOSE_TEST := docker compose -f docker-compose.test.yml
 TEST_DATABASE_URL := postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
 TEST_REDIS_URL := redis://localhost:16379/0
+
+# The base compose file refuses to parse without these three variables. The
+# Zitadel targets never start the services that read them, so placeholders keep
+# the targets working from a checkout with no .env.
+COMPOSE_ZITADEL := POSTGRES_PASSWORD="$${POSTGRES_PASSWORD:-unused}" \
+	DESCOPE_PROJECT_ID="$${DESCOPE_PROJECT_ID:-unused}" \
+	TYK_GATEWAY_SECRET="$${TYK_GATEWAY_SECRET:-unused}" \
+	docker compose --profile zitadel
+ZITADEL_SERVICES := zitadel-proxy zitadel-login zitadel-api zitadel-db
 
 help: ## show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -69,3 +78,13 @@ dev-gateway: ## start full stack with gateway profile (DEPLOYMENT_MODE=gateway v
 seed: ## seed all resources from Descope + create demo data (requires running stack)
 	docker compose exec backend alembic upgrade head
 	docker compose exec backend python -m scripts.seed_all
+
+zitadel-up: ## start the local Zitadel issuer (http://zitadel.localhost:8480) and wait until healthy
+	$(COMPOSE_ZITADEL) up -d --wait zitadel-proxy
+
+zitadel-reset: ## delete the local Zitadel instance and its volumes, then start a fresh one
+	$(COMPOSE_ZITADEL) down --volumes $(ZITADEL_SERVICES)
+	$(MAKE) zitadel-up
+
+zitadel-admin-pat: ## print the bootstrap admin machine user's personal access token (local-only)
+	@$(COMPOSE_ZITADEL) cp zitadel-api:/zitadel/bootstrap/admin.pat - 2>/dev/null | tar -xO
