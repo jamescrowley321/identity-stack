@@ -96,10 +96,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi.middleware import SlowAPIMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from app.knobs import knob, knob_flag
+from app.knobs import knob
 from app.logbook import logbook
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.claims import GatewayClaimsMiddleware
+from app.middleware.providers import configured_providers
 from app.middleware.security import SecurityHeadersMiddleware
 
 logger = logbook(__name__)
@@ -146,33 +147,24 @@ def configure_middleware(app: FastAPI) -> None:
     excluded_prefixes = {
         "/api/internal/",
     }
-    # Ory is added as a configured provider when ORY_ISSUER_URL is set; Descope
-    # stays configured via DESCOPE_PROJECT_ID. Both middlewares select a provider
-    # by the token's issuer (see app.middleware.providers).
-    ory_issuer_url = knob("ORY_ISSUER_URL", "")
-    ory_audience = knob("ORY_AUDIENCE") or None
-    # Ory access-token audience validation is required by default (fail closed).
-    ory_require_audience = knob_flag("ORY_REQUIRE_AUDIENCE", "true")
+    # Descope is always configured; Ory and Keycloak are added when their issuer
+    # is set. Both middlewares select a provider by the token's issuer. A provider
+    # configured without its required audience raises here and stops startup.
+    providers = configured_providers()
     if DEPLOYMENT_MODE == "standalone":
         app.add_middleware(
             TokenValidationMiddleware,
-            descope_project_id=knob("DESCOPE_PROJECT_ID", ""),
             excluded_paths=excluded_paths,
             excluded_prefixes=excluded_prefixes,
-            ory_issuer_url=ory_issuer_url,
-            ory_audience=ory_audience,
-            ory_require_audience=ory_require_audience,
+            providers=providers,
         )
         logger.info("Middleware included: TokenValidationMiddleware")
     else:
         app.add_middleware(
             GatewayClaimsMiddleware,
-            descope_project_id=knob("DESCOPE_PROJECT_ID", ""),
             excluded_paths=excluded_paths,
             excluded_prefixes=excluded_prefixes,
-            ory_issuer_url=ory_issuer_url,
-            ory_audience=ory_audience,
-            ory_require_audience=ory_require_audience,
+            providers=providers,
         )
         logger.info("Middleware included: GatewayClaimsMiddleware")
 

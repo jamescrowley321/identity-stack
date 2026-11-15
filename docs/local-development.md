@@ -92,5 +92,17 @@ Everything in the realm file and the admin password are local fixtures. The cont
 
 The name is not `localhost` or `127.0.0.1`, so a client that allows plain HTTP only for loopback hosts has to be told to allow it for this issuer. The realm's SSL mode is `none`.
 
-`docker-compose.test.yml` runs the same realm as `keycloak-test` on `http://keycloak-test.localhost:18180`, resolved the same way. It sits behind the `keycloak` profile there: `make test-up` leaves it out, `make test-up-keycloak` starts the test stack with it.
+### Backend configuration
+
+To have the backend accept this realm's tokens, set in `backend/.env`:
+
+```bash
+KEYCLOAK_ISSUER_URL=http://keycloak.localhost:8180/realms/identity-stack
+KEYCLOAK_AUDIENCES=member,tenant-admin
+KEYCLOAK_REQUIRE_HTTPS=false   # local only: this issuer is plain HTTP on a non-loopback name
+```
+
+See [environment-variables.md](environment-variables.md) for each variable.
+
+`docker-compose.test.yml` runs the same realm as `keycloak-test` on `http://keycloak-test.localhost:18180`, resolved the same way. It sits behind the `keycloak` profile there: `make test-up` leaves it out, `make test-up-keycloak` starts the test stack with it, and so does `make test-integration`.
 
