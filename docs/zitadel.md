@@ -18,7 +18,7 @@ Neither target needs a `.env`, and neither touches the default stack's container
 | `zitadel-login` | `ghcr.io/zitadel/zitadel-login:v4.20.3` | Login V2 |
 | `zitadel-db` | `postgres:17.10-alpine` | Zitadel's own database, volume `zitadel-pgdata` |
 
-The images are AGPL-3.0 and run unmodified.
+The two Zitadel images are AGPL-3.0 and run unmodified. Traefik is MIT and PostgreSQL is under the PostgreSQL License.
 
 ## Issuer
 
