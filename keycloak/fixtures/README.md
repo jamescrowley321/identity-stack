@@ -14,7 +14,9 @@ every instance. The claim names and shapes are what the fixture is for.
 
 ## The realm
 
-Every secret and password below is a local fixture.
+Every secret and password below is a local fixture. The realm's redirect URIs
+(`http://localhost:3000`, post-logout `http://localhost:3000/login`), its SSL mode `none` and the
+`admin`/`admin` bootstrap login are for this local container only; do not copy them elsewhere.
 
 | Client | Kind | Client roles |
 |---|---|---|
