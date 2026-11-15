@@ -62,7 +62,7 @@ async def deactivate_member(
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
     """Deactivate a member. They will not be able to log in."""
-    result = await require_descope_management(request).set_member_status(user_id, "disabled")
+    result = await require_descope_management(request).set_member_status(user_id, tenant_id, "disabled")
     if result.is_error():
         raise HTTPException(status_code=502, detail="Failed to deactivate member via Descope")
     return result_to_response(Ok({"status": "deactivated", "user_id": user_id}), request)
@@ -76,7 +76,7 @@ async def activate_member(
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
     """Reactivate a previously deactivated member."""
-    result = await require_descope_management(request).set_member_status(user_id, "enabled")
+    result = await require_descope_management(request).set_member_status(user_id, tenant_id, "enabled")
     if result.is_error():
         raise HTTPException(status_code=502, detail="Failed to activate member via Descope")
     return result_to_response(Ok({"status": "activated", "user_id": user_id}), request)

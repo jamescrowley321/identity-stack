@@ -82,11 +82,21 @@ class DescopeManagementAdapter:
             return Ok({"status": "invited", "email": email, "user": canonical_user(user)})
 
     async def set_member_status(
-        self, user_id: str, status: Literal["enabled", "disabled"]
+        self, user_id: str, tenant_id: str, status: Literal["enabled", "disabled"]
     ) -> Result[None, IdentityError]:
-        """Enable or disable a user."""
+        """Enable or disable a member of ``tenant_id``.
+
+        Descope's status call takes no tenant and applies across the project, so
+        membership is checked first. A user outside the tenant is ``NotFound``,
+        the same as one Descope does not have, and the status call is not made.
+        """
         with tracer.start_as_current_span("DescopeManagementAdapter.set_member_status"):
             try:
+                user = await self._client.load_user(user_id)
+                memberships = user.get("userTenants") or []
+                if tenant_id not in [m.get("tenantId") for m in memberships]:
+                    logger.warning("Refused status change: %s is not a member of tenant %s", user_id, tenant_id)
+                    return Error(NotFound(message="Member not found in tenant"))
                 await self._client.update_user_status(user_id, status)
             except UpstreamStatusError as exc:
                 action = "deactivating" if status == "disabled" else "activating"
