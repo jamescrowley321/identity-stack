@@ -18,6 +18,7 @@ TENANT_ID = "tenant-1"
 OTHER_TENANT_ID = "tenant-2"
 USER_ID = "U2abc123"
 KEY_ID = "K1"
+MEMBER = {"userId": USER_ID, "userTenants": [{"tenantId": TENANT_ID, "roleNames": ["member"]}]}
 
 
 def _status_error(status_code: int, json: dict | None = None) -> httpx.HTTPStatusError:
@@ -126,15 +127,56 @@ class TestMembers:
 
     @pytest.mark.parametrize("status", ["enabled", "disabled"])
     async def test_set_member_status(self, adapter, client, status):
-        result = await adapter.set_member_status(USER_ID, status)
+        client.load_user.return_value = MEMBER
+
+        result = await adapter.set_member_status(USER_ID, TENANT_ID, status)
 
         assert result == Ok(None)
+        client.load_user.assert_awaited_once_with(USER_ID)
         client.update_user_status.assert_awaited_once_with(USER_ID, status)
 
+    @pytest.mark.parametrize(
+        "user",
+        [
+            {"userId": USER_ID, "userTenants": [{"tenantId": OTHER_TENANT_ID, "roleNames": ["owner"]}]},
+            {"userId": USER_ID, "userTenants": [{}]},
+            {"userId": USER_ID, "userTenants": []},
+            {"userId": USER_ID, "userTenants": None},
+            {"userId": USER_ID},
+            {},
+        ],
+    )
+    @pytest.mark.parametrize("status", ["enabled", "disabled"])
+    async def test_set_member_status_outside_the_tenant_is_not_found(self, adapter, client, status, user):
+        """#581: the status call is project-wide, so it is never made for a non-member or an unknown user."""
+        client.load_user.return_value = user
+
+        result = await adapter.set_member_status(USER_ID, TENANT_ID, status)
+
+        assert result.error == NotFound(message="Member not found in tenant")
+        client.update_user_status.assert_not_awaited()
+
+    async def test_set_member_status_lookup_failure_fails_closed(self, adapter, client):
+        client.load_user.side_effect = _status_error(500)
+
+        result = await adapter.set_member_status(USER_ID, TENANT_ID, "disabled")
+
+        assert isinstance(result.error, ProviderError)
+        client.update_user_status.assert_not_awaited()
+
+    async def test_set_member_status_lookup_transport_failure_fails_closed(self, adapter, client):
+        client.load_user.side_effect = _transport_error()
+
+        with pytest.raises(httpx.ConnectError):
+            await adapter.set_member_status(USER_ID, TENANT_ID, "disabled")
+
+        client.update_user_status.assert_not_awaited()
+
     async def test_set_member_status_error_is_a_provider_error(self, adapter, client):
+        client.load_user.return_value = MEMBER
         client.update_user_status.side_effect = _status_error(404)
 
-        result = await adapter.set_member_status(USER_ID, "disabled")
+        result = await adapter.set_member_status(USER_ID, TENANT_ID, "disabled")
 
         assert isinstance(result.error, ProviderError)
 
@@ -160,13 +202,14 @@ class TestMembers:
             client.remove_user_from_tenant,
         ):
             method.side_effect = _transport_error()
+        client.load_user.return_value = MEMBER
 
         with pytest.raises(httpx.ConnectError):
             await adapter.list_members(TENANT_ID)
         with pytest.raises(httpx.ConnectError):
             await adapter.invite_member(email="new@example.com", tenant_id=TENANT_ID, role_names=["member"])
         with pytest.raises(httpx.ConnectError):
-            await adapter.set_member_status(USER_ID, "enabled")
+            await adapter.set_member_status(USER_ID, TENANT_ID, "enabled")
         with pytest.raises(httpx.ConnectError):
             await adapter.remove_member(USER_ID, TENANT_ID)
 
