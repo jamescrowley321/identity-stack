@@ -10,6 +10,7 @@ instance and `make zitadel-reset` afterwards.
     make -s zitadel-admin-pat | python3 scripts/zitadel-capture-fixtures.py
 
 Standard library only. Signed tokens are never written, only their claims.
+Nothing is written unless the whole capture succeeds.
 """
 
 import base64
@@ -59,6 +60,9 @@ def call(method, path, *, token=None, body=None, form=None, basic=None):
             status, response_headers, raw = response.status, response.headers, response.read()
     except urllib.error.HTTPError as error:
         status, response_headers, raw = error.code, error.headers, error.read()
+    except (urllib.error.URLError, TimeoutError) as error:
+        reason = getattr(error, "reason", error)
+        sys.exit(f"{method} {ISSUER}{path} failed: {reason}. Is the instance up? Run `make zitadel-up`.")
     if status >= 400:
         sys.exit(f"{method} {path} -> {status}: {raw.decode(errors='replace')}")
     try:
@@ -79,10 +83,19 @@ def describe_token(access_token):
     return {"format": "jwt", "header": decode_segment(parts[0]), "claims": decode_segment(parts[1])}
 
 
-def write(name, value):
+_fixtures = {}
+
+
+def record(name, value):
+    _fixtures[name] = value
+
+
+def write_fixtures():
+    """Write every recorded fixture. Called once, after the whole capture succeeded."""
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / name).write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
-    print(f"wrote {OUT / name}")
+    for name, value in _fixtures.items():
+        (OUT / name).write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+        print(f"wrote {OUT / name}")
 
 
 def machine_user(pat, username, access_token_type=None):
@@ -140,8 +153,11 @@ def human_token(pat, client_id, scope):
         }
     )
     _, headers, _ = call("GET", f"/oauth/v2/authorize?{query}")
-    login_url = urllib.parse.urlparse(headers["Location"])
-    auth_request = urllib.parse.parse_qs(login_url.query)["authRequest"][0]
+    location = headers.get("Location")
+    auth_requests = urllib.parse.parse_qs(urllib.parse.urlparse(location or "").query).get("authRequest")
+    if not auth_requests:
+        sys.exit(f"GET /oauth/v2/authorize did not redirect to Login V2 with an authRequest (Location: {location})")
+    auth_request = auth_requests[0]
     _, _, session = call(
         "POST",
         "/v2/sessions",
@@ -175,9 +191,9 @@ def main():
         sys.exit("pipe the admin PAT on stdin: make -s zitadel-admin-pat | python3 scripts/zitadel-capture-fixtures.py")
 
     _, _, discovery = call("GET", "/.well-known/openid-configuration")
-    write("discovery.json", discovery)
+    record("discovery.json", discovery)
     _, _, jwks = call("GET", urllib.parse.urlparse(discovery["jwks_uri"]).path)
-    write("jwks.json", jwks)
+    record("jwks.json", jwks)
 
     # Finishing an auth request for a session needs the login-client role.
     _, _, admin = call("GET", "/auth/v1/users/me", token=pat)
@@ -202,7 +218,7 @@ def main():
     # Defaults: what a machine user and an application get when no token type is asked for.
     _, default_machine, default_credentials = machine_user(pat, "fixture-default")
     default_client_id, default_app = oidc_app(pat, project_id, "fixture-default-app")
-    write(
+    record(
         "defaults.json",
         {
             "machine_user": default_machine,
@@ -222,11 +238,11 @@ def main():
         token=pat,
         body={"projectId": project_id, "roleKeys": [ROLE_KEY]},
     )
-    write(
+    record(
         "machine-access-token-openid.json",
         describe_token(client_credentials(credentials, "openid")["access_token"]),
     )
-    write(
+    record(
         "machine-access-token-project.json",
         describe_token(client_credentials(credentials, all_scopes)["access_token"]),
     )
@@ -241,19 +257,21 @@ def main():
         body={"projectId": project_id, "roleKeys": [ROLE_KEY]},
     )
     jwt_client_id, _ = oidc_app(pat, project_id, "fixture-jwt-app", "OIDC_TOKEN_TYPE_JWT")
-    write("human-access-token-openid.json", describe_token(human_token(pat, jwt_client_id, "openid")["access_token"]))
+    record("human-access-token-openid.json", describe_token(human_token(pat, jwt_client_id, "openid")["access_token"]))
     human = human_token(pat, jwt_client_id, all_scopes)
-    write("human-access-token-project.json", describe_token(human["access_token"]))
-    write("human-id-token-project.json", describe_token(human["id_token"]))
+    record("human-access-token-project.json", describe_token(human["access_token"]))
+    record("human-id-token-project.json", describe_token(human["id_token"]))
     _, _, userinfo = call("GET", "/oidc/v1/userinfo", token=human["access_token"])
-    write("human-userinfo-project.json", userinfo)
+    record("human-userinfo-project.json", userinfo)
 
     # The same, through an application with accessTokenRoleAssertion on.
     roles_client_id, _ = oidc_app(pat, project_id, "fixture-jwt-roles-app", "OIDC_TOKEN_TYPE_JWT", assert_roles=True)
-    write(
+    record(
         "human-access-token-roles.json",
         describe_token(human_token(pat, roles_client_id, all_scopes)["access_token"]),
     )
+
+    write_fixtures()
 
 
 if __name__ == "__main__":

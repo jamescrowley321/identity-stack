@@ -87,4 +87,9 @@ zitadel-reset: ## delete the local Zitadel instance and its volumes, then start 
 	$(MAKE) zitadel-up
 
 zitadel-admin-pat: ## print the bootstrap admin machine user's personal access token (local-only)
-	@$(COMPOSE_ZITADEL) cp zitadel-api:/zitadel/bootstrap/admin.pat - 2>/dev/null | tar -xO
+	@pat="$$($(COMPOSE_ZITADEL) cp zitadel-api:/zitadel/bootstrap/admin.pat - 2>/dev/null | tar -xO 2>/dev/null)"; \
+	if [ -z "$$pat" ]; then \
+		echo "zitadel-admin-pat: no token found; the local Zitadel is not running. Run 'make zitadel-up' first." >&2; \
+		exit 1; \
+	fi; \
+	printf '%s\n' "$$pat"
