@@ -16,7 +16,7 @@ from typing import Literal
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
-from app.errors.identity import Forbidden, IdentityError, NotFound, ProviderError, ValidationError
+from app.errors.identity import Conflict, Forbidden, IdentityError, NotFound, ProviderError, ValidationError
 from app.logbook import logbook
 from app.outbound import UpstreamStatusError, UpstreamTransportError
 from app.services.canonical import canonical_user
@@ -84,19 +84,24 @@ class DescopeManagementAdapter:
     async def set_member_status(
         self, user_id: str, tenant_id: str, status: Literal["enabled", "disabled"]
     ) -> Result[None, IdentityError]:
-        """Enable or disable a member of ``tenant_id``.
+        """Enable or disable a user whose only tenant is ``tenant_id``.
 
-        Descope's status call takes no tenant and applies across the project, so
-        membership is checked first. A user outside the tenant is ``NotFound``,
-        the same as one Descope does not have, and the status call is not made.
+        Descope's status call takes no tenant and applies to the whole account, so
+        the user's memberships are checked first. A user outside the tenant is
+        ``NotFound``, the same as one Descope does not have. A member who also
+        belongs to another tenant is ``Conflict``: this tenant alone cannot decide
+        that account's status. Neither makes the status call.
         """
         with tracer.start_as_current_span("DescopeManagementAdapter.set_member_status"):
             try:
                 user = await self._client.load_user(user_id)
-                memberships = user.get("userTenants") or []
-                if tenant_id not in [m.get("tenantId") for m in memberships]:
+                member_of = [m.get("tenantId") for m in user.get("userTenants") or []]
+                if tenant_id not in member_of:
                     logger.warning("Refused status change: %s is not a member of tenant %s", user_id, tenant_id)
                     return Error(NotFound(message="Member not found in tenant"))
+                if any(other != tenant_id for other in member_of):
+                    logger.warning("Refused status change: %s belongs to more than tenant %s", user_id, tenant_id)
+                    return Error(Conflict(message="Member also belongs to another tenant"))
                 await self._client.update_user_status(user_id, status)
             except UpstreamStatusError as exc:
                 action = "deactivating" if status == "disabled" else "activating"

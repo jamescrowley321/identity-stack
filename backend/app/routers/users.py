@@ -5,7 +5,7 @@ from pydantic import BaseModel, EmailStr, Field
 from app.dependencies.descope import require_descope_management
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
-from app.errors.identity import ValidationError
+from app.errors.identity import Conflict, IdentityError, ValidationError
 from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 
@@ -15,6 +15,19 @@ router = APIRouter(tags=["Users"])
 class InviteUserRequest(BaseModel):
     email: EmailStr
     role_names: list[str] = Field(default_factory=lambda: ["member"])
+
+
+# Descope keeps one status per account, not per tenant membership (#581).
+_SHARED_ACCOUNT_DETAIL = (
+    "Status applies to the member's whole account, which also belongs to another tenant. "
+    "Remove the member from this tenant instead."
+)
+
+
+def _refuse_shared_account(error: IdentityError) -> None:
+    """Answer 409 when the member's account is shared with another tenant."""
+    if isinstance(error, Conflict):
+        raise HTTPException(status_code=409, detail=_SHARED_ACCOUNT_DETAIL)
 
 
 @router.get("/members")
@@ -64,6 +77,7 @@ async def deactivate_member(
     """Deactivate a member. They will not be able to log in."""
     result = await require_descope_management(request).set_member_status(user_id, tenant_id, "disabled")
     if result.is_error():
+        _refuse_shared_account(result.error)
         raise HTTPException(status_code=502, detail="Failed to deactivate member via Descope")
     return result_to_response(Ok({"status": "deactivated", "user_id": user_id}), request)
 
@@ -78,6 +92,7 @@ async def activate_member(
     """Reactivate a previously deactivated member."""
     result = await require_descope_management(request).set_member_status(user_id, tenant_id, "enabled")
     if result.is_error():
+        _refuse_shared_account(result.error)
         raise HTTPException(status_code=502, detail="Failed to activate member via Descope")
     return result_to_response(Ok({"status": "activated", "user_id": user_id}), request)
 

@@ -219,7 +219,9 @@ RFC 9457 problem-detail bodies (`application/problem+json`) **MUST** be built on
   `routers/accesskeys.py::_verify_key_tenant`. They answer an `Error` from
   `DescopeManagementAdapter` with the `{"detail": ...}` 400/403/502 bodies those routes had
   before the adapter existed, and `get_profile` and `get_tenant_settings` answer one with
-  blank defaults. Moving them to problem details is a behaviour change left for a follow-up.
+  blank defaults. The member activate and deactivate routes answer a member shared with
+  another tenant with a 409 in the same style (#581). Moving them to problem details is a
+  behaviour change left for a follow-up.
 
 *Enforcement:* review.
 
