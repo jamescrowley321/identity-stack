@@ -464,6 +464,38 @@ async def test_member_status_fails_closed_when_the_lookup_fails(mock_validate, m
     mock_descope.update_user_status.assert_not_awaited()
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("action", STATUS_ROUTES)
+@pytest.mark.parametrize(
+    "other_membership",
+    [
+        {"tenantId": OTHER_TENANT_ID, "roleNames": ["member"]},
+        {"roleNames": ["member"]},
+    ],
+)
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_member_status_refuses_a_user_shared_with_another_tenant(
+    mock_validate, mock_descope, client, action, other_membership
+):
+    """Status is per account, so a member who also belongs elsewhere is not this tenant's to disable or enable."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_descope.load_user.return_value = {
+        **DESCOPE_USER,
+        "userTenants": [{"tenantId": TENANT_ID, "roleNames": ["admin"]}, other_membership],
+    }
+
+    response = await client.post(f"/api/members/{DESCOPE_USER['userId']}/{action}", headers=AUTH_HEADER)
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": (
+            "Status applies to the member's whole account, which also belongs to another tenant. "
+            "Remove the member from this tenant instead."
+        )
+    }
+    mock_descope.update_user_status.assert_not_awaited()
+
+
 # --- Input validation ---
 
 

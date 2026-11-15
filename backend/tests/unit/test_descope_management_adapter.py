@@ -11,7 +11,7 @@ import httpx
 import pytest
 from expression import Ok
 
-from app.errors.identity import Forbidden, NotFound, ProviderError, ValidationError
+from app.errors.identity import Conflict, Forbidden, NotFound, ProviderError, ValidationError
 from app.services.descope_management import DescopeManagementAdapter
 
 TENANT_ID = "tenant-1"
@@ -155,6 +155,38 @@ class TestMembers:
 
         assert result.error == NotFound(message="Member not found in tenant")
         client.update_user_status.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "other_membership",
+        [
+            {"tenantId": OTHER_TENANT_ID, "roleNames": ["owner"]},
+            {"tenantId": ""},
+            {},
+        ],
+    )
+    @pytest.mark.parametrize("status", ["enabled", "disabled"])
+    async def test_set_member_status_of_a_shared_user_is_a_conflict(self, adapter, client, status, other_membership):
+        """#581: status is per account, so membership here does not authorize changing it for another tenant."""
+        client.load_user.return_value = {
+            "userId": USER_ID,
+            "userTenants": [{"tenantId": TENANT_ID, "roleNames": ["member"]}, other_membership],
+        }
+
+        result = await adapter.set_member_status(USER_ID, TENANT_ID, status)
+
+        assert result.error == Conflict(message="Member also belongs to another tenant")
+        client.update_user_status.assert_not_awaited()
+
+    async def test_set_member_status_with_a_repeated_membership_of_the_one_tenant(self, adapter, client):
+        client.load_user.return_value = {
+            "userId": USER_ID,
+            "userTenants": [{"tenantId": TENANT_ID}, {"tenantId": TENANT_ID}],
+        }
+
+        result = await adapter.set_member_status(USER_ID, TENANT_ID, "disabled")
+
+        assert result == Ok(None)
+        client.update_user_status.assert_awaited_once_with(USER_ID, "disabled")
 
     async def test_set_member_status_lookup_failure_fails_closed(self, adapter, client):
         client.load_user.side_effect = _status_error(500)
