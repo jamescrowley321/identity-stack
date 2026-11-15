@@ -23,15 +23,15 @@ test-up: ## bring up postgres+redis for tests (idempotent; leave running between
 test-up-keycloak: ## bring up the test stack plus keycloak-test (http://keycloak-test.localhost:18180)
 	$(COMPOSE_TEST) --profile keycloak up -d --wait
 
-test-down: ## tear down the test stack
-	$(COMPOSE_TEST) down -v
+test-down: ## tear down the test stack, keycloak-test included
+	$(COMPOSE_TEST) --profile keycloak down -v
 
 test-unit: test-up ## run backend unit tests (auto-brings-up test stack)
 	set -a; [ -f backend/.env ] && . backend/.env; set +a; \
 	cd backend && TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TEST_REDIS_URL='$(TEST_REDIS_URL)' \
 	python -m pytest tests/unit/ -v
 
-test-integration: test-up ## run backend integration tests (auto-brings-up test stack)
+test-integration: test-up-keycloak ## run backend integration tests (auto-brings-up test stack, with keycloak-test)
 	set -a; [ -f backend/.env ] && . backend/.env; set +a; \
 	cd backend && TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TEST_REDIS_URL='$(TEST_REDIS_URL)' \
 	python -m pytest tests/integration/ -v
