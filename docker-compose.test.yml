@@ -86,6 +86,8 @@ services:
   # users. Same definition as the `keycloak` profile in docker-compose.yml on a
   # shifted port. Storage is the container's own H2 file: every recreate
   # re-imports the realm. Every credential is a local fixture.
+  # Behind a profile: `make test-up` does not start it, `make test-up-keycloak`
+  # does.
   keycloak-test:
     image: quay.io/keycloak/keycloak:26.8.2
     command: start-dev --import-realm
@@ -120,3 +122,5 @@ services:
       timeout: 5s
       retries: 90
       start_period: 20s
+    profiles:
+      - keycloak

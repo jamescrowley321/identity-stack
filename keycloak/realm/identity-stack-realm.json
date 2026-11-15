@@ -71,11 +71,11 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "fullScopeAllowed": false,
-      "redirectUris": ["http://localhost:3000/*"],
+      "redirectUris": ["http://localhost:3000"],
       "webOrigins": ["http://localhost:3000"],
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "http://localhost:3000/*"
+        "post.logout.redirect.uris": "http://localhost:3000/login"
       },
       "defaultClientScopes": ["basic", "roles", "profile", "email", "web-origins", "acr"],
       "optionalClientScopes": ["organization", "offline_access"]
@@ -90,11 +90,11 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "fullScopeAllowed": false,
-      "redirectUris": ["http://localhost:3000/*"],
+      "redirectUris": ["http://localhost:3000"],
       "webOrigins": ["http://localhost:3000"],
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "http://localhost:3000/*"
+        "post.logout.redirect.uris": "http://localhost:3000/login"
       },
       "defaultClientScopes": ["basic", "roles", "profile", "email", "web-origins", "acr"],
       "optionalClientScopes": ["organization", "offline_access"]

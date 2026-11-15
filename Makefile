@@ -19,6 +19,10 @@ lint: ## run linters
 test-up: ## bring up postgres+redis for tests (idempotent; leave running between test runs)
 	$(COMPOSE_TEST) up -d --wait
 
+.PHONY: test-up-keycloak
+test-up-keycloak: ## bring up the test stack plus keycloak-test (http://keycloak-test.localhost:18180)
+	$(COMPOSE_TEST) --profile keycloak up -d --wait
+
 test-down: ## tear down the test stack
 	$(COMPOSE_TEST) down -v
 
