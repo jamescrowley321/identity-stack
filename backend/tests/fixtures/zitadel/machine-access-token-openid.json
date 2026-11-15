@@ -1,0 +1,20 @@
+{
+  "claims": {
+    "aud": [
+      "fixture-jwt"
+    ],
+    "client_id": "fixture-jwt",
+    "exp": 1794827356,
+    "iat": 1794784156,
+    "iss": "http://zitadel.localhost:8480",
+    "jti": "V2_399781186815148035-at_399781186815213571",
+    "nbf": 1794784156,
+    "sub": "399781186647375875"
+  },
+  "format": "jwt",
+  "header": {
+    "alg": "RS256",
+    "kid": "399781148344991747",
+    "typ": "JWT"
+  }
+}

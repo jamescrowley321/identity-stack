@@ -1,0 +1,28 @@
+{
+  "claims": {
+    "aud": [
+      "399781183140937731"
+    ],
+    "client_id": "fixture-jwt",
+    "exp": 1794827356,
+    "iat": 1794784156,
+    "iss": "http://zitadel.localhost:8480",
+    "jti": "V2_399781186882256899-at_399781186882322435",
+    "nbf": 1794784156,
+    "sub": "399781186647375875",
+    "urn:zitadel:iam:org:project:399781183140937731:roles": {
+      "viewer": {
+        "399781146147241987": "zitadel.zitadel.localhost"
+      }
+    },
+    "urn:zitadel:iam:user:resourceowner:id": "399781146147241987",
+    "urn:zitadel:iam:user:resourceowner:name": "ZITADEL",
+    "urn:zitadel:iam:user:resourceowner:primary_domain": "zitadel.zitadel.localhost"
+  },
+  "format": "jwt",
+  "header": {
+    "alg": "RS256",
+    "kid": "399781148344991747",
+    "typ": "JWT"
+  }
+}

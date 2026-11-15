@@ -1,0 +1,78 @@
+# Local Zitadel
+
+A self-hosted [Zitadel](https://zitadel.com) for local development, behind the compose profile `zitadel`. It is disposable: no account, no console step, and a reset returns it to first-start state.
+
+## Run it
+
+```bash
+make zitadel-up      # start and wait until healthy (about 30 s after the images are pulled)
+make zitadel-reset   # delete the instance and its volumes, then start a fresh one
+```
+
+Neither target needs a `.env`, and neither touches the default stack's containers or volumes.
+
+| Service | Image | Role |
+|---------|-------|------|
+| `zitadel-proxy` | `traefik:v3.7.7` | The only published port, `127.0.0.1:8480`. Routes `/ui/v2/login` to Login V2 and the rest to the API over h2c ([`zitadel/traefik.yml`](../zitadel/traefik.yml)) |
+| `zitadel-api` | `ghcr.io/zitadel/zitadel:v4.20.3` | Zitadel, `start-from-init` |
+| `zitadel-login` | `ghcr.io/zitadel/zitadel-login:v4.20.3` | Login V2 |
+| `zitadel-db` | `postgres:17.10-alpine` | Zitadel's own database, volume `zitadel-pgdata` |
+
+The images are AGPL-3.0 and run unmodified.
+
+## Issuer
+
+`http://zitadel.localhost:8480`, from the browser and from containers alike. Zitadel answers 404 on any other host, including `http://localhost:8480`.
+
+- **Host and browser:** `*.localhost` resolves to loopback without configuration in Chrome, in curl and in the Linux host resolver (all observed). Where a client does not, add `127.0.0.1 zitadel.localhost` to the hosts file.
+- **Containers on the compose network:** the proxy carries the network alias `zitadel.localhost` and listens on 8480 inside the network, so the same URL reaches it.
+
+Two limits, both observed:
+
+- curl inside a container cannot use the URL: it resolves `*.localhost` to loopback itself and never asks Docker's DNS. Python (`urllib`, `httpx`) and BusyBox `wget` resolve the alias.
+- py-identity-model 3.18.2 refuses the discovery fetch under its default policy ("HTTPS is required by discovery policy"): the issuer is plain HTTP and `zitadel.localhost` does not count as a loopback address. A backend that validates against this issuer has to opt in to HTTP for it.
+
+## Bootstrap
+
+First start creates everything below from `ZITADEL_FIRSTINSTANCE_*` settings. Anything else inside the instance belongs to Terraform.
+
+| What | Value |
+|------|-------|
+| Organization | `ZITADEL` |
+| Admin machine user | `terraform-admin`, `IAM_OWNER`. Its personal access token is written to `/zitadel/bootstrap/admin.pat` on the volume `zitadel-bootstrap`; `make -s zitadel-admin-pat` prints it |
+| Login V2 service user | `login-client`; its token is on the same volume |
+| Human admin | `zitadel-admin@zitadel.zitadel.localhost` / `Local-only-Passw0rd!`, `IAM_OWNER`, email verified |
+
+**Every secret in the compose file is a local-only throwaway**: the masterkey, the Login V2 cookie secret, the database password and the human admin's password. They are committed on purpose, protect nothing, and must not be reused anywhere. The tokens on the volume are minted per instance and die with `make zitadel-reset`.
+
+## What the instance does
+
+Recorded from v4.20.3 on 2026-11-15 by [`scripts/zitadel-capture-fixtures.py`](../scripts/zitadel-capture-fixtures.py) into [`backend/tests/fixtures/zitadel/`](../backend/tests/fixtures/zitadel/). Ids, key ids and timestamps differ on every instance; the shapes do not. Signed tokens are not stored, only their decoded header and claims.
+
+| Question | Observed | Fixture |
+|----------|----------|---------|
+| Issuer string | `http://zitadel.localhost:8480`: scheme, external domain and external port, no trailing slash. The `iss` of every token is the same string | `discovery.json` |
+| Signing keys | Two RSA keys, `RS256`. Token headers carry `alg`, `kid` and `typ: JWT` | `jwks.json` |
+| Default access-token type | Opaque, for an application and for a machine user created without naming a type. JWT has to be asked for: `OIDC_TOKEN_TYPE_JWT` on the application, `ACCESS_TOKEN_TYPE_JWT` on the machine user | `defaults.json` |
+| `aud`, machine user, client credentials | Scope `openid` alone: the machine user's own client id (its username). With `urn:zitadel:iam:org:project:id:{projectid}:aud`: the project id **only**; the client id is gone | `machine-access-token-openid.json`, `machine-access-token-project.json` |
+| `aud`, human through an application | The client id of every application in the project, then the project id, with no audience scope requested. The project-audience scope adds nothing | `human-access-token-openid.json`, `human-access-token-project.json` |
+| Shape of `urn:zitadel:iam:org:project:roles` | An object, not an array: role key → organization id → organization primary domain, e.g. `{"viewer": {"<org id>": "zitadel.zitadel.localhost"}}` | `human-access-token-roles.json` |
+| When the roles claim is in a JWT access token | Human: only when the application sets `accessTokenRoleAssertion`; then both `urn:zitadel:iam:org:project:roles` and `urn:zitadel:iam:org:project:{projectid}:roles` appear. Without it there is no roles claim even when `urn:zitadel:iam:org:projects:roles` is requested and a grant exists; UserInfo returns both. Machine user with that scope: the project-specific claim only | `human-access-token-roles.json`, `human-access-token-project.json`, `human-userinfo-project.json`, `machine-access-token-project.json` |
+| Organization claim | `urn:zitadel:iam:user:resourceowner:id`, `:name` and `:primary_domain`, only when scope `urn:zitadel:iam:user:resourceowner` is requested | `human-access-token-project.json` |
+| `email` and `email_verified` in a JWT access token | Absent, for a human with a verified email and scopes `openid profile email`. Absent from the ID token too, by default. UserInfo returns both | `human-access-token-project.json`, `human-id-token-project.json`, `human-userinfo-project.json` |
+| DPoP | Not advertised: no `dpop_signing_alg_values_supported` | `discovery.json` |
+| Mutual TLS | Not advertised: no `mtls_endpoint_aliases`, no `tls_client_certificate_bound_access_tokens`, no `tls_client_auth` method | `discovery.json` |
+| PAR | Not advertised: no `pushed_authorization_request_endpoint` | `discovery.json` |
+| Other discovery facts | No `authorization_details_types_supported` (RAR). Token exchange is not among `grant_types_supported`. `backchannel_logout_supported` is true. `code_challenge_methods_supported` is `S256` only | `discovery.json` |
+
+The human tokens are for the first-instance admin. `defaults.json` holds no claims because both default tokens were opaque.
+
+### Re-recording
+
+```bash
+make zitadel-reset
+make -s zitadel-admin-pat | python3 scripts/zitadel-capture-fixtures.py
+make zitadel-reset
+```
+
+The script creates a project, a role, three applications and two machine users to get tokens, hence the reset after it.

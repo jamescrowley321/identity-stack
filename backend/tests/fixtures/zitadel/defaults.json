@@ -1,0 +1,18 @@
+{
+  "machine_user": {
+    "name": "fixture-default"
+  },
+  "machine_user_token": {
+    "format": "opaque",
+    "length": 288
+  },
+  "oidc_application": {
+    "accessTokenType": null,
+    "appType": "OIDC_APP_TYPE_USER_AGENT",
+    "authMethodType": "OIDC_AUTH_METHOD_TYPE_NONE"
+  },
+  "oidc_application_human_token": {
+    "format": "opaque",
+    "length": 288
+  }
+}
