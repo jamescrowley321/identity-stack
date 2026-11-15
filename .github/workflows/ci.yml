@@ -99,8 +99,12 @@ jobs:
 
       - uses: ./.github/actions/setup-backend
 
-      - name: Start test stack (postgres + redis + hydra)
-        run: docker compose -f docker-compose.test.yml up -d --wait
+      - name: Start test stack (postgres + redis + hydra + keycloak)
+        # The Keycloak issuer is a fixed *.localhost name; pin it to loopback
+        # rather than depend on the runner's resolver.
+        run: |
+          echo "127.0.0.1 keycloak-test.localhost" | sudo tee -a /etc/hosts
+          docker compose -f docker-compose.test.yml --profile keycloak up -d --wait
 
       - name: Run integration tests
         # Deliberately unguarded. A step-level `if:` on a credential meant that an
@@ -124,7 +128,7 @@ jobs:
 
       - name: Stop test stack
         if: always()
-        run: docker compose -f docker-compose.test.yml down -v
+        run: docker compose -f docker-compose.test.yml --profile keycloak down -v
 
   e2e-tests:
     name: E2E Tests
