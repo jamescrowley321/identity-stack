@@ -1,6 +1,7 @@
 """UserTenantRoleRepository — data access layer for role assignment model.
 
-Handles all SQLAlchemy queries for user-tenant-role assignment CRUD.
+Handles all SQLAlchemy queries for user-tenant-role assignment CRUD, and maps
+assignment rows to and from the Access domain's values.
 Contains NO business logic, NO OTel spans, NO adapter calls — data access only.
 """
 
@@ -10,8 +11,30 @@ import uuid
 
 import sqlalchemy as sa
 
+from app.domain import access
 from app.models.identity.assignment import UserTenantRole
 from app.repositories.base import BaseRepository
+
+
+def assignment_from_row(row: UserTenantRole) -> access.Assignment:
+    return access.Assignment(
+        user_id=row.user_id,
+        tenant_id=row.tenant_id,
+        role_id=row.role_id,
+        assigned_by=row.assigned_by,
+        assigned_at=row.assigned_at,
+    )
+
+
+def assignment_to_row(assignment: access.Assignment) -> UserTenantRole:
+    """Build the row for an assignment that has not been stored yet."""
+    return UserTenantRole(
+        user_id=assignment.user_id,
+        tenant_id=assignment.tenant_id,
+        role_id=assignment.role_id,
+        assigned_by=assignment.assigned_by,
+        assigned_at=assignment.assigned_at,
+    )
 
 
 class UserTenantRoleRepository(BaseRepository[UserTenantRole]):
