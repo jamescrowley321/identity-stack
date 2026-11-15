@@ -16,6 +16,10 @@ TENANT_ID = uuid.uuid4()
 TRANSLATIONS = [
     (access.RoleNameTaken(name="editor"), Conflict(message="Role 'editor' already exists in this scope")),
     (access.RoleNotFound(role_id=ROLE_ID), NotFound(message=f"Role '{ROLE_ID}' not found")),
+    (
+        access.RoleOutOfScope(role_id=ROLE_ID, tenant_id=TENANT_ID),
+        NotFound(message=f"Role '{ROLE_ID}' not found"),
+    ),
     (access.PermissionNameTaken(name="documents.read"), Conflict(message="Permission 'documents.read' already exists")),
     (
         access.PermissionNotFound(permission_id=PERMISSION_ID),
