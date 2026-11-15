@@ -6,6 +6,8 @@ from starlette.responses import JSONResponse
 
 from app.logbook import logbook
 from app.middleware.providers import (
+    ProviderTokenConfig,
+    algorithm_rejected,
     audience_rejected,
     build_provider_configs,
     infer_single_tenant_dct,
@@ -48,15 +50,22 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
         ory_issuer_url: str = "",
         ory_audience: str | None = None,
         ory_require_audience: bool = True,
+        providers: list[ProviderTokenConfig] | None = None,
     ):
         super().__init__(app)
         self.excluded_paths = excluded_paths or set()
         self.excluded_prefixes = tuple(excluded_prefixes) if excluded_prefixes else ()
-        self._providers = build_provider_configs(
-            descope_project_id=descope_project_id,
-            ory_issuer_url=ory_issuer_url,
-            ory_audience=ory_audience,
-            ory_require_audience=ory_require_audience,
+        # ``providers`` is the list from ``configured_providers``. The Descope and
+        # Ory arguments are for callers that build the middleware by hand.
+        self._providers = (
+            list(providers)
+            if providers is not None
+            else build_provider_configs(
+                descope_project_id=descope_project_id,
+                ory_issuer_url=ory_issuer_url,
+                ory_audience=ory_audience,
+                ory_require_audience=ory_require_audience,
+            )
         )
 
     async def dispatch(self, request: Request, call_next):
@@ -106,6 +115,12 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
         """
         iss_hint = unverified_issuer(token)
         for provider in order_candidates(self._providers, iss_hint):
+            # Algorithm: checked here, before any crypto. The library does not
+            # enforce ``algorithms`` in discovery mode (see algorithm_rejected).
+            if algorithm_rejected(token, provider):
+                logger.debug("signing algorithm not accepted by candidate provider %s; trying next", provider.name)
+                continue
+
             # Validate the signature against this provider's JWKS. Issuer and
             # audience are checked manually below (Descope disables the library
             # checks because session tokens use a non-discovery issuer and omit
@@ -114,7 +129,9 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
             config = TokenValidationConfig(
                 perform_disco=True,
                 audience=provider.audience or "",
+                algorithms=sorted(provider.algorithms) or None,
                 options={"verify_iss": False, "verify_aud": False},
+                require_https=provider.require_https,
             )
             try:
                 claims = await validate_token(

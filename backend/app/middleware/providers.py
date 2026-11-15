@@ -19,6 +19,16 @@ import base64
 import json
 from dataclasses import dataclass
 
+from app.knobs import knob, knob_flag
+
+RS256 = "RS256"
+# The claim that names the client a token was issued to (OIDC Core §2).
+AUTHORIZED_PARTY_CLAIM = "azp"
+
+
+class ProviderConfigurationError(ValueError):
+    """A provider is configured in a way that would accept tokens it must not."""
+
 
 @dataclass(frozen=True)
 class ProviderTokenConfig:
@@ -48,6 +58,21 @@ class ProviderTokenConfig:
     # "rp_initiated" is standard OIDC RP-initiated logout (Ory) — redirect the
     # browser to the provider's ``end_session_endpoint``.
     logout_kind: str = "management"
+    # Several acceptable audiences (Keycloak: the type client ids). When set it
+    # is used instead of ``audience``: the token's ``aud`` must name one of them.
+    audiences: frozenset[str] = frozenset()
+    # Signing algorithms accepted from this provider. Empty accepts whichever
+    # algorithm the provider's JWKS key declares.
+    algorithms: frozenset[str] = frozenset()
+    # Require HTTPS for discovery, JWKS and the logout discovery fetch. The
+    # library still allows plain HTTP on loopback when this is on.
+    require_https: bool = True
+    # RP-initiated logout: the client id is fixed (``logout_client_id``), or read
+    # from a claim of the caller's token (``logout_client_id_claim``), or else
+    # ``audience`` (Ory with no ``ORY_CLIENT_ID``).
+    logout_client_id: str | None = None
+    logout_client_id_claim: str | None = None
+    post_logout_redirect_uri: str | None = None
 
 
 def descope_config(project_id: str) -> ProviderTokenConfig:
@@ -88,7 +113,14 @@ def descope_config(project_id: str) -> ProviderTokenConfig:
     )
 
 
-def ory_config(issuer_url: str, audience: str | None = None, require_audience: bool = True) -> ProviderTokenConfig:
+def ory_config(
+    issuer_url: str,
+    audience: str | None = None,
+    require_audience: bool = True,
+    *,
+    client_id: str | None = None,
+    post_logout_redirect_uri: str | None = None,
+) -> ProviderTokenConfig:
     """Ory Network provider config — standard OIDC.
 
     Ory issues a single OIDC-compliant issuer and JWT access tokens validated via
@@ -109,6 +141,45 @@ def ory_config(issuer_url: str, audience: str | None = None, require_audience: b
         infer_single_tenant_dct=False,
         require_audience=require_audience,
         logout_kind="rp_initiated",
+        logout_client_id=client_id or None,
+        post_logout_redirect_uri=post_logout_redirect_uri,
+    )
+
+
+def keycloak_config(
+    issuer_url: str,
+    audiences: frozenset[str],
+    *,
+    require_https: bool = True,
+    post_logout_redirect_uri: str | None = None,
+) -> ProviderTokenConfig:
+    """Keycloak realm provider config.
+
+    ``issuer_url`` is ``<KC_HOSTNAME>/realms/<realm>``, the exact ``iss`` of the
+    realm's tokens. ``audiences`` are the type client ids: ``aud`` names the type
+    and ``azp`` the app client, so logout takes its client id from ``azp``.
+
+    Fails closed: ``aud`` is always required, only RS256 is accepted, and a
+    config with no audience is refused, because it would accept every token the
+    realm issues for any client.
+    """
+    issuer = issuer_url.rstrip("/")
+    accepted_audiences = frozenset(audience.strip() for audience in audiences if audience.strip())
+    if not accepted_audiences:
+        raise ProviderConfigurationError(
+            "KEYCLOAK_AUDIENCES must name at least one type client id when KEYCLOAK_ISSUER_URL is set"
+        )
+    return ProviderTokenConfig(
+        name="Keycloak",
+        accepted_issuers=frozenset({issuer}),
+        disco_address=f"{issuer}/.well-known/openid-configuration",
+        audiences=accepted_audiences,
+        require_audience=True,
+        algorithms=frozenset({RS256}),
+        require_https=require_https,
+        logout_kind="rp_initiated",
+        logout_client_id_claim=AUTHORIZED_PARTY_CLAIM,
+        post_logout_redirect_uri=post_logout_redirect_uri,
     )
 
 
@@ -118,11 +189,19 @@ def build_provider_configs(
     ory_issuer_url: str = "",
     ory_audience: str | None = None,
     ory_require_audience: bool = True,
+    ory_client_id: str | None = None,
+    ory_post_logout_redirect_uri: str | None = None,
+    keycloak_issuer_url: str = "",
+    keycloak_audiences: frozenset[str] = frozenset(),
+    keycloak_require_https: bool = True,
+    keycloak_post_logout_redirect_uri: str | None = None,
 ) -> list[ProviderTokenConfig]:
-    """Build the configured provider list.
+    """Build the provider list from explicit values. ``configured_providers`` is the
+    caller that reads them from the environment.
 
     Descope is always present (preserving single-provider behavior, including the
-    no-project-id path). Ory is appended when an issuer is configured.
+    no-project-id path). Ory and Keycloak are each appended when an issuer is
+    configured. A Keycloak issuer with no audience raises (see ``keycloak_config``).
 
     Fail-closed: if Ory is configured with audience enforcement on (the default) but
     no ``ory_audience`` is provided, raise at startup rather than silently accept any
@@ -136,8 +215,54 @@ def build_provider_configs(
                 "ORY_AUDIENCE must be set when ORY_ISSUER_URL is set — Ory access-token "
                 "audience validation is required. Set ORY_REQUIRE_AUDIENCE=false to opt out."
             )
-        providers.append(ory_config(ory_issuer_url, ory_audience, require_audience=ory_require_audience))
+        providers.append(
+            ory_config(
+                ory_issuer_url,
+                ory_audience,
+                require_audience=ory_require_audience,
+                client_id=ory_client_id,
+                post_logout_redirect_uri=ory_post_logout_redirect_uri,
+            )
+        )
+    if keycloak_issuer_url:
+        providers.append(
+            keycloak_config(
+                keycloak_issuer_url,
+                keycloak_audiences,
+                require_https=keycloak_require_https,
+                post_logout_redirect_uri=keycloak_post_logout_redirect_uri,
+            )
+        )
     return providers
+
+
+def configured_providers() -> list[ProviderTokenConfig]:
+    """The provider list this deployment's environment configures.
+
+    The one builder behind the middleware factory and the logout router. It reads
+    the environment when called (conventions §1): the factory calls it once at
+    startup, the logout router on each request. A provider configured so that it
+    would accept tokens it must not raises here, which stops startup.
+    """
+    frontend_url = knob("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+    default_post_logout_redirect_uri = f"{frontend_url}/login"
+    # Client ids are case-sensitive, so this list is not read with ``knob_set``,
+    # which lowercases its entries.
+    keycloak_audiences = frozenset(knob("KEYCLOAK_AUDIENCES", "").split(","))
+    return build_provider_configs(
+        descope_project_id=knob("DESCOPE_PROJECT_ID", ""),
+        ory_issuer_url=knob("ORY_ISSUER_URL", ""),
+        ory_audience=knob("ORY_AUDIENCE") or None,
+        ory_require_audience=knob_flag("ORY_REQUIRE_AUDIENCE", "true"),
+        ory_client_id=knob("ORY_CLIENT_ID") or None,
+        ory_post_logout_redirect_uri=knob("ORY_POST_LOGOUT_REDIRECT_URI") or default_post_logout_redirect_uri,
+        keycloak_issuer_url=knob("KEYCLOAK_ISSUER_URL", ""),
+        keycloak_audiences=keycloak_audiences,
+        keycloak_require_https=knob_flag("KEYCLOAK_REQUIRE_HTTPS", "true"),
+        keycloak_post_logout_redirect_uri=(
+            knob("KEYCLOAK_POST_LOGOUT_REDIRECT_URI") or default_post_logout_redirect_uri
+        ),
+    )
 
 
 def unverified_issuer(token: str) -> str | None:
@@ -203,15 +328,56 @@ def audience_ok(aud: object, expected: str) -> bool:
     return aud == expected or (isinstance(aud, list) and expected in aud)
 
 
+def accepted_audiences(provider: ProviderTokenConfig) -> frozenset[str]:
+    """The audiences this provider's tokens may carry: ``audiences``, else the single ``audience``."""
+    if provider.audiences:
+        return provider.audiences
+    return frozenset({provider.audience}) if provider.audience else frozenset()
+
+
+def _names_an_accepted_audience(aud: object, accepted: frozenset[str]) -> bool:
+    """True if ``aud`` (a string, or a list of them) names at least one accepted audience."""
+    if isinstance(aud, str):
+        return aud in accepted
+    if isinstance(aud, list):
+        return any(isinstance(entry, str) and entry in accepted for entry in aud)
+    return False
+
+
 def audience_rejected(claims: dict, provider: ProviderTokenConfig) -> bool:
     """True if the token must be rejected on audience grounds for this provider.
 
-    - ``require_audience`` (Ory): ``aud`` MUST be present and match — fail closed.
+    - ``require_audience`` (Ory, Keycloak): ``aud`` MUST be present and name an
+      accepted audience — fail closed, also when no audience is configured.
     - otherwise (Descope): ``aud`` is checked only when present (session tokens omit it).
     """
+    accepted = accepted_audiences(provider)
     if provider.require_audience:
-        return "aud" not in claims or not audience_ok(claims["aud"], provider.audience or "")
-    return bool(provider.audience) and "aud" in claims and not audience_ok(claims["aud"], provider.audience)
+        return "aud" not in claims or not _names_an_accepted_audience(claims["aud"], accepted)
+    return bool(accepted) and "aud" in claims and not _names_an_accepted_audience(claims["aud"], accepted)
+
+
+def algorithm_rejected(token: str, provider: ProviderTokenConfig) -> bool:
+    """True if the token's signing algorithm is not one this provider accepts.
+
+    Reads ``alg`` from the JWT header. The header is covered by the signature the
+    standalone middleware goes on to verify, so a token only authenticates when
+    its real algorithm is accepted. Enforced here because py-identity-model, in
+    discovery mode, replaces ``TokenValidationConfig.algorithms`` with the
+    algorithm of the JWKS key the token selects.
+
+    Fails closed: with algorithms pinned, a header that cannot be read is rejected.
+    """
+    if not provider.algorithms:
+        return False
+    try:
+        header_b64 = token.split(".")[0]
+        header_b64 += "=" * (-len(header_b64) % 4)
+        header = json.loads(base64.urlsafe_b64decode(header_b64))
+    except Exception:
+        return True
+    alg = header.get("alg") if isinstance(header, dict) else None
+    return not isinstance(alg, str) or alg not in provider.algorithms
 
 
 def token_kind_rejected(claims: dict, provider: ProviderTokenConfig) -> bool:

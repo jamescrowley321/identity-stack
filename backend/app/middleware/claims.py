@@ -9,6 +9,8 @@ from starlette.responses import JSONResponse
 
 from app.logbook import logbook
 from app.middleware.providers import (
+    ProviderTokenConfig,
+    algorithm_rejected,
     audience_rejected,
     build_provider_configs,
     infer_single_tenant_dct,
@@ -59,15 +61,22 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
         ory_issuer_url: str = "",
         ory_audience: str | None = None,
         ory_require_audience: bool = True,
+        providers: list[ProviderTokenConfig] | None = None,
     ):
         super().__init__(app)
         self.excluded_paths = excluded_paths or set()
         self.excluded_prefixes = tuple(excluded_prefixes) if excluded_prefixes else ()
-        self._providers = build_provider_configs(
-            descope_project_id=descope_project_id,
-            ory_issuer_url=ory_issuer_url,
-            ory_audience=ory_audience,
-            ory_require_audience=ory_require_audience,
+        # ``providers`` is the list from ``configured_providers``. The Descope and
+        # Ory arguments are for callers that build the middleware by hand.
+        self._providers = (
+            list(providers)
+            if providers is not None
+            else build_provider_configs(
+                descope_project_id=descope_project_id,
+                ory_issuer_url=ory_issuer_url,
+                ory_audience=ory_audience,
+                ory_require_audience=ory_require_audience,
+            )
         )
 
     async def dispatch(self, request: Request, call_next):
@@ -116,6 +125,12 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
             provider = select_by_issuer(self._providers, claims.get("iss"))
             if provider is None:
                 logger.warning("GatewayClaims rejected: iss not in allow-list (iss=%r)", claims.get("iss"))
+                return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+
+            # Algorithm: a provider that pins its signing algorithms (Keycloak)
+            # gets the same rule here as in standalone mode.
+            if algorithm_rejected(token, provider):
+                logger.warning("GatewayClaims rejected: signing algorithm not accepted for %s", provider.name)
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
             # Audience: fail-closed for providers that require it (Ory); for Descope,

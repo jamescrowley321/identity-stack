@@ -30,6 +30,10 @@ Defaults below are the values baked into the code (`backend/app/...`). The backe
 | `ORY_REQUIRE_AUDIENCE` | `true` | Ory audience validation switch. Only `false`, `0` or `no` turn it off; any other value leaves it on (`knob_flag`). |
 | `ORY_CLIENT_ID` | — | OAuth2 client id sent on Ory RP-initiated logout. Unset or empty ⇒ `ORY_AUDIENCE`. |
 | `ORY_POST_LOGOUT_REDIRECT_URI` | — | Where Ory sends the browser after logout. Unset or empty ⇒ `FRONTEND_URL` + `/login`. Must be registered on the Ory client. |
+| `KEYCLOAK_ISSUER_URL` | `""` | Keycloak realm issuer, `<KC_HOSTNAME>/realms/<realm>`, exactly as in the token's `iss`. Set ⇒ Keycloak is added as a configured token provider (`middleware/providers.py`). |
+| `KEYCLOAK_AUDIENCES` | `""` | Comma-separated type client ids accepted as the access token's `aud` (case-sensitive). A token with no `aud`, or none of these, gets 401. Required when `KEYCLOAK_ISSUER_URL` is set: the backend refuses to start without it. |
+| `KEYCLOAK_REQUIRE_HTTPS` | `true` | Require HTTPS for Keycloak discovery and JWKS, in token validation and in logout. Only `false`, `0` or `no` turn it off; any other value leaves it on (`knob_flag`). Turn it off only for a local plain-HTTP Keycloak. Plain HTTP on `localhost` or a loopback address is allowed either way. |
+| `KEYCLOAK_POST_LOGOUT_REDIRECT_URI` | — | Where Keycloak sends the browser after logout. Unset or empty ⇒ `FRONTEND_URL` + `/login`. Must be registered on the app client. The logout client id is the token's `azp`. |
 | `JIT_ENABLED_PROVIDERS` | `ory` | Comma-separated providers whose first-login users are provisioned just in time by `GET /api/identity`. |
 | `CANONICAL_RBAC_PROVIDERS` | `ory` | Comma-separated providers whose roles and permissions come from the canonical model rather than token claims. Descope is excluded by default. |
 
