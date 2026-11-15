@@ -62,3 +62,35 @@ The base `docker-compose.yml` composes with profiles for the larger topologies:
 The backend's `REDIS_URL` points at the `redis` service, which only runs with `--profile infra`; without it the backend logs that Redis is unreachable and runs with cache invalidation disabled.
 
 `make dev-gateway` wires up the gateway profile for you. See [deployment.md](deployment.md) for what each mode requires.
+
+## Local Keycloak
+
+The `keycloak` profile runs Keycloak 26 with the `identity-stack` realm imported at start from `keycloak/realm/identity-stack-realm.json`. There is no step in the admin console.
+
+```bash
+docker compose --profile keycloak up --wait            # the default stack plus Keycloak
+docker compose --profile keycloak up --wait keycloak   # Keycloak alone
+```
+
+Compose reads the whole file whichever services you start, so `.env` needs the values any other invocation needs (`POSTGRES_PASSWORD`, `TYK_GATEWAY_SECRET`, `DESCOPE_PROJECT_ID`; see [deployment.md](deployment.md)). Keycloak itself uses none of them.
+
+| | |
+|---|---|
+| Issuer | `http://keycloak.localhost:8180/realms/identity-stack` |
+| Discovery | `http://keycloak.localhost:8180/realms/identity-stack/.well-known/openid-configuration` |
+| Admin console | `http://keycloak.localhost:8180/admin`, user `admin`, password `admin` |
+| Realm contents, users and passwords | [`keycloak/fixtures/README.md`](../keycloak/fixtures/README.md) |
+
+Everything in the realm file and the admin password are local fixtures. The container keeps no volume: recreating it re-imports the realm, and anything changed in the console is lost.
+
+### How the hostname resolves
+
+`KC_HOSTNAME` is the fixed URL `http://keycloak.localhost:8180`, so the issuer is the same string for every caller. Keycloak listens on 8180 inside the container too, which keeps the URL valid on both sides:
+
+- **On the host and in the browser**, `*.localhost` names resolve to loopback (browsers do this themselves; so does systemd-resolved), and the port is published on `127.0.0.1:8180`. If a tool on your machine does not resolve the name, add `127.0.0.1 keycloak.localhost` to your hosts file.
+- **In other compose containers**, `keycloak.localhost` is a network alias of the Keycloak service, so the name resolves to the container, not to the caller's own loopback.
+
+The name is not `localhost` or `127.0.0.1`, so a client that allows plain HTTP only for loopback hosts has to be told to allow it for this issuer. The realm's SSL mode is `none`.
+
+`docker-compose.test.yml` runs the same realm as `keycloak-test` on `http://keycloak-test.localhost:18180`, resolved the same way; `make test-up` starts it with the rest of the test stack.
+

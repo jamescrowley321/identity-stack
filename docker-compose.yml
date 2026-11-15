@@ -15,6 +15,10 @@
 #   infra:              redis + aspire-dashboard (observability/cache, opt-in)
 #                       docker compose --profile infra up --build
 #                       docker compose --profile gateway --profile infra up --build
+#
+#   keycloak:           local Keycloak issuer at http://keycloak.localhost:8180
+#                       with the identity-stack realm imported at start.
+#                       docker compose --profile keycloak up --wait
 
 services:
   frontend:
@@ -182,6 +186,48 @@ services:
     profiles:
       - gateway
       - full
+
+  # --- keycloak profile ------------------------------------------------------
+  # Local, disposable Keycloak. The admin password and every credential in the
+  # realm file are LOCAL-ONLY fixtures; the published port binds to loopback.
+  # Data is not persisted: the realm is re-imported whenever the container is
+  # recreated. See docs/local-development.md.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.2
+    command: start-dev --import-realm
+    ports:
+      - "127.0.0.1:8180:8180"
+    environment:
+      # Fixed full URL, so `iss` is this one string for the browser and for
+      # other containers. The container listens on the same port it publishes
+      # so the URL is valid on both sides.
+      - KC_HOSTNAME=http://keycloak.localhost:8180
+      - KC_HTTP_PORT=8180
+      - KC_BOOTSTRAP_ADMIN_USERNAME=admin
+      - KC_BOOTSTRAP_ADMIN_PASSWORD=admin
+    volumes:
+      - ./keycloak/realm:/opt/keycloak/data/import:ro
+    networks:
+      default:
+        aliases:
+          - keycloak.localhost
+    healthcheck:
+      # The image has no curl or wget. Probing the imported realm's discovery
+      # document means healthy implies the import finished.
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/8180 &&
+          printf 'GET /realms/identity-stack/.well-known/openid-configuration HTTP/1.0\r\nHost: keycloak.localhost:8180\r\n\r\n' >&3 &&
+          grep -qE '^HTTP/1\.[01] 200' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 36
+      start_period: 20s
+    profiles:
+      - keycloak
 
 volumes:
   pgdata:
