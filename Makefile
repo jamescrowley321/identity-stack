@@ -14,7 +14,7 @@ setup: ## install all dependencies
 	cd frontend && npm install
 
 lint: ## run linters
-	cd backend && ruff check . && ruff format --check .
+	cd backend && ruff check . && ruff format --check . && lint-imports
 
 test-up: ## bring up postgres+redis for tests (idempotent; leave running between test runs)
 	$(COMPOSE_TEST) up -d --wait

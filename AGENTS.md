@@ -42,7 +42,8 @@ docstring before you call it in a new way.
 
 Run what CI runs where you can:
 
-- `make lint`: Ruff, including the house-rule bans (TID251) and lazy logging (G004/G010).
+- `make lint`: Ruff, including the house-rule bans (TID251) and lazy logging (G004/G010),
+  then the import-linter layer contracts (conventions §22–§27).
 - `make test-unit`: includes `tests/unit/test_house_rules.py` and
   `tests/unit/test_router_authorization.py`, which enforce the rules Ruff cannot.
   It brings up `docker-compose.test.yml`, so it needs Docker.

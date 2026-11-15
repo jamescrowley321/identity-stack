@@ -11,8 +11,9 @@ the larger rules are recorded in [`docs/adr/`](adr/README.md). The helpers that 
 the rules carry further, narrower rules in their docstrings. Read a helper's docstring
 before you change the helper or call it in a new way.
 
-Enforcement is noted under each rule. **Ruff** means `make lint` fails, and **test**
-means `make test-unit` fails. Rules marked **review** are enforced by a reviewer.
+Enforcement is noted under each rule. **Ruff** and **import-linter** mean `make lint`
+fails, and **test** means `make test-unit` fails. Rules marked **review** are enforced by a
+reviewer.
 
 [RFC 2119]: https://www.rfc-editor.org/rfc/rfc2119
 [RFC 8174]: https://www.rfc-editor.org/rfc/rfc8174
@@ -368,3 +369,97 @@ its enforcement and any named exceptions together, so the rules keep describing 
 A new exception **MUST** be named in the rule it breaks.
 
 *Enforcement:* review.
+
+## Layers and the domain
+
+The architecture, its layer map, the context map and each context's glossary are in
+[ADR-0008](adr/0008-layered-architecture-with-a-functional-domain-core.md).
+
+### 22. Imports point inward
+
+The layers are, from the outside in: `app/routers/`, `app/dependencies/`, `app/services/`,
+`app/repositories/`, `app/models/` and `app/domain/`. A module **MUST NOT** import a layer
+that comes before its own in that list.
+
+*Enforcement:* import-linter (`layers`).
+
+### 23. The domain is pure
+
+Code in `app/domain/` **MUST** import only the standard library, `expression` and its own
+context. It **MUST NOT** import SQLModel, SQLAlchemy, FastAPI, Pydantic, httpx, `logging`,
+OpenTelemetry or any other package under `app/`. It **MUST NOT** do I/O, read the clock or
+generate ids. The caller passes the time and new ids in, as `now=` and `role_id=` are
+passed to `access.create_role`.
+
+*Enforcement:* import-linter (`forbidden`), plus a test (`test_domain_is_pure`). The test
+rejects an import outside the standard library and `expression`, a standard-library module
+that does I/O (`os`, `time`, `random`, `logging` and the rest of `_IMPURE_STDLIB`), and any
+use of `now`, `utcnow`, `today` or a `uuid` generator.
+
+### 24. Domain functions return `Result`
+
+A domain function **MUST** report an expected failure as `Error(<context error>)` and
+**MUST NOT** raise for one. A context's errors **MUST** be `@dataclass(frozen=True)`
+subclasses of its one error base, such as `AccessError`, and carry data, not a message.
+Each **MUST** have a translation to an `IdentityError` in `app/errors/<context>.py`, which
+is where the message a caller sees is written.
+
+A decision function takes the state it needs and a command, and returns the new value
+together with the domain event that records it:
+`(state, command, *, ids, now) -> Result[(value, event), error]`. State that does not exist
+is passed as `None`, and the decision answers with the context's not-found error.
+
+*Enforcement:* test (`test_domain_does_not_raise`, which rejects any `raise` in
+`app/domain/`, and `test_every_access_error_is_translated`), plus review.
+
+### 25. Domain types are immutable
+
+Every class in `app/domain/` **MUST** be a `@dataclass(frozen=True)` or an `Enum`. Changing
+state means returning a new value, with `dataclasses.replace`. A value object with an
+invariant **MUST** be built from outside input through its smart constructor, which returns
+`Result`, as `access.role_name` does. A repository rebuilding a stored value **MAY** call
+the type directly.
+
+*Enforcement:* test (`test_domain_types_are_frozen_dataclasses_or_enums`).
+
+### 26. Routers and services skip no layer
+
+A module in `app/routers/` **MUST NOT** import `app.repositories`, `app.models` or
+`app.outbound`. It reaches data and providers through one application service.
+
+A module in `app/services/` **MUST NOT** import `app.models`. It holds domain values and
+decides nothing itself: it loads state, calls a decision function in `app/domain/`,
+persists the result, then invalidates caches and syncs. Rows are mapped to and from domain
+values by functions in the repository's module, such as `role_from_row`, `role_to_row` and
+`apply_role` in `app/repositories/role.py`.
+
+The modules of a bounded context that has not moved onto the domain are exempt until its
+migration, one entry per context:
+
+- Exception: Directory (#515): `routers/canonical_users.py`, `routers/tenants.py`,
+  `services/tenant.py`, `services/user.py`.
+- Exception: Federation (#516): `routers/idp_links.py`, `routers/providers.py`,
+  `services/identity_provisioning.py`, `services/idp_link.py`, `services/provider.py`.
+- Exception: Documents and fine-grained authorization (#517): `routers/documents.py`,
+  `routers/fga.py`.
+- Exception: Synchronisation (#518): `routers/sync_status.py`, `services/inbound_sync.py`,
+  `services/reconciliation.py`, `services/sync_status.py`.
+- Exception: Descope management boundary (#519): `routers/attributes.py`,
+  `routers/users.py`.
+
+§4's requirement that a router catch `UpstreamStatusError` and `UpstreamTransportError`
+applies to the excepted routers for as long as they call Descope themselves.
+
+*Enforcement:* import-linter (`context_layers`, defined in `backend/import_contracts.py`).
+The exceptions are its `unmigrated` entries in `backend/pyproject.toml`. An entry that
+names a module breaking no rule fails the contract.
+
+### 27. Each bounded context has its own package and glossary
+
+A bounded context **MUST** have its own package, `app/domain/<context>/`, and its own
+glossary section in ADR-0008. Code in one context's package **MUST NOT** import another
+context's package. A context refers to another's entities by id. Code outside
+`app/domain/` **SHOULD** import a context's package, as in `from app.domain import access`,
+not its modules.
+
+*Enforcement:* import-linter (`independence`), plus review for the glossary.

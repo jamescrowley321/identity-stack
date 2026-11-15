@@ -43,7 +43,7 @@ make test-gateway-proxy            # verify gateway proxying + header forwarding
 ## Lint & security
 
 ```bash
-make lint       # ruff check + format (backend)
+make lint       # ruff check + format, import-linter contracts (backend)
 make security   # pip-audit + npm audit
 ```
 
