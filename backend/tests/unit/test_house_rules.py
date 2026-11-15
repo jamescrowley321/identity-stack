@@ -442,6 +442,67 @@ def test_router_functions_that_call_descope_handle_upstream_failures():
     )
 
 
+_ADAPTER = "services/descope_management.py"
+_ADAPTER_CLASS = "DescopeManagementAdapter"
+_ADAPTER_STATUS_ONLY = "predates #512: catches UpstreamStatusError only, so a transport failure is a 500 (#558)"
+_ADAPTER_UNHANDLED = "predates #512: catches no upstream failure, so every Descope error is a 500 (#558)"
+
+# method -> why it does not catch both UpstreamStatusError and UpstreamTransportError.
+ADAPTER_UPSTREAM_HANDLING_EXCEPTIONS = {
+    **{
+        name: _ADAPTER_STATUS_ONLY
+        for name in (
+            "list_members",
+            "invite_member",
+            "set_member_status",
+            "remove_member",
+            "update_profile_attribute",
+            "load_tenant_settings",
+            "update_tenant_settings",
+        )
+    },
+    **{
+        name: _ADAPTER_UNHANDLED
+        for name in (
+            "create_access_key",
+            "list_access_keys",
+            "load_tenant_access_key",
+            "deactivate_access_key",
+            "activate_access_key",
+            "delete_access_key",
+        )
+    },
+}
+
+
+def _calls_the_client(func: ast.AST) -> bool:
+    """Whether ``func`` reads ``self._client``."""
+    return any(
+        isinstance(node, ast.Attribute)
+        and node.attr == "_client"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+        for node in ast.walk(func)
+    )
+
+
+def test_adapter_methods_that_call_descope_handle_upstream_failures():
+    """§4, for the routes behind the adapter: the adapter makes the calls, so it is checked."""
+    cls = next(
+        node for node in _tree(APP / _ADAPTER).body if isinstance(node, ast.ClassDef) and node.name == _ADAPTER_CLASS
+    )
+    methods = [m for m in cls.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name != "__init__"]
+    callers = [m for m in methods if _calls_the_client(m)]
+    # Guard the scan: load_profile is the compliant method, so it must be seen and must pass.
+    assert "load_profile" in {m.name for m in callers}
+    found = {m.name for m in callers if not _handles_both_upstream_failures(m)}
+    expected = ADAPTER_UPSTREAM_HANDLING_EXCEPTIONS.keys()
+    assert found == expected, (
+        f"§4: {_ADAPTER_CLASS} methods catch UpstreamStatusError and UpstreamTransportError and return Error. "
+        f"New: {sorted(found - expected)}; stale exceptions: {sorted(expected - found)}"
+    )
+
+
 def test_caught_names_reads_dotted_and_bare_handlers():
     tree = ast.parse(
         "try:\n    pass\nexcept app.outbound.UpstreamStatusError:\n    pass\ntry:\n    pass\nexcept:\n    pass\n"
@@ -479,7 +540,7 @@ def test_pass_through_routers_reach_descope_only_through_the_adapter():
     for name in ADAPTER_ONLY_ROUTERS:
         tree = _tree(APP / "routers" / name)
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module in ("app.outbound", "app.services.descope"):
+            if isinstance(node, ast.ImportFrom) and node.module in ("httpx", "app.outbound", "app.services.descope"):
                 offenders.append(f"routers/{name}:{node.lineno} imports {node.module}")
             if isinstance(node, ast.Import):
                 offenders += [
