@@ -1,0 +1,40 @@
+{
+  "header": {
+    "alg": "RS256",
+    "typ": "JWT",
+    "kid": "YQbYc-y1Wc99uz4TI6OFo9bz-GRD-90i_srrOX3dbAo"
+  },
+  "claims": {
+    "exp": 1794784188,
+    "iat": 1794783888,
+    "auth_time": 1794783888,
+    "jti": "onrtac:8101c78a-e58a-7ee4-3be0-0bc13867c390",
+    "iss": "http://keycloak.localhost:8180/realms/identity-stack",
+    "aud": "member",
+    "sub": "86990099-812e-41e9-9464-51412bb49784",
+    "typ": "Bearer",
+    "azp": "member-app",
+    "sid": "Yf-8iMlAF2Tp6JllA477nQ6m",
+    "acr": "1",
+    "allowed-origins": [
+      "http://localhost:3000"
+    ],
+    "resource_access": {
+      "member": {
+        "roles": [
+          "documents:read"
+        ]
+      }
+    },
+    "scope": "openid profile email organization:acme",
+    "email_verified": true,
+    "organization": [
+      "acme"
+    ],
+    "name": "Bob Two-Orgs",
+    "preferred_username": "bob",
+    "given_name": "Bob",
+    "family_name": "Two-Orgs",
+    "email": "bob@globex.test"
+  }
+}

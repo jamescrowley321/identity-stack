@@ -1,0 +1,148 @@
+{
+  "realm": "identity-stack",
+  "enabled": true,
+  "sslRequired": "none",
+  "organizationsEnabled": true,
+  "organizations": [
+    {
+      "name": "Acme",
+      "alias": "acme",
+      "enabled": true,
+      "domains": [{ "name": "acme.test", "verified": false }],
+      "members": [
+        { "username": "alice", "membershipType": "UNMANAGED" },
+        { "username": "bob", "membershipType": "UNMANAGED" },
+        { "username": "carol", "membershipType": "UNMANAGED" }
+      ]
+    },
+    {
+      "name": "Globex",
+      "alias": "globex",
+      "enabled": true,
+      "domains": [{ "name": "globex.test", "verified": false }],
+      "members": [{ "username": "bob", "membershipType": "UNMANAGED" }]
+    }
+  ],
+  "roles": {
+    "client": {
+      "member": [
+        { "name": "documents:read" },
+        { "name": "documents:write" }
+      ],
+      "tenant-admin": [
+        { "name": "members:invite" },
+        { "name": "members:remove" },
+        { "name": "settings:manage" }
+      ]
+    }
+  },
+  "clients": [
+    {
+      "clientId": "member",
+      "name": "Type client: member",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "local-only-member-type-client",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false
+    },
+    {
+      "clientId": "tenant-admin",
+      "name": "Type client: tenant-admin",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "local-only-tenant-admin-type-client",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false
+    },
+    {
+      "clientId": "member-app",
+      "name": "App client for type member",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "redirectUris": ["http://localhost:3000/*"],
+      "webOrigins": ["http://localhost:3000"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:3000/*"
+      },
+      "defaultClientScopes": ["basic", "roles", "profile", "email", "web-origins", "acr"],
+      "optionalClientScopes": ["organization", "offline_access"]
+    },
+    {
+      "clientId": "tenant-admin-app",
+      "name": "App client for type tenant-admin",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "redirectUris": ["http://localhost:3000/*"],
+      "webOrigins": ["http://localhost:3000"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:3000/*"
+      },
+      "defaultClientScopes": ["basic", "roles", "profile", "email", "web-origins", "acr"],
+      "optionalClientScopes": ["organization", "offline_access"]
+    }
+  ],
+  "clientScopeMappings": {
+    "member": [
+      { "client": "member-app", "roles": ["documents:read", "documents:write"] }
+    ],
+    "tenant-admin": [
+      {
+        "client": "tenant-admin-app",
+        "roles": ["members:invite", "members:remove", "settings:manage"]
+      }
+    ]
+  },
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "email": "alice@acme.test",
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Single-Org",
+      "credentials": [{ "type": "password", "value": "local-only-alice", "temporary": false }],
+      "clientRoles": { "member": ["documents:read", "documents:write"] }
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "email": "bob@globex.test",
+      "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "Two-Orgs",
+      "credentials": [{ "type": "password", "value": "local-only-bob", "temporary": false }],
+      "clientRoles": {
+        "member": ["documents:read"],
+        "tenant-admin": ["members:invite", "members:remove", "settings:manage"]
+      }
+    },
+    {
+      "username": "carol",
+      "enabled": true,
+      "email": "carol@acme.test",
+      "emailVerified": true,
+      "firstName": "Carol",
+      "lastName": "No-Role",
+      "credentials": [{ "type": "password", "value": "local-only-carol", "temporary": false }]
+    }
+  ]
+}
