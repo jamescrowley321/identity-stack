@@ -41,6 +41,14 @@ class RoleNotFound(AccessError):
 
 
 @dataclass(frozen=True)
+class RoleOutOfScope(AccessError):
+    """The role belongs to a tenant other than the one it was asked for in."""
+
+    role_id: uuid.UUID
+    tenant_id: uuid.UUID
+
+
+@dataclass(frozen=True)
 class PermissionNameTaken(AccessError):
     name: str
 

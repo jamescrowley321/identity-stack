@@ -35,6 +35,7 @@ from app.domain.access.errors import (
     RoleAlreadyAssigned,
     RoleNameTaken,
     RoleNotFound,
+    RoleOutOfScope,
 )
 from app.domain.access.events import (
     PermissionCreated,
@@ -160,9 +161,14 @@ def assign_role(
     *,
     now: datetime,
 ) -> Result[tuple[Assignment, RoleAssigned], AccessError]:
-    """``held`` is the user's existing assignment of this role in this tenant."""
+    """``held`` is the user's existing assignment of this role in this tenant.
+
+    A global role may be assigned in any tenant, a tenant's role only in that tenant.
+    """
     if role is None:
         return Error(RoleNotFound(role_id=command.role_id))
+    if role.tenant_id is not None and role.tenant_id != command.tenant_id:
+        return Error(RoleOutOfScope(role_id=role.id, tenant_id=command.tenant_id))
     if held is not None:
         return Error(RoleAlreadyAssigned(user_id=command.user_id, tenant_id=command.tenant_id, role_id=command.role_id))
     assignment = Assignment(

@@ -247,6 +247,22 @@ def test_assign_role_rejects_a_missing_role():
     assert access.assign_role(None, None, command, now=NOW) == Error(access.RoleNotFound(role_id=command.role_id))
 
 
+def test_assign_role_accepts_a_role_scoped_to_the_same_tenant():
+    role = _role("editor", TENANT_ID)
+    command = access.AssignRole(user_id=USER_ID, tenant_id=TENANT_ID, role_id=role.id, assigned_by=None)
+
+    assert access.assign_role(role, None, command, now=NOW).is_ok()
+
+
+def test_assign_role_rejects_a_role_scoped_to_another_tenant():
+    role = _role("editor", uuid.uuid4())
+    command = access.AssignRole(user_id=USER_ID, tenant_id=TENANT_ID, role_id=role.id, assigned_by=None)
+
+    result = access.assign_role(role, None, command, now=NOW)
+
+    assert result == Error(access.RoleOutOfScope(role_id=role.id, tenant_id=TENANT_ID))
+
+
 def test_assign_role_rejects_a_role_the_user_already_holds():
     role = _role()
     command = access.AssignRole(user_id=USER_ID, tenant_id=TENANT_ID, role_id=role.id, assigned_by=None)

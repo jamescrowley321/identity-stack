@@ -41,6 +41,7 @@ from app.domain.access.errors import (
     RoleAlreadyAssigned,
     RoleNameTaken,
     RoleNotFound,
+    RoleOutOfScope,
 )
 from app.domain.access.events import (
     AccessEvent,
@@ -99,6 +100,7 @@ __all__ = [
     "RoleName",
     "RoleNameTaken",
     "RoleNotFound",
+    "RoleOutOfScope",
     "RoleUnassigned",
     "RoleUpdated",
     "UnassignRole",

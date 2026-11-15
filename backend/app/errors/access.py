@@ -21,6 +21,9 @@ def identity_error(error: access.AccessError) -> IdentityError:
             return Conflict(message=f"Role '{name}' already exists in this scope")
         case access.RoleNotFound(role_id=role_id):
             return NotFound(message=f"Role '{role_id}' not found")
+        case access.RoleOutOfScope(role_id=role_id):
+            # Answered as not found, so a caller cannot probe another tenant's roles.
+            return NotFound(message=f"Role '{role_id}' not found")
         case access.PermissionNameTaken(name=name):
             return Conflict(message=f"Permission '{name}' already exists")
         case access.PermissionNotFound(permission_id=permission_id):
