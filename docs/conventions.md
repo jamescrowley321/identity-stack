@@ -78,20 +78,22 @@ A router function that calls Descope **MUST** catch both `UpstreamStatusError` a
 `attributes.py::get_profile` do. Otherwise a Descope outage surfaces as an unhandled 500. A
 function that catches `Exception` counts as handling both.
 
-- Exception: the five handlers in `routers/users.py`, plus `update_profile_attribute`,
-  `get_tenant_settings` and `update_tenant_settings` in `routers/attributes.py`. They catch
-  only `UpstreamStatusError`, so a transport failure surfaces as 500. That predates #512, and
-  changing those answers to 502 is a behaviour change left for a follow-up.
-- Exception: every function in `routers/accesskeys.py` (its six handlers and
-  `_verify_key_tenant`). None of them catches an upstream failure, so every Descope error and
-  timeout there surfaces as 500. That also predates #512 and is left for the same follow-up.
-- Exception: `routers/users.py::_get_descope_client`, which only returns the client and makes
-  no call.
+The routes behind `DescopeManagementAdapter` (§5) leave that decision to the adapter, which
+reports an upstream failure as an `Error`.
 
-*Enforcement:* Ruff (TID251 on `httpx`), plus a test
-(`test_router_functions_that_call_descope_handle_upstream_failures`). The test checks each
-router function that reads `descope_client` or calls a same-module helper that does, and keys
-its exceptions by module and function.
+- Exception: the adapter's member methods (`list_members`, `invite_member`,
+  `set_member_status`, `remove_member`), plus `update_profile_attribute`,
+  `load_tenant_settings` and `update_tenant_settings`. They catch only `UpstreamStatusError`,
+  so a transport failure propagates and the route answers 500. That predates #512, and
+  changing those answers to 502 is a behaviour change left for a follow-up.
+- Exception: the adapter's six access-key methods. None of them catches an upstream failure,
+  so every Descope error and timeout on the `routers/accesskeys.py` routes surfaces as 500.
+  That also predates #512 and is left for the same follow-up.
+
+*Enforcement:* Ruff (TID251 on `httpx`), plus tests
+(`test_router_functions_that_call_descope_handle_upstream_failures`, which checks each
+router function that reads `descope_client` or calls a same-module helper that does, and
+`test_descope_management_adapter.py`, which pins each adapter exception above).
 
 ### 5. The Descope Management API is called through `DescopeManagementClient`
 
@@ -100,11 +102,18 @@ Calls to Descope's `/v1/mgmt/...` endpoints **MUST** go through
 process-wide instance on `request.app.state.descope_client`. Code **MUST NOT** build a
 management URL or an `Authorization: Bearer <project>:<key>` header itself.
 
+`routers/users.py`, `routers/attributes.py`, `routers/accesskeys.py`, `routers/internal.py`
+and `routers/protected.py` **MUST NOT** touch the client or an upstream error type. They
+call `app.services.descope_management.DescopeManagementAdapter`, taken from
+`app/dependencies/descope.py`. Each of its methods returns a `Result` carrying the API's own
+response shape.
+
 - Exception: `app/services/logout.py` (`_descope_management_logout`). It calls
   `/v1/mgmt/user/logout` with its own short-lived client, and that request is preserved
   byte-for-byte (NFR-8).
 
-*Enforcement:* review.
+*Enforcement:* review, plus a test
+(`test_pass_through_routers_reach_descope_only_through_the_adapter`).
 
 ### 6. Every outbound call has an explicit timeout
 
@@ -204,6 +213,11 @@ RFC 9457 problem-detail bodies (`application/problem+json`) **MUST** be built on
 - Exception: `GET /api/identity` (`routers/protected.py::canonical_identity`). Its
   400/404/409/500 answers predate the canonical service layer and are part of the
   endpoint's published contract.
+- Exception: the handlers in `routers/users.py` and `routers/attributes.py`, and
+  `routers/accesskeys.py::_verify_key_tenant`. They answer an `Error` from
+  `DescopeManagementAdapter` with the `{"detail": ...}` 400/403/502 bodies those routes had
+  before the adapter existed, and `get_profile` and `get_tenant_settings` answer one with
+  blank defaults. Moving them to problem details is a behaviour change left for a follow-up.
 
 *Enforcement:* review.
 

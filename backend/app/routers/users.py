@@ -1,28 +1,20 @@
+from expression import Ok
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
 
+from app.dependencies.descope import require_descope_management
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
-from app.logbook import logbook
+from app.errors.identity import ValidationError
+from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
-from app.outbound import UpstreamStatusError
-from app.services.canonical import canonical_user
 
 router = APIRouter(tags=["Users"])
-logger = logbook(__name__)
 
 
 class InviteUserRequest(BaseModel):
     email: EmailStr
     role_names: list[str] = Field(default_factory=lambda: ["member"])
-
-
-def _get_descope_client(request: Request):
-    """Retrieve the DescopeManagementClient from app state."""
-    client = getattr(request.app.state, "descope_client", None)
-    if client is None:
-        raise HTTPException(status_code=503, detail="Descope client not initialized")
-    return client
 
 
 @router.get("/members")
@@ -32,29 +24,10 @@ async def list_members(
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
     """List all members in the current tenant via Descope Management API."""
-    client = _get_descope_client(request)
-    try:
-        users = await client.search_tenant_users(tenant_id)
-        members = []
-        for u in users:
-            tenant_roles = []
-            for t in u.get("userTenants", []):
-                if t.get("tenantId") == tenant_id:
-                    tenant_roles = t.get("roleNames", [])
-                    break
-            members.append(
-                {
-                    "userId": u.get("userId", ""),
-                    "email": u.get("email", ""),
-                    "name": u.get("name", ""),
-                    "status": u.get("status", "enabled"),
-                    "roleNames": tenant_roles,
-                }
-            )
-        return {"members": members}
-    except UpstreamStatusError as exc:
-        logger.warning("Descope API error listing members: %s", exc.response.status_code)
-        raise HTTPException(status_code=502, detail="Failed to list members from Descope") from exc
+    result = await require_descope_management(request).list_members(tenant_id)
+    if result.is_error():
+        raise HTTPException(status_code=502, detail="Failed to list members from Descope")
+    return result_to_response(result, request)
 
 
 @router.post("/members/invite")
@@ -69,20 +42,16 @@ async def invite_member(
     if "owner" in body.role_names and "owner" not in caller_roles:
         raise HTTPException(status_code=403, detail="Only owners can assign the owner role")
 
-    client = _get_descope_client(request)
-    try:
-        result = await client.invite_user(
-            email=body.email,
-            tenant_id=tenant_id,
-            role_names=body.role_names,
-        )
-        return {"status": "invited", "email": body.email, "user": canonical_user(result)}
-    except UpstreamStatusError as exc:
-        if exc.response.status_code == 400:
-            detail = exc.response.json().get("errorDescription", "Bad request")
-            raise HTTPException(status_code=400, detail=detail) from exc
-        logger.warning("Descope API error inviting member: %s", exc.response.status_code)
-        raise HTTPException(status_code=502, detail="Failed to invite member via Descope") from exc
+    result = await require_descope_management(request).invite_member(
+        email=body.email,
+        tenant_id=tenant_id,
+        role_names=body.role_names,
+    )
+    if result.is_error():
+        if isinstance(result.error, ValidationError):
+            raise HTTPException(status_code=400, detail=result.error.message)
+        raise HTTPException(status_code=502, detail="Failed to invite member via Descope")
+    return result_to_response(result, request)
 
 
 @router.post("/members/{user_id}/deactivate")
@@ -93,13 +62,10 @@ async def deactivate_member(
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
     """Deactivate a member. They will not be able to log in."""
-    client = _get_descope_client(request)
-    try:
-        await client.update_user_status(user_id, "disabled")
-        return {"status": "deactivated", "user_id": user_id}
-    except UpstreamStatusError as exc:
-        logger.warning("Descope API error deactivating member: %s", exc.response.status_code)
-        raise HTTPException(status_code=502, detail="Failed to deactivate member via Descope") from exc
+    result = await require_descope_management(request).set_member_status(user_id, "disabled")
+    if result.is_error():
+        raise HTTPException(status_code=502, detail="Failed to deactivate member via Descope")
+    return result_to_response(Ok({"status": "deactivated", "user_id": user_id}), request)
 
 
 @router.post("/members/{user_id}/activate")
@@ -110,13 +76,10 @@ async def activate_member(
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
     """Reactivate a previously deactivated member."""
-    client = _get_descope_client(request)
-    try:
-        await client.update_user_status(user_id, "enabled")
-        return {"status": "activated", "user_id": user_id}
-    except UpstreamStatusError as exc:
-        logger.warning("Descope API error activating member: %s", exc.response.status_code)
-        raise HTTPException(status_code=502, detail="Failed to activate member via Descope") from exc
+    result = await require_descope_management(request).set_member_status(user_id, "enabled")
+    if result.is_error():
+        raise HTTPException(status_code=502, detail="Failed to activate member via Descope")
+    return result_to_response(Ok({"status": "activated", "user_id": user_id}), request)
 
 
 @router.delete("/members/{user_id}")
@@ -127,10 +90,7 @@ async def remove_member(
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
 ):
     """Remove a member from the current tenant."""
-    client = _get_descope_client(request)
-    try:
-        await client.remove_user_from_tenant(user_id, tenant_id)
-        return {"status": "removed", "user_id": user_id}
-    except UpstreamStatusError as exc:
-        logger.warning("Descope API error removing member: %s", exc.response.status_code)
-        raise HTTPException(status_code=502, detail="Failed to remove member via Descope") from exc
+    result = await require_descope_management(request).remove_member(user_id, tenant_id)
+    if result.is_error():
+        raise HTTPException(status_code=502, detail="Failed to remove member via Descope")
+    return result_to_response(Ok({"status": "removed", "user_id": user_id}), request)

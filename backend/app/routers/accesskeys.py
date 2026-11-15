@@ -1,11 +1,15 @@
 import time
 
+from expression import Ok
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from app.dependencies.descope import get_descope_management
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
+from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
+from app.services.descope_management import DescopeManagementAdapter
 
 router = APIRouter(tags=["Access Keys"])
 
@@ -22,13 +26,12 @@ class CreateAccessKeyRequest(BaseModel):
     role_names: list[str] | None = None
 
 
-async def _verify_key_tenant(request: Request, key_id: str, tenant_id: str) -> dict:
+async def _verify_key_tenant(management: DescopeManagementAdapter, key_id: str, tenant_id: str) -> dict:
     """Load a key and verify it belongs to the caller's tenant."""
-    key = await request.app.state.descope_client.load_access_key(key_id)
-    key_tenants = [t.get("tenantId", "") for t in key.get("keyTenants", [])] if key.get("keyTenants") else []
-    if tenant_id not in key_tenants:
+    result = await management.load_tenant_access_key(key_id, tenant_id)
+    if result.is_error():
         raise HTTPException(status_code=403, detail="Key does not belong to your tenant")
-    return key
+    return result.ok
 
 
 def _require_roles_caller_holds(role_names: list[str] | None, caller_roles: list[str]) -> None:
@@ -91,6 +94,7 @@ async def create_access_key(
     body: CreateAccessKeyRequest,
     tenant_id: str = Depends(get_tenant_id),
     caller_roles: list[str] = Depends(require_role("owner", "admin")),
+    management: DescopeManagementAdapter = Depends(get_descope_management),
 ):
     """Create an access key scoped to the current tenant. Returns cleartext (shown once).
 
@@ -115,14 +119,13 @@ async def create_access_key(
     """
     _require_roles_caller_holds(body.role_names, caller_roles)
     expire_time = _validated_expire_time(body.expire_time)
-    client = request.app.state.descope_client
-    result = await client.create_access_key(
+    result = await management.create_access_key(
         name=body.name,
         tenant_id=tenant_id,
         expire_time=expire_time,
         role_names=body.role_names,
     )
-    return result
+    return result_to_response(result, request)
 
 
 @router.get("/keys")
@@ -130,11 +133,10 @@ async def list_access_keys(
     request: Request,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    management: DescopeManagementAdapter = Depends(get_descope_management),
 ):
     """List access keys for the current tenant."""
-    client = request.app.state.descope_client
-    keys = await client.search_access_keys(tenant_id)
-    return {"keys": keys}
+    return result_to_response(await management.list_access_keys(tenant_id), request)
 
 
 @router.get("/keys/{key_id}")
@@ -143,10 +145,11 @@ async def get_access_key(
     key_id: str,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    management: DescopeManagementAdapter = Depends(get_descope_management),
 ):
     """Load a single access key by ID. Verifies key belongs to current tenant."""
-    key = await _verify_key_tenant(request, key_id, tenant_id)
-    return key
+    key = await _verify_key_tenant(management, key_id, tenant_id)
+    return result_to_response(Ok(key), request)
 
 
 @router.post("/keys/{key_id}/deactivate")
@@ -155,12 +158,12 @@ async def deactivate_access_key(
     key_id: str,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    management: DescopeManagementAdapter = Depends(get_descope_management),
 ):
     """Deactivate (revoke) an access key. Verifies key belongs to current tenant."""
-    await _verify_key_tenant(request, key_id, tenant_id)
-    client = request.app.state.descope_client
-    await client.deactivate_access_key(key_id)
-    return {"status": "deactivated", "key_id": key_id}
+    await _verify_key_tenant(management, key_id, tenant_id)
+    await management.deactivate_access_key(key_id)
+    return result_to_response(Ok({"status": "deactivated", "key_id": key_id}), request)
 
 
 @router.post("/keys/{key_id}/activate")
@@ -169,12 +172,12 @@ async def activate_access_key(
     key_id: str,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    management: DescopeManagementAdapter = Depends(get_descope_management),
 ):
     """Reactivate a previously deactivated access key. Verifies key belongs to current tenant."""
-    await _verify_key_tenant(request, key_id, tenant_id)
-    client = request.app.state.descope_client
-    await client.activate_access_key(key_id)
-    return {"status": "activated", "key_id": key_id}
+    await _verify_key_tenant(management, key_id, tenant_id)
+    await management.activate_access_key(key_id)
+    return result_to_response(Ok({"status": "activated", "key_id": key_id}), request)
 
 
 @router.delete("/keys/{key_id}")
@@ -183,9 +186,9 @@ async def delete_access_key(
     key_id: str,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    management: DescopeManagementAdapter = Depends(get_descope_management),
 ):
     """Permanently delete an access key. Verifies key belongs to current tenant."""
-    await _verify_key_tenant(request, key_id, tenant_id)
-    client = request.app.state.descope_client
-    await client.delete_access_key(key_id)
-    return {"status": "deleted", "key_id": key_id}
+    await _verify_key_tenant(management, key_id, tenant_id)
+    await management.delete_access_key(key_id)
+    return result_to_response(Ok({"status": "deleted", "key_id": key_id}), request)
