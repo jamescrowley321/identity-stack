@@ -73,6 +73,71 @@ select = ["E", "F", "I", "W", "S", "TID251", "G004", "G010"]
 "scripts/**" = ["TID251"]  # operator scripts run outside the app process
 "migrations/**" = ["TID251"]  # Alembic env.py runs under the alembic CLI and reads DATABASE_URL itself
 
+# docs/conventions.md §22-§27 and ADR-0008. Run by `make lint` as `lint-imports`.
+[tool.importlinter]
+root_package = "app"
+include_external_packages = true
+contract_types = ["context_layers: import_contracts.ContextLayersContract"]
+
+[[tool.importlinter.contracts]]
+name = "Layers import inward (conventions §22)"
+type = "layers"
+layers = [
+    "app.routers",
+    "app.dependencies",
+    "app.services",
+    "app.repositories",
+    "app.models",
+    "app.domain",
+]
+
+[[tool.importlinter.contracts]]
+name = "The domain imports no framework and no other layer (conventions §23)"
+type = "forbidden"
+source_modules = ["app.domain"]
+forbidden_modules = [
+    "app.*",
+    "alembic",
+    "asyncpg",
+    "fastapi",
+    "httpx",
+    "logging",
+    "opentelemetry",
+    "pydantic",
+    "py_identity_model",
+    "redis",
+    "slowapi",
+    "sqlalchemy",
+    "sqlmodel",
+    "starlette",
+]
+
+[[tool.importlinter.contracts]]
+name = "Bounded contexts do not import each other (conventions §27)"
+type = "independence"
+modules = ["app.domain.*"]
+
+# Routers reach data and providers only through a service; services hold domain
+# values, not table rows (§26). `unmigrated` has one entry per bounded
+# context that has not moved onto the domain yet. A migration deletes its entry;
+# the contract fails on an entry that no longer excuses anything.
+[[tool.importlinter.contracts]]
+name = "Routers and services skip no layer (conventions §26)"
+type = "context_layers"
+rules = [
+    "app.routers -> app.repositories",
+    "app.routers -> app.models",
+    "app.routers -> app.outbound",
+    "app.services -> app.models",
+]
+unmigrated = [
+    "Directory (#515): app.routers.canonical_users app.routers.tenants app.services.tenant app.services.user",
+    "Federation (#516): app.routers.idp_links app.routers.providers app.services.identity_provisioning app.services.idp_link app.services.provider",
+    "Documents and FGA (#517): app.routers.documents app.routers.fga",
+    "Synchronisation (#518): app.routers.sync_status app.services.inbound_sync app.services.reconciliation app.services.sync_status",
+    "Descope management (#519): app.routers.attributes app.routers.users",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -91,4 +156,5 @@ dev = [
     "ruff>=0.9",
     "aiosqlite>=0.20",
     "testcontainers[postgres]>=4.0",
+    "import-linter>=2.16",
 ]

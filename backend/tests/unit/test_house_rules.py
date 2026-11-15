@@ -11,6 +11,7 @@ import ast
 import dataclasses
 import inspect
 import re
+import sys
 from pathlib import Path
 
 from app.errors import identity as identity_errors
@@ -555,3 +556,111 @@ def test_pass_through_routers_reach_descope_only_through_the_adapter():
             if isinstance(node, ast.Constant) and isinstance(node.value, str) and "/v1/mgmt/" in node.value:
                 offenders.append(f"routers/{name}:{node.lineno} builds a management URL")
     assert not offenders, f"§5: call app.services.descope_management.DescopeManagementAdapter instead: {offenders}"
+
+
+# --- §23-§25: the domain is pure, returns Result and is immutable -------------
+
+# Standard-library modules that do I/O, read the clock or produce randomness.
+_IMPURE_STDLIB = {
+    "asyncio",
+    "http",
+    "io",
+    "logging",
+    "os",
+    "pathlib",
+    "random",
+    "secrets",
+    "shutil",
+    "socket",
+    "sqlite3",
+    "subprocess",
+    "tempfile",
+    "threading",
+    "time",
+    "urllib",
+}
+_CLOCK_AND_ID_SOURCES = {"now", "utcnow", "today", "uuid1", "uuid4", "uuid6", "uuid7"}
+
+
+def _impure_domain_lines(tree: ast.Module) -> list[int]:
+    """Lines that import outside the standard library and ``expression``, or name a clock or id source."""
+    allowed = (set(sys.stdlib_module_names) - _IMPURE_STDLIB) | {"expression"}
+    lines = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            imported = [node.module or ""]
+            if {alias.name for alias in node.names} & _CLOCK_AND_ID_SOURCES:
+                lines.append(node.lineno)
+        elif isinstance(node, ast.Attribute) and node.attr in _CLOCK_AND_ID_SOURCES:
+            lines.append(node.lineno)
+            continue
+        else:
+            continue
+        for name in imported:
+            in_domain = name == "app.domain" or name.startswith("app.domain.")
+            if not in_domain and name.split(".")[0] not in allowed:
+                lines.append(node.lineno)
+    return lines
+
+
+def test_domain_modules_are_found():
+    """Guard the scans below: over an empty package they would pass vacuously."""
+    assert "domain/access/decisions.py" in {_rel(path) for path in _modules("domain")}
+
+
+def test_domain_is_pure():
+    offenders = [f"{_rel(path)}:{line}" for path in _modules("domain") for line in _impure_domain_lines(_tree(path))]
+    assert not offenders, f"§23: the domain imports stdlib and expression only; time and ids are passed in: {offenders}"
+
+
+def test_domain_purity_scan_catches_impure_code():
+    impure = ast.parse(
+        "import logging\n"
+        "import sqlalchemy\n"
+        "from app.errors import identity\n"
+        "from uuid import uuid4\n"
+        "stamp = datetime.now(timezone.utc)\n"
+        "new_id = uuid.uuid4()\n"
+    )
+    pure = ast.parse(
+        "import uuid\n"
+        "from datetime import datetime\n"
+        "from expression import Ok\n"
+        "from app.domain.access.values import Role\n"
+        "def decide(now: datetime) -> datetime:\n"
+        "    return now\n"
+    )
+    assert _impure_domain_lines(impure) == [1, 2, 3, 4, 5, 6]
+    assert _impure_domain_lines(pure) == []
+
+
+def test_domain_does_not_raise():
+    offenders = [
+        f"{_rel(path)}:{node.lineno}"
+        for path in _modules("domain")
+        for node in ast.walk(_tree(path))
+        if isinstance(node, ast.Raise)
+    ]
+    assert not offenders, f"§24: a domain function returns Error(...) for an expected failure: {offenders}"
+
+
+def _is_frozen_dataclass(cls: ast.ClassDef) -> bool:
+    for decorator in cls.decorator_list:
+        if isinstance(decorator, ast.Call) and ast.unparse(decorator.func) in ("dataclass", "dataclasses.dataclass"):
+            return any(
+                kw.arg == "frozen" and isinstance(kw.value, ast.Constant) and kw.value.value is True
+                for kw in decorator.keywords
+            )
+    return False
+
+
+def test_domain_types_are_frozen_dataclasses_or_enums():
+    offenders = []
+    for path in _modules("domain"):
+        for cls in (node for node in ast.walk(_tree(path)) if isinstance(node, ast.ClassDef)):
+            is_enum = any(ast.unparse(base).rsplit(".", 1)[-1] in ("Enum", "StrEnum") for base in cls.bases)
+            if not is_enum and not _is_frozen_dataclass(cls):
+                offenders.append(f"{_rel(path)}:{cls.name}")
+    assert not offenders, f"§25: a domain type is a @dataclass(frozen=True) or an Enum: {offenders}"

@@ -60,6 +60,7 @@ backend/app/
   routers/        # API routes (auth, tenants, roles, fga, internal, ...)
   dependencies/   # auth, tenant, RBAC and FGA guards; service wiring
   errors/         # IdentityError kinds + RFC 9457 problem details
+  domain/         # the pure core, one package per bounded context (§22-§27, ADR-0008)
   repositories/   # SQL against the canonical model (§19)
   services/       # canonical services, sync adapters, descope client, reconciliation, identity resolution
   models/         # canonical DB models (identity/: tenant, role, provider, ...)
@@ -69,4 +70,4 @@ infra/            # Terraform (Descope project config; infra/ory/ for Ory)
 tyk/              # gateway config + init sidecar
 ```
 
-The rules the backend code follows (configuration, outbound HTTP, logging, results and errors, authorization, data access) are in [conventions.md](conventions.md). The decisions behind them are in [adr/](adr/README.md).
+The rules the backend code follows (configuration, outbound HTTP, logging, results and errors, authorization, data access, layers and the domain) are in [conventions.md](conventions.md). The decisions behind them are in [adr/](adr/README.md).

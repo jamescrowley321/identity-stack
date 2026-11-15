@@ -23,6 +23,9 @@ jobs:
       - name: Ruff format check
         run: cd backend && ruff format --check .
 
+      - name: Import contracts
+        run: cd backend && lint-imports
+
   frontend-tests:
     name: Frontend Tests
     runs-on: ubuntu-latest
