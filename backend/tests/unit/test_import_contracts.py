@@ -75,3 +75,16 @@ def test_broken_by_an_exemption_for_a_module_that_does_not_exist():
 
     assert not check.kept
     assert check.metadata["stale"] == [("Directory (#515)", "app.routers.gone")]
+
+
+def test_broken_by_a_rule_naming_a_package_that_does_not_exist():
+    contract = ContextLayersContract(
+        name="layers",
+        session_options={"root_packages": ["app"]},
+        contract_options={"rules": ["app.router -> app.models", "app.services -> app.model"], "unmigrated": []},
+    )
+
+    check = contract.check(_graph(), verbose=False)
+
+    assert not check.kept
+    assert check.metadata["missing"] == ["app.model", "app.router"]

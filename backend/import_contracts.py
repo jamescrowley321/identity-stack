@@ -18,7 +18,8 @@ class ContextLayersContract(Contract):
     modules exempt from every rule until that context is migrated.
 
     An exempt module that breaks no rule, or does not exist, breaks the contract,
-    so an entry cannot outlive the code it excuses.
+    so an entry cannot outlive the code it excuses. So does a rule that names a
+    package missing from the import graph, which would otherwise check nothing.
     """
 
     type_name = "context_layers"
@@ -32,6 +33,9 @@ class ContextLayersContract(Contract):
             context, _, modules = entry.partition(":")
             for module in modules.split():
                 exempt[module] = context.strip()
+
+        named = {package for rule in self.rules for package in (rule.importer.expression, rule.imported.expression)}
+        missing = sorted(named - graph.modules)
 
         violations = []
         offenders = set()
@@ -47,9 +51,14 @@ class ContextLayersContract(Contract):
                         violations.append((importer, imported))
 
         stale = sorted((context, module) for module, context in exempt.items() if module not in offenders)
-        return ContractCheck(kept=not violations and not stale, metadata={"violations": violations, "stale": stale})
+        return ContractCheck(
+            kept=not violations and not stale and not missing,
+            metadata={"violations": violations, "stale": stale, "missing": missing},
+        )
 
     def render_broken_contract(self, check: ContractCheck) -> None:
+        for package in check.metadata["missing"]:
+            output.print_error(f"{package} is named in a rule but is not in the import graph", bold=False)
         for importer, imported in check.metadata["violations"]:
             output.print_error(f"{importer} is not allowed to import {imported}", bold=False)
         for context, module in check.metadata["stale"]:
