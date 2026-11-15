@@ -162,7 +162,9 @@ async def deactivate_access_key(
 ):
     """Deactivate (revoke) an access key. Verifies key belongs to current tenant."""
     await _verify_key_tenant(management, key_id, tenant_id)
-    await management.deactivate_access_key(key_id)
+    result = await management.deactivate_access_key(key_id)
+    if result.is_error():
+        return result_to_response(result, request)
     return result_to_response(Ok({"status": "deactivated", "key_id": key_id}), request)
 
 
@@ -176,7 +178,9 @@ async def activate_access_key(
 ):
     """Reactivate a previously deactivated access key. Verifies key belongs to current tenant."""
     await _verify_key_tenant(management, key_id, tenant_id)
-    await management.activate_access_key(key_id)
+    result = await management.activate_access_key(key_id)
+    if result.is_error():
+        return result_to_response(result, request)
     return result_to_response(Ok({"status": "activated", "key_id": key_id}), request)
 
 
@@ -190,5 +194,7 @@ async def delete_access_key(
 ):
     """Permanently delete an access key. Verifies key belongs to current tenant."""
     await _verify_key_tenant(management, key_id, tenant_id)
-    await management.delete_access_key(key_id)
+    result = await management.delete_access_key(key_id)
+    if result.is_error():
+        return result_to_response(result, request)
     return result_to_response(Ok({"status": "deleted", "key_id": key_id}), request)

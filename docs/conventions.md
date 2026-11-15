@@ -90,10 +90,12 @@ reports an upstream failure as an `Error`.
   so every Descope error and timeout on the `routers/accesskeys.py` routes surfaces as 500.
   That also predates #512 and is left for the same follow-up.
 
-*Enforcement:* Ruff (TID251 on `httpx`), plus tests
-(`test_router_functions_that_call_descope_handle_upstream_failures`, which checks each
-router function that reads `descope_client` or calls a same-module helper that does, and
-`test_descope_management_adapter.py`, which pins each adapter exception above).
+*Enforcement:* Ruff (TID251 on `httpx`), plus tests.
+`test_router_functions_that_call_descope_handle_upstream_failures` checks each router
+function that reads `descope_client` or calls a same-module helper that does.
+`test_adapter_methods_that_call_descope_handle_upstream_failures` checks each
+`DescopeManagementAdapter` method that calls its client, and keys the exceptions above by
+method. `test_descope_management_adapter.py` pins what each excepted method does.
 
 ### 5. The Descope Management API is called through `DescopeManagementClient`
 
