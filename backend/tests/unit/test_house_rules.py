@@ -399,33 +399,8 @@ def test_abstract_identity_service_has_no_implementation_to_trace():
 
 # --- §4: every router function that calls Descope handles both upstream failures ---
 
-_STATUS_ONLY = "predates #512: catches UpstreamStatusError only, so a transport failure is a 500 (follow-up)"
-_UNHANDLED = "predates #512: catches no upstream failure, so every Descope error is a 500 (follow-up)"
-
 # (module, function) -> why it does not catch both UpstreamStatusError and UpstreamTransportError.
-UPSTREAM_HANDLING_EXCEPTIONS = {
-    **{
-        ("routers/users.py", name): _STATUS_ONLY
-        for name in ("list_members", "invite_member", "deactivate_member", "activate_member", "remove_member")
-    },
-    **{
-        ("routers/attributes.py", name): _STATUS_ONLY
-        for name in ("update_profile_attribute", "get_tenant_settings", "update_tenant_settings")
-    },
-    **{
-        ("routers/accesskeys.py", name): _UNHANDLED
-        for name in (
-            "_verify_key_tenant",
-            "create_access_key",
-            "list_access_keys",
-            "get_access_key",
-            "deactivate_access_key",
-            "activate_access_key",
-            "delete_access_key",
-        )
-    },
-    ("routers/users.py", "_get_descope_client"): "returns the client; makes no call itself",
-}
+UPSTREAM_HANDLING_EXCEPTIONS: dict[tuple[str, str], str] = {}
 
 
 def _caught_names(handler: ast.ExceptHandler) -> set[str]:
@@ -491,3 +466,31 @@ def test_descope_client_spans_leave_status_to_the_caller():
             if not (isinstance(value, ast.Constant) and value.value is False):
                 offenders.append(f"line {node.lineno}: {name}")
     assert not offenders, f"§20: {offenders}"
+
+
+# --- §5: the pass-through routers reach Descope only through the adapter -------
+
+ADAPTER_ONLY_ROUTERS = ("users.py", "internal.py", "attributes.py", "accesskeys.py", "protected.py")
+
+
+def test_pass_through_routers_reach_descope_only_through_the_adapter():
+    """§5: no client, no upstream error type and no management URL in these routers."""
+    offenders = []
+    for name in ADAPTER_ONLY_ROUTERS:
+        tree = _tree(APP / "routers" / name)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module in ("app.outbound", "app.services.descope"):
+                offenders.append(f"routers/{name}:{node.lineno} imports {node.module}")
+            if isinstance(node, ast.Import):
+                offenders += [
+                    f"routers/{name}:{node.lineno} imports {alias.name}"
+                    for alias in node.names
+                    if alias.name in ("httpx", "app.outbound", "app.services.descope")
+                ]
+            if isinstance(node, ast.Attribute) and node.attr == "descope_client":
+                offenders.append(f"routers/{name}:{node.lineno} reads descope_client")
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value == "descope_client":
+                offenders.append(f"routers/{name}:{node.lineno} reads descope_client")
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and "/v1/mgmt/" in node.value:
+                offenders.append(f"routers/{name}:{node.lineno} builds a management URL")
+    assert not offenders, f"§5: call app.services.descope_management.DescopeManagementAdapter instead: {offenders}"
