@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 from py_identity_model import DiscoveryPolicy
 from slowapi.errors import RateLimitExceeded
 
+from app.dependencies import rbac
 from app.middleware import providers as provider_registry
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.claims import GatewayClaimsMiddleware
@@ -36,6 +37,7 @@ from app.middleware.providers import (
     descope_tenant_claims,
     keycloak_config,
     ory_config,
+    refuse_canonical_descope_managed,
 )
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.routers import auth as auth_router
@@ -538,6 +540,107 @@ class TestOneAssemblyBehindBothBuilders:
 
         with pytest.raises(ProviderConfigurationError, match="another provider already accepts"):
             configured_providers()
+
+    def test_issuers_that_differ_in_the_case_of_the_path_are_two_issuers(self, second_registered):
+        """A path is case-sensitive: two realms spelled ``Acme`` and ``acme`` are two realms."""
+        upper = replace(
+            _second_provider(), name="RealmUpper", accepted_issuers=frozenset({"https://kc.test/realms/Acme"})
+        )
+        lower = replace(
+            _second_provider(), name="RealmLower", accepted_issuers=frozenset({"https://kc.test/realms/acme"})
+        )
+        second_registered.setattr(
+            provider_registry,
+            "PROVIDER_REGISTRATIONS",
+            [*provider_registry.PROVIDER_REGISTRATIONS, lambda: upper, lambda: lower],
+        )
+
+        names = {provider.name for provider in configured_providers()}
+
+        assert {"RealmUpper", "RealmLower"} <= names
+
+    def test_issuers_that_differ_in_the_case_of_the_host_are_one_issuer(self, second_registered):
+        first = replace(
+            _second_provider(), name="HostLower", accepted_issuers=frozenset({"https://kc.test/realms/acme"})
+        )
+        again = replace(
+            _second_provider(), name="HostUpper", accepted_issuers=frozenset({"HTTPS://KC.TEST/realms/acme/"})
+        )
+        second_registered.setattr(
+            provider_registry,
+            "PROVIDER_REGISTRATIONS",
+            [*provider_registry.PROVIDER_REGISTRATIONS, lambda: first, lambda: again],
+        )
+
+        with pytest.raises(ProviderConfigurationError, match="another provider already accepts"):
+            configured_providers()
+
+
+class TestADescopeManagedProviderIsNeverCanonical:
+    """Descope's ids must not be swapped for canonical ones on the routes that hand them to Descope."""
+
+    def test_listing_descope_as_canonical_is_refused(self):
+        providers = [descope_config(DESCOPE_PROJECT), ory_config(ORY_ISSUER, ORY_AUDIENCE)]
+
+        with pytest.raises(ProviderConfigurationError, match="CANONICAL_RBAC_PROVIDERS") as refused:
+            refuse_canonical_descope_managed(providers, {"ory", "descope"})
+
+        assert "'Descope'" in str(refused.value)
+
+    def test_the_default_set_is_accepted(self):
+        providers = [descope_config(DESCOPE_PROJECT), ory_config(ORY_ISSUER, ORY_AUDIENCE)]
+
+        assert refuse_canonical_descope_managed(providers, {"ory"}) is None
+
+    def test_a_canonical_name_no_provider_carries_is_accepted(self):
+        assert refuse_canonical_descope_managed([ory_config(ORY_ISSUER, ORY_AUDIENCE)], {"ory", "descope"}) is None
+
+    @pytest.mark.parametrize("mode", ["standalone", "gateway"])
+    def test_it_stops_startup(self, with_ory, mode):
+        with_ory.setattr(rbac, "CANONICAL_RBAC_PROVIDERS", {"ory", "descope"})
+
+        with pytest.raises(ProviderConfigurationError, match="CANONICAL_RBAC_PROVIDERS"):
+            _configured_app(with_ory, mode)
+
+    @pytest.mark.parametrize("mode", ["standalone", "gateway"])
+    def test_the_default_set_starts(self, with_ory, mode):
+        assert _token_middleware(_configured_app(with_ory, mode)) is not None
+
+
+class TestAnUnreadableTokenIsOneLogLine:
+    """Anyone can send a garbage bearer, so it must not cost a traceback each time."""
+
+    UNIFORM_401 = {"detail": "Invalid or expired token"}
+    GATEWAY_LOGGER = "app.middleware.claims"
+
+    @pytest.mark.parametrize(
+        "token",
+        ["a.b.c", "header.!!!!.sig", f"header.{base64.urlsafe_b64encode(b'not json').decode()}.sig", "h.\u00e9.s"],
+        ids=["short segments", "not base64", "not json", "not ascii"],
+    )
+    def test_gateway_logs_a_payload_it_cannot_decode_without_a_traceback(self, with_ory, caplog, token):
+        client = TestClient(_configured_app(with_ory, "gateway"))
+
+        with caplog.at_level("WARNING", logger=self.GATEWAY_LOGGER):
+            response = client.get(PROBE, headers={"Authorization": f"Bearer {token}".encode()})
+
+        assert response.status_code == 401
+        assert response.json() == self.UNIFORM_401
+        (record,) = [r for r in caplog.records if r.name == self.GATEWAY_LOGGER]
+        assert record.getMessage() == "GatewayClaims rejected: the token payload could not be decoded"
+        assert record.exc_info is None
+
+    def test_gateway_keeps_the_traceback_for_an_extractor_that_raises(self, with_ory, caplog):
+        _register_second_with(with_ory, _raising_tenant_claims)
+        client = TestClient(_configured_app(with_ory, "gateway"))
+
+        with caplog.at_level("WARNING", logger=self.GATEWAY_LOGGER):
+            response = client.get(PROBE, headers=_bearer(_second_claims()))
+
+        assert response.status_code == 401
+        (record,) = [r for r in caplog.records if r.name == self.GATEWAY_LOGGER]
+        assert record.exc_info is not None
+        assert record.exc_info[0] is KeyError
 
 
 class TestOnlyDescopeIsDescopeManaged:

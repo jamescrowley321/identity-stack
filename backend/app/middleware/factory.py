@@ -96,11 +96,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi.middleware import SlowAPIMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from app.dependencies import rbac
 from app.knobs import knob
 from app.logbook import logbook
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.claims import GatewayClaimsMiddleware
-from app.middleware.providers import configured_providers
+from app.middleware.providers import configured_providers, refuse_canonical_descope_managed
 from app.middleware.security import SecurityHeadersMiddleware
 
 logger = logbook(__name__)
@@ -150,9 +151,10 @@ def configure_middleware(app: FastAPI) -> None:
     # The one provider list (``PROVIDER_REGISTRATIONS``): Descope always, each
     # other provider when its issuer is set. Both middlewares select a provider
     # by the token's issuer. A provider configured without its required audience,
-    # or one that shares a name or an issuer with another, raises here and stops
-    # startup.
+    # one that shares a name or an issuer with another, or Descope listed in
+    # ``CANONICAL_RBAC_PROVIDERS`` raises here and stops startup.
     providers = configured_providers()
+    refuse_canonical_descope_managed(providers, rbac.CANONICAL_RBAC_PROVIDERS)
     if DEPLOYMENT_MODE == "standalone":
         app.add_middleware(
             TokenValidationMiddleware,

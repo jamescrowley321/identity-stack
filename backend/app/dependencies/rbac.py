@@ -186,7 +186,10 @@ async def _rbac_session(request: Request) -> AsyncIterator[AsyncSession | None]:
     ``canonical_memberships`` must not declare ``Depends(get_rbac_session)``:
     FastAPI would then open a session for every request to a tenant-scoped
     route, whoever the provider. Opening it here keeps one definition of that
-    session, including whatever the application has overridden it with.
+    session, including whatever the application has overridden it with. An
+    override must be what ``get_rbac_session`` is: an async generator function
+    that takes no argument and yields once. It is called here, not by FastAPI,
+    so it gets no dependencies of its own.
     """
     provide = request.app.dependency_overrides.get(get_rbac_session, get_rbac_session)
     async with asynccontextmanager(provide)() as session:

@@ -76,14 +76,16 @@ DESCOPE_BACKED_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/tenants/current/settings"),
         ("PATCH", "/api/tenants/current/settings"),
         ("GET", "/api/roles/me"),
+        # ``RoleService`` mirrors every assignment to Descope (``DescopeSyncAdapter``).
+        ("POST", "/api/roles/assign"),
+        ("POST", "/api/roles/remove"),
     }
 )
 
 # (method, path) -> why a principal from any provider may use the route's tenant.
-PROVIDER_NEUTRAL_ROUTES: dict[tuple[str, str], str] = {
-    ("POST", "/api/roles/assign"): "assigns a canonical role in the canonical tenant the resolver names",
-    ("POST", "/api/roles/remove"): "removes a canonical role in the canonical tenant the resolver names",
-}
+# A route belongs here only when nothing behind it, its service's sync adapter
+# included, hands the tenant or a user id to Descope. None does yet.
+PROVIDER_NEUTRAL_ROUTES: dict[tuple[str, str], str] = {}
 
 
 def _dependency_calls(dependant: Dependant) -> Iterator[Callable]:
@@ -130,6 +132,12 @@ DESCOPE_MEMBER = {
     "sub": "descope-user",
     "dct": "t1",
     "tenants": {"t1": {"roles": ["member"], "permissions": ["documents.read"]}},
+}
+DESCOPE_ADMIN = {
+    "iss": DESCOPE_ISSUER,
+    "sub": "descope-admin",
+    "dct": "t1",
+    "tenants": {"t1": {"roles": ["admin"], "permissions": []}},
 }
 FAKE_ADMIN = {"iss": FAKE_ISSUER, "sub": "fake-user", "org": "org-1", "org_roles": ["owner"]}
 
@@ -260,13 +268,27 @@ class TestADescopePrincipalIsServed:
         descope_client.load_tenant.assert_awaited_once_with("t1")
 
 
-class TestAProviderNeutralRouteStillResolvesTheCanonicalTenant:
-    def test_an_ory_owner_reaches_the_handler_with_its_canonical_tenant(self, client, store):
-        """The handler's own check answers: it compared the body's tenant with the resolved one."""
+class TestRoleAssignmentIsDescopeBacked:
+    """``RoleService`` sends each assignment to Descope, so the two routes take Descope principals only."""
+
+    @pytest.mark.parametrize("path", ["/api/roles/assign", "/api/roles/remove"])
+    def test_an_ory_owner_of_the_tenant_is_refused_before_anything_is_read(self, client, store, descope_client, path):
+        """The body names the caller's own tenant and a well-formed user: only the guard refuses it."""
+        body = {"user_id": RESOURCE_ID, "tenant_id": TENANT_A, "role_names": ["member"]}
+
+        response = client.post(path, json=body, headers={**_bearer(ORY_OWNER), "X-Tenant-ID": TENANT_A})
+
+        assert response.status_code == 403
+        assert response.json() == REFUSED
+        assert descope_client.mock_calls == []
+        assert store.calls == []
+
+    @pytest.mark.parametrize("path", ["/api/roles/assign", "/api/roles/remove"])
+    def test_a_descope_admin_still_reaches_the_handler(self, client, path):
+        """The handler's own check answers: it compared the body's tenant with the token's."""
         body = {"user_id": RESOURCE_ID, "tenant_id": TENANT_B, "role_names": ["member"]}
 
-        response = client.post("/api/roles/assign", json=body, headers=_bearer(ORY_OWNER))
+        response = client.post(path, json=body, headers=_bearer(DESCOPE_ADMIN))
 
         assert response.status_code == 403
         assert response.json() == {"detail": "Cannot manage roles for a different tenant"}
-        assert store.calls == [("ory", ORY_SUB)]

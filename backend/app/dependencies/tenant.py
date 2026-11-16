@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, Request
 
 from app.dependencies.rbac import canonical_memberships
-from app.dependencies.tenant_access import CanonicalMemberships, resolve_tenant_access
+from app.dependencies.tenant_access import SELECT_A_TENANT_FIRST, CanonicalMemberships, resolve_tenant_access
 
 
 def get_tenant_id(
@@ -25,7 +25,7 @@ def get_tenant_id(
         request,
         claims,
         memberships,
-        no_tenant_detail="No tenant context — select a tenant first",
+        no_tenant_detail=SELECT_A_TENANT_FIRST,
     )
     return access.tenant_id
 

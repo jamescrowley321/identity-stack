@@ -90,11 +90,11 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
 
         token = auth_header.removeprefix("Bearer ")
 
-        try:
-            parts = token.split(".")
-            if len(parts) != 3:
-                return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+        parts = token.split(".")
+        if len(parts) != 3:
+            return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
+        try:
             # Base64-decode the payload (second segment)
             payload_b64 = parts[1]
             # Add padding if needed
@@ -104,7 +104,13 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
 
             payload_bytes = base64.urlsafe_b64decode(payload_b64)
             claims = json.loads(payload_bytes)
+        except Exception:
+            # Any caller can send a bearer that is not a JWT, so this is one line
+            # and no traceback.
+            logger.warning("GatewayClaims rejected: the token payload could not be decoded")
+            return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
+        try:
             if not isinstance(claims, dict):
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
@@ -159,9 +165,9 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
             request.state.provider = provider
             request.state.tenant_id = claimed_tenant_id(claims, provider)
         except Exception:
-            # Covers a payload that cannot be decoded, a principal that cannot be
-            # built and a claims extractor that raises. The cause is logged here
-            # only: the body is the same 401 as every other rejection.
+            # Covers a principal that cannot be built and a claims extractor that
+            # raises, on a payload that did decode. The cause is logged here only:
+            # the body is the same 401 as every other rejection.
             logger.warning("GatewayClaims rejected: the token could not be read", exc_info=True)
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 

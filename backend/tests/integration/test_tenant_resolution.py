@@ -8,7 +8,7 @@ signature and SQL.
 """
 
 import uuid
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import Depends, FastAPI
@@ -34,7 +34,7 @@ from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
-from app.routers import accesskeys, documents, users
+from app.routers import accesskeys, documents, roles, users
 from app.routers.protected import canonical_identity
 from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
@@ -52,7 +52,8 @@ def _build_app(db_session, *, issuer: str, audience: str) -> FastAPI:
     # The shipped Descope-backed routers, over a Descope client that records its calls.
     app.state.limiter = limiter
     app.state.descope_client = AsyncMock()
-    for router in (documents.router, users.router, accesskeys.router):
+    app.state.cache_publisher = MagicMock()
+    for router in (documents.router, users.router, accesskeys.router, roles.router):
         app.include_router(router, prefix="/api")
 
     @app.get(TENANT_ROUTE)
@@ -230,3 +231,34 @@ async def test_ory_principal_is_refused_on_the_descope_backed_routes(db_session,
     }
     assert app.state.descope_client.mock_calls == []
     assert await _document_count(db_session) == documents_before
+
+
+async def _assignment_count(db_session) -> int:
+    return (await db_session.execute(select(func.count()).select_from(UserTenantRole))).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_ory_admin_cannot_assign_or_remove_a_role(db_session, ory_token_source):
+    """Role assignment is mirrored to Descope, so an admin from another provider is refused before any write."""
+    app = _build_app(db_session, issuer=ory_token_source.issuer, audience=ory_token_source.audience)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        headers, _ = await _provisioned_ory_user(db_session, client, ory_token_source, "tenant-roles")
+        admin_tenant = await _add_membership(db_session, user_email=await _email_of(client, headers), role_name="admin")
+        selected = {**headers, TENANT_SELECTOR_HEADER: admin_tenant}
+        body = {"user_id": str(uuid.uuid4()), "tenant_id": admin_tenant, "role_names": ["admin"]}
+        assignments_before = await _assignment_count(db_session)
+
+        is_admin = await client.get(ADMIN_ROUTE, headers=selected)
+        assigned = await client.post("/api/roles/assign", json=body, headers=selected)
+        removed = await client.post("/api/roles/remove", json=body, headers=selected)
+
+    # The caller is an admin of the tenant the body names, so each refusal is the route's own.
+    assert is_admin.json() == {"tenant_id": admin_tenant, "roles": ["admin"]}
+    refusals = {"assign": assigned, "remove": removed}
+    assert {name: response.status_code for name, response in refusals.items()} == {"assign": 403, "remove": 403}
+    assert {name: response.json() for name, response in refusals.items()} == {
+        "assign": DESCOPE_PRINCIPALS_ONLY,
+        "remove": DESCOPE_PRINCIPALS_ONLY,
+    }
+    assert app.state.descope_client.mock_calls == []
+    assert await _assignment_count(db_session) == assignments_before
