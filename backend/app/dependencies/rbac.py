@@ -1,5 +1,10 @@
 """Role and permission dependencies.
 
+Both dependencies take the tenant and the caller's grants from the one resolver,
+``app.dependencies.tenant_access.resolve_tenant_access`` (conventions §18). This
+module supplies the half of it that does I/O: loading a caller's canonical
+memberships.
+
 Two shapes of principal reach these dependencies:
 
 * Providers that carry authorization **in the token** — Descope, via its ``dct``
@@ -30,6 +35,13 @@ from collections.abc import AsyncIterator
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.dependencies.tenant_access import (
+    NO_TENANT_CONTEXT,
+    CanonicalGrant,
+    CanonicalMemberships,
+    TenantAccess,
+    resolve_tenant_access,
+)
 from app.knobs import knob_set
 from app.logbook import logbook
 from app.models.database import get_session_factory
@@ -81,22 +93,22 @@ def _principal_provider(request: Request) -> str:
     return authentication_type.lower() if isinstance(authentication_type, str) else ""
 
 
-async def _canonical_grants(
+async def _load_canonical_memberships(
     request: Request,
     claims: dict,
     session: AsyncSession | None,
-) -> tuple[list[str], list[str]]:
-    """Resolve (roles, permissions) for the caller's tenant from the canonical model.
+) -> CanonicalMemberships:
+    """Load every grant the canonical model holds for the caller.
 
-    Raises 401 when the token names no subject, and 403 on every branch that cannot
-    name exactly one tenant — zero memberships, or several with nothing in the token
-    to choose between them. Picking one would be an arbitrary grant.
+    Raises 401 when the token names no subject, and 403 when there is no database,
+    no canonical identity for the subject, or the canonical user is not active.
+    Which tenant the request is for is the resolver's decision, not this function's.
     """
     sub = claims.get("sub")
     if not sub:
         raise HTTPException(status_code=401, detail="Token missing subject")
     if session is None:
-        raise HTTPException(status_code=403, detail="No tenant context")
+        raise HTTPException(status_code=403, detail=NO_TENANT_CONTEXT)
 
     resolver = IdentityResolutionService(
         user_repository=UserRepository(session),
@@ -114,7 +126,7 @@ async def _canonical_grants(
     result = await resolver.resolve(provider=_principal_provider(request), sub=sub)
     if result.is_error():
         logger.debug("canonical role resolution found no identity for sub=%r", sub)
-        raise HTTPException(status_code=403, detail="No tenant context")
+        raise HTTPException(status_code=403, detail=NO_TENANT_CONTEXT)
 
     # Deactivation is the only revocation signal that reaches this path. Every
     # control that offboards a user — ``UserService.deactivate_user``, the Descope
@@ -130,43 +142,74 @@ async def _canonical_grants(
             "canonical role resolution refused a non-active user (status=%r)",
             user_status,
         )
-        raise HTTPException(status_code=403, detail="No tenant context")
+        raise HTTPException(status_code=403, detail=NO_TENANT_CONTEXT)
 
-    grants = result.ok.get("roles", [])
-    tenant_ids = {grant["tenant_id"] for grant in grants}
+    return CanonicalMemberships(
+        grants=tuple(
+            CanonicalGrant(
+                tenant_id=grant["tenant_id"],
+                role_name=grant["role_name"],
+                permissions=tuple(grant.get("permissions", [])),
+            )
+            for grant in result.ok.get("roles", [])
+        )
+    )
 
-    claimed_tenant = claims.get("dct")
-    if claimed_tenant is not None and not isinstance(claimed_tenant, str):
-        # ``dct`` arrives straight from the token. A list or dict raises
-        # ``TypeError: unhashable type`` on the membership test below and surfaces as
-        # a 500 out of an auth dependency — the one branch here that would not fail
-        # closed.
-        raise HTTPException(status_code=403, detail="No tenant context")
-    if claimed_tenant:
-        # A provider in this set does not normally emit `dct`, but if a token does
-        # carry one it must name a tenant the canonical model actually grants.
-        if claimed_tenant not in tenant_ids:
-            raise HTTPException(status_code=403, detail="No tenant context")
-        tenant_id = claimed_tenant
-    elif len(tenant_ids) == 1:
-        tenant_id = next(iter(tenant_ids))
-    else:
-        raise HTTPException(status_code=403, detail="No tenant context")
 
-    roles = [grant["role_name"] for grant in grants if grant["tenant_id"] == tenant_id]
-    permissions = [
-        permission for grant in grants if grant["tenant_id"] == tenant_id for permission in grant.get("permissions", [])
-    ]
-    return roles, permissions
+async def _canonical_memberships(
+    request: Request,
+    claims: dict,
+    session: AsyncSession | None,
+) -> CanonicalMemberships | None:
+    """The caller's canonical memberships, or ``None`` for a provider not authorized from them.
+
+    Only a provider in ``CANONICAL_RBAC_PROVIDERS`` is read from the canonical
+    model (conventions §18). The memberships are loaded once per request and kept
+    on ``request.state``, so a route that depends on both ``get_tenant_id`` and
+    ``require_role`` decides both from one read. They are never kept across
+    requests.
+    """
+    if _principal_provider(request) not in CANONICAL_RBAC_PROVIDERS:
+        return None
+    loaded = getattr(request.state, "canonical_memberships", None)
+    if not isinstance(loaded, CanonicalMemberships):
+        loaded = await _load_canonical_memberships(request, claims, session)
+        request.state.canonical_memberships = loaded
+    return loaded
+
+
+async def canonical_memberships(
+    request: Request,
+    session: AsyncSession | None = Depends(get_rbac_session),
+) -> CanonicalMemberships | None:
+    """Dependency: the canonical memberships ``get_tenant_id`` resolves the tenant from.
+
+    ``None`` for an unauthenticated request, which ``get_tenant_id`` answers with
+    401, and for a provider that is not authorized from the canonical model.
+    """
+    claims = getattr(request.state, "claims", None)
+    if claims is None:
+        return None
+    return await _canonical_memberships(request, claims, session)
+
+
+async def _tenant_access(request: Request, session: AsyncSession | None) -> TenantAccess:
+    """The request's tenant and the caller's grants in it. 401 with no claims."""
+    claims = getattr(request.state, "claims", None)
+    if claims is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    memberships = await _canonical_memberships(request, claims, session)
+    return resolve_tenant_access(request, claims, memberships)
 
 
 def require_role(*roles: str):
     """Dependency factory that enforces the user has one of the specified roles
     in their current tenant.
 
-    Descope principals are decided from the ``dct`` + ``tenants`` JWT claims;
-    principals from a provider in ``CANONICAL_RBAC_PROVIDERS`` are decided from the
-    canonical model.
+    The tenant and the roles come from the tenant resolver (conventions §18):
+    a Descope principal's from its ``dct`` + ``tenants`` JWT claims, and those of a
+    principal from a provider in ``CANONICAL_RBAC_PROVIDERS`` from the canonical
+    model.
 
     Returns the user's role list for downstream use.
     """
@@ -175,19 +218,7 @@ def require_role(*roles: str):
         request: Request,
         session: AsyncSession | None = Depends(get_rbac_session),
     ) -> list[str]:
-        claims = getattr(request.state, "claims", None)
-        if claims is None:
-            raise HTTPException(status_code=401, detail="Not authenticated")
-
-        if _principal_provider(request) in CANONICAL_RBAC_PROVIDERS:
-            user_roles, _ = await _canonical_grants(request, claims, session)
-        else:
-            tenant_id = claims.get("dct")
-            if not tenant_id:
-                raise HTTPException(status_code=403, detail="No tenant context")
-            tenant_info = claims.get("tenants", {}).get(tenant_id, {})
-            user_roles = tenant_info.get("roles", []) if isinstance(tenant_info, dict) else []
-
+        user_roles = (await _tenant_access(request, session)).roles
         if not any(r in user_roles for r in roles):
             raise HTTPException(status_code=403, detail="Insufficient permissions")
         return user_roles
@@ -199,9 +230,10 @@ def require_permission(*permissions: str):
     """Dependency factory that enforces the user has one of the specified permissions
     in their current tenant.
 
-    Descope principals are decided from the ``dct`` + ``tenants`` JWT claims;
-    principals from a provider in ``CANONICAL_RBAC_PROVIDERS`` are decided from the
-    canonical model.
+    The tenant and the permissions come from the tenant resolver (conventions
+    §18): a Descope principal's from its ``dct`` + ``tenants`` JWT claims, and those
+    of a principal from a provider in ``CANONICAL_RBAC_PROVIDERS`` from the canonical
+    model.
 
     Returns the user's permission list for downstream use.
     """
@@ -210,19 +242,7 @@ def require_permission(*permissions: str):
         request: Request,
         session: AsyncSession | None = Depends(get_rbac_session),
     ) -> list[str]:
-        claims = getattr(request.state, "claims", None)
-        if claims is None:
-            raise HTTPException(status_code=401, detail="Not authenticated")
-
-        if _principal_provider(request) in CANONICAL_RBAC_PROVIDERS:
-            _, user_permissions = await _canonical_grants(request, claims, session)
-        else:
-            tenant_id = claims.get("dct")
-            if not tenant_id:
-                raise HTTPException(status_code=403, detail="No tenant context")
-            tenant_info = claims.get("tenants", {}).get(tenant_id, {})
-            user_permissions = tenant_info.get("permissions", []) if isinstance(tenant_info, dict) else []
-
+        user_permissions = (await _tenant_access(request, session)).permissions
         if not any(p in user_permissions for p in permissions):
             raise HTTPException(status_code=403, detail="Insufficient permissions")
         return user_permissions

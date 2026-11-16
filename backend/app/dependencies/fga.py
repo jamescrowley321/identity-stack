@@ -24,10 +24,11 @@ def extract_user_id(request: Request) -> str:
 
 
 def _extract_tenant_id(request: Request) -> str:
-    """Extract tenant_id from JWT claims, mirroring get_tenant_id logic.
+    """The Descope tenant that prefixes a resource id in Descope's FGA store: the ``dct`` claim.
 
-    This avoids calling the FastAPI dependency directly (which requires
-    the dependency injection framework) while keeping the same validation.
+    Not the tenant resolver (conventions §18). ``require_fga`` checks relations
+    in Descope's store, which is keyed on Descope tenant and user ids, so a
+    principal from any other provider has no ``dct`` and is refused here.
     """
     claims = getattr(request.state, "claims", None)
     if not isinstance(claims, dict):
