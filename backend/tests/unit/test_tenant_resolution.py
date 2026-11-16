@@ -15,6 +15,7 @@ import base64
 import json
 import time
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -754,3 +755,33 @@ class TestRefusalsAreLoggedWithTheCaller:
         assert record.getMessage() == (
             f"tenant selection refused: provider=Ory sub={ORY_SUB!r} sent more than one tenant selector"
         )
+
+
+TYK_API_DEFINITION = Path(__file__).resolve().parents[3] / "tyk" / "apps" / "saas-backend.json"
+
+# The Tyk settings that drop or rewrite a request header on its way to the backend.
+TYK_REQUEST_HEADER_SETTINGS = frozenset(
+    {"global_headers", "global_headers_remove", "transform_headers", "strip_auth_data", "CORS"}
+)
+
+
+def _settings_named(node: object, names: frozenset[str]) -> dict[str, object]:
+    """Every setting in ``names`` anywhere in the document, by name."""
+    found: dict[str, object] = {}
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in names:
+                found[key] = value
+            found.update(_settings_named(value, names))
+    elif isinstance(node, list):
+        for item in node:
+            found.update(_settings_named(item, names))
+    return found
+
+
+class TestTheGatewayForwardsTheSelector:
+    def test_the_api_definition_touches_no_request_header(self):
+        """Tyk passes a request header through unless the definition says otherwise."""
+        definition = json.loads(TYK_API_DEFINITION.read_text(encoding="utf-8"))
+
+        assert _settings_named(definition, TYK_REQUEST_HEADER_SETTINGS) == {"strip_auth_data": False}

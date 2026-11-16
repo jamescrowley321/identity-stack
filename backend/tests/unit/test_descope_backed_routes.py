@@ -8,6 +8,11 @@ principal on them before anything is read.
 
 Every tenant-scoped route is in exactly one of the two registers here. A new
 route that depends on ``get_tenant_id`` fails this file until it is put in one.
+
+The routes over project-wide state that Descope holds or mirrors (the role and
+permission definitions, the FGA schema) take no tenant from ``get_tenant_id``
+but carry the same guard: a canonical principal who is an admin of any one of
+their tenants would otherwise change every tenant's definitions in Descope.
 """
 
 import base64
@@ -27,6 +32,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.dependencies import rbac
 from app.dependencies.descope import require_descope_principal
+from app.dependencies.identity import get_permission_service, get_role_service
 from app.dependencies.rbac import get_rbac_session
 from app.dependencies.tenant import get_tenant_id
 from app.main import app as shipped_app
@@ -34,6 +40,8 @@ from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.providers import ProviderTokenConfig, TenantClaims, descope_config, ory_config
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.models.database import get_async_session
+from app.services.permission import PermissionService
+from app.services.role import RoleService
 
 DESCOPE_PROJECT = "P123"
 DESCOPE_ISSUER = f"https://api.descope.com/{DESCOPE_PROJECT}"
@@ -49,7 +57,7 @@ ORY_SUB = "ory-subject-1"
 REFUSED = {"detail": "No tenant context — select a tenant first"}
 
 # (method, path) of every route that hands the tenant or the subject to Descope.
-DESCOPE_BACKED_ROUTES: frozenset[tuple[str, str]] = frozenset(
+DESCOPE_TENANT_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
         ("POST", "/api/documents"),
         ("GET", "/api/documents"),
@@ -82,6 +90,26 @@ DESCOPE_BACKED_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/roles/remove"),
     }
 )
+
+# (method, path) of every guarded route over state that belongs to no tenant:
+# ``RoleService`` and ``PermissionService`` mirror each definition to Descope, and
+# the FGA schema is the Descope project's own.
+DESCOPE_PROJECT_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/api/roles"),
+        ("POST", "/api/roles"),
+        ("PUT", "/api/roles/{name}"),
+        ("DELETE", "/api/roles/{name}"),
+        ("GET", "/api/permissions"),
+        ("POST", "/api/permissions"),
+        ("PUT", "/api/permissions/{name}"),
+        ("DELETE", "/api/permissions/{name}"),
+        ("GET", "/api/fga/schema"),
+        ("PUT", "/api/fga/schema"),
+    }
+)
+
+DESCOPE_BACKED_ROUTES = DESCOPE_TENANT_ROUTES | DESCOPE_PROJECT_ROUTES
 
 # (method, path) -> why a principal from any provider may use the route's tenant.
 # A route belongs here only when nothing behind it, its service's sync adapter
@@ -143,20 +171,23 @@ DESCOPE_ADMIN = {
 FAKE_ADMIN = {"iss": FAKE_ISSUER, "sub": "fake-user", "org": "org-1", "org_roles": ["owner"]}
 
 
+SOLE_OWNER = [{"tenant_id": TENANT_A, "role_name": "owner", "permissions": ["documents.read"]}]
+MEMBER_OF_A_ADMIN_OF_B = [
+    {"tenant_id": TENANT_A, "role_name": "member", "permissions": []},
+    {"tenant_id": TENANT_B, "role_name": "admin", "permissions": []},
+]
+
+
 class _CanonicalStore:
     """Stands in for IdentityResolutionService: the Ory caller owns one tenant; lookups are recorded."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.roles: list[dict] = SOLE_OWNER
 
     async def resolve(self, *, provider: str, sub: str):
         self.calls.append((provider, sub))
-        return Ok(
-            {
-                "user": {"id": "canonical-user-1", "status": "active"},
-                "roles": [{"tenant_id": TENANT_A, "role_name": "owner", "permissions": ["documents.read"]}],
-            }
-        )
+        return Ok({"user": {"id": "canonical-user-1", "status": "active"}, "roles": self.roles})
 
 
 @pytest.fixture
@@ -172,7 +203,17 @@ def descope_client() -> AsyncMock:
 
 
 @pytest.fixture
-def client(store, descope_client) -> TestClient:
+def role_service() -> AsyncMock:
+    return AsyncMock(spec=RoleService)
+
+
+@pytest.fixture
+def permission_service() -> AsyncMock:
+    return AsyncMock(spec=PermissionService)
+
+
+@pytest.fixture
+def client(store, descope_client, role_service, permission_service) -> TestClient:
     """Every shipped route behind the shipped gateway middleware; only the stores are stubs."""
     limiter.reset()
     app = FastAPI()
@@ -187,6 +228,8 @@ def client(store, descope_client) -> TestClient:
 
     app.dependency_overrides[get_rbac_session] = _session
     app.dependency_overrides[get_async_session] = _session
+    app.dependency_overrides[get_role_service] = lambda: role_service
+    app.dependency_overrides[get_permission_service] = lambda: permission_service
     app.add_middleware(
         GatewayClaimsMiddleware,
         providers=[descope_config(DESCOPE_PROJECT), ory_config(ORY_ISSUER, ORY_AUDIENCE), FAKE_PROVIDER],
@@ -200,6 +243,7 @@ def _url(path: str) -> str:
         .replace("{target_user_id}", "someone")
         .replace("{user_id}", "someone")
         .replace("{key_id}", "key-1")
+        .replace("{name}", "editor")
     )
 
 
@@ -208,7 +252,10 @@ class TestTheRegisters:
         assert _routes_depending_on(require_descope_principal) == DESCOPE_BACKED_ROUTES
 
     def test_every_route_that_takes_a_tenant_is_in_one_register(self):
-        assert _routes_depending_on(get_tenant_id) == DESCOPE_BACKED_ROUTES | set(PROVIDER_NEUTRAL_ROUTES)
+        assert _routes_depending_on(get_tenant_id) == DESCOPE_TENANT_ROUTES | set(PROVIDER_NEUTRAL_ROUTES)
+
+    def test_no_project_route_takes_a_tenant(self):
+        assert DESCOPE_TENANT_ROUTES & DESCOPE_PROJECT_ROUTES == set()
 
     def test_no_route_is_in_both(self):
         assert DESCOPE_BACKED_ROUTES & set(PROVIDER_NEUTRAL_ROUTES) == set()
@@ -293,6 +340,57 @@ class TestRoleAssignmentIsDescopeBacked:
 
         assert response.status_code == 403
         assert response.json() == {"detail": "Cannot manage roles for a different tenant"}
+
+
+class TestProjectWideStateIsDescopeBacked:
+    """Role and permission definitions and the FGA schema belong to no tenant and live in Descope."""
+
+    @pytest.mark.parametrize(("method", "path"), sorted(DESCOPE_PROJECT_ROUTES))
+    def test_an_admin_of_one_of_several_tenants_is_refused(
+        self, client, store, descope_client, role_service, permission_service, method, path
+    ):
+        """Naming the tenant the caller administers would pass ``require_role``: only the guard refuses it."""
+        store.roles = MEMBER_OF_A_ADMIN_OF_B
+
+        response = client.request(method, _url(path), headers={**_bearer(ORY_OWNER), "X-Tenant-ID": TENANT_B})
+
+        assert response.status_code == 403
+        assert response.json() == REFUSED
+        assert descope_client.mock_calls == []
+        assert role_service.mock_calls == []
+        assert permission_service.mock_calls == []
+        assert store.calls == []
+
+    def test_a_descope_admin_lists_the_role_definitions(self, client, role_service):
+        role_service.list_roles.return_value = Ok([{"id": RESOURCE_ID, "name": "editor"}])
+
+        response = client.get("/api/roles", headers=_bearer(DESCOPE_ADMIN))
+
+        assert response.status_code == 200
+        assert response.json() == {"roles": [{"id": RESOURCE_ID, "name": "editor"}]}
+
+    def test_a_descope_admin_lists_the_permission_definitions(self, client, permission_service):
+        permission_service.list_permissions.return_value = Ok([{"id": RESOURCE_ID, "name": "documents.read"}])
+
+        response = client.get("/api/permissions", headers=_bearer(DESCOPE_ADMIN))
+
+        assert response.status_code == 200
+        assert response.json() == {"permissions": [{"id": RESOURCE_ID, "name": "documents.read"}]}
+
+    def test_a_descope_admin_reads_the_fga_schema(self, client, descope_client):
+        descope_client.get_fga_schema.return_value = "model AuthZ 1.0"
+
+        response = client.get("/api/fga/schema", headers=_bearer(DESCOPE_ADMIN))
+
+        assert response.status_code == 200
+        assert response.json() == {"schema": "model AuthZ 1.0"}
+
+    def test_a_descope_member_is_still_refused_by_the_role_gate(self, client, role_service):
+        response = client.get("/api/roles", headers=_bearer(DESCOPE_MEMBER))
+
+        assert response.status_code == 403
+        assert response.json() != REFUSED
+        assert role_service.mock_calls == []
 
 
 def _hand_built_request(**state: object) -> SimpleNamespace:

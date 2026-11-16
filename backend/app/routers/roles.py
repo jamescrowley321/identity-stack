@@ -14,7 +14,11 @@ from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.role import RoleService
 
-router = APIRouter(tags=["Roles"])
+# Every route here is Descope-backed (conventions §18). ``RoleService`` mirrors each
+# definition and each assignment to Descope (``DescopeSyncAdapter``), and ``/roles/me``
+# reads the Descope ``tenants`` claim. The definitions belong to no tenant, so without
+# the guard an admin of any one canonical tenant would change them for every tenant.
+router = APIRouter(tags=["Roles"], dependencies=[Depends(require_descope_principal)])
 
 
 class RoleAssignmentRequest(BaseModel):
@@ -50,8 +54,7 @@ def _parse_uuid(value: str, field_name: str) -> uuid.UUID:
 # --- Existing user-facing endpoints (must stay before /roles/{name}) ---
 
 
-# Reads the Descope ``tenants`` claim (``get_tenant_claims``), so it serves Descope principals only.
-@router.get("/roles/me", dependencies=[Depends(require_descope_principal)])
+@router.get("/roles/me")
 async def get_my_roles(
     tenant_id: str = Depends(get_tenant_id),
     tenant_claims: dict = Depends(get_tenant_claims),
@@ -67,9 +70,7 @@ async def get_my_roles(
     }
 
 
-# ``RoleService`` mirrors each assignment to Descope (``DescopeSyncAdapter``), so the canonical
-# user and tenant ids of another provider's principal must not reach it (conventions §18).
-@router.post("/roles/assign", dependencies=[Depends(require_descope_principal)])
+@router.post("/roles/assign")
 @limiter.limit(RATE_LIMIT_AUTH)
 async def assign_roles(
     request: Request,
@@ -111,8 +112,7 @@ async def assign_roles(
     )
 
 
-# Mirrored to Descope like ``/roles/assign``.
-@router.post("/roles/remove", dependencies=[Depends(require_descope_principal)])
+@router.post("/roles/remove")
 @limiter.limit(RATE_LIMIT_AUTH)
 async def remove_roles(
     request: Request,

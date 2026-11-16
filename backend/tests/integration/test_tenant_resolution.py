@@ -26,7 +26,7 @@ from app.models.database import get_async_session
 from app.models.document import Document
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.provider import Provider, ProviderType
-from app.models.identity.role import Role
+from app.models.identity.role import Permission, Role
 from app.models.identity.tenant import Tenant
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
@@ -34,7 +34,7 @@ from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
-from app.routers import accesskeys, documents, roles, users
+from app.routers import accesskeys, documents, fga, permissions, roles, users
 from app.routers.protected import canonical_identity
 from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
@@ -53,7 +53,8 @@ def _build_app(db_session, *, issuer: str, audience: str) -> FastAPI:
     app.state.limiter = limiter
     app.state.descope_client = AsyncMock()
     app.state.cache_publisher = MagicMock()
-    for router in (documents.router, users.router, accesskeys.router, roles.router):
+    routers = (documents.router, users.router, accesskeys.router, roles.router, permissions.router, fga.router)
+    for router in routers:
         app.include_router(router, prefix="/api")
 
     @app.get(TENANT_ROUTE)
@@ -262,3 +263,49 @@ async def test_ory_admin_cannot_assign_or_remove_a_role(db_session, ory_token_so
     }
     assert app.state.descope_client.mock_calls == []
     assert await _assignment_count(db_session) == assignments_before
+
+
+async def _role_count(db_session) -> int:
+    return (await db_session.execute(select(func.count()).select_from(Role))).scalar_one()
+
+
+async def _permission_count(db_session) -> int:
+    return (await db_session.execute(select(func.count()).select_from(Permission))).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_ory_admin_of_one_of_two_tenants_cannot_reach_project_wide_state(db_session, ory_token_source):
+    """Definitions and the FGA schema belong to no tenant: an admin of one tenant must not change them for all."""
+    app = _build_app(db_session, issuer=ory_token_source.issuer, audience=ory_token_source.audience)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        headers, _ = await _provisioned_ory_user(db_session, client, ory_token_source, "tenant-project")
+        admin_tenant = await _add_membership(db_session, user_email=await _email_of(client, headers), role_name="admin")
+        selected = {**headers, TENANT_SELECTOR_HEADER: admin_tenant}
+        roles_before = await _role_count(db_session)
+        permissions_before = await _permission_count(db_session)
+
+        is_admin = await client.get(ADMIN_ROUTE, headers=selected)
+        refusals = {
+            "list roles": await client.get("/api/roles", headers=selected),
+            "create role": await client.post("/api/roles", json={"name": "project-wide"}, headers=selected),
+            "update role": await client.put("/api/roles/admin", json={"description": "changed"}, headers=selected),
+            "delete role": await client.delete("/api/roles/admin", headers=selected),
+            "list permissions": await client.get("/api/permissions", headers=selected),
+            "create permission": await client.post("/api/permissions", json={"name": "all.write"}, headers=selected),
+            "update permission": await client.put(
+                "/api/permissions/all.write", json={"new_name": "all.read"}, headers=selected
+            ),
+            "delete permission": await client.delete("/api/permissions/all.write", headers=selected),
+            "read schema": await client.get("/api/fga/schema", headers=selected),
+            "replace schema": await client.put("/api/fga/schema", json={"schema": "model AuthZ 1.0"}, headers=selected),
+        }
+
+    # The caller is an admin of the tenant it names, so each refusal is the route's own.
+    assert is_admin.json() == {"tenant_id": admin_tenant, "roles": ["admin"]}
+    assert {name: response.status_code for name, response in refusals.items()} == dict.fromkeys(refusals, 403)
+    assert {name: response.json() for name, response in refusals.items()} == dict.fromkeys(
+        refusals, DESCOPE_PRINCIPALS_ONLY
+    )
+    assert app.state.descope_client.mock_calls == []
+    assert await _role_count(db_session) == roles_before
+    assert await _permission_count(db_session) == permissions_before

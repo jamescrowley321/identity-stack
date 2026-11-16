@@ -13,7 +13,10 @@ from app.outbound import UpstreamStatusError, UpstreamTransportError
 
 logger = logbook(__name__)
 
-router = APIRouter(tags=["fga"])
+# Every route here reads or writes Descope's FGA store, so each serves Descope principals
+# only (conventions §18). The schema belongs to the whole Descope project: without the
+# guard an admin of any one canonical tenant would replace it for every tenant.
+router = APIRouter(tags=["fga"], dependencies=[Depends(require_descope_principal)])
 
 
 class UpdateSchemaRequest(BaseModel):
@@ -138,7 +141,7 @@ async def update_fga_schema(
 # --- Relation endpoints (tenant-scoped via resource_id prefixing) ---
 
 
-@router.post("/fga/relations", status_code=201, dependencies=[Depends(require_descope_principal)])
+@router.post("/fga/relations", status_code=201)
 @limiter.limit(RATE_LIMIT_AUTH)
 async def create_relation(
     request: Request,
@@ -178,7 +181,7 @@ async def create_relation(
         raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
 
 
-@router.delete("/fga/relations", dependencies=[Depends(require_descope_principal)])
+@router.delete("/fga/relations")
 @limiter.limit(RATE_LIMIT_AUTH)
 async def delete_relation(
     request: Request,
@@ -213,7 +216,7 @@ async def delete_relation(
         raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
 
 
-@router.get("/fga/relations", dependencies=[Depends(require_descope_principal)])
+@router.get("/fga/relations")
 async def list_relations(
     request: Request,
     # FGA identifiers; Descope uses short names/IDs — 200 is generous
@@ -259,7 +262,7 @@ async def list_relations(
         raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
 
 
-@router.post("/fga/check", dependencies=[Depends(require_descope_principal)])
+@router.post("/fga/check")
 @limiter.limit(RATE_LIMIT_AUTH)
 async def check_permission(
     request: Request,
