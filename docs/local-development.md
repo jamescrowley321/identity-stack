@@ -105,7 +105,12 @@ KEYCLOAK_PORTABLE_TYPES=member
 KEYCLOAK_ORGANIZATION_BOUND_TYPES=tenant-admin
 KEYCLOAK_PORTABLE_PERMISSIONS=member=documents:read
 KEYCLOAK_REQUIRE_HTTPS=false   # local only: allowed because the issuer host ends in .localhost
+KEYCLOAK_DIRECTORY_CLIENT_ID=identity-stack-directory
+KEYCLOAK_DIRECTORY_CLIENT_SECRET=local-only-directory-client   # local fixture value
 ```
+
+Register the provider row once, so that a first login is provisioned:
+`cd backend && DATABASE_URL=... KEYCLOAK_ISSUER_URL=... python -m scripts.seed_keycloak`.
 
 The backend refuses to start with only part of this set. See
 [environment-variables.md](environment-variables.md) for each variable and
@@ -113,9 +118,11 @@ The backend refuses to start with only part of this set. See
 Keycloak token.
 
 With these settings `alice` and `bob` can call `GET /api/access-checks/documents-read` with a
-token from `member-app`, and `erin` cannot. Every `tenant-admin` token is refused on
-`GET /api/access-checks/settings-manage`: the type is organization-bound and the lookup that
-confirms a user's one organization is not wired yet.
+token from `member-app`, and `erin` cannot. On `GET /api/access-checks/settings-manage` a
+`tenant-admin` token of `dave` or `frank` is allowed in `acme`: each belongs to that one
+organization, and `acme` marks them as tenant admins. `bob`'s is refused, because he belongs
+to two organizations. `GET /api/identity` lists each user's organizations from the same
+lookup.
 
 `docker-compose.test.yml` runs the same realm as `keycloak-test` on `http://keycloak-test.localhost:18180`, resolved the same way. It sits behind the `keycloak` profile there: `make test-up` leaves it out, `make test-up-keycloak` starts the test stack with it, and so does `make test-integration`.
 
