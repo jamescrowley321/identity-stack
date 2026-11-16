@@ -6,6 +6,7 @@ The app is every shipped route behind a shipped token middleware, plus a few
 routes of the test's own where the application has none that fits.
 """
 
+import asyncio
 import base64
 import json
 import time
@@ -19,6 +20,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 from slowapi.errors import RateLimitExceeded
 
+from app.dependencies import rbac
 from app.dependencies.identity import get_identity_provisioning_service, get_identity_resolution_service
 from app.dependencies.rbac import (
     INSUFFICIENT_PERMISSIONS,
@@ -39,12 +41,12 @@ from app.main import app as shipped_app
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.providers import (
+    ProviderConfigurationError,
     ProviderTokenConfig,
     TenantClaims,
     claimed_tenant_id,
     descope_config,
     keycloak_config,
-    ory_config,
 )
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.models.database import get_async_session
@@ -79,6 +81,8 @@ STANDALONE = "standalone"
 GATEWAY = "gateway"
 MIDDLEWARES = {STANDALONE: TokenValidationMiddleware, GATEWAY: GatewayClaimsMiddleware}
 SECONDS_OF_VALIDITY = 300
+TINY_LIMIT_SECONDS = 0.01
+LATE_ANSWER_SECONDS = 2
 
 
 def _provider(lookup=None) -> ProviderTokenConfig:
@@ -131,6 +135,25 @@ class _Lookup:
         if self.error is not None:
             raise self.error
         return self.answer
+
+
+class _AnswersLate:
+    """A test double of a membership lookup whose directory does not answer within the limit.
+
+    It confirms ``ACME`` after ``LATE_ANSWER_SECONDS``, far beyond the limit a
+    test sets, so a request that is not bounded fails the test instead of hanging.
+    """
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    async def __call__(self, claims: dict):
+        try:
+            await asyncio.sleep(LATE_ANSWER_SECONDS)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return [ACME]
 
 
 def _app(mode: str, provider: ProviderTokenConfig) -> FastAPI:
@@ -405,31 +428,12 @@ class TestAnotherProvidersClaimsOnAKeycloakToken:
         assert _get(claims, OWN_OWNER_ROUTE).json() == {"roles": ["owner"]}
 
 
-class TestTheTenantsClaimIsReadFromADescopeTokenOnly:
-    """``tenants`` is Descope's claim. On the token of any other provider it is not a membership."""
+class TestTheTenantsClaimIsNotReadFromAKeycloakToken:
+    """``tenants`` is Descope's claim. On a Keycloak token it is not a membership."""
 
-    ORY_ISSUER = "https://ory.example.test"
-    ORY_AUDIENCE = "https://identity-stack-api"
     FORGED_TENANTS = {"other-tenant": {"roles": ["owner"], "permissions": [DOCUMENTS_WRITE]}}
 
-    def _ory(self, path: str):
-        """An Ory principal, a provider with no extractor of its own, carrying a ``tenants`` claim."""
-        claims = {
-            "iss": self.ORY_ISSUER,
-            "aud": self.ORY_AUDIENCE,
-            "sub": "ory-user",
-            "exp": int(time.time()) + SECONDS_OF_VALIDITY,
-            "tenants": self.FORGED_TENANTS,
-        }
-        return _get(claims, path, app=_app(GATEWAY, ory_config(self.ORY_ISSUER, self.ORY_AUDIENCE)))
-
-    def test_an_ory_token_is_no_member_of_a_tenant_its_tenants_claim_names(self):
-        _assert_403(self._ory("/api/tenants/other-tenant/resources"), "Not a member of this tenant")
-
-    def test_an_ory_token_gets_no_tenants_claim(self):
-        assert self._ory(OWN_TENANT_CLAIMS_ROUTE).json() == {"tenants": {}}
-
-    def test_a_keycloak_token_is_no_member_either(self):
+    def test_a_keycloak_token_is_no_member_of_a_tenant_its_tenants_claim_names(self):
         claims = _member(tenants=self.FORGED_TENANTS)
 
         _assert_403(_get(claims, "/api/tenants/other-tenant/resources"), "Not a member of this tenant")
@@ -624,6 +628,56 @@ class TestAnOrganizationBoundTokenAgainstALookupDouble:
         assert response.json() == {"tenant_id": ACME, "permissions": [DOCUMENTS_WRITE]}
         assert len(lookup.calls) == 1
 
+    def test_a_gate_under_a_dependency_the_application_overrode_does_not_answer_either(self):
+        """FastAPI does not run what an overridden dependency depends on, so that gate refuses nothing."""
+        lookup = _Lookup([ACME])
+        app = _app(GATEWAY, _provider(lookup))
+
+        async def writer(permissions: list[str] = Depends(require_permission(DOCUMENTS_WRITE))) -> list[str]:
+            return permissions
+
+        app.dependency_overrides[writer] = lambda: [DOCUMENTS_WRITE]
+
+        @app.get("/own/tenant-then-overridden-parent")
+        async def tenant_then_overridden_parent(
+            tenant_id: str = Depends(get_tenant_id), permissions: list[str] = Depends(writer)
+        ):
+            return {"tenant_id": tenant_id, "permissions": permissions}
+
+        response = _get(_tenant_admin(), "/own/tenant-then-overridden-parent", app=app)
+
+        assert response.status_code == 200, response.text
+        assert response.json() == {"tenant_id": ACME, "permissions": [DOCUMENTS_WRITE]}
+        assert len(lookup.calls) == 1
+
+    @pytest.mark.parametrize("mode", [STANDALONE, GATEWAY])
+    def test_a_lookup_that_does_not_answer_within_the_limit_is_502_and_no_grant(self, mode, monkeypatch, caplog):
+        """The request does not wait for the directory beyond the limit."""
+        monkeypatch.setattr(rbac, "MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS", TINY_LIMIT_SECONDS)
+        lookup = _AnswersLate()
+
+        with caplog.at_level("WARNING", logger="app.dependencies.rbac"):
+            response = _get(_tenant_admin(), SETTINGS_MANAGE_ROUTE, mode=mode, lookup=lookup)
+
+        assert response.status_code == 502
+        assert response.json() == {"detail": MEMBERSHIP_LOOKUP_FAILED}
+        assert lookup.cancelled is True
+        messages = [record.getMessage() for record in caplog.records if record.name == "app.dependencies.rbac"]
+        assert messages == [
+            f"membership lookup of provider=Keycloak did not answer within {TINY_LIMIT_SECONDS} s (sub={SUBJECT!r})"
+        ]
+
+    def test_a_lookup_that_raises_a_timeout_of_its_own_is_logged_as_a_failure(self, caplog):
+        """Only the limit running out is logged as the limit running out."""
+        lookup = _Lookup(error=TimeoutError("the directory client gave up"))
+
+        with caplog.at_level("WARNING", logger="app.dependencies.rbac"):
+            response = _get(_tenant_admin(), SETTINGS_MANAGE_ROUTE, lookup=lookup)
+
+        assert response.status_code == 502
+        messages = [record.getMessage() for record in caplog.records if record.name == "app.dependencies.rbac"]
+        assert messages == [f"membership lookup failed for provider=Keycloak sub={SUBJECT!r}"]
+
     def test_a_token_with_unreadable_roles_is_refused_without_asking(self):
         lookup = _Lookup(error=RuntimeError("directory unreachable"))
         claims = _tenant_admin(resource_access={TENANT_ADMIN_TYPE_CLIENT: {"roles": SETTINGS_MANAGE}})
@@ -731,3 +785,65 @@ class TestTheResolverHoldsAnyProviderToTheConfirmation:
 
         assert refused.value.status_code == 403
         assert refused.value.detail == NO_TENANT_CONTEXT
+
+
+class _Unhashable:
+    """A dependency callable that cannot be a dictionary key."""
+
+    __hash__ = None
+
+    def __call__(self) -> None:
+        return None
+
+
+class TestTheGateWalk:
+    """``_route_gate_checks`` reads a route's dependants as FastAPI would run them."""
+
+    @staticmethod
+    def _request(*dependants, overrides=None):
+        route = SimpleNamespace(dependant=SimpleNamespace(dependencies=list(dependants)))
+        return SimpleNamespace(
+            scope={"route": route},
+            app=SimpleNamespace(dependency_overrides=overrides or {}),
+        )
+
+    @staticmethod
+    def _dependant(call, *dependencies):
+        return SimpleNamespace(call=call, dependencies=list(dependencies))
+
+    def test_a_callable_that_cannot_be_hashed_is_passed_over_and_its_gates_still_count(self):
+        gate = require_permission(DOCUMENTS_WRITE)
+        request = self._request(self._dependant(_Unhashable(), self._dependant(gate)))
+
+        assert rbac._route_gate_checks(request) == [rbac._GATE_CHECKS[gate]]
+
+    def test_nothing_under_an_overridden_dependency_counts(self):
+        gate = require_permission(DOCUMENTS_WRITE)
+
+        def parent() -> None:
+            return None
+
+        request = self._request(self._dependant(parent, self._dependant(gate)), overrides={parent: lambda: None})
+
+        assert rbac._route_gate_checks(request) == []
+
+
+class TestTheMembershipLookupLimit:
+    """``MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`` is a positive, finite number of seconds, or startup fails."""
+
+    def test_the_default_is_five_seconds(self, monkeypatch):
+        monkeypatch.delenv("MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS", raising=False)
+
+        assert rbac.membership_lookup_timeout() == 5.0
+
+    def test_a_set_value_is_read(self, monkeypatch):
+        monkeypatch.setenv("MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS", " 2.5 ")
+
+        assert rbac.membership_lookup_timeout() == 2.5
+
+    @pytest.mark.parametrize("value", ["", "soon", "0", "-1", "nan", "inf"])
+    def test_a_value_that_is_no_limit_is_refused(self, monkeypatch, value):
+        monkeypatch.setenv("MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS", value)
+
+        with pytest.raises(ProviderConfigurationError):
+            rbac.membership_lookup_timeout()
