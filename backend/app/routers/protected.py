@@ -10,14 +10,20 @@ from app.dependencies.identity import (
 )
 from app.errors.identity import NotFound, ValidationError
 from app.knobs import knob, knob_set
+from app.logbook import logbook
+from app.middleware.providers import descope_config
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
 
 router = APIRouter(tags=["Protected"])
+logger = logbook(__name__)
 
 DESCOPE_PROJECT_ID = knob("DESCOPE_PROJECT_ID", "")
-DISCO_ADDRESS = f"https://api.descope.com/{DESCOPE_PROJECT_ID}/.well-known/openid-configuration"
+# ``POST /validate-id-token`` runs behind neither token middleware, so it takes
+# the Descope provider's discovery address, audience and signing algorithms
+# from the same config they use.
+DESCOPE = descope_config(DESCOPE_PROJECT_ID)
 
 # Providers eligible for just-in-time provisioning on first login. Ory is
 # greenfield (every user is JIT-provisioned); Descope users are pre-provisioned
@@ -112,11 +118,21 @@ async def validate_id_token(request: Request, authorization: str = Header()):
 
     config = TokenValidationConfig(
         perform_disco=True,
-        audience=DESCOPE_PROJECT_ID,
+        audience=DESCOPE.audience or "",
+        algorithms=sorted(DESCOPE.algorithms) or None,
+        require_https=DESCOPE.require_https,
     )
-    id_claims = await validate_token(
-        jwt=id_token,
-        token_validation_config=config,
-        disco_doc_address=DISCO_ADDRESS,
-    )
-    return id_claims
+    try:
+        return await validate_token(
+            jwt=id_token,
+            token_validation_config=config,
+            disco_doc_address=DESCOPE.disco_address,
+        )
+    except Exception as exc:
+        # Whatever stops validation refuses the token, as in
+        # TokenValidationMiddleware, with the body every token refusal gets; the
+        # cause stays in the log. Not narrowed to TokenValidationException: in
+        # discovery mode the library lets PyJWT's DecodeError out for a token
+        # that is not a JWT (identity-model#1179).
+        logger.warning("validate-id-token refused the token", exc_info=True)
+        raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
