@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
@@ -66,10 +66,19 @@ TenantClaimsExtractor = Callable[[dict], TenantClaims]
 # checks is still not one for this API, or ``None`` when it is.
 TokenBinding = Callable[[dict], str | None]
 # A provider's membership lookup: every tenant the caller of these verified
-# claims belongs to, as the provider's directory has it now. It raises when the
-# directory cannot be asked, and it bounds its own time (conventions §6): the
-# request waits for it.
-SoleMembershipLookup = Callable[[dict], Awaitable[Collection[str]]]
+# claims belongs to, as the provider's directory has it now, as a list, tuple,
+# set or frozenset of tenant ids (any other answer is refused, a bare string
+# among them). It raises when the directory cannot be asked, and it bounds its
+# own time (conventions §6): the request waits for it.
+#
+# Membership alone is not enough. The token's grants are believed for the one
+# tenant the lookup returns, so a lookup MUST return a tenant only where the
+# directory also grants the caller the roles the token carries (ADR-0010,
+# docs/security.md). A lookup that checks membership only lets roles granted in
+# one organization carry over to another; none is wired until it confirms the
+# grant as well (#559).
+SoleMembershipAnswer = list[str] | tuple[str, ...] | set[str] | frozenset[str]
+SoleMembershipLookup = Callable[[dict], Awaitable[SoleMembershipAnswer]]
 
 
 @dataclass(frozen=True)
@@ -321,7 +330,10 @@ def keycloak_config(
     ``portable_permissions`` lists what each portable type grants (see
     ``app.middleware.keycloak``). ``organization_lookup`` answers which
     organizations a caller belongs to; without one, every token of an
-    organization-bound type is refused.
+    organization-bound type is refused. It must return an organization only
+    where the caller also holds the token's roles there, not on membership
+    alone (``SoleMembershipLookup``); no such lookup is wired until
+    #559.
 
     Fails closed: ``aud`` is always required, only RS256 is accepted, and a
     half-configured provider is refused, because it would accept tokens it

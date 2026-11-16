@@ -156,6 +156,24 @@ class _AnswersLate:
         return [ACME]
 
 
+class _SwallowsTheCancellation:
+    """A test double of a membership lookup that catches its cancellation and answers anyway.
+
+    It confirms ``ACME`` once it is cancelled, so only a resolver that checks
+    whether the limit ran out refuses the late answer.
+    """
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    async def __call__(self, claims: dict):
+        try:
+            await asyncio.sleep(LATE_ANSWER_SECONDS)
+        except asyncio.CancelledError:
+            self.cancelled = True
+        return [ACME]
+
+
 def _app(mode: str, provider: ProviderTokenConfig) -> FastAPI:
     app = FastAPI()
     app.state.limiter = limiter
@@ -666,6 +684,41 @@ class TestAnOrganizationBoundTokenAgainstALookupDouble:
         assert messages == [
             f"membership lookup of provider=Keycloak did not answer within {TINY_LIMIT_SECONDS} s (sub={SUBJECT!r})"
         ]
+
+    @pytest.mark.parametrize("mode", [STANDALONE, GATEWAY])
+    def test_a_late_answer_from_a_lookup_that_swallows_its_cancellation_is_502(self, mode, monkeypatch, caplog):
+        """The limit holds even when the lookup does not let its cancellation through."""
+        monkeypatch.setattr(rbac, "MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS", TINY_LIMIT_SECONDS)
+        lookup = _SwallowsTheCancellation()
+
+        with caplog.at_level("WARNING", logger="app.dependencies.rbac"):
+            response = _get(_tenant_admin(), SETTINGS_MANAGE_ROUTE, mode=mode, lookup=lookup)
+
+        assert response.status_code == 502
+        assert response.json() == {"detail": MEMBERSHIP_LOOKUP_FAILED}
+        assert lookup.cancelled is True
+        messages = [record.getMessage() for record in caplog.records if record.name == "app.dependencies.rbac"]
+        assert messages == [
+            f"membership lookup of provider=Keycloak did not answer within {TINY_LIMIT_SECONDS} s (sub={SUBJECT!r})"
+        ]
+
+    def test_every_gate_of_a_route_is_answered_before_the_lookup(self):
+        """With two gates, the one the token passes does not ask before the one it fails has refused."""
+        lookup = _Lookup(error=RuntimeError("directory unreachable"))
+        app = _app(GATEWAY, _provider(lookup))
+
+        @app.get(
+            "/own/two-gates",
+            dependencies=[
+                Depends(require_permission(SETTINGS_MANAGE)),
+                Depends(require_permission(DOCUMENTS_WRITE)),
+            ],
+        )
+        async def two_gates():
+            return {"ok": True}
+
+        _assert_403(_get(_tenant_admin(), "/own/two-gates", app=app), INSUFFICIENT_PERMISSIONS)
+        assert lookup.calls == []
 
     def test_a_lookup_that_raises_a_timeout_of_its_own_is_logged_as_a_failure(self, caplog):
         """Only the limit running out is logged as the limit running out."""
