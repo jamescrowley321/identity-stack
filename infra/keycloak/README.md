@@ -21,7 +21,7 @@ and git-ignored; `.terraform.lock.hcl` is committed.
 | `keycloak_user.this`, `keycloak_user_roles.this`, `random_password.user` | Users `alice`, `bob`, `carol`, `dave`, `erin`, `frank` with the import's emails, names and client roles. `keycloak_user_roles` is exhaustive: a user holds exactly the listed client roles and no realm role, as in the import. |
 | `keycloak_organization.this` | Organizations `acme` (domain `acme.test`) and `globex` (`globex.test`). `acme` carries the attribute `type:tenant-admin` listing the ids of `bob`, `dave` and `frank`. |
 | `keycloak_organization_memberships.this` | Members: `acme` has all six users, `globex` has `bob`. |
-| `keycloak_openid_client.directory` and its scopes, roles and scope mappings | `identity-stack-directory`, the backend's read-only service account for the organization lookup: client scope `kc-admin-api`, `realm-management` roles `view-users` and `view-organizations`. |
+| `keycloak_openid_client.directory` and its scopes, roles and scope mappings | `identity-stack-directory`, the backend's read-only service account for the organization lookup: client scope `kc-admin-api`; its service account holds exactly `realm-management` roles `view-users` and `view-organizations` and no realm role (`keycloak_user_roles.directory`, exhaustive), as in the import. |
 
 The root declares no protocol mapper. Keycloak's built-in client scopes write `aud`,
 `organization` and `resource_access` from client roles and memberships, and Keycloak sets `azp`
@@ -68,7 +68,7 @@ Variables (all have defaults for the compose `keycloak` service):
 |---|---|---|
 | `keycloak_url` | `http://keycloak.localhost:8180` | The Keycloak's `KC_HOSTNAME`. The issuer is `<keycloak_url>/realms/<realm>`. |
 | `realm` | `identity-stack` | Realm to create. |
-| `frontend_url` | `http://localhost:3000` | SPA origin: redirect URI, web origin, post-logout `<frontend_url>/login`. |
+| `frontend_url` | `http://localhost:3000` | SPA origin: redirect URI, web origin, post-logout `<frontend_url>/login`. No trailing slash (validated). |
 | `ssl_required` | `none` | Realm SSL mode. |
 
 ## Outputs
@@ -77,7 +77,7 @@ Variables (all have defaults for the compose `keycloak` service):
 |---|---|
 | `backend_environment` | Backend `KEYCLOAK_ISSUER_URL`, `KEYCLOAK_AUDIENCES`, `KEYCLOAK_APP_CLIENTS`, `KEYCLOAK_PORTABLE_TYPES`, `KEYCLOAK_ORGANIZATION_BOUND_TYPES`, `KEYCLOAK_PORTABLE_PERMISSIONS`, `KEYCLOAK_REQUIRE_HTTPS`, `KEYCLOAK_POST_LOGOUT_REDIRECT_URI`, `KEYCLOAK_DIRECTORY_CLIENT_ID` ([`docs/environment-variables.md`](../../docs/environment-variables.md)). |
 | `keycloak_directory_client_secret` (sensitive) | Backend `KEYCLOAK_DIRECTORY_CLIENT_SECRET`. |
-| `frontend_environment` | Frontend `VITE_OIDC_AUTHORITY`, `VITE_OIDC_CLIENT_ID`, `VITE_OIDC_REDIRECT_URI`, one map per app client. |
+| `frontend_environment` | Frontend `VITE_OIDC_AUTHORITY`, `VITE_OIDC_CLIENT_ID`, `VITE_OIDC_REDIRECT_URI`, `VITE_OIDC_SCOPE`, one map per app client. The scope is `openid profile email organization`: `organization` is optional on the app clients, and without it the token carries no `organization` claim, so an organization-bound type (`tenant-admin`) is refused. Keycloak asks a member of several organizations which one to use. |
 | `user_ids` | Each user's id (token `sub`). |
 | `user_passwords` (sensitive) | Each user's login password. |
 
@@ -99,19 +99,28 @@ each other in the compose `keycloak-test` container:
    keycloak-test that is still up, then applies this root to a new realm of that name beside
    the imported `identity-stack`, with its own state in a temporary directory;
 2. runs `terraform plan` again and fails unless it is empty;
-3. runs [`scripts/check_realm.py`](scripts/check_realm.py), which compares the realm settings,
-   clients, client roles, scope mappings, users and their roles, organizations, domains, members
-   and `type:` attributes through the Admin API; logs the users in to both realms and compares
+3. runs [`scripts/check_realm.py`](scripts/check_realm.py), which compares, in both
+   directions, the realm settings, every client (Keycloak's built-in ones by name only), client
+   roles, scope mappings, the directory service account's client and realm roles, every user and
+   their client and realm roles, organizations, domains, members and `type:` attributes through
+   the Admin API; logs the users in to both realms and compares
    the tokens' `iss`, `aud`, `azp`, `organization`, `resource_access`, `scope` and claim names;
    compares the claim names with [`keycloak/fixtures/access-token.json`](../../keycloak/fixtures/access-token.json);
    fails on any protocol mapper that writes a user attribute or property to `aud`, `azp`,
-   `organization`, `resource_access`, `dct` or `tenants`; and reads `bob`'s organizations
+   `organization`, `resource_access`, `dct` or `tenants`; logs in through each app client with
+   the output `VITE_OIDC_SCOPE` and fails unless the token names the user's organization; and reads `bob`'s organizations
    with the directory client's generated secret. Users, organizations and members are read
    one page of `LISTING_PAGE_SIZE` at a time, and a full page fails the check as possibly cut off;
 4. destroys the realm (if the destroy fails, the temporary state directory is kept and its
    path printed), and stops the container (deleting its volumes) only if the script started
    it: a keycloak-test that was already running is left up.
 
-It needs Docker, `terraform` and the backend virtual environment
-(`cd backend && uv sync --locked --extra dev`). On a Docker host shared with other sessions, hold
-the compose lock: `flock ~/.cache/identity-stack-compose.lock make keycloak-terraform-check`.
+It copies only the root's `.tf` files git does not ignore into its working directory, so a local
+`override.tf` or `*_override.tf` never changes what it applies.
+
+It needs Docker, `terraform`, `curl`, `jq`, `flock` and the backend virtual environment
+(`cd backend && uv sync --locked --extra dev`), and checks for each before it starts anything.
+Two runs never overlap: each waits for its own lock file,
+`~/.cache/identity-stack-keycloak-terraform-check.lock`, since both would build the same realm
+in the same container. On a Docker host shared with other sessions, hold the compose lock as
+well: `flock ~/.cache/identity-stack-compose.lock make keycloak-terraform-check`.

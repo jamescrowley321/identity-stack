@@ -5,14 +5,34 @@
 # volumes) only when this script started it: a keycloak-test that was already
 # running, for another test run or session, is left up.
 #
-# Run from anywhere in the repo, with Docker, terraform and the backend venv
-# (cd backend && uv sync --locked --extra dev). Hold the compose lock if other
-# sessions share the Docker host:
+# Run from anywhere in the repo, with Docker, terraform, curl, jq, flock and the
+# backend venv (cd backend && uv sync --locked --extra dev). Two runs of this
+# script never overlap: each holds its own lock file for the whole run. Hold the
+# compose lock as well if other sessions share the Docker host:
 #   flock ~/.cache/identity-stack-compose.lock infra/keycloak/scripts/check-against-compose.sh
 set -euo pipefail
 
 repo="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 root="$repo/infra/keycloak"
+python="$repo/backend/.venv/bin/python"
+
+missing=()
+for command in docker terraform curl jq flock; do
+  command -v "$command" >/dev/null || missing+=("$command")
+done
+[ -x "$python" ] || missing+=("$python (cd backend && uv sync --locked --extra dev)")
+if [ "${#missing[@]}" -gt 0 ]; then
+  printf 'missing prerequisite: %s\n' "${missing[@]}" >&2
+  exit 1
+fi
+
+# One check at a time: every run builds the same realm in the same container and
+# may stop that container. A lock file of its own, not the compose lock, so the
+# documented `flock <compose lock> make keycloak-terraform-check` cannot deadlock.
+lock="${XDG_CACHE_HOME:-$HOME/.cache}/identity-stack-keycloak-terraform-check.lock"
+mkdir -p "$(dirname "$lock")"
+exec 9>"$lock"
+flock 9
 base_url="http://keycloak-test.localhost:18180"
 import_realm="identity-stack"
 terraform_realm="identity-stack-terraform"
@@ -62,9 +82,13 @@ delete_leftover_realm() {
   esac
 }
 
-# Own working copy and state: never the root's terraform.tfstate.
+# Own working copy and state: never the root's terraform.tfstate. Only the
+# root's .tf files git does not ignore are copied, so a local override.tf or
+# *_override.tf (git-ignored) never changes what the check applies.
 work="$(mktemp -d "${TMPDIR:-/var/tmp}/keycloak-terraform-check.XXXXXX")"
-cp "$root"/*.tf "$root/.terraform.lock.hcl" "$work/"
+git -C "$repo" ls-files -z --cached --others --exclude-standard -- ':(glob)infra/keycloak/*.tf' |
+  (cd "$repo" && xargs -0 cp -t "$work/")
+cp "$root/.terraform.lock.hcl" "$work/"
 
 if [ -z "$("${compose[@]}" ps --status running --quiet keycloak-test)" ]; then
   started=1
@@ -87,7 +111,7 @@ esac
 
 terraform -chdir="$work" output -json >"$work/outputs.json"
 echo "--- comparing with the imported realm"
-PYTHONPATH="$repo/backend" "$repo/backend/.venv/bin/python" "$root/scripts/check_realm.py" \
+PYTHONPATH="$repo/backend" "$python" "$root/scripts/check_realm.py" \
   --base-url "$base_url" \
   --import-realm "$import_realm" \
   --terraform-realm "$terraform_realm" \
