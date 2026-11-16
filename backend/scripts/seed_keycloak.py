@@ -13,6 +13,8 @@ needed.
 
 Idempotent: skips if the ``keycloak`` provider already exists.
 
+Run it as a module from ``backend/``, so ``app`` is importable.
+
 Usage:
     DATABASE_URL=postgresql+asyncpg://... \
     KEYCLOAK_ISSUER_URL=http://keycloak.localhost:8180/realms/identity-stack \
@@ -28,13 +30,8 @@ import uuid as uuid_mod
 
 from sqlmodel import select
 
-# Ensure backend package is importable when run directly (not via -m)
-_backend_dir = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-if _backend_dir not in sys.path:
-    sys.path.insert(0, _backend_dir)
-
-from app.models.database import get_session_factory  # noqa: E402
-from app.models.identity.provider import Provider, ProviderType  # noqa: E402
+from app.models.database import get_session_factory
+from app.models.identity.provider import Provider, ProviderType
 
 logger = logging.getLogger(__name__)
 
