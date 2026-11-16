@@ -1,5 +1,13 @@
+from enum import Enum
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from py_identity_model import TokenValidationConfig
+from py_identity_model import (
+    ConfigurationException,
+    DiscoveryValidationError,
+    JwksValidationError,
+    NetworkException,
+    TokenValidationConfig,
+)
 from py_identity_model.aio import validate_token
 from py_identity_model.identity import ClaimsPrincipal
 
@@ -25,6 +33,14 @@ DESCOPE_PROJECT_ID = knob("DESCOPE_PROJECT_ID", "")
 # from the same config they use.
 DESCOPE = descope_config(DESCOPE_PROJECT_ID)
 
+# What stops ``POST /validate-id-token`` before the token is judged: the
+# provider's discovery document or JWKS cannot be fetched, was fetched and is
+# unusable, or the provider config itself is refused. None of them says
+# anything about the token, and none is a ``TokenValidationException``.
+PROVIDER_FAULTS = (NetworkException, DiscoveryValidationError, JwksValidationError, ConfigurationException)
+REFUSED_DETAIL = "Invalid or expired token"
+UNAVAILABLE_DETAIL = "Identity provider unavailable"
+
 # Providers eligible for just-in-time provisioning on first login. Ory is
 # greenfield (every user is JIT-provisioned); Descope users are pre-provisioned
 # via the seed, so Descope is intentionally excluded by default.
@@ -45,6 +61,23 @@ def _serialize_principal(principal: ClaimsPrincipal) -> dict:
             ],
         },
     }
+
+
+def _cause(exc: Exception) -> str:
+    """What to log about a failed validation: the error's type and what the library typed.
+
+    Never the message. The library quotes the token's header in it (``alg``,
+    which the caller chooses), and this route answers anyone. ``kind`` is an
+    enum member where the library sets one; ``status_code`` is the provider's
+    HTTP status on a failed fetch.
+    """
+    name = type(exc).__name__
+    kind = getattr(exc, "kind", None)
+    if isinstance(kind, Enum):
+        return f"{name} ({kind.value})"
+    if isinstance(exc, NetworkException):
+        return f"{name} (status {exc.status_code})"
+    return name
 
 
 @router.get("/me")
@@ -128,11 +161,13 @@ async def validate_id_token(request: Request, authorization: str = Header()):
             token_validation_config=config,
             disco_doc_address=DESCOPE.disco_address,
         )
+    except PROVIDER_FAULTS as exc:
+        logger.error("validate-id-token could not validate: %s", _cause(exc))
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_DETAIL) from exc
     except Exception as exc:
-        # Whatever stops validation refuses the token, as in
-        # TokenValidationMiddleware, with the body every token refusal gets; the
-        # cause stays in the log. Not narrowed to TokenValidationException: in
-        # discovery mode the library lets PyJWT's DecodeError out for a token
-        # that is not a JWT (identity-model#1179).
-        logger.warning("validate-id-token refused the token", exc_info=True)
-        raise HTTPException(status_code=401, detail="Invalid or expired token") from exc
+        # Anything else refuses the token, as in TokenValidationMiddleware, with
+        # the body every token refusal gets. Not narrowed to
+        # TokenValidationException: in discovery mode the library lets PyJWT's
+        # DecodeError out for a token that is not a JWT (identity-model#1179).
+        logger.warning("validate-id-token refused the token: %s", _cause(exc))
+        raise HTTPException(status_code=401, detail=REFUSED_DETAIL) from exc
