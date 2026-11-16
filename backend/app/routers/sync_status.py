@@ -7,7 +7,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.dependencies.identity import get_sync_status_service
-from app.dependencies.rbac import require_role
+from app.dependencies.rbac import require_global_role
 from app.errors.problem_detail import result_to_response
 from app.models.identity.sync_event import SyncEventVerb
 from app.services.sync_status import SyncStatusService
@@ -39,7 +39,7 @@ def _parse_verb(value: str | None) -> SyncEventVerb | None:
 @router.get("/sync/status")
 async def get_sync_status(
     request: Request,
-    _operator_roles: list[str] = Depends(require_role("operator")),
+    _operator_roles: list[str] = Depends(require_global_role("operator")),
     service: SyncStatusService = Depends(get_sync_status_service),
 ):
     """Aggregate per-provider sync state plus the most recent reconciliation timestamp."""
@@ -53,7 +53,7 @@ async def list_recent_events(
     limit: int = Query(default=50, ge=1, le=_MAX_EVENTS_LIMIT),
     provider: str | None = Query(default=None),
     verb: str | None = Query(default=None),
-    _operator_roles: list[str] = Depends(require_role("operator")),
+    _operator_roles: list[str] = Depends(require_global_role("operator")),
     service: SyncStatusService = Depends(get_sync_status_service),
 ):
     """Return the most recent inbound sync events ordered by occurred_at desc."""

@@ -34,13 +34,14 @@ from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
-from app.routers import accesskeys, documents, fga, permissions, roles, users
+from app.routers import accesskeys, canonical_users, documents, fga, permissions, roles, users
 from app.routers.protected import canonical_identity
 from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
 
 TENANT_ROUTE = "/api/probe/tenant"
 ADMIN_ROUTE = "/api/probe/admin"
+OPERATOR_ROUTE = "/api/probe/operator"
 NO_TENANT_FROM_GET_TENANT_ID = {"detail": "No tenant context — select a tenant first"}
 DESCOPE_PRINCIPALS_ONLY = {"detail": "No tenant context — select a tenant first"}
 
@@ -53,7 +54,15 @@ def _build_app(db_session, *, issuer: str, audience: str) -> FastAPI:
     app.state.limiter = limiter
     app.state.descope_client = AsyncMock()
     app.state.cache_publisher = MagicMock()
-    routers = (documents.router, users.router, accesskeys.router, roles.router, permissions.router, fga.router)
+    routers = (
+        documents.router,
+        users.router,
+        accesskeys.router,
+        roles.router,
+        permissions.router,
+        fga.router,
+        canonical_users.router,
+    )
     for router in routers:
         app.include_router(router, prefix="/api")
 
@@ -63,6 +72,10 @@ def _build_app(db_session, *, issuer: str, audience: str) -> FastAPI:
 
     @app.get(ADMIN_ROUTE)
     async def admin(tenant_id: str = Depends(get_tenant_id), roles: list[str] = Depends(require_role("admin"))):
+        return {"tenant_id": tenant_id, "roles": sorted(roles)}
+
+    @app.get(OPERATOR_ROUTE)
+    async def operator(tenant_id: str = Depends(get_tenant_id), roles: list[str] = Depends(require_role("operator"))):
         return {"tenant_id": tenant_id, "roles": sorted(roles)}
 
     async def _session():
@@ -309,3 +322,26 @@ async def test_ory_admin_of_one_of_two_tenants_cannot_reach_project_wide_state(d
     assert app.state.descope_client.mock_calls == []
     assert await _role_count(db_session) == roles_before
     assert await _permission_count(db_session) == permissions_before
+
+
+@pytest.mark.asyncio
+async def test_ory_operator_of_one_of_two_tenants_cannot_list_every_tenants_users(db_session, ory_token_source):
+    """The canonical user list belongs to no tenant: the header must not pick the tenant that opens it."""
+    app = _build_app(db_session, issuer=ory_token_source.issuer, audience=ory_token_source.audience)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        headers, _ = await _provisioned_ory_user(db_session, client, ory_token_source, "tenant-global")
+        operator_tenant = await _add_membership(
+            db_session, user_email=await _email_of(client, headers), role_name="operator"
+        )
+        selected = {**headers, TENANT_SELECTOR_HEADER: operator_tenant}
+
+        is_operator = await client.get(OPERATOR_ROUTE, headers=selected)
+        named = await client.get("/api/users", headers=selected)
+        unnamed = await client.get("/api/users", headers=headers)
+
+    # The caller is an operator of the tenant it names, so the refusal is the global gate's own.
+    assert is_operator.json() == {"tenant_id": operator_tenant, "roles": ["operator"]}
+    assert named.status_code == 403
+    assert named.json() == {"detail": "No tenant context"}
+    assert unnamed.status_code == 403
+    assert unnamed.json() == {"detail": "No tenant context"}

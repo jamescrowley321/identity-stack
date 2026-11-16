@@ -13,6 +13,12 @@ The routes over project-wide state that Descope holds or mirrors (the role and
 permission definitions, the FGA schema) take no tenant from ``get_tenant_id``
 but carry the same guard: a canonical principal who is an admin of any one of
 their tenants would otherwise change every tenant's definitions in Descope.
+
+The routes over state that belongs to no tenant and that Descope does not hold
+(every tenant's users, the provider records, the sync status) are gated by
+``require_global_role``, which lets no caller pick the tenant that answers with
+the ``X-Tenant-ID`` header. Every role-gated route is held to one of these
+shapes, so a new one has to choose.
 """
 
 import base64
@@ -24,7 +30,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from expression import Ok
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
@@ -32,8 +38,14 @@ from slowapi.errors import RateLimitExceeded
 
 from app.dependencies import rbac
 from app.dependencies.descope import require_descope_principal
-from app.dependencies.identity import get_permission_service, get_role_service
-from app.dependencies.rbac import get_rbac_session
+from app.dependencies.identity import (
+    get_permission_service,
+    get_provider_service,
+    get_role_service,
+    get_sync_status_service,
+    get_user_service,
+)
+from app.dependencies.rbac import get_rbac_session, require_global_role, require_permission, require_role
 from app.dependencies.tenant import get_tenant_id
 from app.main import app as shipped_app
 from app.middleware.claims import GatewayClaimsMiddleware
@@ -41,7 +53,10 @@ from app.middleware.providers import ProviderTokenConfig, TenantClaims, descope_
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.models.database import get_async_session
 from app.services.permission import PermissionService
+from app.services.provider import ProviderService
 from app.services.role import RoleService
+from app.services.sync_status import SyncStatusService
+from app.services.user import UserService
 
 DESCOPE_PROJECT = "P123"
 DESCOPE_ISSUER = f"https://api.descope.com/{DESCOPE_PROJECT}"
@@ -55,6 +70,8 @@ RESOURCE_ID = "33333333-3333-3333-3333-333333333333"
 ORY_SUB = "ory-subject-1"
 
 REFUSED = {"detail": "No tenant context — select a tenant first"}
+NO_TENANT = {"detail": "No tenant context"}
+NOT_GRANTED = {"detail": "Insufficient permissions"}
 
 # (method, path) of every route that hands the tenant or the subject to Descope.
 DESCOPE_TENANT_ROUTES: frozenset[tuple[str, str]] = frozenset(
@@ -117,6 +134,31 @@ DESCOPE_BACKED_ROUTES = DESCOPE_TENANT_ROUTES | DESCOPE_PROJECT_ROUTES
 PROVIDER_NEUTRAL_ROUTES: dict[tuple[str, str], str] = {}
 
 
+# (method, path) of every route over state that belongs to no tenant and is not
+# Descope's: one role in one tenant opens all of it, so the header picks nothing.
+GLOBAL_ROLE_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/api/users"),
+        ("GET", "/api/providers"),
+        ("POST", "/api/providers"),
+        ("PATCH", "/api/providers/{provider_id}"),
+        ("GET", "/api/providers/{provider_id}/capabilities"),
+        ("GET", "/api/sync/status"),
+        ("GET", "/api/events/recent"),
+    }
+)
+
+# (method, path) -> why a route gated by ``require_role`` or ``require_permission``
+# takes no tenant from ``get_tenant_id`` and carries no guard.
+SELF_SCOPED_ROLE_ROUTES: dict[tuple[str, str], str] = {
+    ("GET", "/api/users/{user_id}/idp-links"): "_require_user_in_tenant holds the user to the token's dct (#590)",
+    ("POST", "/api/users/{user_id}/idp-links"): "_require_user_in_tenant holds the user to the token's dct (#590)",
+    ("DELETE", "/api/users/{user_id}/idp-links/{link_id}"): (
+        "_require_user_in_tenant holds the user to the token's dct (#590)"
+    ),
+}
+
+
 def _dependency_calls(dependant: Dependant) -> Iterator[Callable]:
     for sub in dependant.dependencies:
         if sub.call is not None:
@@ -129,6 +171,18 @@ def _routes_depending_on(dependency: Callable) -> set[tuple[str, str]]:
         (method, route.path)
         for route in shipped_app.routes
         if isinstance(route, APIRoute) and dependency in _dependency_calls(route.dependant)
+        for method in route.methods
+    }
+
+
+def _routes_gated_by(*factories: Callable) -> set[tuple[str, str]]:
+    """(method, path) of every route that depends on a closure one of ``factories`` returned."""
+    prefixes = tuple(f"{factory.__name__}.<locals>." for factory in factories)
+    return {
+        (method, route.path)
+        for route in shipped_app.routes
+        if isinstance(route, APIRoute)
+        and any(getattr(call, "__qualname__", "").startswith(prefixes) for call in _dependency_calls(route.dependant))
         for method in route.methods
     }
 
@@ -162,6 +216,12 @@ DESCOPE_MEMBER = {
     "dct": "t1",
     "tenants": {"t1": {"roles": ["member"], "permissions": ["documents.read"]}},
 }
+DESCOPE_OPERATOR = {
+    "iss": DESCOPE_ISSUER,
+    "sub": "descope-operator",
+    "dct": "t1",
+    "tenants": {"t1": {"roles": ["operator"], "permissions": []}},
+}
 DESCOPE_ADMIN = {
     "iss": DESCOPE_ISSUER,
     "sub": "descope-admin",
@@ -172,6 +232,11 @@ FAKE_ADMIN = {"iss": FAKE_ISSUER, "sub": "fake-user", "org": "org-1", "org_roles
 
 
 SOLE_OWNER = [{"tenant_id": TENANT_A, "role_name": "owner", "permissions": ["documents.read"]}]
+SOLE_OPERATOR = [{"tenant_id": TENANT_A, "role_name": "operator", "permissions": []}]
+MEMBER_OF_A_OPERATOR_OF_B = [
+    {"tenant_id": TENANT_A, "role_name": "member", "permissions": []},
+    {"tenant_id": TENANT_B, "role_name": "operator", "permissions": []},
+]
 MEMBER_OF_A_ADMIN_OF_B = [
     {"tenant_id": TENANT_A, "role_name": "member", "permissions": []},
     {"tenant_id": TENANT_B, "role_name": "admin", "permissions": []},
@@ -213,7 +278,26 @@ def permission_service() -> AsyncMock:
 
 
 @pytest.fixture
-def client(store, descope_client, role_service, permission_service) -> TestClient:
+def user_service() -> AsyncMock:
+    service = AsyncMock(spec=UserService)
+    service.list_canonical_users.return_value = []
+    return service
+
+
+@pytest.fixture
+def provider_service() -> AsyncMock:
+    return AsyncMock(spec=ProviderService)
+
+
+@pytest.fixture
+def sync_status_service() -> AsyncMock:
+    return AsyncMock(spec=SyncStatusService)
+
+
+@pytest.fixture
+def client(
+    store, descope_client, role_service, permission_service, user_service, provider_service, sync_status_service
+) -> TestClient:
     """Every shipped route behind the shipped gateway middleware; only the stores are stubs."""
     limiter.reset()
     app = FastAPI()
@@ -230,6 +314,9 @@ def client(store, descope_client, role_service, permission_service) -> TestClien
     app.dependency_overrides[get_async_session] = _session
     app.dependency_overrides[get_role_service] = lambda: role_service
     app.dependency_overrides[get_permission_service] = lambda: permission_service
+    app.dependency_overrides[get_user_service] = lambda: user_service
+    app.dependency_overrides[get_provider_service] = lambda: provider_service
+    app.dependency_overrides[get_sync_status_service] = lambda: sync_status_service
     app.add_middleware(
         GatewayClaimsMiddleware,
         providers=[descope_config(DESCOPE_PROJECT), ory_config(ORY_ISSUER, ORY_AUDIENCE), FAKE_PROVIDER],
@@ -243,6 +330,7 @@ def _url(path: str) -> str:
         .replace("{target_user_id}", "someone")
         .replace("{user_id}", "someone")
         .replace("{key_id}", "key-1")
+        .replace("{provider_id}", RESOURCE_ID)
         .replace("{name}", "editor")
     )
 
@@ -259,6 +347,21 @@ class TestTheRegisters:
 
     def test_no_route_is_in_both(self):
         assert DESCOPE_BACKED_ROUTES & set(PROVIDER_NEUTRAL_ROUTES) == set()
+
+    def test_the_global_gate_is_on_exactly_the_global_routes(self):
+        assert _routes_gated_by(require_global_role) == GLOBAL_ROLE_ROUTES
+
+    def test_a_global_route_has_no_tenant_gate_beside_it(self):
+        tenant_scoped = _routes_depending_on(get_tenant_id) | _routes_gated_by(require_role, require_permission)
+
+        assert GLOBAL_ROLE_ROUTES & tenant_scoped == set()
+
+    def test_every_tenant_gated_route_resolves_its_tenant_or_is_guarded_or_says_why(self):
+        """A new route behind ``require_role`` alone fails here until it chooses."""
+        gated = _routes_gated_by(require_role, require_permission)
+        accounted_for = _routes_depending_on(get_tenant_id) | _routes_depending_on(require_descope_principal)
+
+        assert gated - accounted_for == set(SELF_SCOPED_ROLE_ROUTES)
 
 
 class TestACanonicalProviderPrincipalIsRefused:
@@ -391,6 +494,133 @@ class TestProjectWideStateIsDescopeBacked:
         assert response.status_code == 403
         assert response.json() != REFUSED
         assert role_service.mock_calls == []
+
+
+class TestStateThatBelongsToNoTenant:
+    """One role in one tenant opens every tenant's users, the provider records and the sync status."""
+
+    @pytest.mark.parametrize(("method", "path"), sorted(GLOBAL_ROLE_ROUTES))
+    def test_an_operator_of_one_of_several_tenants_cannot_name_it_with_the_header(
+        self, client, store, user_service, provider_service, sync_status_service, method, path
+    ):
+        store.roles = MEMBER_OF_A_OPERATOR_OF_B
+
+        response = client.request(method, _url(path), headers={**_bearer(ORY_OWNER), "X-Tenant-ID": TENANT_B})
+
+        assert response.status_code == 403
+        assert response.json() == NO_TENANT
+        assert user_service.mock_calls == []
+        assert provider_service.mock_calls == []
+        assert sync_status_service.mock_calls == []
+
+    def test_the_header_does_name_that_tenant_on_a_tenant_scoped_gate(self, store):
+        """The caller above is an operator where the header points: only the global gate refuses them."""
+        store.roles = MEMBER_OF_A_OPERATOR_OF_B
+        app = FastAPI()
+
+        @app.get("/tenant-scoped")
+        async def tenant_scoped(roles: list[str] = Depends(require_role("operator"))):
+            return {"roles": roles}
+
+        async def _session():
+            yield MagicMock()
+
+        app.dependency_overrides[get_rbac_session] = _session
+        app.add_middleware(GatewayClaimsMiddleware, providers=[ory_config(ORY_ISSUER, ORY_AUDIENCE)])
+
+        response = TestClient(app).get("/tenant-scoped", headers={**_bearer(ORY_OWNER), "X-Tenant-ID": TENANT_B})
+
+        assert response.status_code == 200
+        assert response.json() == {"roles": ["operator"]}
+
+    def test_several_memberships_and_no_header_are_refused(self, client, store, user_service):
+        store.roles = MEMBER_OF_A_OPERATOR_OF_B
+
+        response = client.get("/api/users", headers=_bearer(ORY_OWNER))
+
+        assert response.status_code == 403
+        assert response.json() == NO_TENANT
+        assert user_service.mock_calls == []
+
+    def test_an_operator_by_their_sole_membership_is_served(self, client, store):
+        store.roles = SOLE_OPERATOR
+
+        response = client.get("/api/users", headers=_bearer(ORY_OWNER))
+
+        assert response.status_code == 200
+        assert response.json() == {"users": []}
+
+    def test_a_sole_membership_named_by_the_header_is_served(self, client, store):
+        """The header picks nothing here, but a request that names the caller's one tenant is not wrong."""
+        store.roles = SOLE_OPERATOR
+
+        response = client.get("/api/users", headers={**_bearer(ORY_OWNER), "X-Tenant-ID": TENANT_A})
+
+        assert response.status_code == 200
+        assert response.json() == {"users": []}
+
+    def test_a_header_naming_another_tenant_is_refused_even_with_one_membership(self, client, store, user_service):
+        store.roles = SOLE_OPERATOR
+
+        response = client.get("/api/users", headers={**_bearer(ORY_OWNER), "X-Tenant-ID": TENANT_B})
+
+        assert response.status_code == 403
+        assert response.json() == NO_TENANT
+        assert user_service.mock_calls == []
+
+    def test_a_dct_on_the_token_selects_as_it_did_before_the_header(self, client, store):
+        store.roles = MEMBER_OF_A_OPERATOR_OF_B
+
+        response = client.get("/api/users", headers=_bearer({**ORY_OWNER, "dct": TENANT_B}))
+
+        assert response.status_code == 200
+        assert response.json() == {"users": []}
+
+    def test_a_dct_and_a_header_together_are_refused_with_several_memberships(self, client, store, user_service):
+        store.roles = MEMBER_OF_A_OPERATOR_OF_B
+
+        response = client.get(
+            "/api/users", headers={**_bearer({**ORY_OWNER, "dct": TENANT_B}), "X-Tenant-ID": TENANT_B}
+        )
+
+        assert response.status_code == 403
+        assert response.json() == NO_TENANT
+        assert user_service.mock_calls == []
+
+    def test_a_sole_membership_without_the_role_is_refused(self, client, store, user_service):
+        response = client.get("/api/users", headers=_bearer(ORY_OWNER))
+
+        assert response.status_code == 403
+        assert response.json() == NOT_GRANTED
+        assert user_service.mock_calls == []
+
+    def test_a_descope_operator_is_served_from_its_claims(self, client, store):
+        response = client.get("/api/users", headers={**_bearer(DESCOPE_OPERATOR), "X-Tenant-ID": TENANT_B})
+
+        assert response.status_code == 200
+        assert response.json() == {"users": []}
+        assert store.calls == []
+
+    def test_a_descope_member_is_refused(self, client, user_service):
+        response = client.get("/api/users", headers=_bearer(DESCOPE_MEMBER))
+
+        assert response.status_code == 403
+        assert response.json() == NOT_GRANTED
+        assert user_service.mock_calls == []
+
+    def test_the_refusal_is_logged_with_the_caller_and_not_the_tenant(self, client, store, caplog):
+        store.roles = MEMBER_OF_A_OPERATOR_OF_B
+
+        with caplog.at_level("WARNING", logger="app.dependencies.tenant_access"):
+            client.get("/api/users", headers={**_bearer(ORY_OWNER), "X-Tenant-ID": TENANT_B})
+
+        (message,) = [
+            record.getMessage() for record in caplog.records if record.name == "app.dependencies.tenant_access"
+        ]
+        assert message == (
+            f"tenant selection refused: provider=Ory sub={ORY_SUB!r} named one of several tenants "
+            "on a route whose state belongs to no tenant"
+        )
 
 
 def _hand_built_request(**state: object) -> SimpleNamespace:

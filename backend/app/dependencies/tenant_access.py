@@ -12,6 +12,9 @@
    canonical memberships already name, and a tenant outside them is refused.
 3. **The caller's sole canonical membership**, when the request selects nothing.
 
+On a route whose state belongs to no tenant (``require_global_role``) the header
+chooses nothing: a caller with several memberships who sends it is refused.
+
 Anything else is 403. Nothing here does I/O: the canonical memberships are loaded
 by ``app.dependencies.rbac`` and passed in.
 """
@@ -174,9 +177,13 @@ def _selected_tenants(request: Request, claims: dict) -> tuple[list[str], set[st
     return by_header, by_claim
 
 
-def _canonical_tenant(request: Request, claims: dict, memberships: CanonicalMemberships) -> str | None:
+def _canonical_tenant(
+    request: Request, claims: dict, memberships: CanonicalMemberships, *, header_selects: bool
+) -> str | None:
     """The one tenant a canonical-provider request is for, or ``None`` when there is not exactly one.
 
+    With ``header_selects`` off, a header from a caller with several memberships
+    is refused: it may name the caller's one tenant but never choose among them.
     A refusal of something the request itself selected is logged with the
     provider and the subject, never with the value it sent.
     """
@@ -186,6 +193,13 @@ def _canonical_tenant(request: Request, claims: dict, memberships: CanonicalMemb
     if not selected:
         # Nothing selected: only a sole membership is unambiguous.
         return next(iter(tenant_ids)) if len(tenant_ids) == 1 else None
+    if by_header and not header_selects and len(tenant_ids) != 1:
+        logger.warning(
+            "tenant selection refused: provider=%s sub=%r named one of several tenants "
+            "on a route whose state belongs to no tenant",
+            *_caller(request, claims),
+        )
+        return None
     if len(by_header) > 1:
         logger.warning(
             "tenant selection refused: provider=%s sub=%r sent more than one tenant selector",
@@ -214,12 +228,15 @@ def resolve_tenant_access(
     memberships: CanonicalMemberships | None,
     *,
     no_tenant_detail: str = NO_TENANT_CONTEXT,
+    header_selects: bool = True,
 ) -> TenantAccess:
     """Resolve the request's tenant and the caller's roles and permissions in it.
 
     ``memberships`` is the caller's canonical memberships when the request's
     provider is authorized from the canonical model, and ``None`` for every other
-    provider. Raises 403 with ``no_tenant_detail`` on every branch that does not
+    provider. ``header_selects`` is off for a route whose state belongs to no
+    tenant: there the ``X-Tenant-ID`` header may not choose among several
+    memberships. Raises 403 with ``no_tenant_detail`` on every branch that does not
     end at exactly one tenant.
     """
     if memberships is None:
@@ -228,7 +245,7 @@ def resolve_tenant_access(
             raise HTTPException(status_code=403, detail=no_tenant_detail)
         return TenantAccess(tenant_id=claimed.tenant_id, roles=claimed.roles, permissions=claimed.permissions)
 
-    tenant_id = _canonical_tenant(request, claims, memberships)
+    tenant_id = _canonical_tenant(request, claims, memberships, header_selects=header_selects)
     if tenant_id is None:
         raise HTTPException(status_code=403, detail=no_tenant_detail)
     grants = [grant for grant in memberships.grants if grant.tenant_id == tenant_id]
