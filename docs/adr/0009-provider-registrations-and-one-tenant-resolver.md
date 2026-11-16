@@ -51,7 +51,12 @@ refused on every role-gated route.
   longer what an unlisted provider falls back to, so a `dct` on another provider's token
   grants nothing.
 - A canonical-provider user with one membership now gets a tenant from `get_tenant_id`.
-  A user with several must send the header, and the SPA has to send it.
+  A user with several must send the header. Nothing shipped sends it yet: the SPA's tenant
+  switcher does not, so from the SPA such a user is still refused on every tenant-scoped
+  route, as before this decision. The switcher sends it with the Zitadel frontend work
+  (#568); until then the header serves API clients. Nothing between a client and the
+  backend drops it: the Tyk API definition (`tyk/apps/saas-backend.json`) transforms and
+  removes no request header, and the backend's CORS policy allows every request header.
 - `get_tenant_id` now depends on the canonical memberships. For a Descope principal that
   dependency returns without opening a session or touching the database. For a canonical
   provider it opens a session for the one read, and the memberships are shared by the
@@ -66,7 +71,12 @@ refused on every role-gated route.
   two registers, Descope-backed or provider-neutral, so a new route has to choose.
   `POST /api/roles/assign` and `/api/roles/remove` are Descope-backed too: they write
   canonical rows, but `RoleService` mirrors each assignment to Descope with the canonical
-  user and tenant ids. No shipped route is provider-neutral yet. The first will be one
+  user and tenant ids. The routes over state that belongs to the whole Descope project
+  carry the guard as well: the role and permission definitions, which the services mirror
+  to Descope, and the FGA schema. `require_role` answers for one tenant, and the selector
+  lets a canonical principal with several memberships name the one they administer, which
+  would have reached those routes where the sole-membership rule used to refuse them. The
+  project-level grant they need is #593. No shipped route is provider-neutral yet. The first will be one
   whose service is given a sync adapter chosen by the caller's provider.
 - Descope cannot be listed in `CANONICAL_RBAC_PROVIDERS`. A provider that is both
   `descope_managed` and canonical would pass the guard and hand Descope a canonical
