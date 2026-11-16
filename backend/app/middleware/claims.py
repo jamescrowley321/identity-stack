@@ -159,6 +159,10 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
             request.state.provider = provider
             request.state.tenant_id = claimed_tenant_id(claims, provider)
         except Exception:
+            # Covers a payload that cannot be decoded, a principal that cannot be
+            # built and a claims extractor that raises. The cause is logged here
+            # only: the body is the same 401 as every other rejection.
+            logger.warning("GatewayClaims rejected: the token could not be read", exc_info=True)
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
         return await call_next(request)

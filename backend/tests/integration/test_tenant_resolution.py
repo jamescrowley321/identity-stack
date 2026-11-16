@@ -8,10 +8,12 @@ signature and SQL.
 """
 
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import func, select
 
 from app.dependencies.identity import get_identity_provisioning_service, get_identity_resolution_service
 from app.dependencies.rbac import get_rbac_session, require_role
@@ -19,6 +21,9 @@ from app.dependencies.tenant import get_tenant_id
 from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.providers import descope_config, ory_config
+from app.middleware.rate_limit import limiter
+from app.models.database import get_async_session
+from app.models.document import Document
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.role import Role
@@ -29,6 +34,7 @@ from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
+from app.routers import accesskeys, documents, users
 from app.routers.protected import canonical_identity
 from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
@@ -36,12 +42,18 @@ from app.services.identity_resolution import IdentityResolutionService
 TENANT_ROUTE = "/api/probe/tenant"
 ADMIN_ROUTE = "/api/probe/admin"
 NO_TENANT_FROM_GET_TENANT_ID = {"detail": "No tenant context — select a tenant first"}
+DESCOPE_PRINCIPALS_ONLY = {"detail": "No tenant context — select a tenant first"}
 
 
 def _build_app(db_session, *, issuer: str, audience: str) -> FastAPI:
     """The shipped middleware and dependencies on the test transaction."""
     app = FastAPI()
     app.add_api_route("/api/identity", canonical_identity, methods=["GET"])
+    # The shipped Descope-backed routers, over a Descope client that records its calls.
+    app.state.limiter = limiter
+    app.state.descope_client = AsyncMock()
+    for router in (documents.router, users.router, accesskeys.router):
+        app.include_router(router, prefix="/api")
 
     @app.get(TENANT_ROUTE)
     async def tenant(tenant_id: str = Depends(get_tenant_id)):
@@ -79,6 +91,7 @@ def _build_app(db_session, *, issuer: str, audience: str) -> FastAPI:
     app.dependency_overrides[get_identity_resolution_service] = _resolver
     app.dependency_overrides[get_identity_provisioning_service] = _provisioner
     app.dependency_overrides[get_rbac_session] = _session
+    app.dependency_overrides[get_async_session] = _session
     app.add_middleware(
         TokenValidationMiddleware,
         providers=[descope_config(""), ory_config(issuer, audience)],
@@ -116,6 +129,10 @@ async def _add_membership(db_session, *, user_email: str, role_name: str) -> str
     db_session.add(UserTenantRole(user_id=user.id, tenant_id=tenant.id, role_id=role.id))
     await db_session.flush()
     return str(tenant.id)
+
+
+async def _document_count(db_session) -> int:
+    return (await db_session.execute(select(func.count()).select_from(Document))).scalar_one()
 
 
 async def _email_of(client: AsyncClient, headers: dict) -> str:
@@ -179,3 +196,37 @@ async def test_selecting_a_tenant_the_caller_is_not_in_is_refused(db_session, or
     assert tenant.json() == NO_TENANT_FROM_GET_TENANT_ID
     assert admin.status_code == 403
     assert admin.json() == NO_TENANT_FROM_GET_TENANT_ID
+
+
+@pytest.mark.asyncio
+async def test_ory_principal_is_refused_on_the_descope_backed_routes(db_session, ory_token_source):
+    """Its sole membership names a canonical tenant, which is nothing Descope can be asked about."""
+    app = _build_app(db_session, issuer=ory_token_source.issuer, audience=ory_token_source.audience)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        headers, tenant_id = await _provisioned_ory_user(db_session, client, ory_token_source, "tenant-descope")
+        selected = {**headers, TENANT_SELECTOR_HEADER: tenant_id}
+        documents_before = await _document_count(db_session)
+
+        resolved = await client.get(TENANT_ROUTE, headers=selected)
+        created = await client.post("/api/documents", json={"title": "a title", "content": "text"}, headers=selected)
+        listed = await client.get("/api/documents", headers=selected)
+        members = await client.get("/api/members", headers=selected)
+        keys = await client.get("/api/keys", headers=selected)
+
+    # The tenant resolves for this caller, so each refusal below is the route's own.
+    assert resolved.json() == {"tenant_id": tenant_id}
+    refusals = {"create": created, "list": listed, "members": members, "keys": keys}
+    assert {name: response.status_code for name, response in refusals.items()} == {
+        "create": 403,
+        "list": 403,
+        "members": 403,
+        "keys": 403,
+    }
+    assert {name: response.json() for name, response in refusals.items()} == {
+        "create": DESCOPE_PRINCIPALS_ONLY,
+        "list": DESCOPE_PRINCIPALS_ONLY,
+        "members": DESCOPE_PRINCIPALS_ONLY,
+        "keys": DESCOPE_PRINCIPALS_ONLY,
+    }
+    assert app.state.descope_client.mock_calls == []
+    assert await _document_count(db_session) == documents_before

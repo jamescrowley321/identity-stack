@@ -4,14 +4,16 @@ from expression import Ok
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from app.dependencies.descope import get_descope_management
+from app.dependencies.descope import get_descope_management, require_descope_principal
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
 from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.descope_management import DescopeManagementAdapter
 
-router = APIRouter(tags=["Access Keys"])
+# Every route here hands the tenant id or the caller's ``sub`` to Descope, so the
+# router serves Descope principals only (conventions §18).
+router = APIRouter(tags=["Access Keys"], dependencies=[Depends(require_descope_principal)])
 
 # Longest lifetime an access key may be given, in seconds. `expireTime` is epoch
 # seconds and Descope treats 0 (and an absent value) as "never expires", so

@@ -1,5 +1,8 @@
+from typing import NamedTuple
+
 from py_identity_model import TokenValidationConfig, to_principal
 from py_identity_model.aio import validate_token
+from py_identity_model.identity import ClaimsPrincipal
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -17,6 +20,15 @@ from app.middleware.providers import (
 )
 
 logger = logbook(__name__)
+
+
+class _Authenticated(NamedTuple):
+    """Everything authentication puts on ``request.state``, built before any of it is set."""
+
+    claims: dict
+    provider: ProviderTokenConfig
+    principal: ClaimsPrincipal
+    tenant_id: str | None
 
 
 class TokenValidationMiddleware(BaseHTTPMiddleware):
@@ -78,12 +90,15 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
 
         token = auth_header.removeprefix("Bearer ")
 
-        # Authentication is the ONLY thing guarded by this try. ``call_next`` is
-        # deliberately outside it: a downstream failure (database, upstream
-        # provider, application bug) must surface as its own status code, not be
-        # relabelled "Invalid or expired token". Wrapping the request handling in
-        # the authentication except-clause reported every unhandled 500 as a 401
-        # and made real outages read as auth failures.
+        # Authentication is the ONLY thing guarded by this try, and ALL of it is:
+        # validating the token, building the principal and reading the tenant
+        # with the provider's extractor happen inside ``_authenticate``, so a
+        # failure in any of them is the uniform 401, as it is in gateway mode.
+        # ``call_next`` is deliberately outside it: a downstream failure
+        # (database, upstream provider, application bug) must surface as its own
+        # status code, not be relabelled "Invalid or expired token". Wrapping the
+        # request handling in the authentication except-clause reported every
+        # unhandled 500 as a 401 and made real outages read as auth failures.
         try:
             authenticated = await self._authenticate(token)
         except Exception:
@@ -101,20 +116,21 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
             logger.warning("rejecting request: no configured provider accepted the token")
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
-        claims, provider = authenticated
-        request.state.claims = claims
-        request.state.principal = to_principal(claims, provider.name)
+        request.state.claims = authenticated.claims
+        request.state.principal = authenticated.principal
         # The provider is recorded for the tenant resolver, which reads the
         # tenant and the grants with this provider's own extractor (conventions §18).
-        request.state.provider = provider
-        request.state.tenant_id = claimed_tenant_id(claims, provider)
+        request.state.provider = authenticated.provider
+        request.state.tenant_id = authenticated.tenant_id
         return await call_next(request)
 
-    async def _authenticate(self, token: str) -> tuple[dict, ProviderTokenConfig] | None:
+    async def _authenticate(self, token: str) -> _Authenticated | None:
         """Validate ``token`` against the configured providers.
 
-        Returns the accepted claims and the provider that accepted them, or None
-        when no configured provider accepts the token.
+        Returns the accepted claims, the provider that accepted them, and the
+        principal and the tenant read from them, or None when no configured
+        provider accepts the token. Raises when the principal cannot be built or
+        the provider's claims extractor fails: the caller answers both with 401.
         """
         iss_hint = unverified_issuer(token)
         for provider in order_candidates(self._providers, iss_hint):
@@ -162,6 +178,11 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
                 return None
 
             infer_single_tenant_dct(claims, provider)
-            return claims, provider
+            return _Authenticated(
+                claims=claims,
+                provider=provider,
+                principal=to_principal(claims, provider.name),
+                tenant_id=claimed_tenant_id(claims, provider),
+            )
 
         return None

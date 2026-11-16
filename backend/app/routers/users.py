@@ -2,14 +2,16 @@ from expression import Ok
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
 
-from app.dependencies.descope import require_descope_management
+from app.dependencies.descope import require_descope_management, require_descope_principal
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
 from app.errors.identity import Conflict, IdentityError, ValidationError
 from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 
-router = APIRouter(tags=["Users"])
+# Every route here hands the tenant id or the caller's ``sub`` to Descope, so the
+# router serves Descope principals only (conventions §18).
+router = APIRouter(tags=["Users"], dependencies=[Depends(require_descope_principal)])
 
 
 class InviteUserRequest(BaseModel):

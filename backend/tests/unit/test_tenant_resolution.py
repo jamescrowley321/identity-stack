@@ -15,16 +15,18 @@ import base64
 import json
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from expression import Error, Ok
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from starlette.datastructures import Headers
 
 from app.dependencies import rbac
 from app.dependencies.rbac import get_rbac_session, require_permission, require_role
 from app.dependencies.tenant import get_tenant_id
-from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER
+from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER, resolve_tenant_access
 from app.errors.identity import NotFound
 from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.providers import (
@@ -46,6 +48,8 @@ FAKE_ISSUER = "https://fake.example.test"
 TENANT_A = "11111111-1111-1111-1111-111111111111"
 TENANT_B = "22222222-2222-2222-2222-222222222222"
 TENANT_C = "33333333-3333-3333-3333-333333333333"
+# One with hex letters, so its upper-case spelling differs from the stored one.
+TENANT_D = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 ORY_SUB = "ory-subject-1"
 
 NO_TENANT_FROM_GET_TENANT_ID = {"detail": "No tenant context — select a tenant first"}
@@ -132,7 +136,13 @@ def store(monkeypatch) -> _CanonicalStore:
     return canonical
 
 
-def _app(*, database: bool = True, providers: list[ProviderTokenConfig] | None = None) -> FastAPI:
+def _app(
+    *,
+    database: bool = True,
+    providers: list[ProviderTokenConfig] | None = None,
+    opened: list[str] | None = None,
+) -> FastAPI:
+    """``opened`` gets one entry each time the canonical-resolution session is opened."""
     app = FastAPI()
 
     @app.get("/tenant")
@@ -155,6 +165,8 @@ def _app(*, database: bool = True, providers: list[ProviderTokenConfig] | None =
         return {"permissions": sorted(held)}
 
     async def _session():
+        if opened is not None:
+            opened.append("session")
         yield object() if database else None
 
     app.dependency_overrides[get_rbac_session] = _session
@@ -308,6 +320,48 @@ class TestTenantSelector:
 
         assert response.json() == {"tenant_id": TENANT_B, "roles": ["member"]}
 
+    @pytest.mark.parametrize(
+        "spelling",
+        [
+            TENANT_D.upper(),
+            f"{{{TENANT_D}}}",
+            f"urn:uuid:{TENANT_D}",
+            TENANT_D.replace("-", ""),
+        ],
+    )
+    def test_another_spelling_of_the_same_uuid_selects_the_same_tenant(self, client, store, spelling):
+        store.holds((TENANT_A, "admin", []), (TENANT_D, "member", []))
+
+        response = _get(client, "/roles", _ory(), selector=spelling)
+
+        assert response.status_code == 200
+        assert response.json() == {"tenant_id": TENANT_D, "roles": ["member"]}
+
+    def test_another_spelling_of_a_tenant_the_caller_is_not_in_is_still_refused(self, client, store):
+        store.holds((TENANT_A, "admin", []))
+
+        response = _get(client, "/admin", _ory(), selector=TENANT_D.upper())
+
+        assert response.status_code == 403
+        assert response.json() == NO_TENANT_FROM_RBAC
+
+    def test_a_selector_that_is_not_a_uuid_is_compared_as_it_is(self, client, store):
+        store.holds(("tenant-plain", "admin", []), (TENANT_A, "member", []))
+
+        exact = _get(client, "/roles", _ory(), selector="tenant-plain")
+        other_case = _get(client, "/roles", _ory(), selector="TENANT-PLAIN")
+
+        assert exact.json() == {"tenant_id": "tenant-plain", "roles": ["admin"]}
+        assert other_case.status_code == 403
+        assert other_case.json() == NO_TENANT_FROM_GET_TENANT_ID
+
+    def test_an_upper_case_selector_and_a_dct_for_the_same_tenant_agree(self, client, store):
+        store.holds((TENANT_A, "admin", []), (TENANT_D, "member", []))
+
+        response = _get(client, "/roles", _ory(dct=TENANT_D), selector=TENANT_D.upper())
+
+        assert response.json() == {"tenant_id": TENANT_D, "roles": ["member"]}
+
     @pytest.mark.parametrize("selector", ["", "   "])
     def test_an_empty_selector_is_refused_even_with_one_membership(self, client, store, selector):
         store.holds((TENANT_A, "admin", []))
@@ -322,6 +376,14 @@ class TestTenantSelector:
         store.holds((TENANT_A, "admin", []), (TENANT_B, "member", []))
 
         response = _get(client, "/admin", _ory(), selector=TENANT_A, extra_headers=[(TENANT_SELECTOR_HEADER, TENANT_B)])
+
+        assert response.status_code == 403
+        assert response.json() == NO_TENANT_FROM_RBAC
+
+    def test_a_selector_repeated_with_one_value_is_refused_too(self, client, store):
+        store.holds((TENANT_A, "admin", []), (TENANT_B, "member", []))
+
+        response = _get(client, "/admin", _ory(), selector=TENANT_A, extra_headers=[(TENANT_SELECTOR_HEADER, TENANT_A)])
 
         assert response.status_code == 403
         assert response.json() == NO_TENANT_FROM_RBAC
@@ -361,6 +423,48 @@ class TestOneCanonicalReadPerRequest:
         assert response.status_code == 403
         assert response.json() == INSUFFICIENT
         assert store.calls == [("ory", ORY_SUB), ("ory", ORY_SUB)]
+
+
+class TestTheCanonicalSessionIsOpenedOnlyWhenItIsRead:
+    """``get_tenant_id`` costs a claims-decided request no session and no canonical read."""
+
+    DESCOPE_CLAIMS = {"dct": "t1", "tenants": {"t1": {"roles": ["member"]}}}
+
+    def test_a_descope_request_opens_no_session_and_reads_nothing(self, store):
+        opened: list[str] = []
+
+        response = _get(TestClient(_app(opened=opened)), "/tenant", _descope(**self.DESCOPE_CLAIMS))
+
+        assert response.json() == {"tenant_id": "t1"}
+        assert opened == []
+        assert store.calls == []
+
+    def test_a_provider_with_its_own_extractor_opens_no_session(self, store):
+        opened: list[str] = []
+
+        response = _get(TestClient(_app(opened=opened)), "/tenant", _fake(org="org-1"))
+
+        assert response.json() == {"tenant_id": "org-1"}
+        assert opened == []
+        assert store.calls == []
+
+    def test_an_unauthorized_provider_opens_no_session(self, store):
+        opened: list[str] = []
+
+        response = _get(TestClient(_app(opened=opened)), "/tenant", _keycloak())
+
+        assert response.status_code == 403
+        assert opened == []
+
+    def test_a_canonical_request_opens_one_session_for_its_one_read(self, store):
+        store.holds((TENANT_A, "member", []))
+        opened: list[str] = []
+
+        response = _get(TestClient(_app(opened=opened)), "/tenant", _ory())
+
+        assert response.json() == {"tenant_id": TENANT_A}
+        assert opened == ["session"]
+        assert store.calls == [("ory", ORY_SUB)]
 
 
 class TestDescopeIsDecidedFromItsOwnClaims:
@@ -473,3 +577,79 @@ class TestProviderRecordedByTheMiddleware:
 
         assert response.status_code == 403
         assert response.json() == NO_TENANT_FROM_RBAC
+
+
+def _raising_tenant_claims(claims: dict) -> TenantClaims:
+    raise KeyError("org")
+
+
+def _attributed_request(provider: ProviderTokenConfig) -> SimpleNamespace:
+    """A request the middleware attributed to ``provider``, with no selector header."""
+    return SimpleNamespace(state=SimpleNamespace(provider=provider), headers=Headers())
+
+
+class TestAnExtractorTheResolverCannotUse:
+    """The resolver fails closed by itself, whatever the middleware let through."""
+
+    def test_an_extractor_that_raises_is_refused(self):
+        request = _attributed_request(replace(FAKE_PROVIDER, tenant_claims=_raising_tenant_claims))
+
+        with pytest.raises(HTTPException) as refused:
+            resolve_tenant_access(request, _fake(org="org-1"), None)
+
+        assert refused.value.status_code == 403
+        assert refused.value.detail == "No tenant context"
+
+    @pytest.mark.parametrize("tenant_id", [7, ["org-1"], {"id": "org-1"}, True, ""])
+    def test_a_tenant_that_is_not_a_non_empty_string_is_refused(self, tenant_id):
+        request = _attributed_request(FAKE_PROVIDER)
+
+        with pytest.raises(HTTPException) as refused:
+            resolve_tenant_access(request, _fake(org=tenant_id, org_roles=["admin"]), None)
+
+        assert refused.value.status_code == 403
+        assert refused.value.detail == "No tenant context"
+
+    def test_a_well_formed_answer_is_returned(self):
+        request = _attributed_request(FAKE_PROVIDER)
+
+        access = resolve_tenant_access(request, _fake(org="org-1", org_roles=["admin"]), None)
+
+        assert (access.tenant_id, access.roles, access.permissions) == ("org-1", ["admin"], [])
+
+
+class TestRefusalsAreLoggedWithTheCaller:
+    """The log names who was refused and why; the 403 body says neither."""
+
+    def test_a_tenant_the_caller_is_not_in(self, client, store, caplog):
+        store.holds((TENANT_A, "admin", []))
+
+        with caplog.at_level("WARNING", logger="app.dependencies.tenant_access"):
+            _get(client, "/admin", _ory(), selector=TENANT_C)
+
+        (record,) = caplog.records
+        assert record.getMessage() == (
+            f"tenant selection refused: provider=Ory sub={ORY_SUB!r} holds no membership in the tenant it names"
+        )
+
+    def test_a_header_and_a_dct_that_disagree(self, client, store, caplog):
+        store.holds((TENANT_A, "admin", []), (TENANT_B, "member", []))
+
+        with caplog.at_level("WARNING", logger="app.dependencies.tenant_access"):
+            _get(client, "/admin", _ory(dct=TENANT_B), selector=TENANT_A)
+
+        (record,) = caplog.records
+        assert record.getMessage() == (
+            f"tenant selection refused: provider=Ory sub={ORY_SUB!r} sent a header that disagrees with the token's dct"
+        )
+
+    def test_a_repeated_header(self, client, store, caplog):
+        store.holds((TENANT_A, "admin", []), (TENANT_B, "member", []))
+
+        with caplog.at_level("WARNING", logger="app.dependencies.tenant_access"):
+            _get(client, "/admin", _ory(), selector=TENANT_A, extra_headers=[(TENANT_SELECTOR_HEADER, TENANT_B)])
+
+        (record,) = caplog.records
+        assert record.getMessage() == (
+            f"tenant selection refused: provider=Ory sub={ORY_SUB!r} sent more than one tenant selector"
+        )
