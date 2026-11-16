@@ -15,6 +15,7 @@ from app.middleware.providers import (
     build_provider_configs,
     claimed_tenant_id,
     infer_single_tenant_dct,
+    library_token_issuers,
     order_candidates,
     token_kind_rejected,
     unverified_issuer,
@@ -135,18 +136,20 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
         """
         iss_hint = unverified_issuer(token)
         for provider in order_candidates(self._providers, iss_hint):
-            # Validate the signature against this provider's JWKS. Issuer and
-            # audience are checked manually below (Descope disables the library
-            # checks because session tokens use a non-discovery issuer and omit
-            # aud); Ory could use the library checks, but the manual path is
-            # uniform and equivalent. ``algorithms`` is the provider's allowlist,
-            # which the library enforces on the token's header ``alg``; None
-            # accepts the library's default asymmetric algorithms.
+            # Validate the signature against this provider's JWKS. The library
+            # always checks ``iss`` in discovery mode: against the discovery
+            # issuer, or against ``token_issuers`` for a provider that signs
+            # several issuer values with one key set (Descope; see
+            # ``library_token_issuers``). The audience is checked below
+            # (Descope session tokens omit ``aud``), so none is passed and the
+            # library's check is off. ``algorithms`` is the provider's
+            # allowlist, which the library enforces on the token's header
+            # ``alg``; None accepts the library's default asymmetric algorithms.
             config = TokenValidationConfig(
                 perform_disco=True,
-                audience=provider.audience or "",
                 algorithms=sorted(provider.algorithms) or None,
-                options={"verify_iss": False, "verify_aud": False},
+                token_issuers=library_token_issuers(provider),
+                options={"verify_aud": False},
                 require_https=provider.require_https,
             )
             try:

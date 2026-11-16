@@ -677,6 +677,20 @@ def build_provider_configs(
     )
 
 
+def library_token_issuers(provider: ProviderTokenConfig) -> list[str] | None:
+    """The ``iss`` values py-identity-model is told to accept for ``provider``.
+
+    In discovery mode the library always checks ``iss``: against the discovery
+    document's issuer, or against ``TokenValidationConfig.token_issuers`` when
+    that is set. A provider that signs several issuer values with one key set
+    (Descope: two URL forms and the bare project id) lists them all; the library
+    then also requires the discovery issuer to be one of them. A provider with
+    one issuer value, or none configured, gets None, so its tokens must carry
+    the discovery issuer.
+    """
+    return sorted(provider.accepted_issuers) if len(provider.accepted_issuers) > 1 else None
+
+
 def unverified_issuer(token: str) -> str | None:
     """Best-effort read of ``iss`` without verifying the signature.
 

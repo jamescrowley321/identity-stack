@@ -45,7 +45,7 @@ The backend runs in one of two **deployment modes** (`DEPLOYMENT_MODE`): *standa
 | Routing | React Router 7 | Client-side routing |
 | Auth (Frontend) | react-oidc-context + oidc-client-ts | Vendor-agnostic OIDC |
 | Backend | FastAPI (Python 3.12+) | REST API |
-| Auth (Backend) | py-identity-model (5.0.0 pre-release, pinned by URL and hash) | Vendor-agnostic token validation; enforces each provider's signing-algorithm allowlist, refuses HMAC algorithms and weak keys, and pulls cryptography>=50 (PYSEC-2026-3552/3553/3554 fixes) |
+| Auth (Backend) | py-identity-model (5.0.0 pre-release, pinned to a commit) | Vendor-agnostic token validation; enforces each provider's signing-algorithm allowlist, refuses HMAC algorithms and weak keys, and pulls cryptography>=50 (PYSEC-2026-3552/3553/3554 fixes) |
 | Data | PostgreSQL + SQLModel / SQLAlchemy 2 + Alembic | Canonical identity store, migrations |
 | Observability | OpenTelemetry | Tracing (OTLP export) |
 | IaC | Terraform + descope provider (fork) | Descope project configuration |
