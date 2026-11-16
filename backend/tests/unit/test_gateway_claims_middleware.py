@@ -178,6 +178,52 @@ class TestSigningAlgorithm:
         assert resp.json() == {"detail": "Invalid or expired token"}
 
 
+class TestSenderConstrainedToken:
+    """A bound token sent as a bearer token is refused, as the library refuses it in standalone mode.
+
+    RFC 9449 §7.2 (``cnf.jkt``) and RFC 8705 §3 (``cnf["x5t#S256"]``). The gateway
+    forwards neither a DPoP proof nor a client certificate, so no binding can be checked here.
+    """
+
+    DESCOPE_CLAIMS = {"sub": "descope-user", "iss": "https://api.descope.com/P123", "aud": "P123"}
+    ORY_CLAIMS = {"sub": "ory-user", "iss": ORY_ISSUER, "aud": ORY_AUD}
+    # The JWK thumbprint of the example proof key in RFC 9449 §6.1.
+    DPOP_BOUND = {"jkt": "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"}
+    # The certificate thumbprint in the example of RFC 8705 §3.1.
+    CERTIFICATE_BOUND = {"x5t#S256": "bwcK0esc3ACC3DB2Y5_lESsXE8o9ltc05O89jdN-dg2"}
+
+    @pytest.fixture
+    def client(self):
+        app = _build_app(descope_project_id="P123", ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
+        return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("claims", [DESCOPE_CLAIMS, ORY_CLAIMS], ids=["Descope", "Ory"])
+    @pytest.mark.parametrize("cnf", [DPOP_BOUND, CERTIFICATE_BOUND, {"jkt": None}], ids=["dpop", "mtls", "null-jkt"])
+    async def test_a_bound_token_is_refused(self, client, claims, cnf):
+        bound = _make_token({**claims, "cnf": cnf})
+
+        resp = await client.get("/api/protected", headers={"Authorization": f"Bearer {bound}"})
+
+        assert resp.status_code == 401
+        assert resp.json() == {"detail": "Invalid or expired token"}
+
+        # Control: the confirmation claim is the only reason.
+        unbound = await client.get("/api/protected", headers={"Authorization": f"Bearer {_make_token(claims)}"})
+        assert unbound.status_code == 200, unbound.text
+
+    @pytest.mark.anyio
+    async def test_the_refusal_names_its_cause_in_the_log_only(self, client, caplog):
+        bound = _make_token({**self.DESCOPE_CLAIMS, "cnf": self.DPOP_BOUND})
+
+        with caplog.at_level("WARNING", logger="app.middleware.claims"):
+            await client.get("/api/protected", headers={"Authorization": f"Bearer {bound}"})
+
+        assert [record.getMessage() for record in caplog.records] == [
+            "GatewayClaims rejected: sender-constrained token presented as a bearer token (Descope)"
+        ]
+
+
 class TestClaimsExtraction:
     """Test JWT payload decoding and request.state population."""
 

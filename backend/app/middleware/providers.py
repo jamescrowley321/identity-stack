@@ -36,6 +36,11 @@ from app.middleware.keycloak import (
 RS256 = "RS256"
 # The claim that names the client a token was issued to (OIDC Core §2).
 AUTHORIZED_PARTY_CLAIM = "azp"
+# The confirmation claim (RFC 7800 §3.1) and the two members that bind an access
+# token to its sender: a DPoP key (RFC 9449 §6.1) or a client certificate
+# (RFC 8705 §3.1).
+CONFIRMATION_CLAIM = "cnf"
+SENDER_BINDINGS = frozenset({"jkt", "x5t#S256"})
 
 
 class ProviderConfigurationError(ValueError):
@@ -799,6 +804,20 @@ def algorithm_rejected(token: str, provider: ProviderTokenConfig) -> bool:
         return True
     alg = header.get("alg") if isinstance(header, dict) else None
     return not isinstance(alg, str) or alg not in provider.algorithms
+
+
+def sender_constrained(claims: dict) -> bool:
+    """True if the token is bound to a DPoP key or a client certificate.
+
+    Gateway mode only. A bound token is valid only with its proof or its
+    certificate (RFC 9449 §7.2, RFC 8705 §3). The gateway forwards neither, so
+    no binding can be checked and the token is refused. In standalone mode
+    py-identity-model refuses the same tokens, by the same reading of ``cnf``:
+    a member that is present binds the token whatever its value, and a ``cnf``
+    that is not an object binds nothing.
+    """
+    cnf = claims.get(CONFIRMATION_CLAIM)
+    return isinstance(cnf, dict) and not SENDER_BINDINGS.isdisjoint(cnf)
 
 
 def token_kind_rejected(claims: dict, provider: ProviderTokenConfig) -> bool:
