@@ -18,33 +18,59 @@ import_realm="identity-stack"
 terraform_realm="identity-stack-terraform"
 compose=(docker compose -f "$repo/docker-compose.test.yml" --profile keycloak)
 
-# Own working copy and state: never the root's terraform.tfstate.
-work="$(mktemp -d "${TMPDIR:-/var/tmp}/keycloak-terraform-check.XXXXXX")"
-cp "$root"/*.tf "$root/.terraform.lock.hcl" "$work/"
-
 # The compose bootstrap admin (a local fixture login, see docker-compose.test.yml).
 export KEYCLOAK_USER=admin KEYCLOAK_PASSWORD=admin
 vars=(-var "keycloak_url=$base_url" -var "realm=$terraform_realm")
+work=""
 applied=0
 started=0
 
 cleanup() {
   status=$?
+  keep_work=0
   if [ "$applied" = 1 ]; then
-    terraform -chdir="$work" destroy -auto-approve -input=false "${vars[@]}" >/dev/null || status=1
+    if ! terraform -chdir="$work" destroy -auto-approve -input=false "${vars[@]}" >/dev/null; then
+      status=1
+      keep_work=1
+      echo "destroy failed: state kept in $work; the next run deletes realm $terraform_realm itself" >&2
+    fi
   fi
-  if [ "$started" = 1 ]; then
-    "${compose[@]}" down -v keycloak-test >/dev/null 2>&1 || true
+  if [ "$started" = 1 ] && ! "${compose[@]}" down -v keycloak-test >/dev/null 2>&1; then
+    echo "warning: could not stop keycloak-test (docker compose down -v failed)" >&2
   fi
-  rm -rf "$work"
+  if [ -n "$work" ] && [ "$keep_work" = 0 ]; then
+    rm -rf "$work"
+  fi
   exit "$status"
 }
 trap cleanup EXIT
+
+# Delete the realm this check builds if a run that was killed, or whose destroy
+# failed, left it in a keycloak-test that is still up. Absent (404) is fine.
+delete_leftover_realm() {
+  local token code
+  token="$(curl -fsS "$base_url/realms/master/protocol/openid-connect/token" \
+    --data-urlencode grant_type=password --data-urlencode client_id=admin-cli \
+    --data-urlencode "username=$KEYCLOAK_USER" --data-urlencode "password=$KEYCLOAK_PASSWORD" |
+    jq -er .access_token)"
+  code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
+    -H "Authorization: Bearer $token" "$base_url/admin/realms/$terraform_realm")"
+  case "$code" in
+    204) echo "--- deleted realm $terraform_realm left by an earlier run" ;;
+    404) ;;
+    *) echo "could not delete leftover realm $terraform_realm (HTTP $code)" >&2; return 1 ;;
+  esac
+}
+
+# Own working copy and state: never the root's terraform.tfstate.
+work="$(mktemp -d "${TMPDIR:-/var/tmp}/keycloak-terraform-check.XXXXXX")"
+cp "$root"/*.tf "$root/.terraform.lock.hcl" "$work/"
 
 if [ -z "$("${compose[@]}" ps --status running --quiet keycloak-test)" ]; then
   started=1
 fi
 "${compose[@]}" up -d --wait keycloak-test
+delete_leftover_realm
 
 terraform -chdir="$work" init -input=false >/dev/null
 applied=1
