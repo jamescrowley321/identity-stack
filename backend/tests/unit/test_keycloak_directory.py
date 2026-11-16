@@ -29,8 +29,11 @@ from tests.helpers.keycloak_admin_api import (
     GLOBEX,
     ISSUER,
     MEMBER_ID,
+    NO_SUCH_ROUTE_BODY,
+    ORGANIZATIONS_DISABLED_BODY,
     ORIGIN,
     OTHER_MEMBER_ID,
+    REALM_NOT_FOUND_BODY,
     SERVICE_ACCOUNT_TOKEN,
     TENANT_ADMIN_MARKER,
     AdminApi,
@@ -231,6 +234,31 @@ class TestEveryFailureIsTyped:
             with pytest.raises(MemberUnknown):
                 await api.directory().organizations_of(MEMBER_ID)
 
+        messages = [r.getMessage() for r in caplog.records if r.name == "app.services.keycloak_directory"]
+        assert any("404" in message for message in messages), messages
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            ORGANIZATIONS_DISABLED_BODY,
+            REALM_NOT_FOUND_BODY,
+            NO_SUCH_ROUTE_BODY,
+            b'{"error":"HTTP 404 Not Found","detail":"more"}',
+            b"<html><body>404 Not Found</body></html>",
+            b"",
+        ],
+        ids=["organizations-disabled", "realm-not-found", "no-such-route", "other-json", "proxy-html", "empty"],
+    )
+    async def test_any_other_404_is_a_directory_failure_not_an_unknown_member(self, body, caplog):
+        """A realm-wide fault answers 404 too; only the unknown member's answer means no organizations."""
+        api = AdminApi(lookup_status=404, lookup_body=body)
+
+        with caplog.at_level("WARNING", logger="app.services.keycloak_directory"):
+            with pytest.raises(KeycloakDirectoryError) as failed:
+                await api.directory().organizations_of(MEMBER_ID)
+
+        assert failed.value.status == 404
+        assert not isinstance(failed.value, MemberUnknown)
         messages = [r.getMessage() for r in caplog.records if r.name == "app.services.keycloak_directory"]
         assert any("404" in message for message in messages), messages
 
