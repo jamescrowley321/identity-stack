@@ -9,6 +9,7 @@ from app.middleware.providers import (
     ProviderTokenConfig,
     audience_rejected,
     build_provider_configs,
+    claimed_tenant_id,
     infer_single_tenant_dct,
     order_candidates,
     token_kind_rejected,
@@ -100,16 +101,19 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
             logger.warning("rejecting request: no configured provider accepted the token")
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
-        claims, principal = authenticated
+        claims, provider = authenticated
         request.state.claims = claims
-        request.state.principal = principal
-        request.state.tenant_id = claims.get("dct")
+        request.state.principal = to_principal(claims, provider.name)
+        # The provider is recorded for the tenant resolver, which reads the
+        # tenant and the grants with this provider's own extractor (conventions §18).
+        request.state.provider = provider
+        request.state.tenant_id = claimed_tenant_id(claims, provider)
         return await call_next(request)
 
-    async def _authenticate(self, token: str) -> tuple[dict, object] | None:
+    async def _authenticate(self, token: str) -> tuple[dict, ProviderTokenConfig] | None:
         """Validate ``token`` against the configured providers.
 
-        Returns the accepted claims and the principal built from them, or None
+        Returns the accepted claims and the provider that accepted them, or None
         when no configured provider accepts the token.
         """
         iss_hint = unverified_issuer(token)
@@ -158,6 +162,6 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
                 return None
 
             infer_single_tenant_dct(claims, provider)
-            return claims, to_principal(claims, provider.name)
+            return claims, provider
 
         return None

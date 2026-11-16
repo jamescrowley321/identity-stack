@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.knobs import knob, knob_flag
@@ -28,6 +29,24 @@ AUTHORIZED_PARTY_CLAIM = "azp"
 
 class ProviderConfigurationError(ValueError):
     """A provider is configured in a way that would accept tokens it must not."""
+
+
+@dataclass(frozen=True)
+class TenantClaims:
+    """What one token says about its caller's tenant.
+
+    ``tenant_id`` is the tenant the token is for, or ``None`` when it names none.
+    ``roles`` and ``permissions`` are what the token grants in that tenant.
+    """
+
+    tenant_id: str | None
+    roles: list[str]
+    permissions: list[str]
+
+
+# A provider's claims extractor: it reads the tenant and the grants out of the
+# claims of a token this provider issued.
+TenantClaimsExtractor = Callable[[dict], TenantClaims]
 
 
 @dataclass(frozen=True)
@@ -73,6 +92,44 @@ class ProviderTokenConfig:
     logout_client_id: str | None = None
     logout_client_id_claim: str | None = None
     post_logout_redirect_uri: str | None = None
+    # Reads the tenant and the grants from this provider's token claims
+    # (conventions §18). ``None``: the token carries neither, and they come from
+    # the canonical model when the provider is in ``CANONICAL_RBAC_PROVIDERS``.
+    tenant_claims: TenantClaimsExtractor | None = None
+
+
+def _string_list(value: object) -> list[str]:
+    """``value`` when it is a list of strings, else nothing: a malformed grant grants nothing."""
+    if not isinstance(value, list):
+        return []
+    return [entry for entry in value if isinstance(entry, str)]
+
+
+def descope_tenant_claims(claims: dict) -> TenantClaims:
+    """Descope's extractor: ``dct`` is the current tenant, ``tenants[dct]`` holds its grants.
+
+    Fails closed on a malformed token. A ``dct`` that is not a non-empty string
+    names no tenant, and a ``tenants`` entry of the wrong shape grants nothing.
+    """
+    tenant_id = claims.get("dct")
+    if not isinstance(tenant_id, str) or not tenant_id:
+        return TenantClaims(tenant_id=None, roles=[], permissions=[])
+    tenants = claims.get("tenants")
+    tenant_info = tenants.get(tenant_id) if isinstance(tenants, dict) else None
+    if not isinstance(tenant_info, dict):
+        return TenantClaims(tenant_id=tenant_id, roles=[], permissions=[])
+    return TenantClaims(
+        tenant_id=tenant_id,
+        roles=_string_list(tenant_info.get("roles")),
+        permissions=_string_list(tenant_info.get("permissions")),
+    )
+
+
+def claimed_tenant_id(claims: dict, provider: ProviderTokenConfig) -> str | None:
+    """The tenant ``provider``'s extractor reads from ``claims``, or ``None`` with no extractor."""
+    if provider.tenant_claims is None:
+        return None
+    return provider.tenant_claims(claims).tenant_id
 
 
 def descope_config(project_id: str) -> ProviderTokenConfig:
@@ -110,6 +167,7 @@ def descope_config(project_id: str) -> ProviderTokenConfig:
         audience=project_id or None,
         infer_single_tenant_dct=True,
         bare_issuer=project_id or None,
+        tenant_claims=descope_tenant_claims,
     )
 
 
@@ -183,6 +241,34 @@ def keycloak_config(
     )
 
 
+def _audience_bound_ory_config(
+    issuer_url: str,
+    audience: str | None,
+    *,
+    require_audience: bool,
+    client_id: str | None,
+    post_logout_redirect_uri: str | None,
+) -> ProviderTokenConfig:
+    """``ory_config``, refusing audience enforcement with no audience to enforce.
+
+    Fail-closed: with enforcement on (the default) and no audience, every token
+    would be rejected at request time, and with it off every Ory-issued token
+    would be accepted. Raising here stops startup instead.
+    """
+    if require_audience and not audience:
+        raise ValueError(
+            "ORY_AUDIENCE must be set when ORY_ISSUER_URL is set — Ory access-token "
+            "audience validation is required. Set ORY_REQUIRE_AUDIENCE=false to opt out."
+        )
+    return ory_config(
+        issuer_url,
+        audience,
+        require_audience=require_audience,
+        client_id=client_id,
+        post_logout_redirect_uri=post_logout_redirect_uri,
+    )
+
+
 def build_provider_configs(
     *,
     descope_project_id: str = "",
@@ -196,8 +282,10 @@ def build_provider_configs(
     keycloak_require_https: bool = True,
     keycloak_post_logout_redirect_uri: str | None = None,
 ) -> list[ProviderTokenConfig]:
-    """Build the provider list from explicit values. ``configured_providers`` is the
-    caller that reads them from the environment.
+    """Build a provider list from explicit values, for a middleware built by hand.
+
+    The application does not call this: ``configured_providers`` builds its list
+    from ``PROVIDER_REGISTRATIONS``. Both apply the same per-provider rules.
 
     Descope is always present (preserving single-provider behavior, including the
     no-project-id path). Ory and Keycloak are each appended when an issuer is
@@ -210,13 +298,8 @@ def build_provider_configs(
     """
     providers = [descope_config(descope_project_id)]
     if ory_issuer_url:
-        if ory_require_audience and not ory_audience:
-            raise ValueError(
-                "ORY_AUDIENCE must be set when ORY_ISSUER_URL is set — Ory access-token "
-                "audience validation is required. Set ORY_REQUIRE_AUDIENCE=false to opt out."
-            )
         providers.append(
-            ory_config(
+            _audience_bound_ory_config(
                 ory_issuer_url,
                 ory_audience,
                 require_audience=ory_require_audience,
@@ -236,33 +319,94 @@ def build_provider_configs(
     return providers
 
 
+def _default_post_logout_redirect_uri() -> str:
+    """Where a provider sends the browser after logout unless it names its own: the SPA's login page."""
+    frontend_url = knob("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+    return f"{frontend_url}/login"
+
+
+def _descope_registration() -> ProviderTokenConfig:
+    """Descope is always registered, also with no project id (the historical single-provider path)."""
+    return descope_config(knob("DESCOPE_PROJECT_ID", ""))
+
+
+def _ory_registration() -> ProviderTokenConfig | None:
+    """Ory, when ``ORY_ISSUER_URL`` is set."""
+    issuer_url = knob("ORY_ISSUER_URL", "")
+    if not issuer_url:
+        return None
+    return _audience_bound_ory_config(
+        issuer_url,
+        knob("ORY_AUDIENCE") or None,
+        require_audience=knob_flag("ORY_REQUIRE_AUDIENCE", "true"),
+        client_id=knob("ORY_CLIENT_ID") or None,
+        post_logout_redirect_uri=knob("ORY_POST_LOGOUT_REDIRECT_URI") or _default_post_logout_redirect_uri(),
+    )
+
+
+def _keycloak_registration() -> ProviderTokenConfig | None:
+    """Keycloak, when ``KEYCLOAK_ISSUER_URL`` is set."""
+    issuer_url = knob("KEYCLOAK_ISSUER_URL", "")
+    if not issuer_url:
+        return None
+    return keycloak_config(
+        issuer_url,
+        # Client ids are case-sensitive, so this list is not read with ``knob_set``,
+        # which lowercases its entries.
+        frozenset(knob("KEYCLOAK_AUDIENCES", "").split(",")),
+        require_https=knob_flag("KEYCLOAK_REQUIRE_HTTPS", "true"),
+        post_logout_redirect_uri=(knob("KEYCLOAK_POST_LOGOUT_REDIRECT_URI") or _default_post_logout_redirect_uri()),
+    )
+
+
+# One entry per provider this backend can be configured with. An entry reads its
+# own settings from the environment and returns the provider, or ``None`` when
+# the deployment does not configure it. Adding a provider is adding its entry
+# (and its claims extractor, if its tokens carry a tenant): nothing in the
+# middleware factory, the middlewares, the logout router or the logout service
+# names a provider.
+ProviderRegistration = Callable[[], ProviderTokenConfig | None]
+PROVIDER_REGISTRATIONS: list[ProviderRegistration] = [
+    _descope_registration,
+    _ory_registration,
+    _keycloak_registration,
+]
+
+
+def _refuse_ambiguous_providers(providers: list[ProviderTokenConfig]) -> None:
+    """Raise when two providers could be taken for each other.
+
+    The dependencies and the logout router find a request's provider by name
+    (compared case-insensitively) and the middlewares by issuer, so a shared
+    name or issuer would apply one provider's rules to the other's tokens.
+    """
+    names: set[str] = set()
+    issuers: set[str] = set()
+    for provider in providers:
+        name = provider.name.lower()
+        if name in names:
+            raise ProviderConfigurationError(f"provider {provider.name!r} is registered more than once")
+        names.add(name)
+        shared = sorted(provider.accepted_issuers & issuers)
+        if shared:
+            raise ProviderConfigurationError(
+                f"provider {provider.name!r} accepts an issuer another provider already accepts: {shared}"
+            )
+        issuers |= provider.accepted_issuers
+
+
 def configured_providers() -> list[ProviderTokenConfig]:
     """The provider list this deployment's environment configures.
 
-    The one builder behind the middleware factory and the logout router. It reads
-    the environment when called (conventions §1): the factory calls it once at
+    The one builder behind the middleware factory and the logout router: it walks
+    ``PROVIDER_REGISTRATIONS`` and takes no per-provider argument. It reads the
+    environment when called (conventions §1): the factory calls it once at
     startup, the logout router on each request. A provider configured so that it
     would accept tokens it must not raises here, which stops startup.
     """
-    frontend_url = knob("FRONTEND_URL", "http://localhost:3000").rstrip("/")
-    default_post_logout_redirect_uri = f"{frontend_url}/login"
-    # Client ids are case-sensitive, so this list is not read with ``knob_set``,
-    # which lowercases its entries.
-    keycloak_audiences = frozenset(knob("KEYCLOAK_AUDIENCES", "").split(","))
-    return build_provider_configs(
-        descope_project_id=knob("DESCOPE_PROJECT_ID", ""),
-        ory_issuer_url=knob("ORY_ISSUER_URL", ""),
-        ory_audience=knob("ORY_AUDIENCE") or None,
-        ory_require_audience=knob_flag("ORY_REQUIRE_AUDIENCE", "true"),
-        ory_client_id=knob("ORY_CLIENT_ID") or None,
-        ory_post_logout_redirect_uri=knob("ORY_POST_LOGOUT_REDIRECT_URI") or default_post_logout_redirect_uri,
-        keycloak_issuer_url=knob("KEYCLOAK_ISSUER_URL", ""),
-        keycloak_audiences=keycloak_audiences,
-        keycloak_require_https=knob_flag("KEYCLOAK_REQUIRE_HTTPS", "true"),
-        keycloak_post_logout_redirect_uri=(
-            knob("KEYCLOAK_POST_LOGOUT_REDIRECT_URI") or default_post_logout_redirect_uri
-        ),
-    )
+    providers = [provider for registration in PROVIDER_REGISTRATIONS if (provider := registration()) is not None]
+    _refuse_ambiguous_providers(providers)
+    return providers
 
 
 def unverified_issuer(token: str) -> str | None:

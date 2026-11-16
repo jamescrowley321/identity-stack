@@ -147,9 +147,11 @@ def configure_middleware(app: FastAPI) -> None:
     excluded_prefixes = {
         "/api/internal/",
     }
-    # Descope is always configured; Ory and Keycloak are added when their issuer
-    # is set. Both middlewares select a provider by the token's issuer. A provider
-    # configured without its required audience raises here and stops startup.
+    # The one provider list (``PROVIDER_REGISTRATIONS``): Descope always, each
+    # other provider when its issuer is set. Both middlewares select a provider
+    # by the token's issuer. A provider configured without its required audience,
+    # or one that shares a name or an issuer with another, raises here and stops
+    # startup.
     providers = configured_providers()
     if DEPLOYMENT_MODE == "standalone":
         app.add_middleware(
