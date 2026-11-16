@@ -40,6 +40,7 @@ AUDIENCES = frozenset({MEMBER_TYPE_CLIENT, TENANT_ADMIN_TYPE_CLIENT})
 KEYCLOAK = "Keycloak"
 STANDALONE = "standalone"
 GATEWAY = "gateway"
+FACTORY_LOGGER = "app.middleware.factory"
 
 _PROVIDER_VARIABLES = (
     "DESCOPE_PROJECT_ID",
@@ -150,6 +151,16 @@ class TestAnIncompleteConfigurationIsRefused:
             id="an app client that is an accepted audience",
         ),
         pytest.param(
+            {"KEYCLOAK_APP_CLIENTS": "member=shared-app,tenant-admin=shared-app"},
+            "KEYCLOAK_APP_CLIENTS",
+            id="one app client for two types",
+        ),
+        pytest.param(
+            {"KEYCLOAK_APP_CLIENTS": "member=member-app,tenant-admin=tenant-admin-app,viewer=viewer-app"},
+            "KEYCLOAK_APP_CLIENTS",
+            id="an app client for a type that is no audience",
+        ),
+        pytest.param(
             {"KEYCLOAK_ORGANIZATION_BOUND_TYPES": None},
             "KEYCLOAK_ORGANIZATION_BOUND_TYPES",
             id="a type declared neither way",
@@ -254,6 +265,35 @@ class TestPlainHttpIsForALocalIssuerOnly:
     def test_the_explicit_builder_refuses_it_too(self):
         with pytest.raises(ProviderConfigurationError, match="KEYCLOAK_REQUIRE_HTTPS"):
             keycloak_config(REMOTE_ISSUER, AUDIENCES, require_https=False, **model_settings(*sorted(AUDIENCES)))
+
+    @staticmethod
+    def _plain_http_warnings(caplog) -> list[str]:
+        return [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == FACTORY_LOGGER and record.levelname == "WARNING"
+        ]
+
+    @pytest.mark.parametrize("mode", [STANDALONE, GATEWAY])
+    def test_starting_with_https_enforcement_off_is_logged_as_a_warning(self, complete, mode, caplog):
+        """A ``.localhost`` name is trusted as it is written, whatever it resolves to: the operator is told."""
+        with caplog.at_level("WARNING", logger=FACTORY_LOGGER):
+            _start(complete, mode)
+
+        assert self._plain_http_warnings(caplog) == [
+            "HTTPS enforcement is off for provider Keycloak: its discovery document and signing keys "
+            "are fetched over plain HTTP. Use this for a local issuer only."
+        ]
+
+    @pytest.mark.parametrize("mode", [STANDALONE, GATEWAY])
+    def test_starting_with_https_enforced_logs_no_such_warning(self, complete, mode, caplog):
+        complete.setenv("KEYCLOAK_ISSUER_URL", REMOTE_ISSUER)
+        complete.delenv("KEYCLOAK_REQUIRE_HTTPS")
+
+        with caplog.at_level("WARNING", logger=FACTORY_LOGGER):
+            _start(complete, mode)
+
+        assert self._plain_http_warnings(caplog) == []
 
 
 class TestTheAuthorizationSourceIsTheToken:

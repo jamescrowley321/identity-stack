@@ -38,7 +38,14 @@ from app.errors.identity import NotFound
 from app.main import app as shipped_app
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.claims import GatewayClaimsMiddleware
-from app.middleware.providers import ProviderTokenConfig, TenantClaims, descope_config, keycloak_config
+from app.middleware.providers import (
+    ProviderTokenConfig,
+    TenantClaims,
+    claimed_tenant_id,
+    descope_config,
+    keycloak_config,
+    ory_config,
+)
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.models.database import get_async_session
 from tests.helpers.keycloak_model import (
@@ -283,10 +290,27 @@ class TestClientRolesAreThePermissions:
         ],
         ids=repr,
     )
-    def test_roles_that_are_missing_or_of_the_wrong_type_grant_nothing(self, resource_access):
-        response = _get(_member(resource_access=resource_access), DOCUMENTS_READ_ROUTE)
+    def test_roles_that_are_missing_or_of_the_wrong_type_name_no_tenant(self, resource_access):
+        """The token cannot be read, so it is refused as one that names no tenant, on every route."""
+        claims = _member(resource_access=resource_access)
 
-        _assert_403(response, INSUFFICIENT_PERMISSIONS)
+        _assert_403(_get(claims, DOCUMENTS_READ_ROUTE), NO_TENANT_CONTEXT)
+        assert _get(claims, OWN_STATE_ROUTE).json() == {"tenant_id": None}
+
+    def test_such_a_token_gets_no_tenant_from_get_tenant_id(self):
+        app = _app(GATEWAY, _provider())
+
+        @app.get("/own/tenant")
+        async def tenant(tenant_id: str = Depends(get_tenant_id)):
+            return {"tenant_id": tenant_id}
+
+        _assert_403(_get(_member(resource_access=None), "/own/tenant", app=app), SELECT_A_TENANT_FIRST)
+
+    def test_an_empty_role_list_is_readable_and_holds_nothing(self):
+        claims = _member(resource_access={MEMBER_TYPE_CLIENT: {"roles": []}})
+
+        _assert_403(_get(claims, DOCUMENTS_READ_ROUTE), INSUFFICIENT_PERMISSIONS)
+        assert _get(claims, OWN_STATE_ROUTE).json() == {"tenant_id": ACME}
 
     def test_a_member_without_documents_read_is_refused(self):
         claims = _member(resource_access={MEMBER_TYPE_CLIENT: {"roles": [DOCUMENTS_WRITE]}})
@@ -381,6 +405,36 @@ class TestAnotherProvidersClaimsOnAKeycloakToken:
         assert _get(claims, OWN_OWNER_ROUTE).json() == {"roles": ["owner"]}
 
 
+class TestTheTenantsClaimIsReadFromADescopeTokenOnly:
+    """``tenants`` is Descope's claim. On the token of any other provider it is not a membership."""
+
+    ORY_ISSUER = "https://ory.example.test"
+    ORY_AUDIENCE = "https://identity-stack-api"
+    FORGED_TENANTS = {"other-tenant": {"roles": ["owner"], "permissions": [DOCUMENTS_WRITE]}}
+
+    def _ory(self, path: str):
+        """An Ory principal, a provider with no extractor of its own, carrying a ``tenants`` claim."""
+        claims = {
+            "iss": self.ORY_ISSUER,
+            "aud": self.ORY_AUDIENCE,
+            "sub": "ory-user",
+            "exp": int(time.time()) + SECONDS_OF_VALIDITY,
+            "tenants": self.FORGED_TENANTS,
+        }
+        return _get(claims, path, app=_app(GATEWAY, ory_config(self.ORY_ISSUER, self.ORY_AUDIENCE)))
+
+    def test_an_ory_token_is_no_member_of_a_tenant_its_tenants_claim_names(self):
+        _assert_403(self._ory("/api/tenants/other-tenant/resources"), "Not a member of this tenant")
+
+    def test_an_ory_token_gets_no_tenants_claim(self):
+        assert self._ory(OWN_TENANT_CLAIMS_ROUTE).json() == {"tenants": {}}
+
+    def test_a_keycloak_token_is_no_member_either(self):
+        claims = _member(tenants=self.FORGED_TENANTS)
+
+        _assert_403(_get(claims, "/api/tenants/other-tenant/resources"), "Not a member of this tenant")
+
+
 class TestAnOrganizationBoundTokenWithNoLookupWired:
     """Done when 7: the state this backend ships in. Every ``tenant-admin`` token is refused."""
 
@@ -418,6 +472,14 @@ class TestAnOrganizationBoundTokenWithNoLookupWired:
 
     def test_a_portable_token_needs_no_lookup(self):
         assert _get(_member(), DOCUMENTS_READ_ROUTE).status_code == 200
+
+    @pytest.mark.parametrize("mode", [STANDALONE, GATEWAY])
+    def test_the_middleware_does_not_record_its_organization_as_the_requests_tenant(self, mode):
+        """Nothing has confirmed the organization when the token is authenticated."""
+        response = _get(_tenant_admin(), OWN_STATE_ROUTE, mode=mode)
+
+        assert response.status_code == 200
+        assert response.json() == {"tenant_id": None}
 
 
 class TestAnOrganizationBoundTokenAgainstALookupDouble:
@@ -479,6 +541,99 @@ class TestAnOrganizationBoundTokenAgainstALookupDouble:
 
         _assert_403(_get(claims, SETTINGS_MANAGE_ROUTE, lookup=lookup), INSUFFICIENT_PERMISSIONS)
         assert lookup.calls == []
+
+    @staticmethod
+    def _gated_after_the_tenant(permission: str, lookup: _Lookup, path: str = "/own/tenant-then-gate") -> FastAPI:
+        """A route that declares its gate as a parameter after the tenant, so FastAPI resolves the tenant first."""
+        app = _app(GATEWAY, _provider(lookup))
+
+        @app.get(path)
+        async def tenant_then_gate(
+            tenant_id: str = Depends(get_tenant_id),
+            permissions: list[str] = Depends(require_permission(permission)),
+        ):
+            return {"tenant_id": tenant_id, "permissions": permissions}
+
+        return app
+
+    def test_a_gate_declared_after_the_tenant_is_answered_before_the_lookup_too(self):
+        """The order does not depend on how the route declares its dependencies."""
+        lookup = _Lookup(error=RuntimeError("directory unreachable"))
+        app = self._gated_after_the_tenant(DOCUMENTS_WRITE, lookup)
+
+        response = _get(_tenant_admin(), "/own/tenant-then-gate", app=app)
+
+        _assert_403(response, INSUFFICIENT_PERMISSIONS)
+        assert lookup.calls == []
+
+    def test_a_gate_declared_after_the_tenant_that_the_token_passes_asks_once(self):
+        lookup = _Lookup([ACME])
+        claims = _tenant_admin()
+        app = self._gated_after_the_tenant(SETTINGS_MANAGE, lookup)
+
+        response = _get(claims, "/own/tenant-then-gate", app=app)
+
+        assert response.status_code == 200
+        assert response.json() == {"tenant_id": ACME, "permissions": [SETTINGS_MANAGE, MEMBERS_INVITE]}
+        assert lookup.calls == [claims]
+
+    def test_a_gate_inside_another_dependency_is_answered_before_the_lookup_too(self):
+        lookup = _Lookup(error=RuntimeError("directory unreachable"))
+        app = _app(GATEWAY, _provider(lookup))
+
+        async def writer(permissions: list[str] = Depends(require_permission(DOCUMENTS_WRITE))) -> list[str]:
+            return permissions
+
+        @app.get("/own/tenant-then-nested-gate")
+        async def tenant_then_nested_gate(
+            tenant_id: str = Depends(get_tenant_id), permissions: list[str] = Depends(writer)
+        ):
+            return {"tenant_id": tenant_id, "permissions": permissions}
+
+        _assert_403(_get(_tenant_admin(), "/own/tenant-then-nested-gate", app=app), INSUFFICIENT_PERMISSIONS)
+        assert lookup.calls == []
+
+    def test_a_role_gate_declared_after_the_tenant_is_answered_before_the_lookup_too(self):
+        lookup = _Lookup(error=RuntimeError("directory unreachable"))
+        app = _app(GATEWAY, _provider(lookup))
+
+        @app.get("/own/tenant-then-role")
+        async def tenant_then_role(
+            tenant_id: str = Depends(get_tenant_id), roles: list[str] = Depends(require_role("owner"))
+        ):
+            return {"tenant_id": tenant_id, "roles": roles}
+
+        _assert_403(_get(_tenant_admin(), "/own/tenant-then-role", app=app), INSUFFICIENT_PERMISSIONS)
+        assert lookup.calls == []
+
+    def test_a_gate_the_application_overrode_does_not_answer_for_the_token(self):
+        """Its check no longer runs for the route, so it refuses nothing here: the lookup is asked."""
+        lookup = _Lookup([ACME])
+        gate = require_permission(DOCUMENTS_WRITE)
+        app = _app(GATEWAY, _provider(lookup))
+        app.dependency_overrides[gate] = lambda: [DOCUMENTS_WRITE]
+
+        @app.get("/own/tenant-then-overridden-gate")
+        async def tenant_then_overridden_gate(
+            tenant_id: str = Depends(get_tenant_id), permissions: list[str] = Depends(gate)
+        ):
+            return {"tenant_id": tenant_id, "permissions": permissions}
+
+        response = _get(_tenant_admin(), "/own/tenant-then-overridden-gate", app=app)
+
+        assert response.json() == {"tenant_id": ACME, "permissions": [DOCUMENTS_WRITE]}
+        assert len(lookup.calls) == 1
+
+    def test_a_token_with_unreadable_roles_is_refused_without_asking(self):
+        lookup = _Lookup(error=RuntimeError("directory unreachable"))
+        claims = _tenant_admin(resource_access={TENANT_ADMIN_TYPE_CLIENT: {"roles": SETTINGS_MANAGE}})
+
+        _assert_403(_get(claims, SETTINGS_MANAGE_ROUTE, lookup=lookup), NO_TENANT_CONTEXT)
+        assert lookup.calls == []
+
+    def test_a_confirmed_organization_is_not_recorded_by_the_middleware_either(self):
+        """``request.state.tenant_id`` is written at authentication, before any lookup."""
+        assert _get(_tenant_admin(), OWN_STATE_ROUTE, lookup=_Lookup([ACME])).json() == {"tenant_id": None}
 
     def test_a_token_that_names_no_organization_is_refused_without_asking(self):
         lookup = _Lookup(error=RuntimeError("directory unreachable"))
@@ -560,6 +715,13 @@ class TestTheResolverHoldsAnyProviderToTheConfirmation:
         access = resolve_tenant_access(self._request(True), self.CLAIMS, None, confirmed_tenant="org-1")
 
         assert (access.tenant_id, access.roles) == ("org-1", ["admin"])
+
+    def test_the_middlewares_record_a_tenant_that_needs_no_confirmation(self):
+        assert claimed_tenant_id(self.CLAIMS, self._request(False).state.provider) == "org-1"
+
+    @pytest.mark.parametrize("flag", [True, None, "no", "false", 0, 1, []], ids=repr)
+    def test_the_middlewares_record_no_tenant_that_needs_one_or_might(self, flag):
+        assert claimed_tenant_id(self.CLAIMS, self._request(flag).state.provider) is None
 
     @pytest.mark.parametrize("flag", [None, "no", "false", 0, 1, []], ids=repr)
     def test_a_flag_that_is_not_a_boolean_is_an_answer_that_cannot_be_used(self, flag):

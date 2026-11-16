@@ -129,7 +129,8 @@ def token_model(
 
     Refused: a type client with no app client, an app client for a type that is
     not an audience, an app client that is itself an audience (its ID tokens
-    would bind), a type declared neither portable nor organization-bound or
+    would bind), one app client for two types (``azp`` would no longer tell
+    them apart), a type declared neither portable nor organization-bound or
     declared both, a declared type that is not an audience, a portable type
     with no permission list, a listed permission whose action is not ``read``
     or ``list``, and a permission list for a type that is not portable.
@@ -151,6 +152,15 @@ def token_model(
         raise KeycloakModelError(
             f"{_APP_CLIENTS} maps {also_audiences} to an app client that is itself in {_AUDIENCES}: "
             "an app client is never an accepted audience"
+        )
+    shared = sorted(
+        type_client
+        for type_client, app in app_clients.items()
+        if sum(1 for other in app_clients.values() if other == app) > 1
+    )
+    if shared:
+        raise KeycloakModelError(
+            f"{_APP_CLIENTS} maps {shared} to one app client: every type client has an app client of its own"
         )
 
     both = sorted(portable & bound)
@@ -286,8 +296,10 @@ def read_grant(model: KeycloakTokenModel, claims: Mapping[str, object]) -> Token
     """What the token grants and where, or ``None`` when it names no single organization.
 
     Also ``None`` for a token that is not bound: the middlewares refuse those
-    with 401 before a grant is read, and this does not rely on them. Roles that
-    cannot be read grant nothing in the organization the token names. Only
+    with 401 before a grant is read, and this does not rely on them. And
+    ``None`` for a token whose client roles cannot be read (``resource_access``,
+    its entry for the audience or ``roles`` is missing or of the wrong type):
+    it names no tenant either. An empty ``roles`` list is readable. Only
     ``organization`` and ``resource_access[aud]`` are read: never ``realm_access``
     and never another provider's ``dct`` or ``tenants``.
     """
@@ -298,7 +310,9 @@ def read_grant(model: KeycloakTokenModel, claims: Mapping[str, object]) -> Token
     client_type = model.type_for(audience) if audience is not None else None
     if alias is None or audience is None or client_type is None:
         return None
-    roles = client_roles(claims, audience) or []
+    roles = client_roles(claims, audience)
+    if roles is None:
+        return None
     if client_type.organization_bound:
         return TokenGrant(organization=alias, permissions=tuple(roles), organization_bound=True)
     return TokenGrant(

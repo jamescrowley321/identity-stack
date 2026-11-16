@@ -161,6 +161,15 @@ def configure_middleware(app: FastAPI) -> None:
     providers = configured_providers()
     refuse_canonical_descope_managed(providers, rbac.CANONICAL_RBAC_PROVIDERS)
     refuse_ambiguous_authorization_source(providers, rbac.CANONICAL_RBAC_PROVIDERS)
+    for provider in providers:
+        if not provider.require_https:
+            # Allowed only for a loopback address or a ``.localhost`` name, and
+            # the name is taken at its word: nothing checks what it resolves to.
+            logger.warning(
+                "HTTPS enforcement is off for provider %s: its discovery document and signing keys "
+                "are fetched over plain HTTP. Use this for a local issuer only.",
+                provider.name,
+            )
     if DEPLOYMENT_MODE == "standalone":
         app.add_middleware(
             TokenValidationMiddleware,

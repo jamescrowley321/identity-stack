@@ -40,15 +40,16 @@ def get_tenant_claims(request: Request) -> dict:
     """Return the `tenants` claim mapping from the JWT.
 
     Returns an empty dict if the user has no tenant memberships. ``tenants`` is
-    Descope's claim: for a principal of a provider that reads its tenant with
-    its own extractor and is not Descope-managed (Keycloak), the claim is not
-    read and the answer is always empty, whatever the token carries.
+    Descope's claim, so it is read only from the token of a Descope-managed
+    provider. For a principal of any other recorded provider (Ory, Keycloak)
+    the claim is not read and the answer is always empty, whatever the token
+    carries. A request that no middleware attributed to a provider (one built
+    by hand) is read as Descope's, as the tenant resolver reads it.
     """
     claims = getattr(request.state, "claims", None)
     if claims is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     provider = getattr(request.state, "provider", None)
-    own_extractor = isinstance(provider, ProviderTokenConfig) and provider.tenant_claims is not None
-    if own_extractor and not provider.descope_managed:
+    if isinstance(provider, ProviderTokenConfig) and not provider.descope_managed:
         return {}
     return claims.get("tenants", {})
