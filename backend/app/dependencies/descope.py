@@ -30,11 +30,13 @@ def require_descope_principal(request: Request) -> None:
     middleware attributed to a provider are refused like another provider's:
     both middlewares record the provider beside the claims, so such a request
     is a defect, and it must not be read as a Descope principal. A request with
-    no claims at all is not this guard's to answer: authentication gives it 401.
+    no claims at all is answered 401 here, as by every other authorization
+    dependency (conventions §17): the guard does not rely on a second
+    dependency of the route to refuse it.
     """
     claims = getattr(request.state, "claims", None)
     if claims is None:
-        return
+        raise HTTPException(status_code=401, detail="Not authenticated")
     provider = getattr(request.state, "provider", None)
     if isinstance(provider, ProviderTokenConfig) and provider.descope_managed:
         return
