@@ -310,28 +310,51 @@ tenant, role or permission claim itself. The resolver takes its sources in this 
    (default `ory`). The selector is the `X-Tenant-ID` request header. It grants nothing by
    itself: it only chooses among the tenants the caller's canonical memberships name. A
    selector naming any other tenant **MUST** be refused, and no grant is read from that
-   tenant. An empty or repeated header is refused too.
+   tenant. An empty or repeated header is refused too. A value that parses as a UUID is
+   compared in its canonical lower-case form, and any other value as it is.
 3. **The caller's sole canonical membership**, when the request selects nothing.
 
-Anything else is 403. Roles and permissions **MUST** be resolved from the canonical model
+Anything else is 403, including an extractor that raises or names a tenant that is not a
+non-empty string. Roles and permissions **MUST** be resolved from the canonical model
 only for a provider listed in `CANONICAL_RBAC_PROVIDERS`. That canonical lookup **MUST
 NOT** be served from the identity cache, and it **MUST NOT** be kept beyond the request
-that made it. See [ADR-0009](adr/0009-provider-registrations-and-one-tenant-resolver.md).
+that made it. `get_tenant_id` **MUST NOT** open a database session or read the canonical
+model for any other provider. See
+[ADR-0009](adr/0009-provider-registrations-and-one-tenant-resolver.md).
+
+A route that hands the request's tenant id or the caller's `sub` to Descope's Management
+API or its FGA store **MUST** depend on `app.dependencies.descope.require_descope_principal`,
+on the route or on its router. The resolver gives a principal of a canonical provider a
+canonical tenant id, which names nothing in Descope, so the guard refuses (403) every
+principal whose provider is not `descope_managed` (§28), before the tenant is resolved and
+before Descope is called. Every route that depends on `get_tenant_id` **MUST** be listed in
+`backend/tests/unit/test_descope_backed_routes.py`, either in `DESCOPE_BACKED_ROUTES` or,
+with its reason, in `PROVIDER_NEUTRAL_ROUTES`. Adding a route to the second register is a
+reviewed decision.
 
 - Exception: a `dct` claim on the token of a provider listed in
   `CANONICAL_RBAC_PROVIDERS` is read as a tenant selector, as it was before the header
   existed. It is held to the same check, and a `dct` that disagrees with the header is
   refused.
 - Exception: a request that no middleware attributed to a provider, which only a test
-  that sets `request.state.claims` by hand can make, is read with Descope's extractor.
+  that sets `request.state.claims` by hand can make, is read with Descope's extractor and
+  passes `require_descope_principal`. Code in `app/` that sets `request.state.claims`
+  **MUST** set `request.state.provider` beside it.
 - Exception: `require_fga` (`dependencies/fga.py::_extract_tenant_id`) reads `dct` itself.
   It checks relations in Descope's FGA store, which is keyed on Descope tenant ids, so it
   serves Descope principals only.
 - Exception: `get_tenant_claims` returns the Descope `tenants` claim as it is, for the
   routes that list a Descope principal's memberships.
+- Exception: the Descope-backed routes that take no tenant from `get_tenant_id` carry no
+  guard and answer a principal of another provider as they did before the resolver:
+  `GET` and `PATCH /api/profile`, `GET` and `PUT /api/fga/schema` and `GET /api/tenants`
+  (#590).
 
 *Enforcement:* review, plus tests (`test_tenant_resolution.py`, `test_rbac_dependencies.py`,
-`test_tenant_dependencies.py`).
+`test_tenant_dependencies.py`, and `test_descope_backed_routes.py`, which walks every route
+of the application against the two registers and calls each guarded route as a canonical
+principal). `test_provider_registration.py` fails on a writer of `request.state.claims`
+that records no provider.
 
 ## Data access
 
@@ -508,15 +531,25 @@ settings themselves.
 
 Everything that differs between providers is a field of `ProviderTokenConfig`: the
 accepted issuers and audiences, the signing algorithms, the logout kind with the
-provider's own client id and post-logout redirect URI, the claims extractor (§18), and
-`require_https`. `require_https` **MUST** default to on, so that plain-HTTP discovery is
+provider's own client id and post-logout redirect URI, the claims extractor (§18),
+`descope_managed` (§18) and `require_https`. `require_https` **MUST** default to on, so that plain-HTTP discovery is
 allowed only for the one provider whose own switch turns it off. A registration that would
 accept tokens it must not **MUST** raise, which stops startup. `configured_providers()`
 raises `ProviderConfigurationError` when two providers share a name or an issuer, because
-requests are matched to a provider by both.
+requests are matched to a provider by both. Two issuers that differ only in case or a
+trailing slash count as shared.
 
-- Exception: `build_provider_configs` builds a list from explicit arguments for a
-  middleware constructed by hand, which only tests do. The application does not call it.
+Both token middlewares **MUST** build the principal and read the tenant with the
+provider's extractor inside the code path that answers a failure with the uniform 401, so
+that a principal that cannot be built or an extractor that raises is the same 401 in
+standalone and in gateway mode, with the cause logged and not returned.
+
+- Exception: `build_provider_configs` takes the shipped providers' settings as explicit
+  arguments, for a middleware constructed by hand, which only tests do. It is the same
+  assembly as `configured_providers()`: each provider is built by the function its
+  registration calls, and an ambiguous list is refused the same way. The application does
+  not call it. Both middlewares keep their `descope_project_id` and `ory_*` constructor
+  arguments for those tests (#591).
 - Exception: `app/services/logout.py::_descope_management_logout` reads
   `DESCOPE_PROJECT_ID` and `DESCOPE_MANAGEMENT_KEY` itself (§5).
 

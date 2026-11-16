@@ -53,12 +53,30 @@ refused on every role-gated route.
 - A canonical-provider user with one membership now gets a tenant from `get_tenant_id`.
   A user with several must send the header, and the SPA has to send it.
 - `get_tenant_id` now depends on the canonical memberships. For a Descope principal that
-  dependency returns without touching the database. For a canonical provider the
-  memberships are read once per request and shared by the dependencies on that route.
+  dependency returns without opening a session or touching the database. For a canonical
+  provider it opens a session for the one read, and the memberships are shared by the
+  dependencies on that route.
+- A canonical-provider principal now has a tenant on routes that were Descope-only just
+  because a token with no `dct` got 403 there. Those routes hand the tenant id and the
+  caller's `sub` to Descope's Management API and FGA store, where a canonical id names
+  nothing: a document created that way would carry an owner relation its creator could
+  never use. They keep serving Descope principals only, now by an explicit guard,
+  `require_descope_principal`, which reads the provider's `descope_managed` field and
+  answers the same 403 as before. A test holds every route that takes a tenant to one of
+  two registers, Descope-backed or provider-neutral, so a new route has to choose.
+  `POST /api/roles/assign` and `/api/roles/remove` are provider-neutral: they work on the
+  canonical model in the tenant the resolver names.
 - A client can ask for any tenant id. The answer for a tenant the caller is not in is the
   same 403 as for a tenant that does not exist, so the header is not an existence oracle.
 - `require_fga` and `get_tenant_claims` still read Descope claims. The routes behind them
   serve Descope principals only until the contexts that own them move.
+- Building the principal and reading the tenant with the provider's extractor are part of
+  authentication in both middlewares. A failure in either is the uniform 401 in standalone
+  and in gateway mode. The resolver also fails closed by itself: an extractor that raises,
+  or that names a tenant that is not a non-empty string, is 403.
+- `build_provider_configs` stays for the tests that build a middleware by hand, as the
+  same assembly over explicit values. The middlewares' `ory_*` constructor arguments stay
+  with it until those tests move to a provider list (#591).
 - Decisions for a well-formed Descope token are unchanged. A malformed one now fails
   closed everywhere: a `dct` that is not a string names no tenant, and a `tenants` claim,
   a tenant entry or a role list of the wrong type grants nothing. Some of those used to
