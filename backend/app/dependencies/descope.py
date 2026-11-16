@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException, Request
 
+from app.dependencies.tenant_access import SELECT_A_TENANT_FIRST
 from app.logbook import logbook
 from app.middleware.providers import ProviderTokenConfig
 from app.services.descope_management import DescopeManagementAdapter
@@ -12,7 +13,7 @@ logger = logbook(__name__)
 
 # The answer a principal of another provider got from these routes before
 # ``get_tenant_id`` could name a canonical tenant, and still gets.
-NOT_A_DESCOPE_PRINCIPAL = "No tenant context — select a tenant first"
+NOT_A_DESCOPE_PRINCIPAL = SELECT_A_TENANT_FIRST
 
 
 def require_descope_principal(request: Request) -> None:

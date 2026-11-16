@@ -30,6 +30,9 @@ logger = logbook(__name__)
 TENANT_SELECTOR_HEADER = "X-Tenant-ID"
 
 NO_TENANT_CONTEXT = "No tenant context"
+# What ``get_tenant_id`` answers when a request has no single tenant, and what
+# ``require_descope_principal`` answers so its routes read as they always did.
+SELECT_A_TENANT_FIRST = "No tenant context — select a tenant first"
 
 
 @dataclass(frozen=True)
@@ -72,8 +75,8 @@ def _claims_source(request: Request, claims: dict) -> TenantClaims | None:
     """What the request's provider says about the tenant, read with that provider's own extractor.
 
     ``None`` when the provider declares no extractor, when its extractor raises,
-    and when it names a tenant that is not a non-empty string: each is refused by
-    the caller. A request that no middleware attributed to a provider (one built
+    and when its answer cannot be used (see ``_usable``): each is refused by the
+    caller. A request that no middleware attributed to a provider (one built
     by hand, with only ``request.state.claims`` set) is read with Descope's
     extractor, which is what the claims path has always been.
     """
@@ -95,9 +98,35 @@ def _claims_source(request: Request, claims: dict) -> TenantClaims | None:
             exc_info=True,
         )
         return None
-    if not isinstance(claimed.tenant_id, str) or not claimed.tenant_id:
+    if not _usable(claimed):
+        logger.warning(
+            "tenant resolution refused: the claims extractor of provider=%s "
+            "gave an answer that cannot be used for sub=%r",
+            *_caller(request, claims),
+        )
         return None
     return claimed
+
+
+def _is_string_list(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(entry, str) for entry in value)
+
+
+def _usable(claimed: object) -> bool:
+    """True when an extractor's answer names a tenant and grants in the shapes the checks rely on.
+
+    The answer must be a ``TenantClaims`` whose tenant is a non-empty string and
+    whose roles and permissions are lists of strings. ``require_role`` asks
+    ``role in roles``, which on a string is a substring search, so anything but
+    a list of strings is refused here and never searched.
+    """
+    return (
+        isinstance(claimed, TenantClaims)
+        and isinstance(claimed.tenant_id, str)
+        and bool(claimed.tenant_id)
+        and _is_string_list(claimed.roles)
+        and _is_string_list(claimed.permissions)
+    )
 
 
 def _selector_value(value: object) -> str:
@@ -123,9 +152,11 @@ def _selected_tenants(request: Request, claims: dict) -> tuple[list[str], set[st
     The selector is every ``X-Tenant-ID`` value on the request, one entry per
     header line, so a header sent twice is seen as two even with one value. A ``dct`` claim on
     a canonical provider's token selects too: those providers do not normally
-    emit one, but a token that carries it has always been held to it. An empty
-    value or a ``dct`` that is not a string is kept as a selection that can match
-    no tenant, so it is refused and not treated as absent.
+    emit one, but a token that carries it has always been held to it. Header and
+    claim are put in one spelling (``_selector_value``) before they are compared
+    with each other and with the memberships. An empty header value or a ``dct``
+    that is not a string is kept as a selection that can match no tenant, so it
+    is refused and not treated as absent.
     """
     values = request.headers.getlist(TENANT_SELECTOR_HEADER)
     # Only a real header list counts: a request double in a test has none.
@@ -135,7 +166,7 @@ def _selected_tenants(request: Request, claims: dict) -> tuple[list[str], set[st
     if claimed is not None and not isinstance(claimed, str):
         by_claim.add("")
     elif claimed:
-        by_claim.add(claimed)
+        by_claim.add(_selector_value(claimed))
     return by_header, by_claim
 
 

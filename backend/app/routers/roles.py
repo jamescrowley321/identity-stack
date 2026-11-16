@@ -67,7 +67,9 @@ async def get_my_roles(
     }
 
 
-@router.post("/roles/assign")
+# ``RoleService`` mirrors each assignment to Descope (``DescopeSyncAdapter``), so the canonical
+# user and tenant ids of another provider's principal must not reach it (conventions §18).
+@router.post("/roles/assign", dependencies=[Depends(require_descope_principal)])
 @limiter.limit(RATE_LIMIT_AUTH)
 async def assign_roles(
     request: Request,
@@ -109,7 +111,8 @@ async def assign_roles(
     )
 
 
-@router.post("/roles/remove")
+# Mirrored to Descope like ``/roles/assign``.
+@router.post("/roles/remove", dependencies=[Depends(require_descope_principal)])
 @limiter.limit(RATE_LIMIT_AUTH)
 async def remove_roles(
     request: Request,

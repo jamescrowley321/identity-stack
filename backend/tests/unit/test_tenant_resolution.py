@@ -362,6 +362,28 @@ class TestTenantSelector:
 
         assert response.json() == {"tenant_id": TENANT_D, "roles": ["member"]}
 
+    def test_an_upper_case_dct_names_the_tenant_as_the_header_would(self, client, store):
+        store.holds((TENANT_A, "admin", []), (TENANT_D, "member", []))
+
+        response = _get(client, "/roles", _ory(dct=TENANT_D.upper()))
+
+        assert response.json() == {"tenant_id": TENANT_D, "roles": ["member"]}
+
+    def test_an_upper_case_dct_and_a_selector_for_the_same_tenant_agree(self, client, store):
+        store.holds((TENANT_A, "admin", []), (TENANT_D, "member", []))
+
+        response = _get(client, "/roles", _ory(dct=TENANT_D.upper()), selector=TENANT_D)
+
+        assert response.json() == {"tenant_id": TENANT_D, "roles": ["member"]}
+
+    def test_an_upper_case_dct_for_a_tenant_the_caller_is_not_in_is_still_refused(self, client, store):
+        store.holds((TENANT_A, "admin", []))
+
+        response = _get(client, "/admin", _ory(dct=TENANT_D.upper()))
+
+        assert response.status_code == 403
+        assert response.json() == NO_TENANT_FROM_RBAC
+
     @pytest.mark.parametrize("selector", ["", "   "])
     def test_an_empty_selector_is_refused_even_with_one_membership(self, client, store, selector):
         store.holds((TENANT_A, "admin", []))
@@ -609,6 +631,66 @@ class TestAnExtractorTheResolverCannotUse:
 
         assert refused.value.status_code == 403
         assert refused.value.detail == "No tenant context"
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            None,
+            {"tenant_id": "org-1", "roles": ["admin"], "permissions": []},
+            ("org-1", ["admin"], []),
+        ],
+        ids=["nothing", "a dict", "a tuple"],
+    )
+    def test_an_answer_that_is_not_tenant_claims_is_refused(self, answer):
+        request = _attributed_request(replace(FAKE_PROVIDER, tenant_claims=lambda _claims: answer))
+
+        with pytest.raises(HTTPException) as refused:
+            resolve_tenant_access(request, _fake(org="org-1"), None)
+
+        assert refused.value.status_code == 403
+        assert refused.value.detail == "No tenant context"
+
+    @pytest.mark.parametrize(
+        "grants",
+        ["administrator", None, ("admin",), {"admin": True}, ["admin", 7], [["admin"]]],
+        ids=["a string", "nothing", "a tuple", "a dict", "a number among them", "a nested list"],
+    )
+    @pytest.mark.parametrize("field", ["roles", "permissions"])
+    def test_grants_that_are_not_a_list_of_strings_are_refused(self, field, grants):
+        answer = replace(TenantClaims(tenant_id="org-1", roles=[], permissions=[]), **{field: grants})
+        request = _attributed_request(replace(FAKE_PROVIDER, tenant_claims=lambda _claims: answer))
+
+        with pytest.raises(HTTPException) as refused:
+            resolve_tenant_access(request, _fake(org="org-1"), None)
+
+        assert refused.value.status_code == 403
+        assert refused.value.detail == "No tenant context"
+
+    def test_a_role_string_is_never_searched_for_the_required_role(self, store):
+        """``'admin' in 'administrator'`` is true of a string: the route must not be reached that way."""
+        answer = TenantClaims(tenant_id="org-1", roles="administrator", permissions="documents.read.all")
+        providers = [replace(FAKE_PROVIDER, tenant_claims=lambda _claims: answer)]
+        client = TestClient(_app(providers=providers))
+
+        by_role = _get(client, "/admin", _fake())
+        by_permission = _get(client, "/permissions", _fake())
+
+        assert by_role.status_code == 403
+        assert by_role.json() == NO_TENANT_FROM_RBAC
+        assert by_permission.status_code == 403
+        assert by_permission.json() == NO_TENANT_FROM_RBAC
+
+    def test_an_unusable_answer_is_logged_with_the_caller(self, caplog):
+        request = _attributed_request(replace(FAKE_PROVIDER, tenant_claims=lambda _claims: None))
+
+        with caplog.at_level("WARNING", logger="app.dependencies.tenant_access"), pytest.raises(HTTPException):
+            resolve_tenant_access(request, _fake(org="org-1"), None)
+
+        (record,) = caplog.records
+        assert record.getMessage() == (
+            "tenant resolution refused: the claims extractor of provider=Fake "
+            "gave an answer that cannot be used for sub='fake-user'"
+        )
 
     def test_a_well_formed_answer_is_returned(self):
         request = _attributed_request(FAKE_PROVIDER)

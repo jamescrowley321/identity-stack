@@ -19,6 +19,7 @@ import base64
 import json
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from urllib.parse import urlsplit, urlunsplit
 
 from app.knobs import knob, knob_flag
 
@@ -353,8 +354,17 @@ PROVIDER_REGISTRATIONS: list[ProviderRegistration] = [
 
 
 def _issuer_key(issuer: str) -> str:
-    """``issuer`` as two spellings of one issuer compare equal: no trailing slash, no case."""
-    return issuer.rstrip("/").casefold()
+    """``issuer`` as two spellings of one issuer compare equal.
+
+    Trailing slashes are dropped and the scheme and host are case-folded. The
+    path keeps its case (two realms may differ only in that), and so does an
+    issuer that is not a URL, such as Descope's bare project id.
+    """
+    trimmed = issuer.rstrip("/")
+    parts = urlsplit(trimmed)
+    if not parts.scheme or not parts.netloc:
+        return trimmed
+    return urlunsplit(parts._replace(scheme=parts.scheme.casefold(), netloc=parts.netloc.casefold()))
 
 
 def _refuse_ambiguous_providers(providers: list[ProviderTokenConfig]) -> None:
@@ -363,8 +373,9 @@ def _refuse_ambiguous_providers(providers: list[ProviderTokenConfig]) -> None:
     The dependencies and the logout router find a request's provider by name
     (compared case-insensitively) and the middlewares by issuer, so a shared
     name or issuer would apply one provider's rules to the other's tokens. Two
-    issuers that differ only in case or a trailing slash count as shared: a
-    token is matched by the exact string, but no deployment means them as two.
+    issuers that differ only in a trailing slash or in the case of the scheme or
+    host count as shared: a token is matched by the exact string, but no
+    deployment means them as two.
     """
     names: set[str] = set()
     issuers: set[str] = set()
@@ -379,6 +390,25 @@ def _refuse_ambiguous_providers(providers: list[ProviderTokenConfig]) -> None:
                 f"provider {provider.name!r} accepts an issuer another provider already accepts: {shared}"
             )
         issuers |= {_issuer_key(issuer) for issuer in provider.accepted_issuers}
+
+
+def refuse_canonical_descope_managed(providers: Iterable[ProviderTokenConfig], canonical: Iterable[str]) -> None:
+    """Raise when a ``descope_managed`` provider is also authorized from the canonical model.
+
+    ``canonical`` is ``CANONICAL_RBAC_PROVIDERS``, lower-case provider names. A
+    provider in it gets its tenant from the canonical model, and a
+    ``descope_managed`` provider passes ``require_descope_principal``: with
+    both, a canonical tenant id would be handed to Descope, where it names
+    nothing or someone else's tenant. The middleware factory calls this at
+    startup.
+    """
+    canonical_names = {name.lower() for name in canonical}
+    both = sorted(p.name for p in providers if p.descope_managed and p.name.lower() in canonical_names)
+    if both:
+        raise ProviderConfigurationError(
+            f"CANONICAL_RBAC_PROVIDERS must not list {both}: the tenant and user ids of a provider "
+            "whose routes call Descope come from its own token claims"
+        )
 
 
 def _assemble(registrations: Iterable[ProviderRegistration]) -> list[ProviderTokenConfig]:
