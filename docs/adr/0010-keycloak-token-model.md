@@ -77,7 +77,15 @@ local realm and are recorded in `keycloak/fixtures/README.md`.
   cost is a second place to grant a type: a realm admin maps the client roles and adds the
   user's id to the organization's `type:<type client>` attribute, and removes both when the
   user stops being one. A marker without the roles grants nothing, and roles without the
-  marker grant nothing for an organization-bound type.
+  marker grant nothing for an organization-bound type. Removing a user from an organization
+  does not clear the marker: re-adding them restores the type there unless the admin removed
+  the id as well.
+- Linking a Keycloak identity to an existing canonical user trusts the realm's
+  `email_verified` (just-in-time provisioning links on a verified email). The realm must
+  broker no identity provider with trusted email, allow no self-registration, keep emails
+  unique and verify a changed email (`docs/security.md`). The alternative, never linking a
+  Keycloak identity to another provider's user, would refuse every Keycloak user whose email
+  is already canonical, because canonical emails are unique.
 - A portable permission holds in every organization its user belongs to. Measured on
   Keycloak 26.8.2 (`keycloak/fixtures/README.md`): after a user is removed from an
   organization, the access token they hold for it stays valid until it expires (300 seconds
