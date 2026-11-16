@@ -35,6 +35,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, HTTPException, Request
+from fastapi.params import Depends as DependsMarker
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies.tenant_access import (
@@ -189,8 +190,13 @@ class RbacSessionOverrideError(TypeError):
 
 
 def _takes_no_argument(provide: object) -> bool:
+    """Whether ``provide()`` gets everything it asks for.
+
+    A ``Depends()`` default does not count as one: nothing here resolves it, so
+    the override would be handed the marker itself.
+    """
     return all(
-        parameter.default is not inspect.Parameter.empty
+        (parameter.default is not inspect.Parameter.empty and not isinstance(parameter.default, DependsMarker))
         or parameter.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
         for parameter in inspect.signature(provide).parameters.values()
     )
