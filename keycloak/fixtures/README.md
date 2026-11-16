@@ -30,6 +30,15 @@ Every secret and password below is a local fixture. The realm's redirect URIs
 | `alice` | `local-only-alice` | `acme` | `member`: both |
 | `bob` | `local-only-bob` | `acme`, `globex` | `member`: `documents:read`; `tenant-admin`: all three |
 | `carol` | `local-only-carol` | `acme` | none |
+| `dave` | `local-only-dave` | `acme` | `tenant-admin`: all three |
+| `erin` | `local-only-erin` | `acme` | `member`: `documents:write` |
+
+`dave` is a tenant admin in exactly one organization, and `erin` is a `member` user without
+`documents:read`. The backend's token model for this realm declares `member` portable with
+the one portable permission `documents:read`, and `tenant-admin` organization-bound
+([`docs/architecture.md`](../../docs/architecture.md#keycloak-token-model)). `bob`'s
+`tenant-admin` tokens are therefore refused in both of his organizations, and `erin`'s
+`member` token grants nothing.
 
 The login form is identity-first: username on one page, password on the next.
 

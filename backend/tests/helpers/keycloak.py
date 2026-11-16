@@ -41,6 +41,8 @@ TENANT_ADMIN_TYPE_CLIENT = "tenant-admin"
 MEMBER_APP_CLIENT = "member-app"
 TENANT_ADMIN_APP_CLIENT = "tenant-admin-app"
 ACME_SCOPE = "openid organization:acme"
+GLOBEX_SCOPE = "openid organization:globex"
+BOTH_ORGANIZATIONS_SCOPE = "openid organization:acme organization:globex"
 
 # Client attributes Keycloak reads when it issues an access token.
 ACCESS_TOKEN_ALG_ATTRIBUTE = "access.token.signed.response.alg"
@@ -68,6 +70,10 @@ ALICE = KeycloakUser("alice", "local-only-alice")
 BOB = KeycloakUser("bob", "local-only-bob")
 # In ``acme`` with no client role: her access token carries no ``aud``.
 CAROL = KeycloakUser("carol", "local-only-carol")
+# A tenant admin in ``acme`` only.
+DAVE = KeycloakUser("dave", "local-only-dave")
+# A ``member`` user in ``acme`` whose one client role is ``documents:write``.
+ERIN = KeycloakUser("erin", "local-only-erin")
 
 
 @dataclass(frozen=True)
