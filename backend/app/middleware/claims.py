@@ -170,7 +170,7 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
             # it in standalone mode; nothing here calls the library.
             if sender_constrained(claims):
                 logger.warning(
-                    "GatewayClaims rejected: sender-constrained token presented as a bearer token (%s)",
+                    "GatewayClaims rejected (%s): sender-constrained token presented as a bearer token",
                     provider.name,
                 )
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)

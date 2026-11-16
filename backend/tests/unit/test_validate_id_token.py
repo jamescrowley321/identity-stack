@@ -147,7 +147,7 @@ def test_a_refusal_is_one_log_line_naming_the_error_type(monkeypatch, op, caplog
     with caplog.at_level("DEBUG"):
         _assert_uniform_401(_post(_client(monkeypatch, op), token))
 
-    assert _route_records(caplog) == [("WARNING", "validate-id-token refused the token: TokenValidationException")]
+    assert _route_records(caplog) == [("WARNING", "ID validation refused: TokenValidationException")]
     assert token not in caplog.text
 
 
@@ -158,7 +158,7 @@ def test_a_refusal_with_a_typed_kind_logs_the_kind(monkeypatch, op, caplog):
         _assert_uniform_401(_post(_client(monkeypatch, op), token))
 
     assert _route_records(caplog) == [
-        ("WARNING", "validate-id-token refused the token: CertificateBindingError (certificate_required)")
+        ("WARNING", "ID validation refused: CertificateBindingError (certificate_required)")
     ]
 
 
@@ -207,7 +207,7 @@ class TestProviderFault:
             self._assert_503(_post(client, token))
 
         assert _route_records(caplog) == [
-            ("ERROR", "validate-id-token could not validate: DiscoveryException (status None)")
+            ("ERROR", "ID validation hit a provider fault: DiscoveryException (status None)")
         ]
 
     def test_a_discovery_endpoint_that_answers_500(self, monkeypatch, faulty, caplog):
@@ -217,7 +217,7 @@ class TestProviderFault:
             self._assert_503(_post(_client(monkeypatch, faulty), faulty.token(RS256, _claims(faulty))))
 
         assert _route_records(caplog) == [
-            ("ERROR", "validate-id-token could not validate: DiscoveryException (status 500)")
+            ("ERROR", "ID validation hit a provider fault: DiscoveryException (status 500)")
         ]
 
     def test_a_jwks_endpoint_that_answers_500(self, monkeypatch, faulty, caplog):
@@ -226,7 +226,7 @@ class TestProviderFault:
         with caplog.at_level("DEBUG"):
             self._assert_503(_post(_client(monkeypatch, faulty), faulty.token(RS256, _claims(faulty))))
 
-        assert _route_records(caplog) == [("ERROR", "validate-id-token could not validate: JwksException (status 500)")]
+        assert _route_records(caplog) == [("ERROR", "ID validation hit a provider fault: JwksException (status 500)")]
 
     def test_a_discovery_document_for_another_issuer(self, monkeypatch, faulty, caplog):
         faulty.publish(issuer=f"http://127.0.0.1:{_closed_port()}")
@@ -234,9 +234,7 @@ class TestProviderFault:
         with caplog.at_level("DEBUG"):
             self._assert_503(_post(_client(monkeypatch, faulty), faulty.token(RS256, _claims(faulty))))
 
-        assert _route_records(caplog) == [
-            ("ERROR", "validate-id-token could not validate: DiscoveryIssuerMismatchError")
-        ]
+        assert _route_records(caplog) == [("ERROR", "ID validation hit a provider fault: DiscoveryIssuerMismatchError")]
 
     def test_a_jwks_with_no_keys(self, monkeypatch, faulty, caplog):
         faulty.publish(keys=[])
@@ -244,7 +242,7 @@ class TestProviderFault:
         with caplog.at_level("DEBUG"):
             self._assert_503(_post(_client(monkeypatch, faulty), faulty.token(RS256, _claims(faulty))))
 
-        assert _route_records(caplog) == [("ERROR", "validate-id-token could not validate: JwksValidationError")]
+        assert _route_records(caplog) == [("ERROR", "ID validation hit a provider fault: JwksValidationError")]
 
     def test_a_plain_http_provider_where_https_is_required(self, monkeypatch, faulty, caplog):
         """Refused by the library's discovery policy before any request is sent."""
@@ -258,9 +256,7 @@ class TestProviderFault:
         with caplog.at_level("DEBUG"):
             self._assert_503(_post(client, faulty.token(RS256, _claims(faulty))))
 
-        assert _route_records(caplog) == [
-            ("ERROR", "validate-id-token could not validate: DiscoveryHTTPSRequiredError")
-        ]
+        assert _route_records(caplog) == [("ERROR", "ID validation hit a provider fault: DiscoveryHTTPSRequiredError")]
 
     def test_a_fault_is_logged_without_the_token_or_a_traceback(self, monkeypatch, faulty, caplog):
         faulty.publish(keys=[])
@@ -280,7 +276,7 @@ def test_an_error_the_library_does_not_type_still_refuses_the_token(monkeypatch,
     with caplog.at_level("DEBUG"):
         _assert_uniform_401(_post(_client(monkeypatch, op), "not-a-jwt"))
 
-    assert _route_records(caplog) == [("WARNING", "validate-id-token refused the token: DecodeError")]
+    assert _route_records(caplog) == [("WARNING", "ID validation refused: DecodeError")]
 
 
 def test_a_header_that_is_not_a_bearer_token_is_still_a_400(monkeypatch, op):

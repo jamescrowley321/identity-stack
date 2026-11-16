@@ -162,12 +162,12 @@ async def validate_id_token(request: Request, authorization: str = Header()):
             disco_doc_address=DESCOPE.disco_address,
         )
     except PROVIDER_FAULTS as exc:
-        logger.error("validate-id-token could not validate: %s", _cause(exc))
+        logger.error("ID validation hit a provider fault: %s", _cause(exc))
         raise HTTPException(status_code=503, detail=UNAVAILABLE_DETAIL) from exc
     except Exception as exc:
         # Anything else refuses the token, as in TokenValidationMiddleware, with
         # the body every token refusal gets. Not narrowed to
         # TokenValidationException: in discovery mode the library lets PyJWT's
         # DecodeError out for a token that is not a JWT (identity-model#1179).
-        logger.warning("validate-id-token refused the token: %s", _cause(exc))
+        logger.warning("ID validation refused: %s", _cause(exc))
         raise HTTPException(status_code=401, detail=REFUSED_DETAIL) from exc
