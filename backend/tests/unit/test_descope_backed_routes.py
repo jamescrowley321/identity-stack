@@ -661,10 +661,16 @@ class TestClaimsWithNoProviderAreRefused:
 
         assert require_descope_principal(request) is None
 
-    def test_a_request_with_no_claims_is_left_to_authentication(self, client):
-        """No token: the 401 comes from authentication, as on every other route."""
-        assert require_descope_principal(_hand_built_request()) is None
+    @pytest.mark.parametrize("state", [{}, {"claims": None}], ids=["no claims", "claims is None"])
+    def test_a_request_with_no_claims_is_refused_by_the_guard_itself(self, state):
+        """Conventions §17: the guard does not lean on a second dependency to answer 401."""
+        with pytest.raises(HTTPException) as refused:
+            require_descope_principal(_hand_built_request(**state))
 
+        assert refused.value.status_code == 401
+        assert refused.value.detail == "Not authenticated"
+
+    def test_a_request_with_no_token_gets_401_from_a_guarded_route(self, client):
         response = client.get("/api/documents")
 
         assert response.status_code == 401
