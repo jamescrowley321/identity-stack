@@ -28,11 +28,18 @@ its authorization decisions still come only from its own signed claims.
 
 Every branch of the canonical path that cannot produce an unambiguous answer fails
 closed with 403. An authorization decision is never made on a guess.
+
+A third shape carries authorization in the token but not all of it: a Keycloak
+token of an organization-bound type holds only for a caller whose one
+organization is the token's. This module asks the provider's membership lookup
+for those tokens, after everything the token alone decides: no lookup wired or
+an answer of "no" is 403, and a lookup that fails is 502 and no grant.
 """
 
 import inspect
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.params import Depends as DependsMarker
@@ -43,10 +50,12 @@ from app.dependencies.tenant_access import (
     CanonicalGrant,
     CanonicalMemberships,
     TenantAccess,
+    awaiting_confirmation,
     resolve_tenant_access,
 )
 from app.knobs import knob_set
 from app.logbook import logbook
+from app.middleware.providers import ProviderTokenConfig
 from app.models.database import get_session_factory
 from app.models.identity.user import UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
@@ -63,6 +72,10 @@ logger = logbook(__name__)
 # permissions come from the canonical model. Descope is excluded by default:
 # it signs its own `dct`/`tenants` claims and those stay authoritative.
 CANONICAL_RBAC_PROVIDERS = knob_set("CANONICAL_RBAC_PROVIDERS", "ory")
+
+INSUFFICIENT_PERMISSIONS = "Insufficient permissions"
+# The provider's directory could not say which tenants the caller belongs to.
+MEMBERSHIP_LOOKUP_FAILED = "Membership lookup failed"
 
 
 async def get_rbac_session() -> AsyncIterator[AsyncSession | None]:
@@ -244,15 +257,118 @@ async def canonical_memberships(request: Request) -> CanonicalMemberships | None
         return await _canonical_memberships(request, claims, session)
 
 
+@dataclass(frozen=True)
+class _SoleMembership:
+    """The tenant this request's lookup confirmed as the caller's only one. Never kept across requests."""
+
+    tenant_id: str
+
+
+async def _confirm_sole_membership(request: Request, claims: dict, tenant_id: str) -> str | None:
+    """``tenant_id`` when the provider's lookup says it is the caller's one tenant, else ``None``.
+
+    For claims that are ``sole_membership_required`` (conventions §18). ``None``
+    is a refusal the resolver answers with 403: no lookup is wired for the
+    provider, or the caller belongs to no tenant, to another one, or to several.
+    A lookup that raises, or answers with anything but a collection of strings,
+    could not be asked: that is 502 and no grant, as for the FGA store (§17). A
+    confirmation is kept on ``request.state`` for the rest of the request, so a
+    route that depends on both ``get_tenant_id`` and ``require_permission`` asks
+    once.
+    """
+    kept = getattr(request.state, "sole_membership", None)
+    if isinstance(kept, _SoleMembership) and kept.tenant_id == tenant_id:
+        return tenant_id
+    provider = getattr(request.state, "provider", None)
+    lookup = provider.sole_membership_lookup if isinstance(provider, ProviderTokenConfig) else None
+    name = provider.name if isinstance(provider, ProviderTokenConfig) else "unrecorded"
+    sub = claims.get("sub")
+    if lookup is None:
+        logger.warning("membership not confirmed: provider=%s has no membership lookup (sub=%r)", name, sub)
+        return None
+    try:
+        tenants = await lookup(claims)
+    except Exception as exc:
+        logger.warning("membership lookup failed for provider=%s sub=%r", name, sub, exc_info=True)
+        raise HTTPException(status_code=502, detail=MEMBERSHIP_LOOKUP_FAILED) from exc
+    if not isinstance(tenants, (list, tuple, set, frozenset)) or not all(isinstance(entry, str) for entry in tenants):
+        logger.warning("membership lookup of provider=%s gave an answer that cannot be used (sub=%r)", name, sub)
+        raise HTTPException(status_code=502, detail=MEMBERSHIP_LOOKUP_FAILED)
+    if set(tenants) != {tenant_id}:
+        logger.warning(
+            "membership not confirmed: provider=%s sub=%r belongs to %d tenant(s), not to the token's alone",
+            name,
+            sub,
+            len(set(tenants)),
+        )
+        return None
+    request.state.sole_membership = _SoleMembership(tenant_id)
+    return tenant_id
+
+
+async def confirmed_tenant(request: Request) -> str | None:
+    """Dependency: the tenant ``get_tenant_id`` may believe a ``sole_membership_required`` token for.
+
+    ``None`` for every request whose claims need no confirmation, without a
+    lookup: an unauthenticated one, a provider authorized from the canonical
+    model, and a token that names no tenant or settles its claims alone. Also
+    ``None`` when the lookup did not confirm the token's tenant, which
+    ``get_tenant_id`` then refuses. Raises 502 when the lookup fails.
+    """
+    claims = getattr(request.state, "claims", None)
+    if not isinstance(claims, dict) or _principal_provider(request) in CANONICAL_RBAC_PROVIDERS:
+        return None
+    unconfirmed = awaiting_confirmation(request, claims)
+    if unconfirmed is None:
+        return None
+    return await _confirm_sole_membership(request, claims, unconfirmed.tenant_id)
+
+
 async def _tenant_access(
-    request: Request, session: AsyncSession | None, *, request_selects: bool = True
+    request: Request,
+    session: AsyncSession | None,
+    *,
+    request_selects: bool = True,
+    holds: Callable[[TenantAccess], bool] | None = None,
 ) -> TenantAccess:
-    """The request's tenant and the caller's grants in it. 401 with no claims."""
+    """The request's tenant and the caller's grants in it. 401 with no claims.
+
+    ``holds`` is the caller's own check of the grants. For a token that needs
+    its tenant confirmed it is applied first, to what the token alone says: a
+    token that would be refused anyway is refused (403) without a lookup, so a
+    directory that is down never turns that 403 into a 502.
+    """
     claims = getattr(request.state, "claims", None)
     if claims is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     memberships = await _canonical_memberships(request, claims, session)
-    return resolve_tenant_access(request, claims, memberships, request_selects=request_selects)
+    confirmed = None
+    if memberships is None:
+        unconfirmed = awaiting_confirmation(request, claims)
+        if unconfirmed is not None:
+            if holds is not None and not holds(unconfirmed):
+                raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
+            confirmed = await _confirm_sole_membership(request, claims, unconfirmed.tenant_id)
+    return resolve_tenant_access(
+        request, claims, memberships, request_selects=request_selects, confirmed_tenant=confirmed
+    )
+
+
+def _holds_any(wanted: tuple[str, ...], held: Callable[[TenantAccess], list[str]]) -> Callable[[TenantAccess], bool]:
+    """A check that ``held(access)`` contains one of ``wanted``."""
+
+    def holds(access: TenantAccess) -> bool:
+        return any(entry in held(access) for entry in wanted)
+
+    return holds
+
+
+def _roles(access: TenantAccess) -> list[str]:
+    return access.roles
+
+
+def _permissions(access: TenantAccess) -> list[str]:
+    return access.permissions
 
 
 def require_role(*roles: str):
@@ -262,19 +378,21 @@ def require_role(*roles: str):
     The tenant and the roles come from the tenant resolver (conventions §18):
     a Descope principal's from its ``dct`` + ``tenants`` JWT claims, and those of a
     principal from a provider in ``CANONICAL_RBAC_PROVIDERS`` from the canonical
-    model.
+    model. A Keycloak token carries permissions and no role, so a Keycloak
+    principal is always refused here.
 
     Returns the user's role list for downstream use.
     """
+    holds = _holds_any(roles, _roles)
 
     async def dependency(
         request: Request,
         session: AsyncSession | None = Depends(get_rbac_session),
     ) -> list[str]:
-        user_roles = (await _tenant_access(request, session)).roles
-        if not any(r in user_roles for r in roles):
-            raise HTTPException(status_code=403, detail="Insufficient permissions")
-        return user_roles
+        access = await _tenant_access(request, session, holds=holds)
+        if not holds(access):
+            raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
+        return access.roles
 
     return dependency
 
@@ -286,19 +404,21 @@ def require_permission(*permissions: str):
     The tenant and the permissions come from the tenant resolver (conventions
     §18): a Descope principal's from its ``dct`` + ``tenants`` JWT claims, and those
     of a principal from a provider in ``CANONICAL_RBAC_PROVIDERS`` from the canonical
-    model.
+    model. A Keycloak principal's are the client roles of its token's one
+    audience, in the organization the token names.
 
     Returns the user's permission list for downstream use.
     """
+    holds = _holds_any(permissions, _permissions)
 
     async def dependency(
         request: Request,
         session: AsyncSession | None = Depends(get_rbac_session),
     ) -> list[str]:
-        user_permissions = (await _tenant_access(request, session)).permissions
-        if not any(p in user_permissions for p in permissions):
-            raise HTTPException(status_code=403, detail="Insufficient permissions")
-        return user_permissions
+        access = await _tenant_access(request, session, holds=holds)
+        if not holds(access):
+            raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
+        return access.permissions
 
     return dependency
 
@@ -317,14 +437,15 @@ def require_global_role(*roles: str):
 
     Returns the user's role list for downstream use.
     """
+    holds = _holds_any(roles, _roles)
 
     async def dependency(
         request: Request,
         session: AsyncSession | None = Depends(get_rbac_session),
     ) -> list[str]:
-        user_roles = (await _tenant_access(request, session, request_selects=False)).roles
-        if not any(r in user_roles for r in roles):
-            raise HTTPException(status_code=403, detail="Insufficient permissions")
-        return user_roles
+        access = await _tenant_access(request, session, request_selects=False, holds=holds)
+        if not holds(access):
+            raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
+        return access.roles
 
     return dependency

@@ -23,12 +23,17 @@ from app.middleware.providers import (
     keycloak_config,
     ory_config,
 )
+from tests.helpers.keycloak_model import MODEL_VARIABLES, builder_settings, model_settings, set_model_environment
 
 ISSUER = "http://keycloak.example.test:8180/realms/identity-stack"
 MEMBER = "member"
 TENANT_ADMIN = "tenant-admin"
 APP_CLIENT = "member-app"
 AUDIENCES = frozenset({MEMBER, TENANT_ADMIN})
+# The token model that goes with ``AUDIENCES``: startup refuses a Keycloak provider without one.
+MODEL = model_settings(MEMBER, TENANT_ADMIN)
+# Plain HTTP may be allowed only for an issuer on loopback or a ``.localhost`` name.
+LOCAL_ISSUER = "http://keycloak.localhost:8180/realms/identity-stack"
 ORY_ISSUER = "https://ory.example.test"
 PROBE = "/api/probe"
 UNIFORM_401 = {"detail": "Invalid or expired token"}
@@ -44,6 +49,7 @@ _PROVIDER_VARIABLES = (
     "KEYCLOAK_AUDIENCES",
     "KEYCLOAK_REQUIRE_HTTPS",
     "KEYCLOAK_POST_LOGOUT_REDIRECT_URI",
+    *MODEL_VARIABLES,
     "FRONTEND_URL",
 )
 
@@ -64,7 +70,7 @@ def _claims(**overrides) -> dict:
 
 
 def _keycloak(**overrides):
-    return replace(keycloak_config(ISSUER, AUDIENCES), **overrides)
+    return replace(keycloak_config(ISSUER, AUDIENCES, **MODEL), **overrides)
 
 
 def _client(middleware, providers) -> TestClient:
@@ -91,7 +97,7 @@ def clean_env(monkeypatch):
 
 class TestKeycloakConfig:
     def test_issuer_discovery_and_logout_kind(self):
-        provider = keycloak_config(ISSUER, AUDIENCES)
+        provider = keycloak_config(ISSUER, AUDIENCES, **MODEL)
 
         assert provider.name == "Keycloak"
         assert provider.accepted_issuers == frozenset({ISSUER})
@@ -99,23 +105,25 @@ class TestKeycloakConfig:
         assert provider.logout_kind == "rp_initiated"
 
     def test_trailing_slash_is_dropped_because_the_token_issuer_has_none(self):
-        assert keycloak_config(f"{ISSUER}/", AUDIENCES).accepted_issuers == frozenset({ISSUER})
+        assert keycloak_config(f"{ISSUER}/", AUDIENCES, **MODEL).accepted_issuers == frozenset({ISSUER})
 
     def test_audience_is_the_set_and_is_required(self):
-        provider = keycloak_config(ISSUER, AUDIENCES)
+        provider = keycloak_config(ISSUER, AUDIENCES, **MODEL)
 
         assert provider.audiences == AUDIENCES
         assert provider.require_audience is True
 
     def test_rs256_only(self):
-        assert keycloak_config(ISSUER, AUDIENCES).algorithms == frozenset({"RS256"})
+        assert keycloak_config(ISSUER, AUDIENCES, **MODEL).algorithms == frozenset({"RS256"})
 
     def test_https_is_required_unless_switched_off(self):
-        assert keycloak_config(ISSUER, AUDIENCES).require_https is True
-        assert keycloak_config(ISSUER, AUDIENCES, require_https=False).require_https is False
+        assert keycloak_config(ISSUER, AUDIENCES, **MODEL).require_https is True
+        assert keycloak_config(LOCAL_ISSUER, AUDIENCES, require_https=False, **MODEL).require_https is False
 
     def test_logout_client_is_the_tokens_azp(self):
-        provider = keycloak_config(ISSUER, AUDIENCES, post_logout_redirect_uri="https://app.example.test/login")
+        provider = keycloak_config(
+            ISSUER, AUDIENCES, post_logout_redirect_uri="https://app.example.test/login", **MODEL
+        )
 
         assert provider.logout_client_id is None
         assert provider.logout_client_id_claim == "azp"
@@ -141,6 +149,7 @@ class TestBuildProviderConfigs:
             ory_audience="api",
             keycloak_issuer_url=ISSUER,
             keycloak_audiences=AUDIENCES,
+            **builder_settings(MEMBER, TENANT_ADMIN),
         )
 
         assert [provider.name for provider in providers] == ["Descope", "Ory", "Keycloak"]
@@ -186,17 +195,21 @@ class TestConfiguredProviders:
     def test_keycloak_settings_come_from_the_environment(self, clean_env):
         clean_env.setenv("KEYCLOAK_ISSUER_URL", ISSUER)
         clean_env.setenv("KEYCLOAK_AUDIENCES", " member , tenant-admin ,,")
+        set_model_environment(clean_env, MEMBER, TENANT_ADMIN)
         clean_env.setenv("KEYCLOAK_POST_LOGOUT_REDIRECT_URI", "https://app.example.test/login")
 
         providers = {provider.name: provider for provider in configured_providers()}
 
         assert providers["Keycloak"] == keycloak_config(
-            ISSUER, AUDIENCES, post_logout_redirect_uri="https://app.example.test/login"
+            ISSUER, AUDIENCES, post_logout_redirect_uri="https://app.example.test/login", **MODEL
         )
 
     def test_audience_client_ids_keep_their_case(self, clean_env):
         clean_env.setenv("KEYCLOAK_ISSUER_URL", ISSUER)
         clean_env.setenv("KEYCLOAK_AUDIENCES", "Member")
+        clean_env.setenv("KEYCLOAK_APP_CLIENTS", "Member=Member-App")
+        clean_env.setenv("KEYCLOAK_PORTABLE_TYPES", "Member")
+        clean_env.setenv("KEYCLOAK_PORTABLE_PERMISSIONS", "Member=documents:read")
 
         providers = {provider.name: provider for provider in configured_providers()}
 
@@ -205,6 +218,7 @@ class TestConfiguredProviders:
     def test_post_logout_redirect_defaults_to_the_frontend_login_page(self, clean_env):
         clean_env.setenv("KEYCLOAK_ISSUER_URL", ISSUER)
         clean_env.setenv("KEYCLOAK_AUDIENCES", MEMBER)
+        set_model_environment(clean_env, MEMBER)
         clean_env.setenv("FRONTEND_URL", "https://app.example.test/")
 
         providers = {provider.name: provider for provider in configured_providers()}
@@ -225,8 +239,9 @@ class TestConfiguredProviders:
         [(None, True), ("true", True), ("", True), ("off", True), ("flase", True), ("false", False), ("0", False)],
     )
     def test_https_switch_is_on_unless_explicitly_off(self, clean_env, value, required):
-        clean_env.setenv("KEYCLOAK_ISSUER_URL", ISSUER)
+        clean_env.setenv("KEYCLOAK_ISSUER_URL", LOCAL_ISSUER)
         clean_env.setenv("KEYCLOAK_AUDIENCES", MEMBER)
+        set_model_environment(clean_env, MEMBER)
         if value is not None:
             clean_env.setenv("KEYCLOAK_REQUIRE_HTTPS", value)
 
@@ -420,6 +435,7 @@ class TestFactory:
         clean_env.setenv("DESCOPE_PROJECT_ID", "P123")
         clean_env.setenv("KEYCLOAK_ISSUER_URL", ISSUER)
         clean_env.setenv("KEYCLOAK_AUDIENCES", "member,tenant-admin")
+        set_model_environment(clean_env, MEMBER, TENANT_ADMIN)
 
         registered = self._configure(clean_env, mode)
 

@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.providers import ProviderTokenConfig, descope_config, keycloak_config
+from tests.helpers.keycloak_model import model_settings
 from tests.helpers.local_op import ES256, HS256, PS256, RS256, UNSIGNED, LocalProvider, local_provider
 
 PROBE = "/api/probe"
@@ -33,7 +34,9 @@ def op() -> LocalProvider:
 
 
 def _keycloak(op: LocalProvider, **changes) -> ProviderTokenConfig:
-    return replace(keycloak_config(op.issuer, frozenset({KEYCLOAK_AUDIENCE})), **changes)
+    return replace(
+        keycloak_config(op.issuer, frozenset({KEYCLOAK_AUDIENCE}), **model_settings(KEYCLOAK_AUDIENCE)), **changes
+    )
 
 
 def _descope(op: LocalProvider, **changes) -> ProviderTokenConfig:

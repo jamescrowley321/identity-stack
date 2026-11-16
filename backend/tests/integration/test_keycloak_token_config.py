@@ -38,6 +38,7 @@ from tests.helpers.keycloak import (
     KeycloakTokenSource,
     decode_unverified,
 )
+from tests.helpers.keycloak_model import MODEL_VARIABLES, set_model_environment
 
 PROBE = "/api/probe"
 LOGOUT = "/api/auth/logout"
@@ -60,6 +61,7 @@ _PROVIDER_VARIABLES = (
     "KEYCLOAK_AUDIENCES",
     "KEYCLOAK_REQUIRE_HTTPS",
     "KEYCLOAK_POST_LOGOUT_REDIRECT_URI",
+    *MODEL_VARIABLES,
     "FRONTEND_URL",
 )
 
@@ -107,6 +109,7 @@ def environment(monkeypatch, keycloak):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", keycloak.issuer)
     monkeypatch.setenv("KEYCLOAK_AUDIENCES", MEMBER_TYPE_CLIENT)
+    set_model_environment(monkeypatch, MEMBER_TYPE_CLIENT)
     monkeypatch.setenv("KEYCLOAK_REQUIRE_HTTPS", "false")
     monkeypatch.setenv("KEYCLOAK_POST_LOGOUT_REDIRECT_URI", KEYCLOAK_POST_LOGOUT_REDIRECT_URI)
     return monkeypatch
@@ -218,6 +221,7 @@ async def test_audience_outside_the_set_is_refused(environment, tokens):
 
     # Control: with that type client in the set, the same token validates.
     environment.setenv("KEYCLOAK_AUDIENCES", f"{MEMBER_TYPE_CLIENT},{TENANT_ADMIN_TYPE_CLIENT}")
+    set_model_environment(environment, MEMBER_TYPE_CLIENT, TENANT_ADMIN_TYPE_CLIENT)
     widened = await _probe(tokens.tenant_admin.access_token)
     assert widened.status_code == 200, widened.text
 

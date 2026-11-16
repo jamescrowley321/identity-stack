@@ -11,6 +11,7 @@ from app.logbook import logbook
 from app.middleware.providers import (
     ProviderTokenConfig,
     audience_rejected,
+    binding_refusal,
     build_provider_configs,
     claimed_tenant_id,
     infer_single_tenant_dct,
@@ -169,6 +170,14 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
             # Audience: fail-closed for providers that require it (Ory); for
             # Descope, checked only when present (session tokens omit ``aud``).
             if audience_rejected(claims, provider):
+                return None
+
+            # Token binding: what the provider requires of a token beyond its
+            # audience (Keycloak: exactly one ``aud`` and the ``azp`` configured
+            # for it). Checked here so that it holds on every route.
+            unbound = binding_refusal(claims, provider)
+            if unbound is not None:
+                logger.warning("rejected: %s token binding failed (%s)", provider.name, unbound)
                 return None
 
             # Token kind: a bare-project-id token must be a session token. The

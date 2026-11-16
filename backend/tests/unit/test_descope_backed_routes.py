@@ -148,8 +148,15 @@ UNGUARDED_ADAPTER_ROUTES: dict[tuple[str, str], str] = {
 
 # (method, path) -> why a principal from any provider may use the route's tenant.
 # A route belongs here only when nothing behind it, its service's sync adapter
-# included, hands the tenant or a user id to Descope. None does yet.
-PROVIDER_NEUTRAL_ROUTES: dict[tuple[str, str], str] = {}
+# included, hands the tenant or a user id to Descope.
+PROVIDER_NEUTRAL_ROUTES: dict[tuple[str, str], str] = {
+    ("GET", "/api/access-checks/documents-read"): (
+        "answers the resolver's tenant to a holder of documents:read: no provider call, no table"
+    ),
+    ("GET", "/api/access-checks/settings-manage"): (
+        "answers the resolver's tenant to a holder of settings:manage: no provider call, no table"
+    ),
+}
 
 
 # (method, path) of every route over state that belongs to no tenant and is not
