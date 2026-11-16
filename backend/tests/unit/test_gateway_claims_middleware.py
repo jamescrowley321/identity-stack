@@ -220,7 +220,7 @@ class TestSenderConstrainedToken:
             await client.get("/api/protected", headers={"Authorization": f"Bearer {bound}"})
 
         assert [record.getMessage() for record in caplog.records] == [
-            "GatewayClaims rejected: sender-constrained token presented as a bearer token (Descope)"
+            "GatewayClaims rejected (Descope): sender-constrained token presented as a bearer token"
         ]
 
 
