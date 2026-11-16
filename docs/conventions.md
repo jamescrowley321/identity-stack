@@ -287,19 +287,51 @@ handler **MUST NOT** read the `dct` claim to find its tenant. It takes the tenan
 
 An authorization dependency **MUST** refuse (401 or 403) on every branch where it cannot
 reach an unambiguous decision. That includes a missing subject, missing claims, no tenant
-or several candidate tenants, a non-active canonical user and a malformed `dct`. An error
-from the FGA store **MUST** be answered with 502 and treated as a denial, never as an allow.
+or several candidate tenants, a tenant selector that names a tenant the caller does not
+belong to, a non-active canonical user and a malformed `dct`. An error from the FGA store
+**MUST** be answered with 502 and treated as a denial, never as an allow.
 
-*Enforcement:* review, plus tests (`test_rbac_dependencies.py`, `test_fga_dependencies.py`).
+*Enforcement:* review, plus tests (`test_rbac_dependencies.py`, `test_tenant_resolution.py`,
+`test_fga_dependencies.py`).
 
-### 18. Descope principals are authorized from Descope's own claims
+### 18. One resolver decides the tenant and the grants
 
-`require_role` and `require_permission` **MUST** decide a Descope principal from its signed
-`dct` and `tenants` claims alone. Roles and permissions **MUST** be resolved from the
-canonical model only for a provider listed in `CANONICAL_RBAC_PROVIDERS` (default `ory`).
-That canonical lookup **MUST NOT** be served from the identity cache.
+`get_tenant_id`, `require_role` and `require_permission` **MUST** take the request's tenant
+and the caller's roles and permissions from
+`app.dependencies.tenant_access.resolve_tenant_access`. A dependency **MUST NOT** read a
+tenant, role or permission claim itself. The resolver takes its sources in this order:
 
-*Enforcement:* review, plus tests (`test_rbac_dependencies.py`).
+1. **The provider's claims extractor** (`ProviderTokenConfig.tenant_claims`, §28), for a
+   provider that is not listed in `CANONICAL_RBAC_PROVIDERS`. Descope's extractor reads
+   the signed `dct` and `tenants` claims, and a Descope principal **MUST** be decided from
+   them alone. A provider with no extractor has no source and is refused: another
+   provider's claim shapes on its token are not read.
+2. **The request's tenant selector**, for a provider listed in `CANONICAL_RBAC_PROVIDERS`
+   (default `ory`). The selector is the `X-Tenant-ID` request header. It grants nothing by
+   itself: it only chooses among the tenants the caller's canonical memberships name. A
+   selector naming any other tenant **MUST** be refused, and no grant is read from that
+   tenant. An empty or repeated header is refused too.
+3. **The caller's sole canonical membership**, when the request selects nothing.
+
+Anything else is 403. Roles and permissions **MUST** be resolved from the canonical model
+only for a provider listed in `CANONICAL_RBAC_PROVIDERS`. That canonical lookup **MUST
+NOT** be served from the identity cache, and it **MUST NOT** be kept beyond the request
+that made it. See [ADR-0009](adr/0009-provider-registrations-and-one-tenant-resolver.md).
+
+- Exception: a `dct` claim on the token of a provider listed in
+  `CANONICAL_RBAC_PROVIDERS` is read as a tenant selector, as it was before the header
+  existed. It is held to the same check, and a `dct` that disagrees with the header is
+  refused.
+- Exception: a request that no middleware attributed to a provider, which only a test
+  that sets `request.state.claims` by hand can make, is read with Descope's extractor.
+- Exception: `require_fga` (`dependencies/fga.py::_extract_tenant_id`) reads `dct` itself.
+  It checks relations in Descope's FGA store, which is keyed on Descope tenant ids, so it
+  serves Descope principals only.
+- Exception: `get_tenant_claims` returns the Descope `tenants` claim as it is, for the
+  routes that list a Descope principal's memberships.
+
+*Enforcement:* review, plus tests (`test_tenant_resolution.py`, `test_rbac_dependencies.py`,
+`test_tenant_dependencies.py`).
 
 ## Data access
 
@@ -461,3 +493,32 @@ context's package. A context refers to another's entities by id. Code outside
 not its modules.
 
 *Enforcement:* import-linter (`independence`), plus review for the glossary.
+
+## Providers
+
+### 28. A provider is one registration
+
+An OIDC provider **MUST** be added as one entry in `PROVIDER_REGISTRATIONS` in
+`app/middleware/providers.py`: a function that reads the provider's own settings through
+`app.knobs` and returns its `ProviderTokenConfig`, or `None` when the deployment does not
+configure it. The middleware factory, both token middlewares and the logout router
+**MUST** take their providers from `configured_providers()`, which walks that list and
+takes no per-provider argument. They **MUST NOT** name a provider or read a provider's
+settings themselves.
+
+Everything that differs between providers is a field of `ProviderTokenConfig`: the
+accepted issuers and audiences, the signing algorithms, the logout kind with the
+provider's own client id and post-logout redirect URI, the claims extractor (§18), and
+`require_https`. `require_https` **MUST** default to on, so that plain-HTTP discovery is
+allowed only for the one provider whose own switch turns it off. A registration that would
+accept tokens it must not **MUST** raise, which stops startup. `configured_providers()`
+raises `ProviderConfigurationError` when two providers share a name or an issuer, because
+requests are matched to a provider by both.
+
+- Exception: `build_provider_configs` builds a list from explicit arguments for a
+  middleware constructed by hand, which only tests do. The application does not call it.
+- Exception: `app/services/logout.py::_descope_management_logout` reads
+  `DESCOPE_PROJECT_ID` and `DESCOPE_MANAGEMENT_KEY` itself (§5).
+
+*Enforcement:* tests (`test_provider_registration.py` registers a second provider from the
+test alone and drives it through the factory, both middlewares and logout), plus review.
