@@ -34,7 +34,7 @@ Three issuer formats are supported (all signed by the same project JWKS), so val
 - `https://api.descope.com/v1/apps/{project_id}` — OIDC inbound-app tokens
 - `{project_id}` — the bare project id, used by SDK / session / access-key tokens (e.g. the access-key exchange `sessionJwt`)
 
-Token validation is delegated to [`py-identity-model`](https://github.com/jamescrowley321/py-identity-model) (`>=3.8.5`); the RBAC/FGA authorization layer sits on top of the validated claims (see [security.md](security.md)).
+Token validation is delegated to [`py-identity-model`](https://github.com/jamescrowley321/py-identity-model) (`>=4.1.1`); the RBAC/FGA authorization layer sits on top of the validated claims (see [security.md](security.md)).
 
 ## Sync flows
 

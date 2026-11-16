@@ -4,7 +4,7 @@ This documents the application-level security controls. For vulnerability report
 
 ## Token validation
 
-Bearer tokens are validated by [`py-identity-model`](https://github.com/jamescrowley321/py-identity-model) (`>=3.8.5`, a security-pinned floor — it pulls `cryptography>=50` with the PYSEC-2026-3552/3553/3554 fixes). Validation accepts all three Descope issuer formats (all signed by the same project JWKS — the signature is the security boundary, not the issuer string):
+Bearer tokens are validated by [`py-identity-model`](https://github.com/jamescrowley321/py-identity-model) (`>=4.1.1`, a security-pinned floor — it enforces a provider's signing-algorithm allowlist in discovery mode and pulls `cryptography>=50` with the PYSEC-2026-3552/3553/3554 fixes). Validation accepts all three Descope issuer formats (all signed by the same project JWKS — the signature is the security boundary, not the issuer string):
 
 - `https://api.descope.com/{project_id}` — OIDC / ID tokens
 - `https://api.descope.com/v1/apps/{project_id}` — OIDC inbound-app tokens
@@ -47,4 +47,4 @@ Locally, `make security` runs `pip-audit` + `npm audit`.
 ## Notable dependency pins (decision record)
 
 - **`fastapi>=0.115.0,<0.137`** — capped because slowapi 0.1.10's `SlowAPIMiddleware` route matcher only recognizes top-level routes under the newer FastAPI inclusion model, which breaks rate limiting. Revisit when slowapi ships a fix (`backend/pyproject.toml`).
-- **`py-identity-model>=3.8.5,<4`** — security floor (see Token validation above).
+- **`py-identity-model>=4.1.1,<5`** — security floor (see Token validation above).

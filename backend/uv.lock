@@ -981,7 +981,7 @@ requires-dist = [
     { name = "opentelemetry-instrumentation-logging", specifier = ">=0.62b0" },
     { name = "opentelemetry-instrumentation-sqlalchemy", specifier = ">=0.62b0" },
     { name = "opentelemetry-sdk", specifier = ">=1.41.0" },
-    { name = "py-identity-model", specifier = ">=3.8.5,<4" },
+    { name = "py-identity-model", specifier = ">=4.1.1,<5" },
     { name = "pydantic", extras = ["email"], specifier = ">=2.12.5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.3.0" },
@@ -1573,17 +1573,18 @@ wheels = [
 
 [[package]]
 name = "py-identity-model"
-version = "3.18.2"
+version = "4.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "anyio" },
     { name = "async-lru" },
     { name = "cryptography" },
     { name = "httpx" },
     { name = "pyjwt" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/11/a3/bcad38807b06a93631d6ca4ebf82a24d7ce727c8599c3fc4b413e3e32ed7/py_identity_model-3.18.2.tar.gz", hash = "sha256:a832c971d15f0458353583357ef35249fe55691db249f90f594397a48abea6e8", size = 156475, upload-time = "2026-09-16T02:13:48.922Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/77/7d/046d97b9de395771878cb344afca4e54889856afca75b9c08e4401798419/py_identity_model-4.1.1.tar.gz", hash = "sha256:4cd87cd6ebad296edfbf6f0249bbf15b3ab8b87bfea96d2aeab530e5ce8d21cc", size = 166507, upload-time = "2026-10-16T03:27:39.749Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d2/06/d52867767ac9dfb00c03563e407d3af9a41576d679db15830cc34791cecd/py_identity_model-3.18.2-py3-none-any.whl", hash = "sha256:538a5cf45d38c3486fbc7deecaf0bbf8e3f4fc33d8d1390e488ecbce34c5130b", size = 200774, upload-time = "2026-09-16T02:13:47.664Z" },
+    { url = "https://files.pythonhosted.org/packages/a9/1c/3382d401dec5bc30f93ffa288b508467c9791a6b70f8a6bd225f93d083ff/py_identity_model-4.1.1-py3-none-any.whl", hash = "sha256:f6a62d400e2b384cc0fd33c5aa04e46877915e8df7b61637318375b529355729", size = 202685, upload-time = "2026-10-16T03:27:38.551Z" },
 ]
 
 [[package]]
