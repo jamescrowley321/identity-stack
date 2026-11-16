@@ -498,13 +498,17 @@ async def _session_that_wants_an_argument(request):
     yield object()
 
 
+async def _session_that_wants_a_dependency(session: object = Depends(lambda: object())):
+    yield session
+
+
 class TestAnOverrideOfTheCanonicalSessionMustHaveItsShape:
     """``get_tenant_id`` calls the override itself, so it says so when it cannot."""
 
     @pytest.mark.parametrize(
         "override",
-        [_session_that_is_not_a_generator, _session_that_wants_an_argument],
-        ids=["not an async generator", "takes an argument"],
+        [_session_that_is_not_a_generator, _session_that_wants_an_argument, _session_that_wants_a_dependency],
+        ids=["not an async generator", "takes an argument", "declares a dependency"],
     )
     def test_an_override_of_another_shape_is_named_in_a_typed_error(self, store, override):
         store.holds((TENANT_A, "member", []))
