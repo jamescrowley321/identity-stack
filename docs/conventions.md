@@ -444,8 +444,6 @@ migration, one entry per context:
   `routers/fga.py`.
 - Exception: Synchronisation (#518): `routers/sync_status.py`, `services/inbound_sync.py`,
   `services/reconciliation.py`, `services/sync_status.py`.
-- Exception: Descope management boundary (#519): `routers/attributes.py`,
-  `routers/users.py`.
 
 §4's requirement that a router catch `UpstreamStatusError` and `UpstreamTransportError`
 applies to the excepted routers for as long as they call Descope themselves.
