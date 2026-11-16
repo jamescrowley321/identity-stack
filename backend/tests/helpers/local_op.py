@@ -47,6 +47,7 @@ class LocalProvider:
 
     def __init__(self, issuer: str) -> None:
         self.issuer = issuer
+        self._published_issuer = issuer
         rsa_key = rsa.generate_private_key(public_exponent=_RSA_PUBLIC_EXPONENT, key_size=_RSA_KEY_BITS)
         pss_key = rsa.generate_private_key(public_exponent=_RSA_PUBLIC_EXPONENT, key_size=_RSA_KEY_BITS)
         ec_key = ec.generate_private_key(ec.SECP256R1())
@@ -58,6 +59,7 @@ class LocalProvider:
                 _published(ECAlgorithm.to_jwk(ec_key.public_key()), ES256),
             ]
         }
+        self._failing: dict[str, int] = {}
         self._rs256_public_pem = rsa_key.public_key().public_bytes(
             serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
         )
@@ -66,10 +68,32 @@ class LocalProvider:
     def disco_address(self) -> str:
         return f"{self.issuer}{_WELL_KNOWN}"
 
+    @property
+    def jwks_path(self) -> str:
+        return _JWKS
+
+    @property
+    def discovery_path(self) -> str:
+        return _WELL_KNOWN
+
+    def fail(self, path: str, status: int) -> None:
+        """Answer ``path`` with ``status`` and an error body from now on."""
+        self._failing[path] = status
+
+    def publish(self, *, issuer: str | None = None, keys: list[dict] | None = None) -> None:
+        """Replace the issuer the discovery document names, or the keys the JWKS holds."""
+        if issuer is not None:
+            self._published_issuer = issuer
+        if keys is not None:
+            self._jwks = {"keys": keys}
+
+    def failure(self, path: str) -> int | None:
+        return self._failing.get(path)
+
     def document(self, path: str) -> dict | None:
         if path == _WELL_KNOWN:
             return {
-                "issuer": self.issuer,
+                "issuer": self._published_issuer,
                 "jwks_uri": f"{self.issuer}{_JWKS}",
                 "authorization_endpoint": f"{self.issuer}/authorize",
                 "token_endpoint": f"{self.issuer}/token",
@@ -98,6 +122,12 @@ class LocalProvider:
             return f"{signing_input}.{base64.urlsafe_b64encode(digest).decode().rstrip('=')}"
         return f"{signing_input}."
 
+    def token_with_header_alg(self, alg: str, claims: dict) -> str:
+        """An unsigned token whose header ``alg`` is ``alg``, whatever text that is."""
+        now = int(time.time())
+        payload = {"iat": now, "exp": now + TOKEN_LIFETIME_SECONDS, **claims}
+        return f"{_segment({'alg': alg, 'typ': 'JWT', 'kid': RS256})}.{_segment(payload)}."
+
 
 @contextmanager
 def local_provider() -> Iterator[LocalProvider]:
@@ -105,9 +135,10 @@ def local_provider() -> Iterator[LocalProvider]:
 
     class _Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            document = provider.document(self.path)
-            body = json.dumps(document if document is not None else {"error": "not_found"}).encode()
-            self.send_response(200 if document is not None else 404)
+            failure = provider.failure(self.path)
+            document = None if failure is not None else provider.document(self.path)
+            body = json.dumps(document if document is not None else {"error": "not_served"}).encode()
+            self.send_response(200 if document is not None else failure or 404)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
