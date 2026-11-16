@@ -296,6 +296,10 @@ class _SoleMembership:
     tenant_id: str
 
 
+def _log_lookup_timeout(name: str, limit: float, sub: object) -> None:
+    logger.warning("membership lookup of provider=%s did not answer within %s s (sub=%r)", name, limit, sub)
+
+
 async def _confirm_sole_membership(request: Request, claims: dict, tenant_id: str) -> str | None:
     """``tenant_id`` when the provider's lookup says it is the caller's one tenant, else ``None``.
 
@@ -303,8 +307,9 @@ async def _confirm_sole_membership(request: Request, claims: dict, tenant_id: st
     is a refusal the resolver answers with 403: no lookup is wired for the
     provider, or the caller belongs to no tenant, to another one, or to several.
     A lookup that raises, that does not answer within
-    ``MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`` (it is cancelled then), or that answers
-    with anything but a collection of strings, could not be asked: that is 502
+    ``MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`` (it is cancelled then, and an answer it
+    gives after that is refused too), or that answers with anything but a list,
+    tuple, set or frozenset of strings, could not be asked: that is 502
     and no grant, as for the FGA store (§17). A
     confirmation is kept on ``request.state`` for the rest of the request, so a
     route that depends on both ``get_tenant_id`` and ``require_permission`` asks
@@ -327,10 +332,15 @@ async def _confirm_sole_membership(request: Request, claims: dict, tenant_id: st
             tenants = await lookup(claims)
     except Exception as exc:
         if bound.expired():
-            logger.warning("membership lookup of provider=%s did not answer within %s s (sub=%r)", name, limit, sub)
+            _log_lookup_timeout(name, limit, sub)
         else:
             logger.warning("membership lookup failed for provider=%s sub=%r", name, sub, exc_info=True)
         raise HTTPException(status_code=502, detail=MEMBERSHIP_LOOKUP_FAILED) from exc
+    # A lookup that catches its cancellation and returns leaves ``asyncio.timeout``
+    # without an error: an answer given after the limit ran out is still no answer.
+    if bound.expired():
+        _log_lookup_timeout(name, limit, sub)
+        raise HTTPException(status_code=502, detail=MEMBERSHIP_LOOKUP_FAILED)
     if not isinstance(tenants, (list, tuple, set, frozenset)) or not all(isinstance(entry, str) for entry in tenants):
         logger.warning("membership lookup of provider=%s gave an answer that cannot be used (sub=%r)", name, sub)
         raise HTTPException(status_code=502, detail=MEMBERSHIP_LOOKUP_FAILED)
@@ -402,9 +412,25 @@ async def confirmed_tenant(request: Request) -> str | None:
     unconfirmed = awaiting_confirmation(request, claims)
     if unconfirmed is None:
         return None
-    if not all(holds(unconfirmed) for holds in _route_gate_checks(request)):
-        raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
+    _refuse_what_the_token_alone_decides(request, unconfirmed)
     return await _confirm_sole_membership(request, claims, unconfirmed.tenant_id)
+
+
+def _refuse_what_the_token_alone_decides(
+    request: Request, unconfirmed: TenantAccess, holds: Callable[[TenantAccess], bool] | None = None
+) -> None:
+    """403 when the token alone fails a check of the route's gates or ``holds``, before any lookup.
+
+    Every gate of the route is applied, not only the one asking: on a route
+    with two gates, the one the token passes would otherwise ask the lookup
+    before the other refuses, and a directory that is down would answer 502
+    where the token alone decides 403.
+    """
+    checks = _route_gate_checks(request)
+    if holds is not None and holds not in checks:
+        checks.append(holds)
+    if not all(check(unconfirmed) for check in checks):
+        raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
 
 
 async def _tenant_access(
@@ -417,9 +443,10 @@ async def _tenant_access(
     """The request's tenant and the caller's grants in it. 401 with no claims.
 
     ``holds`` is the caller's own check of the grants. For a token that needs
-    its tenant confirmed it is applied first, to what the token alone says: a
-    token that would be refused anyway is refused (403) without a lookup, so a
-    directory that is down never turns that 403 into a 502.
+    its tenant confirmed it is applied first, with the check of every other
+    gate of the route, to what the token alone says: a token that would be
+    refused anyway is refused (403) without a lookup, so a directory that is
+    down never turns that 403 into a 502.
     """
     claims = getattr(request.state, "claims", None)
     if claims is None:
@@ -429,8 +456,7 @@ async def _tenant_access(
     if memberships is None:
         unconfirmed = awaiting_confirmation(request, claims)
         if unconfirmed is not None:
-            if holds is not None and not holds(unconfirmed):
-                raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
+            _refuse_what_the_token_alone_decides(request, unconfirmed, holds)
             confirmed = await _confirm_sole_membership(request, claims, unconfirmed.tenant_id)
     return resolve_tenant_access(
         request, claims, memberships, request_selects=request_selects, confirmed_tenant=confirmed
