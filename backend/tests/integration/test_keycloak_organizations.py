@@ -6,8 +6,10 @@ users in ``keycloak/fixtures/README.md``. The app is the shipped token middlewar
 on the provider list the environment configures, and the shipped permission-gated
 routes.
 
-The membership lookup an organization-bound token needs is not part of this
-backend yet. Where a test needs one it uses ``_Lookup``, a stated test double.
+Keycloak's membership lookup is taken away here, or replaced by ``_Lookup``, a
+stated test double: this file is about the token and the resolver. The lookup
+the provider wires, against the realm's Admin API, is tested in
+``test_keycloak_identity.py``.
 """
 
 from dataclasses import dataclass, replace
@@ -129,11 +131,13 @@ class _Lookup:
 
 
 def _providers(lookup: _Lookup | None) -> list[ProviderTokenConfig]:
-    """The environment's providers; with ``lookup``, Keycloak's membership lookup is the double."""
-    providers = configured_providers()
-    if lookup is None:
-        return providers
-    return [replace(p, sole_membership_lookup=lookup) if p.name == KEYCLOAK else p for p in providers]
+    """The environment's providers, with Keycloak's membership lookup replaced by ``lookup``.
+
+    ``None`` takes the lookup away: these tests are about what the token decides
+    and what the resolver does with a lookup's answer, not about the realm's
+    Admin API, which ``test_keycloak_identity.py`` reads.
+    """
+    return [replace(p, sole_membership_lookup=lookup) if p.name == KEYCLOAK else p for p in configured_providers()]
 
 
 def _app(lookup: _Lookup | None) -> FastAPI:

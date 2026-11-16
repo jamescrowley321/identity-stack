@@ -43,6 +43,7 @@ Ory `ORY_WORKSPACE_API_KEY` + `ORY_WORKSPACE_ID`.
 | `DESCOPE_WEBHOOK_SECRET` | app env | **none** | backend `/internal` | **no TF/GH source** (fail-closed, warn-only) |
 | `DESCOPE_FLOW_SYNC_SECRET` | app env | **none** | backend `/internal` | **no TF/GH source** |
 | `INTERNAL_IDENTITY_KEY` | app env | **none** | backend `/internal` | **no TF/GH source** |
+| `KEYCLOAK_DIRECTORY_CLIENT_SECRET` | `keycloak/realm/identity-stack-realm.json`, client `identity-stack-directory` (local fixture value `local-only-directory-client`) | none (no `infra/keycloak/` root yet, #554) | backend organization lookup (`services/keycloak_directory.py`) | read-only by role (`view-users`, `view-organizations`); a deployment beyond compose must set its own |
 | `TYK_GATEWAY_SECRET` | compose / `tyk.conf` | manual | gateway profile | must match `tyk.conf` |
 | `POSTGRES_PASSWORD` / `REDIS_PASSWORD` / `DATABASE_URL` | compose env | manual | local stack | not in TF |
 

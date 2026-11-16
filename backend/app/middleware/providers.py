@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
@@ -27,11 +27,14 @@ from app.middleware.keycloak import (
     KeycloakTokenModel,
     binding_failure,
     local_issuer,
+    organization,
     parse_app_clients,
     parse_portable_permissions,
     read_grant,
+    single_audience,
     token_model,
 )
+from app.services.keycloak_directory import KeycloakDirectory, MemberIdRefused
 
 RS256 = "RS256"
 # The claim that names the client a token was issued to (OIDC Core §2).
@@ -77,13 +80,29 @@ TokenBinding = Callable[[dict], str | None]
 # own time (conventions §6): the request waits for it.
 #
 # Membership alone is not enough. The token's grants are believed for the one
-# tenant the lookup returns, so a lookup MUST return a tenant only where the
-# directory also grants the caller the roles the token carries (ADR-0010,
-# docs/security.md). A lookup that checks membership only lets roles granted in
-# one organization carry over to another; none is wired until it confirms the
-# grant as well (#559).
+# tenant the lookup returns, so a lookup MUST return the token's tenant only
+# where the directory also grants the caller the roles the token carries
+# (ADR-0010, docs/security.md). A lookup that checks membership only lets roles
+# granted in one organization carry over to another. Keycloak's
+# (``KeycloakOrganizationLookup``) reads a grant marker per organization.
 SoleMembershipAnswer = list[str] | tuple[str, ...] | set[str] | frozenset[str]
 SoleMembershipLookup = Callable[[dict], Awaitable[SoleMembershipAnswer]]
+
+
+@dataclass(frozen=True)
+class TenantMembership:
+    """One tenant the caller belongs to, as the provider's directory names it."""
+
+    tenant_id: str
+    tenant_name: str
+
+
+# A provider's membership list: every tenant the caller of these verified claims
+# belongs to, as the provider's directory has it now, for ``GET /api/identity``.
+# It raises when the directory cannot be asked and bounds its own time (§6).
+# Only a ``token_authorized_only`` provider has one: the tenant of its principals
+# is not in the canonical model.
+TenantMembershipsLookup = Callable[[dict], Awaitable[Sequence[TenantMembership]]]
 
 
 @dataclass(frozen=True)
@@ -146,6 +165,9 @@ class ProviderTokenConfig:
     # Answers a token whose claims are ``sole_membership_required`` (§18).
     # ``None``: nothing can confirm such a token, and it is refused.
     sole_membership_lookup: SoleMembershipLookup | None = None
+    # Lists the caller's tenants for ``GET /api/identity``. ``None``: they cannot
+    # be listed, and a ``token_authorized_only`` principal is refused there.
+    tenant_memberships: TenantMembershipsLookup | None = None
     # True when this provider's tenant and grants may come only from its own
     # token. Startup refuses it with no extractor, and refuses it listed in
     # ``CANONICAL_RBAC_PROVIDERS``, where the canonical model would decide
@@ -324,6 +346,74 @@ class KeycloakTenantClaims:
         )
 
 
+@dataclass(frozen=True)
+class KeycloakOrganizationLookup:
+    """Keycloak's ``sole_membership_lookup``: the caller's organizations, counting the token's only where granted.
+
+    Answers every organization the caller belongs to, as the Admin API has it
+    now, except the token's own organization when that organization does not
+    mark the caller as holding the token's type (``type:<type client>``,
+    ``app.services.keycloak_directory``). So a tenant admin of one organization
+    who joins a second and leaves the first is not confirmed in the second: the
+    roles are realm-wide, the marker is not. Every other membership counts, so
+    a caller in two organizations is still refused (decision 10).
+
+    The member id is the verified token's ``sub`` and nothing else. A ``sub``
+    that is not a well-formed id belongs to no organization: the answer is
+    empty and no call is made.
+    """
+
+    model: KeycloakTokenModel
+    directory: KeycloakDirectory
+
+    async def __call__(self, claims: dict) -> list[str]:
+        try:
+            memberships = await self.directory.organizations_of(claims.get("sub"))
+        except MemberIdRefused:
+            return []
+        token_organization = organization(claims)
+        token_type = single_audience(claims)
+        return [
+            membership.alias
+            for membership in memberships
+            if membership.alias != token_organization
+            or (token_type is not None and token_type in membership.granted_types)
+        ]
+
+
+@dataclass(frozen=True)
+class KeycloakTenantMemberships:
+    """Keycloak's ``tenant_memberships``: every organization the caller belongs to, alias and name.
+
+    The member id is the verified token's ``sub``. A ``sub`` that is not a
+    well-formed id belongs to no organization: the list is empty and no call is
+    made.
+    """
+
+    directory: KeycloakDirectory
+
+    async def __call__(self, claims: dict) -> list[TenantMembership]:
+        try:
+            memberships = await self.directory.organizations_of(claims.get("sub"))
+        except MemberIdRefused:
+            return []
+        return [TenantMembership(tenant_id=m.alias, tenant_name=m.name) for m in memberships]
+
+
+def keycloak_directory(issuer_url: str, client_id: str, client_secret: str) -> KeycloakDirectory:
+    """The organization lookup's directory, or ``ProviderConfigurationError`` when it cannot be built.
+
+    Both credentials are required: without them no organization-bound token
+    could be confirmed and no membership listed. The message names the
+    variable, never its value.
+    """
+    if not client_id:
+        raise ProviderConfigurationError("KEYCLOAK_DIRECTORY_CLIENT_ID must be set when KEYCLOAK_ISSUER_URL is set")
+    if not client_secret:
+        raise ProviderConfigurationError("KEYCLOAK_DIRECTORY_CLIENT_SECRET must be set when KEYCLOAK_ISSUER_URL is set")
+    return KeycloakDirectory(issuer=issuer_url.rstrip("/"), client_id=client_id, client_secret=client_secret)
+
+
 def keycloak_config(
     issuer_url: str,
     audiences: frozenset[str],
@@ -335,6 +425,8 @@ def keycloak_config(
     organization_bound_types: Iterable[str] = (),
     portable_permissions: Mapping[str, frozenset[str]] | None = None,
     organization_lookup: SoleMembershipLookup | None = None,
+    directory_client_id: str | None = None,
+    directory_client_secret: str | None = None,
 ) -> ProviderTokenConfig:
     """Keycloak realm provider config.
 
@@ -344,12 +436,16 @@ def keycloak_config(
     ``app_clients`` maps each type client to its app client, every type is in
     ``portable_types`` or ``organization_bound_types``, and
     ``portable_permissions`` lists what each portable type grants (see
-    ``app.middleware.keycloak``). ``organization_lookup`` answers which
-    organizations a caller belongs to; without one, every token of an
-    organization-bound type is refused. It must return an organization only
-    where the caller also holds the token's roles there, not on membership
-    alone (``SoleMembershipLookup``); no such lookup is wired until
-    #559.
+    ``app.middleware.keycloak``). ``directory_client_id`` and
+    ``directory_client_secret`` are the service account of the read-only
+    Admin API lookup (``app.services.keycloak_directory``): it backs both the
+    membership confirmation of an organization-bound token
+    (``KeycloakOrganizationLookup``) and the membership list of
+    ``GET /api/identity``. Given at all, both must be non-empty; the
+    registration always gives them. Left out (a provider built by hand in a
+    test), no directory is wired: every token of an organization-bound type is
+    refused unless ``organization_lookup`` answers it, and the membership list
+    is not available.
 
     Fails closed: ``aud`` is always required, only RS256 is accepted, and a
     half-configured provider is refused, because it would accept tokens it
@@ -377,6 +473,11 @@ def keycloak_config(
         )
     except KeycloakModelError as exc:
         raise ProviderConfigurationError(str(exc)) from exc
+    directory = (
+        keycloak_directory(issuer, directory_client_id or "", directory_client_secret or "")
+        if directory_client_id is not None or directory_client_secret is not None
+        else None
+    )
     return ProviderTokenConfig(
         name="Keycloak",
         accepted_issuers=frozenset({issuer}),
@@ -390,7 +491,9 @@ def keycloak_config(
         post_logout_redirect_uri=post_logout_redirect_uri,
         tenant_claims=KeycloakTenantClaims(model),
         token_binding=KeycloakTokenBinding(model),
-        sole_membership_lookup=organization_lookup,
+        sole_membership_lookup=organization_lookup
+        or (KeycloakOrganizationLookup(model, directory) if directory is not None else None),
+        tenant_memberships=KeycloakTenantMemberships(directory) if directory is not None else None,
         token_authorized_only=True,
     )
 
@@ -435,8 +538,14 @@ def _keycloak_provider(
     portable_types: Iterable[str],
     organization_bound_types: Iterable[str],
     portable_permissions: Mapping[str, frozenset[str]],
+    directory_client_id: str,
+    directory_client_secret: str,
 ) -> ProviderTokenConfig | None:
-    """Keycloak when it has an issuer. A half-configured one raises (see ``keycloak_config``)."""
+    """Keycloak when it has an issuer. A half-configured one raises (see ``keycloak_config``).
+
+    The directory's credentials are part of the configuration: a Keycloak with
+    no way to list or confirm memberships is refused at startup.
+    """
     if not issuer_url:
         return None
     return keycloak_config(
@@ -448,6 +557,8 @@ def _keycloak_provider(
         portable_types=portable_types,
         organization_bound_types=organization_bound_types,
         portable_permissions=portable_permissions,
+        directory_client_id=directory_client_id,
+        directory_client_secret=directory_client_secret,
     )
 
 
@@ -501,6 +612,8 @@ def _keycloak_registration() -> ProviderTokenConfig | None:
         portable_types=_client_ids(knob("KEYCLOAK_PORTABLE_TYPES", "")),
         organization_bound_types=_client_ids(knob("KEYCLOAK_ORGANIZATION_BOUND_TYPES", "")),
         portable_permissions=portable_permissions,
+        directory_client_id=knob("KEYCLOAK_DIRECTORY_CLIENT_ID", ""),
+        directory_client_secret=knob("KEYCLOAK_DIRECTORY_CLIENT_SECRET", ""),
     )
 
 
@@ -639,6 +752,8 @@ def build_provider_configs(
     keycloak_portable_types: Iterable[str] = (),
     keycloak_organization_bound_types: Iterable[str] = (),
     keycloak_portable_permissions: Mapping[str, frozenset[str]] | None = None,
+    keycloak_directory_client_id: str = "",
+    keycloak_directory_client_secret: str = "",
 ) -> list[ProviderTokenConfig]:
     """``configured_providers`` over explicit values, for a middleware built by hand.
 
@@ -672,6 +787,8 @@ def build_provider_configs(
                 portable_types=keycloak_portable_types,
                 organization_bound_types=keycloak_organization_bound_types,
                 portable_permissions=keycloak_portable_permissions or {},
+                directory_client_id=keycloak_directory_client_id,
+                directory_client_secret=keycloak_directory_client_secret,
             ),
         ]
     )

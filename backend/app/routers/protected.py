@@ -16,6 +16,7 @@ from app.dependencies.identity import (
     get_identity_provisioning_service,
     get_identity_resolution_service,
 )
+from app.dependencies.rbac import TokenTenant, token_tenant
 from app.errors.identity import NotFound, ValidationError
 from app.knobs import knob, knob_set
 from app.logbook import logbook
@@ -41,10 +42,10 @@ PROVIDER_FAULTS = (NetworkException, DiscoveryValidationError, JwksValidationErr
 REFUSED_DETAIL = "Invalid or expired token"
 UNAVAILABLE_DETAIL = "Identity provider unavailable"
 
-# Providers eligible for just-in-time provisioning on first login. Ory is
-# greenfield (every user is JIT-provisioned); Descope users are pre-provisioned
-# via the seed, so Descope is intentionally excluded by default.
-JIT_ENABLED_PROVIDERS = knob_set("JIT_ENABLED_PROVIDERS", "ory")
+# Providers eligible for just-in-time provisioning on first login. Ory and
+# Keycloak are greenfield (every user is JIT-provisioned); Descope users are
+# pre-provisioned via the seed, so Descope is intentionally excluded by default.
+JIT_ENABLED_PROVIDERS = knob_set("JIT_ENABLED_PROVIDERS", "ory,keycloak")
 
 
 def _serialize_principal(principal: ClaimsPrincipal) -> dict:
@@ -92,17 +93,43 @@ async def claims(claims: dict = Depends(get_claims)):
     return claims
 
 
+def _as_token_tenant_identity(identity: dict, tenant: TokenTenant) -> dict:
+    """The canonical identity of a principal whose tenant and grants come from its own token.
+
+    The one place ``GET /api/identity`` differs by provider. The user and the
+    linked identities are the canonical ones. The tenant and its permissions
+    are the token's (``token_tenant``), so the canonical role assignments,
+    such as the default tenant and role that provisioning grants, are not the
+    caller's here and are not reported: ``roles`` is empty. The memberships are
+    the provider directory's. ``token_tenant`` is the one field only these
+    principals get: its presence says the tenant comes from the token, so
+    switching tenant takes a new token.
+    """
+    return {
+        **identity,
+        "roles": [],
+        "tenant_memberships": [
+            {"tenant_id": membership.tenant_id, "tenant_name": membership.tenant_name}
+            for membership in tenant.memberships
+        ],
+        "token_tenant": {"tenant_id": tenant.tenant_id, "permissions": list(tenant.permissions)},
+    }
+
+
 @router.get("/identity")
 async def canonical_identity(
     request: Request,
     resolver: IdentityResolutionService = Depends(get_identity_resolution_service),
     provisioner: IdentityProvisioningService = Depends(get_identity_provisioning_service),
+    tenant: TokenTenant | None = Depends(token_tenant),
 ):
     """Return the canonical identity (user, roles, permissions, tenants) for the caller.
 
-    Provider-neutral: roles/tenant come from the canonical model, not the token.
-    For JIT-enabled providers (e.g. Ory), a first-login subject that resolves to no
-    canonical user is provisioned on the fly, then resolved.
+    Roles and tenants come from the canonical model, except for a provider
+    whose tenant and grants come from its token alone (Keycloak), where they
+    come from the token and the provider's directory (``token_tenant``). For
+    JIT-enabled providers (e.g. Ory, Keycloak), a first-login subject that
+    resolves to no canonical user is provisioned on the fly, then resolved.
     """
     principal = getattr(request.state, "principal", None)
     claims = getattr(request.state, "claims", None)
@@ -137,6 +164,8 @@ async def canonical_identity(
 
     if result.is_error():
         raise HTTPException(status_code=404, detail="Identity not found")
+    if tenant is not None:
+        return _as_token_tenant_identity(result.ok, tenant)
     return result.ok
 
 

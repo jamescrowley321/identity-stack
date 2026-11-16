@@ -9,12 +9,20 @@
       "alias": "acme",
       "enabled": true,
       "domains": [{ "name": "acme.test", "verified": false }],
+      "attributes": {
+        "type:tenant-admin": [
+          "b0b00000-0000-4000-8000-000000000002",
+          "da4e0000-0000-4000-8000-000000000004",
+          "f4a4c000-0000-4000-8000-000000000006"
+        ]
+      },
       "members": [
         { "username": "alice", "membershipType": "UNMANAGED" },
         { "username": "bob", "membershipType": "UNMANAGED" },
         { "username": "carol", "membershipType": "UNMANAGED" },
         { "username": "dave", "membershipType": "UNMANAGED" },
-        { "username": "erin", "membershipType": "UNMANAGED" }
+        { "username": "erin", "membershipType": "UNMANAGED" },
+        { "username": "frank", "membershipType": "UNMANAGED" }
       ]
     },
     {
@@ -100,6 +108,20 @@
       },
       "defaultClientScopes": ["basic", "roles", "profile", "email", "web-origins", "acr"],
       "optionalClientScopes": ["organization", "offline_access"]
+    },
+    {
+      "clientId": "identity-stack-directory",
+      "name": "Backend service account: organization lookup, read-only",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "local-only-directory-client",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": ["kc-admin-api"],
+      "optionalClientScopes": []
     }
   ],
   "clientScopeMappings": {
@@ -111,10 +133,14 @@
         "client": "tenant-admin-app",
         "roles": ["members:invite", "members:remove", "settings:manage"]
       }
+    ],
+    "realm-management": [
+      { "client": "identity-stack-directory", "roles": ["view-users", "view-organizations"] }
     ]
   },
   "users": [
     {
+      "id": "a11ce000-0000-4000-8000-000000000001",
       "username": "alice",
       "enabled": true,
       "email": "alice@acme.test",
@@ -125,6 +151,7 @@
       "clientRoles": { "member": ["documents:read", "documents:write"] }
     },
     {
+      "id": "b0b00000-0000-4000-8000-000000000002",
       "username": "bob",
       "enabled": true,
       "email": "bob@globex.test",
@@ -138,6 +165,7 @@
       }
     },
     {
+      "id": "ca401000-0000-4000-8000-000000000003",
       "username": "carol",
       "enabled": true,
       "email": "carol@acme.test",
@@ -147,6 +175,7 @@
       "credentials": [{ "type": "password", "value": "local-only-carol", "temporary": false }]
     },
     {
+      "id": "da4e0000-0000-4000-8000-000000000004",
       "username": "dave",
       "enabled": true,
       "email": "dave@acme.test",
@@ -159,6 +188,7 @@
       }
     },
     {
+      "id": "e4140000-0000-4000-8000-000000000005",
       "username": "erin",
       "enabled": true,
       "email": "erin@acme.test",
@@ -168,6 +198,27 @@
       "credentials": [{ "type": "password", "value": "local-only-erin", "temporary": false }],
       "clientRoles": {
         "member": ["documents:write"]
+      }
+    },
+    {
+      "id": "f4a4c000-0000-4000-8000-000000000006",
+      "username": "frank",
+      "enabled": true,
+      "email": "frank@acme.test",
+      "emailVerified": true,
+      "firstName": "Frank",
+      "lastName": "Moving-Admin",
+      "credentials": [{ "type": "password", "value": "local-only-frank", "temporary": false }],
+      "clientRoles": {
+        "tenant-admin": ["members:invite", "members:remove", "settings:manage"]
+      }
+    },
+    {
+      "username": "service-account-identity-stack-directory",
+      "enabled": true,
+      "serviceAccountClientId": "identity-stack-directory",
+      "clientRoles": {
+        "realm-management": ["view-users", "view-organizations"]
       }
     }
   ]
