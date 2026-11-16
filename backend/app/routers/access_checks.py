@@ -1,7 +1,9 @@
 """Two routes that answer from the caller's tenant and permissions alone.
 
 Each depends on ``get_tenant_id`` and ``require_permission`` and on nothing
-else: no provider is called and no table is read. They show what the tenant
+else: the handler calls no provider and reads no table. The resolver may ask
+the provider's membership lookup first, for a token that needs its sole
+membership confirmed (an organization-bound Keycloak token). They show what the tenant
 resolver decided for the request (conventions §18), for a principal of any
 provider, and give an end-to-end run a route that needs a read permission and
 one that needs a management permission.

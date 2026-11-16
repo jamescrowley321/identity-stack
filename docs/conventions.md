@@ -392,9 +392,9 @@ adapter is Descope-backed: `POST /api/roles/assign` and `/api/roles/remove` are,
 
 A Keycloak principal **MUST** get 403 on every route that takes a tenant (`get_tenant_id`
 or `get_tenant_claims`) or is gated by a role, unless the route is in
-`PROVIDER_NEUTRAL_ROUTES` or, with its reason, in `ANSWERED_WITH_NOTHING` in
-`backend/tests/unit/test_keycloak_routes.py`: its tenant is an organization alias, which
-names nothing in Descope and is not a UUID.
+`PROVIDER_NEUTRAL_ROUTES` (`backend/tests/unit/test_keycloak_routes.py` walks every
+shipped route): its tenant is an organization alias, which names nothing in Descope and
+is not a UUID.
 
 A route over state that belongs to the whole Descope project **MUST** carry the same guard
 and be listed in `DESCOPE_PROJECT_ROUTES` in that file: the role and permission definition
@@ -437,11 +437,12 @@ with no extractor (`refuse_ambiguous_authorization_source`).
   It checks relations in Descope's FGA store, which is keyed on Descope tenant ids, so it
   serves Descope principals only.
 - Exception: `get_tenant_claims` returns the Descope `tenants` claim as it is, for the
-  routes that list a Descope principal's memberships. For a principal of a provider that
-  has its own extractor and is not `descope_managed` (Keycloak) it returns nothing,
-  whatever the token carries, so `GET /api/tenants` lists no tenant for one and the
-  `/api/tenants/{tenant_id}/resources` routes refuse it (403). A provider with no
-  extractor of its own (Ory) is still read for the claim (#597).
+  routes that list a Descope principal's memberships. A principal of a provider that
+  has its own extractor and is not `descope_managed` (Keycloak) is refused with 403
+  (`TENANTS_CLAIM_NOT_READ`), whatever the token carries, so `GET /api/tenants` and the
+  `/api/tenants/{tenant_id}/resources` routes refuse it rather than answer an empty
+  membership list. A provider with no extractor of its own (Ory) is still read for the
+  claim (#597).
 - Exception: `POST /api/tenants` is gated by `require_admin_role`
   (`routers/tenants.py`), which reads a top-level `roles` claim itself, for every
   provider, and takes no tenant (#596).

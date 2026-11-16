@@ -7,7 +7,7 @@ wrong thing, so a Keycloak principal must get 403 there. This file walks the
 shipped application: a route that takes a tenant (``get_tenant_id`` or
 ``get_tenant_claims``) or is gated by a role is called as two Keycloak
 principals who hold everything a Keycloak token can hold, and has to answer 403
-unless it is on a register below with its reason.
+unless it is on the provider-neutral register.
 """
 
 import base64
@@ -38,7 +38,7 @@ from app.dependencies.rbac import (
     require_permission,
     require_role,
 )
-from app.dependencies.tenant import get_tenant_claims, get_tenant_id
+from app.dependencies.tenant import TENANTS_CLAIM_NOT_READ, get_tenant_claims, get_tenant_id
 from app.main import app as shipped_app
 from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.providers import keycloak_config
@@ -67,20 +67,9 @@ REFUSED_BY_THE_GUARD = {"detail": "This route serves Descope principals only"}
 MEMBER = "member"
 TENANT_ADMIN = "tenant-admin"
 
-# (method, path) -> why a Keycloak principal is answered on a route that takes
-# the Descope ``tenants`` claim and no tenant from ``get_tenant_id``.
-ANSWERED_WITH_NOTHING: dict[tuple[str, str], str] = {
-    ("GET", "/api/tenants"): (
-        "lists the Descope tenants claim, which is not read for a Keycloak principal: "
-        "the list is empty and Descope is not asked (#590)"
-    ),
-}
-
 TENANT_SCOPED = _routes_depending_on(get_tenant_id) | _routes_depending_on(get_tenant_claims)
 ROLE_GATED = _routes_gated_by(require_role, require_global_role)
-MUST_REFUSE = (
-    (TENANT_SCOPED | ROLE_GATED | DESCOPE_BACKED_ROUTES) - set(PROVIDER_NEUTRAL_ROUTES) - set(ANSWERED_WITH_NOTHING)
-)
+MUST_REFUSE = (TENANT_SCOPED | ROLE_GATED | DESCOPE_BACKED_ROUTES) - set(PROVIDER_NEUTRAL_ROUTES)
 
 
 async def _only_acme(_claims: dict) -> list[str]:
@@ -173,10 +162,13 @@ def client(stores) -> TestClient:
 
 class TestTheWalkCoversTheApplication:
     def test_every_route_that_takes_a_tenant_is_walked_or_registered(self):
-        assert TENANT_SCOPED <= MUST_REFUSE | set(PROVIDER_NEUTRAL_ROUTES) | set(ANSWERED_WITH_NOTHING)
+        assert TENANT_SCOPED <= MUST_REFUSE | set(PROVIDER_NEUTRAL_ROUTES)
 
-    def test_a_route_that_sends_its_tenant_to_descope_is_on_no_register(self):
-        assert DESCOPE_BACKED_ROUTES & (set(PROVIDER_NEUTRAL_ROUTES) | set(ANSWERED_WITH_NOTHING)) == set()
+    def test_a_route_that_sends_its_tenant_to_descope_is_not_provider_neutral(self):
+        assert DESCOPE_BACKED_ROUTES & set(PROVIDER_NEUTRAL_ROUTES) == set()
+
+    def test_the_membership_list_is_walked(self):
+        assert ("GET", "/api/tenants") in MUST_REFUSE
 
     def test_the_registers_hold_no_stale_route(self):
         shipped = {
@@ -186,11 +178,7 @@ class TestTheWalkCoversTheApplication:
             for method in route.methods
         }
 
-        assert set(ANSWERED_WITH_NOTHING) <= shipped
         assert set(PROVIDER_NEUTRAL_ROUTES) <= shipped
-
-    def test_a_registered_route_takes_no_tenant_from_get_tenant_id_unless_it_is_provider_neutral(self):
-        assert set(ANSWERED_WITH_NOTHING) & _routes_depending_on(get_tenant_id) == set()
 
     def test_the_provider_neutral_routes_are_the_permission_gated_ones(self):
         assert _routes_gated_by(require_permission) == set(PROVIDER_NEUTRAL_ROUTES)
@@ -231,11 +219,12 @@ class TestAKeycloakPrincipalIsRefused:
         assert response.status_code == 403
         assert response.json() == REFUSED_BY_THE_GUARD
 
-    def test_the_membership_list_is_empty(self, client, stores, principal):
+    def test_on_the_membership_list_without_asking_descope(self, client, stores, principal):
+        """Its memberships are not in the Descope ``tenants`` claim, so an empty list would be a wrong answer."""
         response = client.get("/api/tenants", headers=_bearer(principal))
 
-        assert response.status_code == 200
-        assert response.json() == {"tenants": []}
+        assert response.status_code == 403
+        assert response.json() == {"detail": TENANTS_CLAIM_NOT_READ}
         assert stores["descope"].mock_calls == []
 
 
