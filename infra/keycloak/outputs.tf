@@ -26,12 +26,17 @@ output "keycloak_directory_client_secret" {
 }
 
 output "frontend_environment" {
-  description = "Frontend VITE_OIDC_* settings, one map per app client (the SPA logs in through one at a time)."
+  description = "Frontend VITE_OIDC_* settings, one map per app client (the SPA logs in through one at a time). VITE_OIDC_SCOPE asks for the organization scope."
   value = {
     for type_client in sort(keys(local.type_clients)) : keycloak_openid_client.app[type_client].client_id => {
       VITE_OIDC_AUTHORITY    = local.issuer_url
       VITE_OIDC_CLIENT_ID    = keycloak_openid_client.app[type_client].client_id
       VITE_OIDC_REDIRECT_URI = var.frontend_url
+      # `organization` is an optional scope on the app clients: without it the
+      # token has no organization claim and an organization-bound type is
+      # refused. Asked bare, Keycloak puts the user's organization in the
+      # token, and asks a member of several which one.
+      VITE_OIDC_SCOPE = "openid profile email organization"
     }
   }
 }

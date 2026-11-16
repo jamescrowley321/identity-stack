@@ -19,6 +19,11 @@ variable "frontend_url" {
   description = "Origin of the SPA: the app clients' redirect URI and web origin. The post-logout redirect is <frontend_url>/login."
   type        = string
   default     = "http://localhost:3000"
+
+  validation {
+    condition     = !endswith(var.frontend_url, "/")
+    error_message = "frontend_url must not end in a slash: it is an origin, and the post-logout redirect is <frontend_url>/login."
+  }
 }
 
 variable "ssl_required" {

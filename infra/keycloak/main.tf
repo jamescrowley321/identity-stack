@@ -287,13 +287,14 @@ resource "keycloak_openid_client_optional_scopes" "directory" {
   optional_scopes = []
 }
 
-resource "keycloak_openid_client_service_account_role" "directory" {
-  for_each = toset(local.directory_client_roles)
-
-  realm_id                = keycloak_realm.this.id
-  service_account_user_id = keycloak_openid_client.directory.service_account_user_id
-  client_id               = data.keycloak_openid_client.realm_management.id
-  role                    = each.key
+# Authoritative over the service account's roles: exactly the realm-management
+# roles listed and no realm role, as in the import (Keycloak gives a new
+# service account the realm's default role, as it does a user).
+resource "keycloak_user_roles" "directory" {
+  realm_id   = keycloak_realm.this.id
+  user_id    = keycloak_openid_client.directory.service_account_user_id
+  role_ids   = [for role in local.directory_client_roles : data.keycloak_role.realm_management[role].id]
+  exhaustive = true
 }
 
 resource "keycloak_generic_role_mapper" "directory" {

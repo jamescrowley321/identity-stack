@@ -7,10 +7,12 @@ test helpers on ``PYTHONPATH`` (``backend/``).
 
 It checks, against the admin API and against real tokens from both realms:
 
-1. the realm settings, clients, client roles, scope mappings, users, their
-   client roles, organizations, domains, members and ``type:`` attributes match
-   the import (user ids differ: Keycloak picks them in the Terraform realm, so
-   ``type:`` attributes are compared by username);
+1. the realm settings, every client (built-in ones by presence only), client
+   roles, scope mappings, the directory service account's client and realm
+   roles, every user, their client and realm roles, organizations, domains,
+   members and ``type:`` attributes match the import, in both directions (user
+   ids differ: Keycloak picks them in the Terraform realm, so ``type:``
+   attributes are compared by username);
 2. a token from each realm has the same ``iss`` (up to the realm name),
    ``aud``, ``azp``, ``organization``, ``resource_access`` and claim names, and
    the Terraform realm's token has the claim names of
@@ -18,7 +20,10 @@ It checks, against the admin API and against real tokens from both realms:
 3. no protocol mapper in the Terraform realm writes a user attribute or user
    property to ``aud``, ``azp``, ``organization``, ``resource_access``, ``dct``
    or ``tenants``;
-4. the directory client reads a user's organizations through the Admin API
+4. a login through each app client with the scope output
+   ``frontend_environment`` gives the SPA (``VITE_OIDC_SCOPE``) carries the
+   user's organization;
+5. the directory client reads a user's organizations through the Admin API
    with the secret Terraform output.
 
 Exits non-zero with every difference listed.
@@ -50,7 +55,6 @@ from tests.helpers.keycloak import (
 )
 
 REPO = Path(__file__).resolve().parents[3]
-IMPORT_FILE = REPO / "keycloak" / "realm" / "identity-stack-realm.json"
 FIXTURE_TOKEN = REPO / "keycloak" / "fixtures" / "access-token.json"
 
 GUARDED_CLAIMS = frozenset({"aud", "azp", "organization", "resource_access", "dct", "tenants"})
@@ -95,6 +99,9 @@ LOGINS = (
     (FRANK, TENANT_ADMIN_APP_CLIENT, ACME_SCOPE),
 )
 ABSENT = "<absent>"
+# Users of one organization (acme) holding each app client's type, logged in
+# with the scope output frontend_environment gives the SPA.
+FRONTEND_LOGIN_USERS = {MEMBER_APP_CLIENT: ALICE, TENANT_ADMIN_APP_CLIENT: DAVE}
 
 
 @dataclass(frozen=True)
@@ -130,7 +137,8 @@ def _list(http: httpx.Client, path: str, **params: object) -> list:
     items = _get(http, path, **params, first=0, max=LISTING_PAGE_SIZE)
     if len(items) >= LISTING_PAGE_SIZE:
         raise TruncatedListing(
-            f"{str(http.base_url).rstrip('/')}{path} returned {len(items)} items, the page size: raise LISTING_PAGE_SIZE"
+            f"{str(http.base_url).rstrip('/')}{path} returned {len(items)} items, the page size: "
+            "raise LISTING_PAGE_SIZE"
         )
     return items
 
@@ -140,13 +148,15 @@ def _sorted(value: object) -> object:
 
 
 def describe(realm: Realm) -> dict:
-    """The parts of a realm the import file defines, keyed by name rather than id."""
+    """A realm's settings, clients, users and organizations, keyed by name rather than id."""
     with realm.admin() as http:
         settings = _get(http, "")
         clients = {}
         for client in _get(http, "/clients"):
             client_id = client["clientId"]
-            if client_id not in WANTED_CLIENTS:
+            if client_id in BUILT_IN_CLIENTS:
+                # Keycloak creates these with every realm; only their presence is compared.
+                clients[client_id] = "built in"
                 continue
             roles = sorted(role["name"] for role in _get(http, f"/clients/{client['id']}/roles"))
             scope = _get(http, f"/clients/{client['id']}/scope-mappings")
@@ -163,21 +173,16 @@ def describe(realm: Realm) -> dict:
             if client.get("serviceAccountsEnabled"):
                 account = _get(http, f"/clients/{client['id']}/service-account-user")
                 clients[client_id]["service account roles"] = _client_roles(http, account["id"])
+                clients[client_id]["service account realm roles"] = _realm_roles(http, realm, account["id"])
 
         users = {}
         names_by_id = {}
         for user in _list(http, "/users", briefRepresentation="false"):
             names_by_id[user["id"]] = user["username"]
-            if user["username"] not in WANTED_USERS:
-                continue
             users[user["username"]] = {
                 **{key: user.get(key, ABSENT) for key in USER_SETTINGS},
                 "client roles": _client_roles(http, user["id"]),
-                # The default role is named after the realm: default-roles-<realm>.
-                "realm roles": sorted(
-                    role["name"].replace(realm.source.realm, "<realm>")
-                    for role in _get(http, f"/users/{user['id']}/role-mappings/realm/composite")
-                ),
+                "realm roles": _realm_roles(http, realm, user["id"]),
             }
 
         organizations = {}
@@ -200,6 +205,14 @@ def describe(realm: Realm) -> dict:
         "users": users,
         "organizations": organizations,
     }
+
+
+def _realm_roles(http: httpx.Client, realm: Realm, user_id: str) -> list[str]:
+    """A user's effective realm roles. The default role is named after the realm: default-roles-<realm>."""
+    return sorted(
+        role["name"].replace(realm.source.realm, "<realm>")
+        for role in _get(http, f"/users/{user_id}/role-mappings/realm/composite")
+    )
 
 
 def _client_roles(http: httpx.Client, user_id: str) -> dict[str, list[str]]:
@@ -266,6 +279,26 @@ def directory_reads_organizations(realm: Realm, secret: str, user_id: str) -> li
     return sorted(organization["alias"] for organization in response.json())
 
 
+def frontend_logins(realm: Realm, frontend_environment: dict) -> list[str]:
+    """Log in through each app client with the scope output ``frontend_environment`` gives the SPA.
+
+    The user is a member of one organization, so the token must name it: an
+    organization-bound type is refused without an ``organization`` claim.
+    """
+    found = []
+    for client_id, environment in sorted(frontend_environment.items()):
+        user = FRONTEND_LOGIN_USERS[client_id]
+        login_as = KeycloakUser(user.username, realm.passwords[user.username], user.id)
+        tokens = realm.source.login(login_as, client_id=client_id, scope=environment["VITE_OIDC_SCOPE"])
+        _header, claims = decode_unverified(tokens.access_token)
+        if claims.get("organization") != ["acme"]:
+            found.append(
+                f"{user.username} via {client_id} with output VITE_OIDC_SCOPE {environment['VITE_OIDC_SCOPE']!r}: "
+                f"organization {claims.get('organization', ABSENT)!r}, expected ['acme']"
+            )
+    return found
+
+
 def differences(path: str, left: object, right: object) -> list[str]:
     if isinstance(left, dict) and isinstance(right, dict):
         found = []
@@ -275,9 +308,10 @@ def differences(path: str, left: object, right: object) -> list[str]:
     return [] if left == right else [f"{path}: import {left!r}, terraform {right!r}"]
 
 
-IMPORT = json.loads(IMPORT_FILE.read_text())
-WANTED_CLIENTS = frozenset(client["clientId"] for client in IMPORT["clients"])
-WANTED_USERS = frozenset(user["username"] for user in IMPORT["users"])
+# Clients Keycloak creates in every realm.
+BUILT_IN_CLIENTS = frozenset(
+    {"account", "account-console", "admin-cli", "broker", "realm-management", "security-admin-console"}
+)
 DIRECTORY_CLIENT = "identity-stack-directory"
 
 
@@ -308,6 +342,7 @@ def main() -> int:
         failures.append(f"token iss {claims['iss']!r} is not output KEYCLOAK_ISSUER_URL")
 
     failures += guarded_mappers(built)
+    failures += frontend_logins(built, outputs["frontend_environment"])
 
     organizations = directory_reads_organizations(
         built, outputs["keycloak_directory_client_secret"], outputs["user_ids"][BOB.username]
