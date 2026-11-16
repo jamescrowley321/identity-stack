@@ -44,7 +44,7 @@ Defaults below are the values baked into the code (`backend/app/...`). The backe
 
 > **Never set any `OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_*` variable** (`_CLIENT_REQUEST`, `_CLIENT_RESPONSE`, `_SERVER_REQUEST`, `_SERVER_RESPONSE`). The OpenTelemetry httpx and FastAPI instrumentors read them themselves and would record headers as span attributes. Outbound, that includes the `Authorization: Bearer <project>:<management key>` header on every Descope management call. Inbound, it includes callers' bearer tokens and the internal-endpoint secrets (`X-Identity-Key`, `X-Flow-Secret`, `X-Descope-Webhook-S256`). The backend's span hook overwrites only the `authorization` attribute ([conventions §9](conventions.md#9-no-secrets-in-logs)).
 
-> `py-identity-model` (token validation, OIDC discovery and JWKS) reads `HTTP_TIMEOUT` itself, default `30` seconds. The backend never reads it, so it is not in the table above.
+> `py-identity-model` (token validation, OIDC discovery and JWKS) reads no environment variables. `HTTP_TIMEOUT`, `JWKS_CACHE_TTL` and the other variables that releases before 5.0 read are ignored. The backend uses the library's defaults: a 30-second timeout on discovery and JWKS fetches, and discovery documents and key sets cached for one hour unless the provider's `Cache-Control: max-age` says otherwise.
 
 > The three internal-endpoint secrets (`DESCOPE_WEBHOOK_SECRET`, `DESCOPE_FLOW_SYNC_SECRET`, `INTERNAL_IDENTITY_KEY`) do **not** block startup — the app logs a warning and the corresponding endpoint refuses traffic until the secret is set (`main.py:_warn_missing_secrets`).
 

@@ -125,8 +125,8 @@ makes `timeout` a required keyword-only argument, so a call site cannot fall bac
 implicit default.
 
 - Exception: OIDC discovery and JWKS fetches made inside `py-identity-model`. The library
-  builds its own clients with a timeout taken from its `HTTP_TIMEOUT` environment variable
-  (default 30 seconds). The backend does not read that variable.
+  builds its own client with its default timeout of 30 seconds. It reads no environment
+  variable, and the backend passes it no client of its own.
 
 *Enforcement:* the helper's signature, plus tests (`test_outbound.py`, including one that pins
 `logout.py`'s `timeout=5.0`).
