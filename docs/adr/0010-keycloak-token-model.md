@@ -38,7 +38,8 @@ local realm and are recorded in `keycloak/fixtures/README.md`.
 - **The tenant and the permissions come from the token alone**, through the provider's
   claims extractor (§18). `organization` must name exactly one alias, as a one-element list
   or a one-key map. Anything else names no tenant, which is 403 and is the membership
-  control. The tenant is the alias, an opaque string. A Keycloak token has no role, so
+  control. A token whose `resource_access[aud].roles` is missing or is not a list of
+  strings names no tenant either. An empty list is readable and holds nothing. The tenant is the alias, an opaque string. A Keycloak token has no role, so
   `require_role` refuses every Keycloak principal. `realm_access`, `dct` and `tenants` are
   never read.
 - **Every type is declared portable or organization-bound.** A portable type grants only
@@ -50,12 +51,14 @@ local realm and are recorded in `keycloak/fixtures/README.md`.
   organization-bound token is refused. A lookup that fails is 502 and no grant.
 - **One answer per failure, in this order:** authentication (401), then what the token
   alone decides (403), then the lookup (403 for "no", 502 for a failure). A token that
-  lacks the permission a route needs is refused without a lookup.
+  lacks the permission a route needs is refused without a lookup, however the route
+  declares its dependencies.
 - **Startup refuses a half-configured provider.** With `KEYCLOAK_ISSUER_URL` set, the
-  backend starts only with an app client for every type client, every type declared one way
+  backend starts only with an app client of its own for every type client, every type declared one way
   and not both, a read-only portable list for every portable type, HTTPS enforcement on
   unless the issuer host is loopback or a `.localhost` name, and Keycloak absent from
-  `CANONICAL_RBAC_PROVIDERS`.
+  `CANONICAL_RBAC_PROVIDERS`. The `.localhost` exemption reads the name and does not
+  resolve it, so startup logs a warning whenever enforcement is off.
 
 ## Consequences
 

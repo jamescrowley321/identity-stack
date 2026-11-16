@@ -299,13 +299,19 @@ failure has one answer, in this order:
    an `aud` that is not a configured type client, and an `azp` that is missing, not a
    string or not the app client configured for that `aud`.
 2. **From the token alone, 403:** an `organization` claim that is missing or names anything
-   but exactly one alias (a one-element list or a one-key map), a permission that is not in
+   but exactly one alias (a one-element list or a one-key map), client roles that cannot be
+   read (`resource_access`, its entry for the `aud` or `roles` is missing or of the wrong
+   type, or `roles` holds an entry that is not a string), a permission that is not in
    `resource_access[aud].roles` or, for a portable type, not on its portable list, and
-   every `require_role` gate.
+   every `require_role` gate. A token whose `organization` or client roles cannot be read
+   names no tenant: `get_tenant_id` refuses it too. An empty `roles` list is readable and
+   holds nothing.
 3. **From the membership lookup**, for a token of an organization-bound type only, and only
    after the first two: 403 when no lookup is wired or when the caller's organizations are
    anything but the token's alone, and 502 with no grant when the lookup fails or answers
-   with something that is not a collection of strings.
+   with something that is not a collection of strings. The order **MUST NOT** depend on how
+   a route declares its dependencies: `get_tenant_id`'s own dependency applies the check of
+   every `require_*` gate on the request's route before it asks the lookup.
 
 *Enforcement:* review, plus tests (`test_rbac_dependencies.py`, `test_tenant_resolution.py`,
 `test_fga_dependencies.py`, `test_keycloak_token_model.py`, `test_keycloak_tenant_access.py`).
@@ -347,7 +353,10 @@ resolver **MUST** refuse such an answer (403, `This tenant is not confirmed as t
 only membership`) unless it is handed the tenant that the provider's
 `sole_membership_lookup` confirmed, so a caller of the resolver that confirms nothing
 grants nothing. `app.dependencies.rbac` asks the lookup, once per request, after what the
-token alone decides (§17). No lookup is wired for Keycloak yet, so every token of an
+token alone decides (§17). A lookup **MUST** bound its own time (§6). The token
+middlewares **MUST NOT** record the tenant of such an answer as `request.state.tenant_id`:
+nothing has confirmed it at authentication, so it stays `None` for the whole request. No
+lookup is wired for Keycloak yet, so every token of an
 organization-bound type is refused. That canonical lookup **MUST
 NOT** be served from the identity cache, and it **MUST NOT** be kept beyond the request
 that made it. `get_tenant_id` **MUST NOT** open a database session or read the canonical
@@ -420,9 +429,13 @@ with no extractor (`refuse_ambiguous_authorization_source`).
   It checks relations in Descope's FGA store, which is keyed on Descope tenant ids, so it
   serves Descope principals only.
 - Exception: `get_tenant_claims` returns the Descope `tenants` claim as it is, for the
-  routes that list a Descope principal's memberships. For a principal of a provider that
-  has its own extractor and is not `descope_managed` (Keycloak) it returns nothing,
-  whatever the token carries, so `GET /api/tenants` lists no tenant for one.
+  routes that list a Descope principal's memberships. For a principal of any provider
+  that is not `descope_managed` (Ory, Keycloak) it returns nothing, whatever the token
+  carries, so `GET /api/tenants` lists no tenant for one and the
+  `/api/tenants/{tenant_id}/resources` routes refuse it (403).
+- Exception: `POST /api/tenants` is gated by `require_admin_role`
+  (`routers/tenants.py`), which reads a top-level `roles` claim itself, for every
+  provider, and takes no tenant (#596).
 - Exception: `GET /api/profile` carries no guard, because every provider's session loads
   it. The handler asks Descope for a Descope principal only (`is_descope_principal`) and
   answers anyone else with the empty profile, without a call. `PATCH /api/profile` carries
@@ -637,12 +650,14 @@ permission, so that it holds on every route, and **MUST** answer a refusal with 
 
 The Keycloak registration **MUST** refuse to build a half-configured provider. With
 `KEYCLOAK_ISSUER_URL` set it raises unless `KEYCLOAK_AUDIENCES` names a type client,
-`KEYCLOAK_APP_CLIENTS` names the app client of every type client and no app client is
-itself an audience, every type client is in exactly one of `KEYCLOAK_PORTABLE_TYPES` and
+`KEYCLOAK_APP_CLIENTS` names the app client of every type client, no app client is
+itself an audience and no two type clients share one, every type client is in exactly one of `KEYCLOAK_PORTABLE_TYPES` and
 `KEYCLOAK_ORGANIZATION_BOUND_TYPES`, every portable type has a list in
 `KEYCLOAK_PORTABLE_PERMISSIONS` holding only `<domain>:read` and `<domain>:list`
 permissions, and `KEYCLOAK_REQUIRE_HTTPS` is on or the issuer host is loopback or a
-`.localhost` name. See [ADR-0010](adr/0010-keycloak-token-model.md).
+`.localhost` name. That exemption is by name: nothing checks what a `.localhost` name
+resolves to. The middleware factory therefore **MUST** log a warning at startup for every
+provider whose `require_https` is off. See [ADR-0010](adr/0010-keycloak-token-model.md).
 
 Both token middlewares **MUST** build the principal and read the tenant with the
 provider's extractor inside the code path that answers a failure with the uniform 401, so

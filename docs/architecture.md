@@ -49,7 +49,7 @@ A Keycloak realm token is for one organization and one user type
 | User type | A confidential "type client", such as `member` or `tenant-admin` | `aud`, exactly one value | Authentication: anything else is 401 |
 | App | A public client, one per type | `azp`, the app client configured for that `aud` | Authentication: anything else is 401 |
 | Tenant | An Organization | `organization`, exactly one alias | `get_tenant_id`: anything else is 403 |
-| Permission | A client role of the type client, named `<domain>:<action>` | `resource_access[aud].roles` | `require_permission` |
+| Permission | A client role of the type client, named `<domain>:<action>` | `resource_access[aud].roles`, a list of strings | `require_permission`. Missing or of the wrong type: the token names no tenant, 403 |
 | Role | Not used | Nothing | `require_role` always answers 403 |
 
 The tenant is the organization alias, an opaque string. It is not a Descope tenant id and not a
