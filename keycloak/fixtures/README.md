@@ -16,6 +16,10 @@ realm import (table below), so a token's `sub` is the same on every instance fro
 
 ## The realm
 
+[`infra/keycloak/`](../../infra/keycloak/README.md) builds the same realm in Terraform. A change
+that adds a user, client, role, organization or member to the import file adds it there too;
+`make keycloak-terraform-check` compares the two.
+
 Every secret and password below is a local fixture. The realm's redirect URIs
 (`http://localhost:3000`, post-logout `http://localhost:3000/login`), its SSL mode `none` and the
 `admin`/`admin` bootstrap login are for this local container only; do not copy them elsewhere.
