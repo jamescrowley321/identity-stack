@@ -82,10 +82,16 @@ def _claims_source(request: Request, claims: dict) -> TenantClaims | None:
     ``_usable``): each is refused by the caller, the last two with a warning.
     A request that no middleware attributed to a provider (one built by hand,
     with only ``request.state.claims`` set) is read with Descope's extractor,
-    which is what the claims path has always been.
+    which is what the claims path has always been. Both middlewares record the
+    provider, so that branch is a defect when it is reached in a running
+    application, and it is logged as a warning each time.
     """
     provider = getattr(request.state, "provider", None)
     if not isinstance(provider, ProviderTokenConfig):
+        logger.warning(
+            "tenant resolution: no provider is recorded for sub=%r; its claims are read as Descope's",
+            claims.get("sub"),
+        )
         extractor = descope_tenant_claims
     elif provider.tenant_claims is None:
         return None

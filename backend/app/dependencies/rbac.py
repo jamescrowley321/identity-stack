@@ -30,6 +30,7 @@ Every branch of the canonical path that cannot produce an unambiguous answer fai
 closed with 403. An authorization decision is never made on a guess.
 """
 
+import inspect
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -179,6 +180,22 @@ async def _canonical_memberships(
     return loaded
 
 
+class RbacSessionOverrideError(TypeError):
+    """An override of ``get_rbac_session`` is not what ``_rbac_session`` can call.
+
+    Raised for the application's ``dependency_overrides`` entry, which only
+    tests set: it is a defect in the override, not in the request.
+    """
+
+
+def _takes_no_argument(provide: object) -> bool:
+    return all(
+        parameter.default is not inspect.Parameter.empty
+        or parameter.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        for parameter in inspect.signature(provide).parameters.values()
+    )
+
+
 @asynccontextmanager
 async def _rbac_session(request: Request) -> AsyncIterator[AsyncSession | None]:
     """Open the ``get_rbac_session`` session now, for a caller that could not declare it.
@@ -189,9 +206,15 @@ async def _rbac_session(request: Request) -> AsyncIterator[AsyncSession | None]:
     session, including whatever the application has overridden it with. An
     override must be what ``get_rbac_session`` is: an async generator function
     that takes no argument and yields once. It is called here, not by FastAPI,
-    so it gets no dependencies of its own.
+    so it gets no dependencies of its own. An override of another shape raises
+    ``RbacSessionOverrideError`` before it is called.
     """
     provide = request.app.dependency_overrides.get(get_rbac_session, get_rbac_session)
+    if not (inspect.isasyncgenfunction(provide) and _takes_no_argument(provide)):
+        raise RbacSessionOverrideError(
+            f"the override of get_rbac_session, {getattr(provide, '__qualname__', provide)!r}, must be an "
+            "async generator function that takes no argument: it is called outside FastAPI's dependency injection"
+        )
     async with asynccontextmanager(provide)() as session:
         yield session
 

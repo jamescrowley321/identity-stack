@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 from starlette.datastructures import Headers
 
 from app.dependencies import rbac
-from app.dependencies.rbac import get_rbac_session, require_permission, require_role
+from app.dependencies.rbac import RbacSessionOverrideError, get_rbac_session, require_permission, require_role
 from app.dependencies.tenant import get_tenant_id
 from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER, resolve_tenant_access
 from app.errors.identity import NotFound
@@ -490,6 +490,41 @@ class TestTheCanonicalSessionIsOpenedOnlyWhenItIsRead:
         assert store.calls == [("ory", ORY_SUB)]
 
 
+async def _session_that_is_not_a_generator():
+    return object()
+
+
+async def _session_that_wants_an_argument(request):
+    yield object()
+
+
+class TestAnOverrideOfTheCanonicalSessionMustHaveItsShape:
+    """``get_tenant_id`` calls the override itself, so it says so when it cannot."""
+
+    @pytest.mark.parametrize(
+        "override",
+        [_session_that_is_not_a_generator, _session_that_wants_an_argument],
+        ids=["not an async generator", "takes an argument"],
+    )
+    def test_an_override_of_another_shape_is_named_in_a_typed_error(self, store, override):
+        store.holds((TENANT_A, "member", []))
+        app = _app()
+        app.dependency_overrides[get_rbac_session] = override
+
+        with pytest.raises(RbacSessionOverrideError, match=override.__name__):
+            _get(TestClient(app), "/tenant", _ory())
+
+        assert store.calls == []
+
+    def test_a_claims_decided_request_never_calls_the_override(self, store):
+        app = _app()
+        app.dependency_overrides[get_rbac_session] = _session_that_is_not_a_generator
+
+        response = _get(TestClient(app), "/tenant", _descope(dct="t1", tenants={"t1": {"roles": ["member"]}}))
+
+        assert response.json() == {"tenant_id": "t1"}
+
+
 class TestDescopeIsDecidedFromItsOwnClaims:
     CLAIMS = {
         "dct": "t1",
@@ -527,6 +562,21 @@ class TestDescopeIsDecidedFromItsOwnClaims:
         response = _get(client, "/permissions", _descope(**self.CLAIMS))
 
         assert response.json() == {"permissions": ["documents.read"]}
+
+    @pytest.mark.parametrize("dct", [7, ["t1"], {"t1": True}], ids=["number", "list", "object"])
+    def test_a_dct_that_is_not_a_string_names_no_tenant_on_every_dependency(self, client, store, dct):
+        """The role and permission checks answer as they do for a token with no ``dct``."""
+        grants = {"roles": ["admin"], "permissions": ["documents.read"]}
+        claims = _descope(dct=dct, tenants={"t1": grants, "7": grants})
+
+        tenant = _get(client, "/tenant", claims)
+        admin = _get(client, "/admin", claims)
+        permissions = _get(client, "/permissions", claims)
+
+        assert (tenant.status_code, tenant.json()) == (403, NO_TENANT_FROM_GET_TENANT_ID)
+        assert (admin.status_code, admin.json()) == (403, NO_TENANT_FROM_RBAC)
+        assert (permissions.status_code, permissions.json()) == (403, NO_TENANT_FROM_RBAC)
+        assert store.calls == []
 
 
 class TestTheSourceIsTheProvidersOwn:
@@ -600,6 +650,34 @@ class TestProviderRecordedByTheMiddleware:
 
         assert response.status_code == 403
         assert response.json() == NO_TENANT_FROM_RBAC
+
+
+class TestClaimsNoMiddlewareAttributed:
+    """Read with Descope's extractor, as the claims path always was, and now said in the log (#591)."""
+
+    CLAIMS = {"sub": "hand-built", "dct": "t1", "tenants": {"t1": {"roles": ["admin"]}}}
+
+    def test_they_are_read_with_descopes_extractor_and_a_warning(self, caplog):
+        request = SimpleNamespace(state=SimpleNamespace(), headers=Headers())
+
+        with caplog.at_level("WARNING", logger="app.dependencies.tenant_access"):
+            access = resolve_tenant_access(request, self.CLAIMS, None)
+
+        assert (access.tenant_id, access.roles) == ("t1", ["admin"])
+        (message,) = [
+            record.getMessage() for record in caplog.records if record.name == "app.dependencies.tenant_access"
+        ]
+        assert message == (
+            "tenant resolution: no provider is recorded for sub='hand-built'; its claims are read as Descope's"
+        )
+
+    def test_attributed_claims_are_resolved_without_that_warning(self, caplog):
+        request = _attributed_request(descope_config(DESCOPE_PROJECT))
+
+        with caplog.at_level("WARNING", logger="app.dependencies.tenant_access"):
+            resolve_tenant_access(request, self.CLAIMS, None)
+
+        assert [record for record in caplog.records if record.name == "app.dependencies.tenant_access"] == []
 
 
 def _raising_tenant_claims(claims: dict) -> TenantClaims:
