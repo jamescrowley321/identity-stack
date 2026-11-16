@@ -329,7 +329,7 @@ on the route or on its router. The resolver gives a principal of a canonical pro
 canonical tenant id, which names nothing in Descope, so the guard refuses (403) every
 principal whose provider is not `descope_managed` (§28), before the tenant is resolved and
 before Descope is called. Every route that depends on `get_tenant_id` **MUST** be listed in
-`backend/tests/unit/test_descope_backed_routes.py`, either in `DESCOPE_BACKED_ROUTES` or,
+`backend/tests/unit/test_descope_backed_routes.py`, either in `DESCOPE_TENANT_ROUTES` or,
 with its reason, in `PROVIDER_NEUTRAL_ROUTES`. Adding a route to the second register is a
 reviewed decision, and a route whose service mirrors its writes to Descope through a sync
 adapter is Descope-backed: `POST /api/roles/assign` and `/api/roles/remove` are, because
