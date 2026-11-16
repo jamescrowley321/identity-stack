@@ -67,7 +67,8 @@ TenantClaimsExtractor = Callable[[dict], TenantClaims]
 TokenBinding = Callable[[dict], str | None]
 # A provider's membership lookup: every tenant the caller of these verified
 # claims belongs to, as the provider's directory has it now. It raises when the
-# directory cannot be asked.
+# directory cannot be asked, and it bounds its own time (conventions §6): the
+# request waits for it.
 SoleMembershipLookup = Callable[[dict], Awaitable[Collection[str]]]
 
 
@@ -171,12 +172,18 @@ def claimed_tenant_id(claims: dict, provider: ProviderTokenConfig) -> str | None
     """The tenant ``provider``'s extractor reads from ``claims``, or ``None`` with no extractor.
 
     Also ``None`` when the extractor answers with anything but a non-empty
-    string. An extractor that raises is not caught here: both middlewares call
-    this while authenticating, where every failure is the uniform 401.
+    string, and when its answer is ``sole_membership_required``: nothing has
+    confirmed that tenant while the token is being authenticated, so it is not
+    recorded as the request's. An extractor that raises is not caught here:
+    both middlewares call this while authenticating, where every failure is the
+    uniform 401.
     """
     if provider.tenant_claims is None:
         return None
-    tenant_id = provider.tenant_claims(claims).tenant_id
+    claimed = provider.tenant_claims(claims)
+    if claimed.sole_membership_required is not False:
+        return None
+    tenant_id = claimed.tenant_id
     return tenant_id if isinstance(tenant_id, str) and tenant_id else None
 
 

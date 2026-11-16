@@ -33,10 +33,13 @@ A third shape carries authorization in the token but not all of it: a Keycloak
 token of an organization-bound type holds only for a caller whose one
 organization is the token's. This module asks the provider's membership lookup
 for those tokens, after everything the token alone decides: no lookup wired or
-an answer of "no" is 403, and a lookup that fails is 502 and no grant.
+an answer of "no" is 403, and a lookup that fails is 502 and no grant. "After"
+holds however a route declares its dependencies: ``get_tenant_id``'s own
+dependency applies the checks of every gate on the route before it asks.
 """
 
 import inspect
+import weakref
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -74,6 +77,10 @@ logger = logbook(__name__)
 CANONICAL_RBAC_PROVIDERS = knob_set("CANONICAL_RBAC_PROVIDERS", "ory")
 
 INSUFFICIENT_PERMISSIONS = "Insufficient permissions"
+
+# The check each ``require_*`` gate makes of a caller's grants, by the gate's
+# dependency function. ``confirmed_tenant`` finds a route's gates here.
+_GATE_CHECKS: "weakref.WeakKeyDictionary[Callable, Callable[[TenantAccess], bool]]" = weakref.WeakKeyDictionary()
 # The provider's directory could not say which tenants the caller belongs to.
 MEMBERSHIP_LOOKUP_FAILED = "Membership lookup failed"
 
@@ -306,6 +313,30 @@ async def _confirm_sole_membership(request: Request, claims: dict, tenant_id: st
     return tenant_id
 
 
+def _route_gate_checks(request: Request) -> list[Callable[[TenantAccess], bool]]:
+    """The check of every ``require_*`` gate the request's route depends on, at any depth.
+
+    Read from the route FastAPI matched, so it is the same list whether a gate
+    is declared in ``dependencies=[...]``, as a parameter, or on the router. A
+    gate the application has overridden is left out: its check no longer runs.
+    Empty for a request that no route was matched for (one built by hand).
+    """
+    scope = getattr(request, "scope", None)
+    route = scope.get("route") if isinstance(scope, dict) else None
+    pending = list(getattr(getattr(route, "dependant", None), "dependencies", ()))
+    if not pending:
+        return []
+    overridden = request.app.dependency_overrides
+    checks = []
+    while pending:
+        dependant = pending.pop()
+        pending.extend(dependant.dependencies)
+        call = dependant.call
+        if call is not None and call not in overridden and call in _GATE_CHECKS:
+            checks.append(_GATE_CHECKS[call])
+    return checks
+
+
 async def confirmed_tenant(request: Request) -> str | None:
     """Dependency: the tenant ``get_tenant_id`` may believe a ``sole_membership_required`` token for.
 
@@ -314,6 +345,11 @@ async def confirmed_tenant(request: Request) -> str | None:
     model, and a token that names no tenant or settles its claims alone. Also
     ``None`` when the lookup did not confirm the token's tenant, which
     ``get_tenant_id`` then refuses. Raises 502 when the lookup fails.
+
+    FastAPI may resolve this before the route's ``require_*`` gate (a gate
+    declared as a parameter after ``get_tenant_id``). What the token alone
+    decides still comes first: a token that one of the route's gates would
+    refuse is refused here (403), and the lookup is not asked.
     """
     claims = getattr(request.state, "claims", None)
     if not isinstance(claims, dict) or _principal_provider(request) in CANONICAL_RBAC_PROVIDERS:
@@ -321,6 +357,8 @@ async def confirmed_tenant(request: Request) -> str | None:
     unconfirmed = awaiting_confirmation(request, claims)
     if unconfirmed is None:
         return None
+    if not all(holds(unconfirmed) for holds in _route_gate_checks(request)):
+        raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
     return await _confirm_sole_membership(request, claims, unconfirmed.tenant_id)
 
 
@@ -394,6 +432,7 @@ def require_role(*roles: str):
             raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
         return access.roles
 
+    _GATE_CHECKS[dependency] = holds
     return dependency
 
 
@@ -420,6 +459,7 @@ def require_permission(*permissions: str):
             raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
         return access.permissions
 
+    _GATE_CHECKS[dependency] = holds
     return dependency
 
 
@@ -448,4 +488,5 @@ def require_global_role(*roles: str):
             raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
         return access.roles
 
+    _GATE_CHECKS[dependency] = holds
     return dependency

@@ -159,6 +159,11 @@ class TestTheModelRefusesAHalfConfiguredRealm:
         with pytest.raises(KeycloakModelError, match="KEYCLOAK_APP_CLIENTS.*member"):
             _model(app_clients={MEMBER: TENANT_ADMIN, TENANT_ADMIN: TENANT_ADMIN_APP})
 
+    def test_one_app_client_for_two_types(self):
+        """``azp`` would be the same on both types' tokens, and tell them apart no longer."""
+        with pytest.raises(KeycloakModelError, match="KEYCLOAK_APP_CLIENTS.*member.*tenant-admin.*one app client"):
+            _model(app_clients={MEMBER: "shared-app", TENANT_ADMIN: "shared-app"})
+
     def test_a_type_declared_neither_portable_nor_organization_bound(self):
         with pytest.raises(KeycloakModelError, match="KEYCLOAK_PORTABLE_TYPES.*tenant-admin"):
             _model(organization_bound_types=frozenset())
@@ -229,6 +234,8 @@ class TestLocalIssuer:
             "http://localhost@keycloak.example.test/realms/identity-stack",
             "keycloak.localhost",
             "",
+            # Not a URL at all: ``urlsplit`` raises for the unclosed bracket.
+            "http://[::1/realms/identity-stack",
         ],
     )
     def test_anything_else_is_not(self, issuer):
@@ -369,9 +376,33 @@ class TestReadGrant:
         """The middleware refuses these with 401 first: the reader does not rely on it."""
         assert read_grant(MODEL, _claims(**changes)) is None
 
-    @pytest.mark.parametrize("resource_access", [None, {}, {MEMBER: {"roles": "documents:read"}}], ids=repr)
-    def test_unreadable_roles_name_the_organization_and_grant_nothing(self, resource_access):
-        claims = _claims(resource_access=resource_access)
+    @pytest.mark.parametrize(
+        "resource_access",
+        [
+            None,
+            {},
+            {TENANT_ADMIN: {"roles": [DOCUMENTS_READ]}},
+            {MEMBER: {}},
+            {MEMBER: [DOCUMENTS_READ]},
+            {MEMBER: {"roles": None}},
+            {MEMBER: {"roles": "documents:read"}},
+            {MEMBER: {"roles": [DOCUMENTS_READ, 7]}},
+        ],
+        ids=repr,
+    )
+    def test_unreadable_roles_are_no_grant_and_name_no_organization(self, resource_access):
+        """``resource_access``, the audience's entry or ``roles`` missing or of the wrong type."""
+        assert read_grant(MODEL, _claims(resource_access=resource_access)) is None
+
+    @pytest.mark.parametrize("resource_access", [None, {}, {TENANT_ADMIN: {"roles": SETTINGS_MANAGE}}], ids=repr)
+    def test_unreadable_roles_of_an_organization_bound_type_are_no_grant_either(self, resource_access):
+        claims = {**_tenant_admin_claims(), "resource_access": resource_access}
+
+        assert read_grant(MODEL, claims) is None
+
+    def test_an_empty_role_list_is_readable(self):
+        """The token says the caller holds nothing: it still names its organization."""
+        claims = _claims(resource_access={MEMBER: {"roles": []}})
 
         assert read_grant(MODEL, claims) == TokenGrant(organization=ACME, permissions=(), organization_bound=False)
 
