@@ -35,7 +35,7 @@ from app.repositories.user import UserRepository
 from app.routers import access_checks, protected
 from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
-from app.services.keycloak_directory import KeycloakDirectory
+from app.services.keycloak_directory import KeycloakDirectory, MemberUnknown
 from scripts.seed_keycloak import keycloak_provider
 from tests.helpers.keycloak import (
     ALICE,
@@ -68,6 +68,8 @@ KEYCLOAK = "Keycloak"
 # Nothing listens here: the Admin API is unreachable.
 UNREACHABLE_ISSUER = "http://127.0.0.1:9/realms/identity-stack"
 DIRECTORY_LOGGER = "app.services.keycloak_directory"
+# Well formed, and no user of the realm import has it.
+UNKNOWN_MEMBER_ID = "0dead000-0000-4000-8000-0000000000ff"
 
 _PROVIDER_VARIABLES = (
     "DESCOPE_PROJECT_ID",
@@ -110,7 +112,7 @@ def _with_directory(directory: KeycloakDirectory) -> list[ProviderTokenConfig]:
             provider = replace(
                 provider,
                 sole_membership_lookup=KeycloakOrganizationLookup(provider.tenant_claims.model, directory),
-                tenant_memberships=KeycloakTenantMemberships(directory),
+                tenant_memberships=KeycloakTenantMemberships(provider.tenant_claims.model, directory),
             )
         providers.append(provider)
     return providers
@@ -312,6 +314,38 @@ def test_the_service_account_is_refused_every_write(keycloak, method, path, body
     )
 
     assert response.status_code == 403, response.text
+
+
+async def test_a_member_the_realm_does_not_know_is_answered_404_and_typed_apart(keycloak):
+    """A well-formed ``sub`` of a user deleted from the realm: Keycloak answers 404, the lookup no organizations."""
+    directory = KeycloakDirectory(
+        issuer=keycloak.issuer, client_id=DIRECTORY_CLIENT_ID, client_secret=DIRECTORY_CLIENT_SECRET
+    )
+
+    with pytest.raises(MemberUnknown):
+        await directory.organizations_of(UNKNOWN_MEMBER_ID)
+
+
+def test_the_realm_keeps_email_verified_meaningful_for_cross_provider_linking(keycloak):
+    """Provisioning links a Keycloak identity to a canonical user on a verified email (docs/security.md).
+
+    So the realm brokers no other identity provider (whose email it could take
+    on trust), lets nobody register, keeps emails unique, and verifies an
+    email before it counts: a changed email is not ``email_verified`` until the
+    user proves it.
+    """
+    admin = httpx.Client(
+        base_url=f"{keycloak.base_url}/admin/realms/{keycloak.realm}",
+        headers={"Authorization": f"Bearer {keycloak.admin_access_token()}"},
+    )
+    realm = admin.get("").json()
+
+    assert admin.get("/identity-provider/instances").json() == []
+    assert {name: realm.get(name) for name in ("registrationAllowed", "duplicateEmailsAllowed", "verifyEmail")} == {
+        "registrationAllowed": False,
+        "duplicateEmailsAllowed": False,
+        "verifyEmail": True,
+    }
 
 
 # --- Done when 10 and the owner's case on #559 ---------------------------------

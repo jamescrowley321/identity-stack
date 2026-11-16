@@ -36,14 +36,15 @@ class AdminApi:
         organizations: object = (),
         *,
         token_status: int = 200,
-        lookup_status: int = 200,
+        lookup_status: int | list[int] = 200,
         token_body: object = None,
         lookup_body: bytes | None = None,
         transport_error: bool = False,
     ) -> None:
         self.organizations = list(organizations) if isinstance(organizations, (list, tuple)) else organizations
         self.token_status = token_status
-        self.lookup_status = lookup_status
+        # One status for every lookup, or one per lookup in order (the last one repeats).
+        self.lookup_statuses = list(lookup_status) if isinstance(lookup_status, list) else [lookup_status]
         self.token_body = token_body
         self.lookup_body = lookup_body
         self.transport_error = transport_error
@@ -60,9 +61,10 @@ class AdminApi:
                 else {"access_token": SERVICE_ACCOUNT_TOKEN, "expires_in": 300, "token_type": "Bearer"}
             )
             return httpx.Response(self.token_status, json=body)
+        status = self.lookup_statuses.pop(0) if len(self.lookup_statuses) > 1 else self.lookup_statuses[0]
         if self.lookup_body is not None:
-            return httpx.Response(self.lookup_status, content=self.lookup_body)
-        return httpx.Response(self.lookup_status, json=self.organizations)
+            return httpx.Response(status, content=self.lookup_body)
+        return httpx.Response(status, json=self.organizations)
 
     def directory(self, *, issuer: str = ISSUER, secret: str = DIRECTORY_CLIENT_SECRET) -> KeycloakDirectory:
         return KeycloakDirectory(

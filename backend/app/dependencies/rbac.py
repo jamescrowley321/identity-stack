@@ -44,7 +44,7 @@ import asyncio
 import inspect
 import math
 import weakref
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -355,12 +355,18 @@ async def _confirm_sole_membership(request: Request, claims: dict, tenant_id: st
     if not isinstance(tenants, (list, tuple, set, frozenset)) or not all(isinstance(entry, str) for entry in tenants):
         logger.warning("membership lookup of provider=%s gave an answer that cannot be used (sub=%r)", name, sub)
         raise HTTPException(status_code=502, detail=MEMBERSHIP_LOOKUP_FAILED)
-    if set(tenants) != {tenant_id}:
+    return _confirmed_by(request, name, sub, tenants, tenant_id)
+
+
+def _confirmed_by(request: Request, name: str, sub: object, tenants: Iterable[str], tenant_id: str) -> str | None:
+    """``tenant_id`` when ``tenants`` is exactly it, kept on ``request.state`` for the request; else ``None``."""
+    counted = set(tenants)
+    if counted != {tenant_id}:
         logger.warning(
             "membership not confirmed: provider=%s sub=%r belongs to %d tenant(s), not to the token's alone",
             name,
             sub,
-            len(set(tenants)),
+            len(counted),
         )
         return None
     request.state.sole_membership = _SoleMembership(tenant_id)
@@ -529,7 +535,10 @@ class TokenTenant:
 
 
 async def _list_memberships(request: Request, provider: ProviderTokenConfig, claims: dict) -> list[TenantMembership]:
-    """The provider's membership list for the caller, bounded like the lookup. 502 when it cannot be had."""
+    """The provider's membership list for the caller, bounded like the lookup.
+
+    403 when the provider has none, 502 when it fails, is late or answers the wrong shape.
+    """
     if provider.tenant_memberships is None:
         logger.warning(
             "memberships not listed: provider=%s has no membership list (sub=%r)", provider.name, claims.get("sub")
@@ -565,11 +574,14 @@ async def token_tenant(request: Request) -> TokenTenant | None:
     ``GET /api/identity`` answers them as before.
 
     Otherwise the tenant and the permissions come from the token through the
-    one resolver (conventions §18): a token that names no tenant is refused
-    (403) before any lookup, and a token that needs its tenant confirmed is
-    confirmed by the provider's lookup (403 or 502, §17). Only then is the
-    caller's membership list asked for: 502 when it fails, and 403 when the
-    token's tenant is not on it (decision 12).
+    one resolver (conventions §18), and what the token alone decides is
+    answered first: a token that names no tenant, or that the route's guards
+    refuse, is refused (403) before any lookup. Then the directory is read
+    once, within ``MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`` (502 when it fails), and
+    that one list serves both questions: a token that needs its tenant
+    confirmed is confirmed from the list's ``counted`` entries, as its
+    ``sole_membership_lookup`` would (403 when not), and a token whose tenant
+    is not on the list is refused (403, decision 12).
     """
     provider = getattr(request.state, "provider", None)
     claims = getattr(request.state, "claims", None)
@@ -577,8 +589,21 @@ async def token_tenant(request: Request) -> TokenTenant | None:
         return None
     if not isinstance(claims, dict):
         return None
-    access = await _tenant_access(request, None)
-    memberships = await _list_memberships(request, provider, claims)
+    unconfirmed = awaiting_confirmation(request, claims)
+    if unconfirmed is None:
+        access = await _tenant_access(request, None)
+        memberships = await _list_memberships(request, provider, claims)
+    else:
+        _refuse_what_the_token_alone_decides(request, unconfirmed)
+        memberships = await _list_memberships(request, provider, claims)
+        confirmed = _confirmed_by(
+            request,
+            provider.name,
+            claims.get("sub"),
+            (membership.tenant_id for membership in memberships if membership.counted is True),
+            unconfirmed.tenant_id,
+        )
+        access = resolve_tenant_access(request, claims, None, confirmed_tenant=confirmed)
     if access.tenant_id not in {membership.tenant_id for membership in memberships}:
         logger.warning(
             "membership list of provider=%s sub=%r does not hold the token's tenant",

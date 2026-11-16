@@ -17,9 +17,11 @@ from app.middleware.providers import (
 )
 from app.services.keycloak_directory import (
     GRANT_ATTRIBUTE_PREFIX,
+    IssuerNamesNoRealm,
     KeycloakDirectory,
     KeycloakDirectoryError,
     MemberIdRefused,
+    MemberUnknown,
     OrganizationMembership,
 )
 from tests.helpers.keycloak_admin_api import (
@@ -78,15 +80,43 @@ class TestTheCall:
         assert len(api.grants()) == 1
         assert len(api.lookups()) == 2
 
-    async def test_a_token_the_admin_api_refuses_is_not_kept(self):
-        api = AdminApi(lookup_status=401)
+    async def test_a_lookup_answered_401_is_asked_once_more_with_a_new_token(self):
+        api = AdminApi([organization(ACME, name="Acme")], lookup_status=[401, 200])
+
+        memberships = await api.directory().organizations_of(MEMBER_ID)
+
+        assert memberships == (OrganizationMembership(alias=ACME, name="Acme", granted_types=frozenset()),)
+        assert len(api.grants()) == 2
+        assert len(api.lookups()) == 2
+
+    async def test_a_second_401_is_a_failure_after_exactly_two_lookups(self):
+        api = AdminApi([organization(ACME)], lookup_status=401)
+
+        with pytest.raises(KeycloakDirectoryError) as failed:
+            await api.directory().organizations_of(MEMBER_ID)
+
+        assert failed.value.status == 401
+        assert len(api.grants()) == 2
+        assert len(api.lookups()) == 2
+
+    async def test_a_token_refused_twice_is_not_kept(self):
+        api = AdminApi([organization(ACME)], lookup_status=[401, 401, 200])
         directory = api.directory()
 
-        for _ in range(2):
-            with pytest.raises(KeycloakDirectoryError):
-                await directory.organizations_of(MEMBER_ID)
+        with pytest.raises(KeycloakDirectoryError):
+            await directory.organizations_of(MEMBER_ID)
+        await directory.organizations_of(MEMBER_ID)
 
-        assert len(api.grants()) == 2
+        assert len(api.grants()) == 3
+
+    @pytest.mark.parametrize("status", [403, 404, 500])
+    async def test_no_other_status_is_asked_again(self, status):
+        api = AdminApi(lookup_status=status)
+
+        with pytest.raises((KeycloakDirectoryError, MemberUnknown)):
+            await api.directory().organizations_of(MEMBER_ID)
+
+        assert len(api.lookups()) == 1
 
     async def test_the_answer_is_every_organization_with_the_types_its_markers_grant_the_member(self):
         api = AdminApi(
@@ -184,7 +214,7 @@ class TestEveryFailureIsTyped:
         assert failed.value.status == status
         assert api.lookups() == []
 
-    @pytest.mark.parametrize("status", [401, 403, 404, 500, 503])
+    @pytest.mark.parametrize("status", [401, 403, 500, 503])
     async def test_a_refused_lookup_carries_its_status(self, status):
         api = AdminApi(lookup_status=status)
 
@@ -192,6 +222,17 @@ class TestEveryFailureIsTyped:
             await api.directory().organizations_of(MEMBER_ID)
 
         assert failed.value.status == status
+
+    async def test_a_member_the_realm_does_not_know_is_typed_apart_and_logged_with_its_status(self, caplog):
+        """The user was deleted from the realm while their token still lives: Keycloak answers 404."""
+        api = AdminApi(lookup_status=404)
+
+        with caplog.at_level("WARNING", logger="app.services.keycloak_directory"):
+            with pytest.raises(MemberUnknown):
+                await api.directory().organizations_of(MEMBER_ID)
+
+        messages = [r.getMessage() for r in caplog.records if r.name == "app.services.keycloak_directory"]
+        assert any("404" in message for message in messages), messages
 
     async def test_no_answer_at_all_has_no_status(self):
         api = AdminApi(transport_error=True)
@@ -227,13 +268,10 @@ class TestEveryFailureIsTyped:
 
         assert failed.value.status is None
 
-    async def test_an_issuer_that_names_no_realm_fails_without_a_call(self):
-        api = AdminApi([])
-
-        with pytest.raises(KeycloakDirectoryError):
-            await api.directory(issuer=ORIGIN).organizations_of(MEMBER_ID)
-
-        assert api.requests == []
+    @pytest.mark.parametrize("issuer", [ORIGIN, f"{ORIGIN}/realms/", f"{ISSUER}/extra", f"{ORIGIN}/auth/x"])
+    def test_an_issuer_that_names_no_realm_builds_no_directory(self, issuer):
+        with pytest.raises(IssuerNamesNoRealm):
+            AdminApi([]).directory(issuer=issuer)
 
     @pytest.mark.parametrize(("token_status", "lookup_status"), [(401, 200), (200, 401), (200, 403)])
     async def test_the_log_names_the_status_and_not_the_secret(self, caplog, token_status, lookup_status):
@@ -318,6 +356,13 @@ class TestTheLookupConfirmsTheGrantAndNotOnlyTheMembership:
         assert answer == []
         assert api.requests == []
 
+    async def test_a_member_the_realm_does_not_know_belongs_to_no_organization(self):
+        api = AdminApi(lookup_status=404)
+
+        answer = await KeycloakOrganizationLookup(_model(), api.directory())(_tenant_admin_claims(ACME))
+
+        assert answer == []
+
     async def test_a_failure_is_raised_for_the_resolver_to_answer_502(self):
         api = AdminApi(lookup_status=503)
 
@@ -329,17 +374,36 @@ class TestTheMembershipList:
     async def test_every_organization_is_listed_with_its_name(self):
         api = AdminApi([organization(ACME, name="Acme"), organization(GLOBEX, name="Globex")])
 
-        listed = await KeycloakTenantMemberships(api.directory())(_tenant_admin_claims(ACME))
+        listed = await KeycloakTenantMemberships(_model(), api.directory())(_tenant_admin_claims(ACME))
 
         assert {m.tenant_id: m for m in listed} == {
-            ACME: TenantMembership(tenant_id=ACME, tenant_name="Acme"),
-            GLOBEX: TenantMembership(tenant_id=GLOBEX, tenant_name="Globex"),
+            ACME: TenantMembership(tenant_id=ACME, tenant_name="Acme", counted=False),
+            GLOBEX: TenantMembership(tenant_id=GLOBEX, tenant_name="Globex", counted=True),
         }
+
+    async def test_the_tokens_organization_is_counted_where_it_marks_the_caller(self):
+        api = AdminApi(
+            [
+                organization(ACME, name="Acme", attributes={TENANT_ADMIN_MARKER: [MEMBER_ID]}),
+                organization(GLOBEX, name="Globex"),
+            ]
+        )
+
+        listed = await KeycloakTenantMemberships(_model(), api.directory())(_tenant_admin_claims(ACME))
+
+        assert {m.tenant_id: m.counted for m in listed} == {ACME: True, GLOBEX: True}
+
+    async def test_a_member_the_realm_does_not_know_lists_nothing(self):
+        api = AdminApi(lookup_status=404)
+
+        listed = await KeycloakTenantMemberships(_model(), api.directory())(_tenant_admin_claims(ACME))
+
+        assert listed == []
 
     async def test_a_sub_that_is_not_an_id_lists_nothing_and_nothing_is_asked(self):
         api = AdminApi([organization(ACME)])
 
-        listed = await KeycloakTenantMemberships(api.directory())(_tenant_admin_claims(ACME, sub="../x"))
+        listed = await KeycloakTenantMemberships(_model(), api.directory())(_tenant_admin_claims(ACME, sub="../x"))
 
         assert listed == []
         assert api.requests == []
