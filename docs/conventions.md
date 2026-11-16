@@ -311,11 +311,17 @@ failure has one answer, in this order:
    anything but the token's alone, and 502 with no grant when the lookup fails, does not
    answer within `MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`, or answers with something that is not
    a collection of strings. The order **MUST NOT** depend on how
-   a route declares its dependencies: `get_tenant_id`'s own dependency applies the check of
-   every `require_*` gate on the request's route before it asks the lookup.
+   a route declares its dependencies: `get_tenant_id`'s own dependency runs every guard on
+   the request's route that is registered with `refuses_from_the_token_alone`
+   (`require_descope_principal`, `get_tenant_claims`), with that guard's own answer, and
+   applies the check of every `require_*` gate, before it asks the lookup. A dependency that
+   refuses from the claims and provider alone **MUST** be registered so;
+   `test_keycloak_routes.py` refuses a shipped dependency of such a route that is neither a
+   gate, a registered guard nor listed with its reason in `RUNS_AFTER_THE_LOOKUP`.
 
 *Enforcement:* review, plus tests (`test_rbac_dependencies.py`, `test_tenant_resolution.py`,
-`test_fga_dependencies.py`, `test_keycloak_token_model.py`, `test_keycloak_tenant_access.py`).
+`test_fga_dependencies.py`, `test_keycloak_token_model.py`, `test_keycloak_tenant_access.py`,
+`test_keycloak_routes.py`).
 
 ### 18. One resolver decides the tenant and the grants
 

@@ -36,7 +36,8 @@ for those tokens, after everything the token alone decides: no lookup wired or
 an answer of "no" is 403, and a lookup that fails, or does not answer within
 ``MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS``, is 502 and no grant. "After"
 holds however a route declares its dependencies: ``get_tenant_id``'s own
-dependency applies the checks of every gate on the route before it asks.
+dependency applies every gate on the route, and every dependency registered with
+``refuses_from_the_token_alone``, before it asks.
 """
 
 import asyncio
@@ -84,6 +85,10 @@ INSUFFICIENT_PERMISSIONS = "Insufficient permissions"
 # The check each ``require_*`` gate makes of a caller's grants, by the gate's
 # dependency function. ``confirmed_tenant`` finds a route's gates here.
 _GATE_CHECKS: "weakref.WeakKeyDictionary[Callable, Callable[[TenantAccess], bool]]" = weakref.WeakKeyDictionary()
+# Dependencies other than the ``require_*`` gates that refuse a request from its
+# claims and provider alone, asking no one. ``confirmed_tenant`` runs those of
+# the route before the lookup, so their refusal is never turned into a 502.
+_TOKEN_GUARDS: "weakref.WeakSet[Callable[[Request], object]]" = weakref.WeakSet()
 # The provider's directory could not say which tenants the caller belongs to.
 MEMBERSHIP_LOOKUP_FAILED = "Membership lookup failed"
 
@@ -364,32 +369,65 @@ def _is_key_of(registered: Mapping, call: object) -> bool:
         return False
 
 
-def _route_gate_checks(request: Request) -> list[Callable[[TenantAccess], bool]]:
-    """The check of every ``require_*`` gate the request's route depends on, at any depth.
+def refuses_from_the_token_alone(guard: Callable[[Request], object]) -> Callable[[Request], object]:
+    """Register ``guard`` as a dependency that refuses from the request's claims and provider alone.
 
-    Read from the route FastAPI matched, so it is the same list whether a gate
-    is declared in ``dependencies=[...]``, as a parameter, or on the router. A
-    gate the application has overridden is left out, and so is everything
-    under an overridden dependency: FastAPI runs the override in its place, and
-    none of what it depended on. Empty for a request that no route was matched
-    for (one built by hand).
+    A dependency registered here is answered before the membership lookup, with
+    its own refusal, on every route that depends on it: a token it refuses is
+    refused even when the directory is down. It must take only the request, be
+    synchronous, and do no I/O; raising is its refusal, and what it returns is
+    not used before the lookup. A dependency that refuses after asking a
+    provider (an FGA check, a database read) is not one: it needs the tenant
+    the lookup confirms.
+    """
+    if inspect.iscoroutinefunction(guard):
+        raise TypeError(f"{guard.__qualname__} is asynchronous: a guard answered before the lookup does no I/O")
+    _TOKEN_GUARDS.add(guard)
+    return guard
+
+
+def _route_calls(request: Request) -> list[Callable]:
+    """Every dependency the request's route runs, at any depth, in the order FastAPI runs them.
+
+    Read from the route FastAPI matched, so it is the same list whether a
+    dependency is declared in ``dependencies=[...]``, as a parameter, or on the
+    router. A dependency the application has overridden is left out, and so is
+    everything under it: FastAPI runs the override in its place, and none of
+    what it depended on. Empty for a request that no route was matched for (one
+    built by hand).
     """
     scope = getattr(request, "scope", None)
     route = scope.get("route") if isinstance(scope, dict) else None
-    pending = list(getattr(getattr(route, "dependant", None), "dependencies", ()))
-    if not pending:
+    dependant = getattr(route, "dependant", None)
+    if dependant is None:
         return []
     overridden = request.app.dependency_overrides
-    checks = []
-    while pending:
-        dependant = pending.pop()
-        call = dependant.call
-        if _is_key_of(overridden, call):
-            continue
-        pending.extend(dependant.dependencies)
-        if _is_key_of(_GATE_CHECKS, call):
-            checks.append(_GATE_CHECKS[call])
-    return checks
+    calls: list[Callable] = []
+
+    def visit(dependants) -> None:
+        # FastAPI resolves a dependency's own dependencies before calling it.
+        for sub in dependants:
+            if _is_key_of(overridden, sub.call):
+                continue
+            visit(sub.dependencies)
+            calls.append(sub.call)
+
+    visit(getattr(dependant, "dependencies", ()))
+    return calls
+
+
+def _route_gate_checks(request: Request) -> list[Callable[[TenantAccess], bool]]:
+    """The check of every ``require_*`` gate the request's route depends on, at any depth (see ``_route_calls``)."""
+    return [_GATE_CHECKS[call] for call in _route_calls(request) if _is_key_of(_GATE_CHECKS, call)]
+
+
+def _route_token_guards(request: Request) -> list[Callable[[Request], object]]:
+    """Every ``refuses_from_the_token_alone`` guard the request's route depends on, in the order FastAPI runs them."""
+    guards: list[Callable[[Request], object]] = []
+    for call in _route_calls(request):
+        if _is_key_of(_TOKEN_GUARDS, call) and call not in guards:
+            guards.append(call)
+    return guards
 
 
 async def confirmed_tenant(request: Request) -> str | None:
@@ -401,10 +439,12 @@ async def confirmed_tenant(request: Request) -> str | None:
     ``None`` when the lookup did not confirm the token's tenant, which
     ``get_tenant_id`` then refuses. Raises 502 when the lookup fails.
 
-    FastAPI may resolve this before the route's ``require_*`` gate (a gate
-    declared as a parameter after ``get_tenant_id``). What the token alone
-    decides still comes first: a token that one of the route's gates would
-    refuse is refused here (403), and the lookup is not asked.
+    FastAPI may resolve this before the route's ``require_*`` gate or another
+    refusing guard (one declared as a parameter after ``get_tenant_id``). What
+    the token alone decides still comes first: a token that one of the route's
+    ``refuses_from_the_token_alone`` guards refuses is refused here with that
+    guard's answer, one that a gate would refuse is refused here (403), and the
+    lookup is not asked.
     """
     claims = getattr(request.state, "claims", None)
     if not isinstance(claims, dict) or _principal_provider(request) in CANONICAL_RBAC_PROVIDERS:
@@ -419,13 +459,17 @@ async def confirmed_tenant(request: Request) -> str | None:
 def _refuse_what_the_token_alone_decides(
     request: Request, unconfirmed: TenantAccess, holds: Callable[[TenantAccess], bool] | None = None
 ) -> None:
-    """403 when the token alone fails a check of the route's gates or ``holds``, before any lookup.
+    """Refuse, before any lookup, what the route's guards, its gates or ``holds`` refuse from the token alone.
 
-    Every gate of the route is applied, not only the one asking: on a route
-    with two gates, the one the token passes would otherwise ask the lookup
-    before the other refuses, and a directory that is down would answer 502
-    where the token alone decides 403.
+    The route's ``refuses_from_the_token_alone`` guards run first, in the order
+    FastAPI runs them, and refuse with their own answer. Then every gate of the
+    route is applied, not only the one asking (403): on a route with two gates,
+    or a gate and a guard, the one the token passes would otherwise ask the
+    lookup before the other refuses, and a directory that is down would answer
+    502 where the token alone decides 403.
     """
+    for guard in _route_token_guards(request):
+        guard(request)
     checks = _route_gate_checks(request)
     if holds is not None and holds not in checks:
         checks.append(holds)
@@ -443,10 +487,11 @@ async def _tenant_access(
     """The request's tenant and the caller's grants in it. 401 with no claims.
 
     ``holds`` is the caller's own check of the grants. For a token that needs
-    its tenant confirmed it is applied first, with the check of every other
-    gate of the route, to what the token alone says: a token that would be
-    refused anyway is refused (403) without a lookup, so a directory that is
-    down never turns that 403 into a 502.
+    its tenant confirmed it is applied first, with the route's
+    ``refuses_from_the_token_alone`` guards and the check of every other gate
+    of the route, to what the token alone says: a token that would be refused
+    anyway is refused (403) without a lookup, so a directory that is down never
+    turns that 403 into a 502.
     """
     claims = getattr(request.state, "claims", None)
     if claims is None:

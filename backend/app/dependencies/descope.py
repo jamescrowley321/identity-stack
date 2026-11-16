@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException, Request
 
+from app.dependencies.rbac import refuses_from_the_token_alone
 from app.logbook import logbook
 from app.middleware.providers import ProviderTokenConfig
 from app.services.descope_management import DescopeManagementAdapter
@@ -24,6 +25,7 @@ def is_descope_principal(request: Request) -> bool:
     return isinstance(provider, ProviderTokenConfig) and provider.descope_managed
 
 
+@refuses_from_the_token_alone
 def require_descope_principal(request: Request) -> None:
     """Refuse a principal whose tenant and subject are not Descope's own (conventions §18).
 
