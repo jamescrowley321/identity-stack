@@ -81,8 +81,9 @@ refused on every role-gated route.
   would have reached those routes where the sole-membership rule used to refuse them. The
   project-level grant they need is #593. The global routes Descope does not hold (`GET
   /api/users`, `/api/providers`, `/api/sync/status`, `/api/events/recent`) are gated by
-  `require_global_role`, for the same reason: on them the header chooses nothing, so a
-  canonical principal is served on a sole membership only, as before the header existed.
+  `require_global_role`, for the same reason: on them neither the header nor a `dct` claim
+  on the token chooses anything, so a canonical principal is served on a sole membership
+  only.
   No shipped route is provider-neutral yet. The first will be one
   whose service is given a sync adapter chosen by the caller's provider.
 - Descope cannot be listed in `CANONICAL_RBAC_PROVIDERS`. A provider that is both

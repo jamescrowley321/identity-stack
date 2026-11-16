@@ -350,9 +350,10 @@ an admin of any one of several tenants would reach them by naming that tenant.
 A route over state that belongs to no tenant and that Descope does not hold **MUST** be
 gated by `app.dependencies.rbac.require_global_role`, not `require_role`: `GET /api/users`
 (every tenant's users), `/api/providers`, `/api/sync/status` and `/api/events/recent`. One
-role in one tenant opens all of that state, so on these routes the `X-Tenant-ID` header
-chooses nothing. A canonical principal is decided by their sole membership, or by a `dct`
-claim on the token, and one with several memberships who sends the header is refused. A
+role in one tenant opens all of that state, so on these routes the request chooses
+nothing. A canonical principal is decided by their sole membership, and one with several
+memberships is refused, whether they send the `X-Tenant-ID` header, carry a `dct` claim
+on the token, or name no tenant at all. A
 Descope principal is decided from its claims, as by `require_role`. The project-level
 grant these routes need is #593. A route gated by `require_role` or `require_permission`
 **MUST** depend on `get_tenant_id` or on the guard, or be listed with its reason in
@@ -365,7 +366,8 @@ configuration at startup (`refuse_canonical_descope_managed`).
 - Exception: a `dct` claim on the token of a provider listed in
   `CANONICAL_RBAC_PROVIDERS` is read as a tenant selector, as it was before the header
   existed. It is put in the same spelling as the header and held to the same check, and a
-  `dct` that disagrees with the header is refused.
+  `dct` that disagrees with the header is refused. On a `require_global_role` route it
+  chooses nothing, like the header.
 - Exception: a request that no middleware attributed to a provider, which only a test
   that sets `request.state.claims` by hand can make, is read with Descope's extractor by
   the resolver, which logs a warning each time. `require_descope_principal` refuses it: the guard passes only a provider
