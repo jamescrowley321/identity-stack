@@ -153,7 +153,7 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
             # for it). The same rule as in standalone mode, on every route.
             unbound = binding_refusal(claims, provider)
             if unbound is not None:
-                logger.warning("GatewayClaims rejected: %s token binding failed (%s)", provider.name, unbound)
+                logger.warning("GatewayClaims rejected: %s binding refused (%s)", provider.name, unbound)
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
             # Token kind: bare-project-id tokens carry no ``aud``, so the check

@@ -177,7 +177,7 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
             # for it). Checked here so that it holds on every route.
             unbound = binding_refusal(claims, provider)
             if unbound is not None:
-                logger.warning("rejected: %s token binding failed (%s)", provider.name, unbound)
+                logger.warning("rejected: %s binding refused (%s)", provider.name, unbound)
                 return None
 
             # Token kind: a bare-project-id token must be a session token. The
