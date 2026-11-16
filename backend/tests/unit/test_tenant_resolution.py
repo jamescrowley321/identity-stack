@@ -692,6 +692,25 @@ class TestAnExtractorTheResolverCannotUse:
             "gave an answer that cannot be used for sub='fake-user'"
         )
 
+    @pytest.mark.parametrize(
+        ("provider", "claims"),
+        [
+            (descope_config(DESCOPE_PROJECT), {"sub": "descope-user", "tenants": {"t1": {"roles": ["admin"]}}}),
+            (FAKE_PROVIDER, {"sub": "fake-user", "org_roles": ["admin"]}),
+        ],
+        ids=["a Descope token with no dct", "another provider's token with no tenant"],
+    )
+    def test_a_token_that_names_no_tenant_is_refused_without_a_warning(self, provider, claims, caplog):
+        """Naming no tenant is an everyday answer, not an extractor at fault."""
+        request = _attributed_request(provider)
+
+        with caplog.at_level("DEBUG", logger="app.dependencies.tenant_access"), pytest.raises(HTTPException) as refused:
+            resolve_tenant_access(request, claims, None)
+
+        assert refused.value.status_code == 403
+        assert refused.value.detail == "No tenant context"
+        assert [record for record in caplog.records if record.name == "app.dependencies.tenant_access"] == []
+
     def test_a_well_formed_answer_is_returned(self):
         request = _attributed_request(FAKE_PROVIDER)
 

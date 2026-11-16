@@ -26,19 +26,24 @@ def require_descope_principal(request: Request) -> None:
     resolved and before Descope is called. Which providers pass is each
     provider's own ``descope_managed``.
 
-    A request that no middleware attributed to a provider, which only a test
-    that sets ``request.state`` by hand can make, passes, as it does in the
-    tenant resolver.
+    It passes only a principal it knows to be Descope's. Claims that no
+    middleware attributed to a provider are refused like another provider's:
+    both middlewares record the provider beside the claims, so such a request
+    is a defect, and it must not be read as a Descope principal. A request with
+    no claims at all is not this guard's to answer: authentication gives it 401.
     """
+    claims = getattr(request.state, "claims", None)
+    if claims is None:
+        return
     provider = getattr(request.state, "provider", None)
-    if isinstance(provider, ProviderTokenConfig) and not provider.descope_managed:
-        claims = getattr(request.state, "claims", None)
-        logger.warning(
-            "refused: provider=%s sub=%r called a route that serves Descope principals only",
-            provider.name,
-            claims.get("sub") if isinstance(claims, dict) else None,
-        )
-        raise HTTPException(status_code=403, detail=NOT_A_DESCOPE_PRINCIPAL)
+    if isinstance(provider, ProviderTokenConfig) and provider.descope_managed:
+        return
+    logger.warning(
+        "refused: provider=%s sub=%r called a route that serves Descope principals only",
+        provider.name if isinstance(provider, ProviderTokenConfig) else "unrecorded",
+        claims.get("sub") if isinstance(claims, dict) else None,
+    )
+    raise HTTPException(status_code=403, detail=NOT_A_DESCOPE_PRINCIPAL)
 
 
 def get_descope_management(request: Request) -> DescopeManagementAdapter:
