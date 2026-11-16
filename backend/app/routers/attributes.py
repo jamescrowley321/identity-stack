@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from app.dependencies.auth import get_claims
-from app.dependencies.descope import get_descope_management, require_descope_principal
+from app.dependencies.descope import get_descope_management, is_descope_principal, require_descope_principal
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
 from app.errors.identity import NotFound
@@ -31,22 +31,30 @@ async def get_profile(
     claims: dict = Depends(get_claims),
     management: DescopeManagementAdapter = Depends(get_descope_management),
 ):
-    """Load the current user's profile and custom attributes from Descope."""
+    """Load the current user's profile and custom attributes from Descope.
+
+    Every provider's session loads this page. Only a Descope principal's ``sub``
+    is a Descope user id, so only a Descope principal is looked up there
+    (conventions §18): anyone else gets the empty profile, without a call.
+    """
     # Descope's sub claim is the userId (not loginId)
     user_id = claims.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="Missing user identity (sub claim)")
+    empty_profile = {"user_id": user_id, "name": "", "email": "", "custom_attributes": {}}
+    if not is_descope_principal(request):
+        return result_to_response(Ok(empty_profile), request)
     result = await management.load_profile(user_id)
     if result.is_error():
         # Degrade gracefully — profile is informational, not critical.
         # In CI the Descope credentials are fake so every call 401s;
         # in production a transient Descope outage shouldn't crash the
         # profile page.
-        result = Ok({"user_id": user_id, "name": "", "email": "", "custom_attributes": {}})
+        result = Ok(empty_profile)
     return result_to_response(result, request)
 
 
-@router.patch("/profile")
+@router.patch("/profile", dependencies=[Depends(require_descope_principal)])
 async def update_profile_attribute(
     request: Request,
     body: UpdateAttributeRequest,

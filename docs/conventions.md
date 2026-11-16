@@ -328,7 +328,12 @@ API or its FGA store **MUST** depend on `app.dependencies.descope.require_descop
 on the route or on its router. The resolver gives a principal of a canonical provider a
 canonical tenant id, which names nothing in Descope, so the guard refuses (403) every
 principal whose provider is not `descope_managed` (§28), before the tenant is resolved and
-before Descope is called. A request with no claims gets 401 from the guard itself (§17). Every route that depends on `get_tenant_id` **MUST** be listed in
+before Descope is called. Its 403 body is its own, `This route serves Descope principals
+only`, not the resolver's "select a tenant first": selecting a tenant would not help the
+caller. A request with no claims gets 401 from the guard itself (§17). A route that is
+handed the management adapter (`get_descope_management`) **MUST** carry the guard or be
+listed, with what keeps another provider's subject from Descope, in the same test's
+`UNGUARDED_ADAPTER_ROUTES`. Every route that depends on `get_tenant_id` **MUST** be listed in
 `backend/tests/unit/test_descope_backed_routes.py`, either in `DESCOPE_TENANT_ROUTES` or,
 with its reason, in `PROVIDER_NEUTRAL_ROUTES`. Adding a route to the second register is a
 reviewed decision, and a route whose service mirrors its writes to Descope through a sync
@@ -371,9 +376,12 @@ configuration at startup (`refuse_canonical_descope_managed`).
   serves Descope principals only.
 - Exception: `get_tenant_claims` returns the Descope `tenants` claim as it is, for the
   routes that list a Descope principal's memberships.
-- Exception: the Descope-backed routes that take no tenant from `get_tenant_id` carry no
-  guard and answer a principal of another provider as they did before the resolver:
-  `GET` and `PATCH /api/profile` and `GET /api/tenants` (#590).
+- Exception: `GET /api/profile` carries no guard, because every provider's session loads
+  it. The handler asks Descope for a Descope principal only (`is_descope_principal`) and
+  answers anyone else with the empty profile, without a call. `PATCH /api/profile` carries
+  the guard.
+- Exception: `GET /api/tenants` takes no tenant from `get_tenant_id`, carries no guard and
+  answers a principal of another provider as it did before the resolver (#590).
 - Exception: the role and permission definitions and the FGA schema belong to no tenant
   and are gated by `require_role`, which answers for one tenant. A Descope principal who
   holds the role in their current tenant is served there, as before the resolver (#593).
