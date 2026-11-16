@@ -17,7 +17,13 @@ from py_identity_model import TokenValidationConfig, TokenValidationException
 from py_identity_model.aio import validate_token
 
 from app.middleware.auth import TokenValidationMiddleware
-from app.middleware.providers import ProviderTokenConfig, descope_config, keycloak_config, ory_config
+from app.middleware.providers import (
+    ProviderTokenConfig,
+    descope_config,
+    keycloak_config,
+    library_token_issuers,
+    ory_config,
+)
 from tests.helpers.keycloak_model import model_settings
 from tests.helpers.local_op import ES256, HS256, PS256, RS256, UNSIGNED, LocalProvider, local_provider
 
@@ -43,17 +49,30 @@ def _keycloak(op: LocalProvider, **changes) -> ProviderTokenConfig:
     )
 
 
+def _descope_issuers(op: LocalProvider) -> frozenset[str]:
+    """Descope's three issuer forms, the two URL forms rooted at the loopback provider.
+
+    The library requires the discovery document's issuer to match the address it
+    was fetched from (OpenID Connect Discovery 1.0 §4.3), so the loopback
+    provider cannot serve ``https://api.descope.com/{project id}``.
+    """
+    return frozenset({op.issuer, f"{op.issuer}/v1/apps/{DESCOPE_PROJECT_ID}", DESCOPE_PROJECT_ID})
+
+
 def _descope(op: LocalProvider, **changes) -> ProviderTokenConfig:
-    """The shipped Descope config, fetching discovery and JWKS from the loopback provider."""
-    return replace(descope_config(DESCOPE_PROJECT_ID), disco_address=op.disco_address, **changes)
+    """The shipped Descope config, its discovery and issuers moved to the loopback provider."""
+    return replace(
+        descope_config(DESCOPE_PROJECT_ID),
+        **{"disco_address": op.disco_address, "accepted_issuers": _descope_issuers(op), **changes},
+    )
 
 
 def _keycloak_claims(op: LocalProvider) -> dict:
     return {"iss": op.issuer, "sub": "kc-user", "aud": KEYCLOAK_AUDIENCE, "azp": "member-app"}
 
 
-def _descope_claims() -> dict:
-    return {"iss": DESCOPE_ISSUER, "sub": "descope-user", "aud": DESCOPE_PROJECT_ID}
+def _descope_claims(op: LocalProvider) -> dict:
+    return {"iss": op.issuer, "sub": "descope-user", "aud": DESCOPE_PROJECT_ID}
 
 
 def _probe(provider: ProviderTokenConfig, token: str):
@@ -104,7 +123,7 @@ class TestDescope:
         assert descope_config(DESCOPE_PROJECT_ID).algorithms == PINNED_TO_RS256
 
     def test_an_rs256_token_authenticates(self, op):
-        response = _probe(_descope(op), op.token(RS256, _descope_claims()))
+        response = _probe(_descope(op), op.token(RS256, _descope_claims(op)))
 
         assert response.status_code == 200, response.text
         assert response.json() == {"sub": "descope-user", "provider": "Descope"}
@@ -112,7 +131,7 @@ class TestDescope:
     @pytest.mark.parametrize("alg", [ES256, PS256])
     def test_an_algorithm_outside_the_set_is_refused(self, op, alg):
         """Signed by a key in the same JWKS, refused by the shipped config."""
-        token = op.token(alg, _descope_claims())
+        token = op.token(alg, _descope_claims(op))
 
         _assert_uniform_401(_probe(_descope(op), token))
 
@@ -122,7 +141,73 @@ class TestDescope:
 
     @pytest.mark.parametrize("alg", [HS256, UNSIGNED])
     def test_symmetric_and_unsigned_tokens_are_refused(self, op, alg):
-        _assert_uniform_401(_probe(_descope(op), op.token(alg, _descope_claims())))
+        _assert_uniform_401(_probe(_descope(op), op.token(alg, _descope_claims(op))))
+
+
+class TestDescopeIssuers:
+    """Descope signs three ``iss`` forms with one JWKS; the library checks ``iss`` against all three."""
+
+    @pytest.mark.parametrize(
+        "claims",
+        [
+            pytest.param(lambda op: {"iss": op.issuer, "aud": DESCOPE_PROJECT_ID}, id="discovery-issuer"),
+            pytest.param(
+                lambda op: {"iss": f"{op.issuer}/v1/apps/{DESCOPE_PROJECT_ID}", "aud": DESCOPE_PROJECT_ID},
+                id="inbound-app-issuer",
+            ),
+            pytest.param(lambda op: {"iss": DESCOPE_PROJECT_ID, "drn": "DS"}, id="bare-project-id-session-token"),
+        ],
+    )
+    def test_each_issuer_form_authenticates(self, op, claims):
+        response = _probe(_descope(op), op.token(RS256, {**claims(op), "sub": "descope-user"}))
+
+        assert response.status_code == 200, response.text
+        assert response.json() == {"sub": "descope-user", "provider": "Descope"}
+
+    def test_an_issuer_outside_the_set_is_refused(self, op):
+        claims = {**_descope_claims(op), "iss": f"{op.issuer}/v1/apps/P2someoneelsesproject"}
+
+        _assert_uniform_401(_probe(_descope(op), op.token(RS256, claims)))
+
+    def test_keys_from_a_discovery_document_naming_another_issuer_are_not_used(self, op):
+        """The listed issuers are accepted only from the keys of a discovery document whose issuer is listed."""
+        token = op.token(RS256, {**_descope_claims(op), "iss": DESCOPE_PROJECT_ID, "drn": "DS"})
+        elsewhere = _descope(op, accepted_issuers=frozenset({DESCOPE_ISSUER, DESCOPE_PROJECT_ID}))
+
+        _assert_uniform_401(_probe(elsewhere, token))
+
+        # Control: the same token is accepted once the discovery issuer is listed.
+        assert _probe(_descope(op), token).status_code == 200
+
+    async def test_the_issuer_check_is_the_library_s(self, op):
+        """The issuer list reaches py-identity-model, which refuses an unlisted ``iss`` itself."""
+        config = TokenValidationConfig(
+            perform_disco=True,
+            token_issuers=library_token_issuers(_descope(op)),
+            options={"verify_aud": False},
+        )
+        claims = {**_descope_claims(op), "iss": f"{op.issuer}/v1/apps/P2someoneelsesproject"}
+
+        with pytest.raises(TokenValidationException, match="[Ii]ssuer"):
+            await validate_token(
+                jwt=op.token(RS256, claims),
+                token_validation_config=config,
+                disco_doc_address=op.disco_address,
+            )
+
+
+class TestLibraryTokenIssuers:
+    def test_descope_lists_its_three_issuer_forms(self):
+        assert library_token_issuers(descope_config(DESCOPE_PROJECT_ID)) == sorted(
+            [DESCOPE_PROJECT_ID, DESCOPE_ISSUER, f"https://api.descope.com/v1/apps/{DESCOPE_PROJECT_ID}"]
+        )
+
+    def test_descope_without_a_project_id_lists_none(self):
+        assert library_token_issuers(descope_config("")) is None
+
+    def test_a_provider_with_one_issuer_lists_none(self, op):
+        assert library_token_issuers(ory_config("https://ory.example.test", "api")) is None
+        assert library_token_issuers(_keycloak(op)) is None
 
 
 class TestOry:
@@ -140,24 +225,24 @@ class TestTheLibraryRefuses:
         config = TokenValidationConfig(
             perform_disco=True,
             algorithms=[RS256],
-            options={"verify_iss": False, "verify_aud": False},
+            options={"verify_aud": False},
         )
 
         with pytest.raises(TokenValidationException, match=f"Algorithm '{alg}' is not in the allowed algorithms"):
             await validate_token(
-                jwt=op.token(alg, _descope_claims()),
+                jwt=op.token(alg, _descope_claims(op)),
                 token_validation_config=config,
                 disco_doc_address=op.disco_address,
             )
 
     def test_a_dpop_bound_token_sent_as_a_bearer_token_is_refused(self, op):
         """RFC 9449 §7.2. The middleware passes no proof, so a bound token never authenticates."""
-        bound = {**_descope_claims(), "cnf": {"jkt": DPOP_KEY_THUMBPRINT}}
+        bound = {**_descope_claims(op), "cnf": {"jkt": DPOP_KEY_THUMBPRINT}}
 
         _assert_uniform_401(_probe(_descope(op), op.token(RS256, bound)))
 
         # Control: the confirmation claim is the only reason.
-        unbound = _probe(_descope(op), op.token(RS256, _descope_claims()))
+        unbound = _probe(_descope(op), op.token(RS256, _descope_claims(op)))
         assert unbound.status_code == 200, unbound.text
 
     @pytest.mark.parametrize("alg", [HS256, UNSIGNED])
@@ -165,4 +250,4 @@ class TestTheLibraryRefuses:
         """With no set named the library accepts its asymmetric defaults and nothing else."""
         unpinned = _descope(op, algorithms=frozenset())
 
-        _assert_uniform_401(_probe(unpinned, op.token(alg, _descope_claims())))
+        _assert_uniform_401(_probe(unpinned, op.token(alg, _descope_claims(op))))
