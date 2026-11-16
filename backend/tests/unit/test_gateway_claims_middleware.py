@@ -17,7 +17,7 @@ def _future_exp(seconds_ahead: int = 3600) -> int:
     return int(time.time()) + seconds_ahead
 
 
-def _make_token(payload: dict, *, auto_exp: bool = True) -> str:
+def _make_token(payload: dict, *, auto_exp: bool = True, alg: str = "RS256") -> str:
     """Build an unsigned JWT with the given payload.
 
     By default a valid future ``exp`` is injected if the caller did not
@@ -26,7 +26,7 @@ def _make_token(payload: dict, *, auto_exp: bool = True) -> str:
     """
     if auto_exp and "exp" not in payload:
         payload = {**payload, "exp": _future_exp()}
-    header = base64.urlsafe_b64encode(json.dumps({"alg": "RS256", "typ": "JWT"}).encode()).decode().rstrip("=")
+    header = base64.urlsafe_b64encode(json.dumps({"alg": alg, "typ": "JWT"}).encode()).decode().rstrip("=")
     body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
     return f"{header}.{body}.fakesig"
 
@@ -145,6 +145,37 @@ def app():
 @pytest.fixture
 def client(app):
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+class TestSigningAlgorithm:
+    """Descope and Ory accept RS256 only. The gateway never calls the library, so the header is checked."""
+
+    DESCOPE_CLAIMS = {"sub": "descope-user", "iss": "https://api.descope.com/P123", "aud": "P123"}
+    ORY_CLAIMS = {"sub": "ory-user", "iss": ORY_ISSUER, "aud": ORY_AUD}
+
+    @pytest.fixture
+    def client(self):
+        app = _build_app(descope_project_id="P123", ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
+        return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(("claims", "provider"), [(DESCOPE_CLAIMS, "Descope"), (ORY_CLAIMS, "Ory")])
+    async def test_rs256_is_accepted(self, client, claims, provider):
+        resp = await client.get("/api/protected", headers={"Authorization": f"Bearer {_make_token(claims)}"})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["auth_type"] == provider
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("claims", [DESCOPE_CLAIMS, ORY_CLAIMS], ids=["Descope", "Ory"])
+    @pytest.mark.parametrize("alg", ["ES256", "PS256", "HS256", "none"])
+    async def test_any_other_algorithm_is_refused(self, client, claims, alg):
+        token = _make_token(claims, alg=alg)
+
+        resp = await client.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+
+        assert resp.status_code == 401
+        assert resp.json() == {"detail": "Invalid or expired token"}
 
 
 class TestClaimsExtraction:

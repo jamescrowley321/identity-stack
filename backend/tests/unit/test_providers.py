@@ -117,6 +117,7 @@ class TestOryConfig:
             audience="identity-stack-api",
             infer_single_tenant_dct=False,
             require_audience=True,
+            algorithms=frozenset({"RS256"}),
             logout_kind="rp_initiated",
         )
 
