@@ -42,6 +42,7 @@ from app.middleware.providers import (
     MembershipSourcesDisagree,
     ProviderTokenConfig,
     TenantMembership,
+    TenantMembershipMistyped,
     descope_config,
     keycloak_config,
     ory_config,
@@ -374,6 +375,57 @@ class TestOneMembershipSource:
         provider = replace(_keycloak(None), sole_membership_lookup=lookup)
 
         assert (provider.sole_membership_lookup, provider.tenant_memberships) == (lookup, None)
+
+
+class TestAMembershipIsTyped:
+    """A membership list entry is typed at construction, so the two readers of the list cannot count it differently."""
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"counted": "false"},
+            {"counted": "true"},
+            {"counted": 1},
+            {"counted": 0},
+            {"counted": None},
+            {"tenant_id": 7},
+            {"tenant_id": None},
+            {"tenant_name": None},
+        ],
+        ids=repr,
+    )
+    def test_a_field_of_the_wrong_type_is_refused(self, fields):
+        with pytest.raises(TenantMembershipMistyped):
+            TenantMembership(**{"tenant_id": ACME, "tenant_name": "Acme", **fields})
+
+    @pytest.mark.parametrize("counted", [True, False], ids=repr)
+    def test_a_well_typed_membership_is_kept(self, counted):
+        assert TenantMembership(ACME, "Acme", counted) == TenantMembership(
+            tenant_id=ACME, tenant_name="Acme", counted=counted
+        )
+
+    @pytest.mark.parametrize(
+        "fields",
+        [{"counted": "false"}, {"counted": 1}, {"tenant_id": 7}],
+        ids=repr,
+    )
+    def test_the_endpoint_and_a_lookup_route_both_answer_502_for_a_mistyped_entry(self, fields):
+        async def mistyped(claims):
+            return [TenantMembership(**{"tenant_id": ACME, "tenant_name": "Acme", **fields})]
+
+        provider = replace(
+            _keycloak(None),
+            sole_membership_lookup=CountedMemberships(mistyped),
+            tenant_memberships=mistyped,
+        )
+        answers = []
+        for path in (IDENTITY, SETTINGS_MANAGE_ROUTE):
+            limiter.reset()
+            client = TestClient(_app([descope_config(DESCOPE_PROJECT), provider], _Services(CANONICAL)))
+            response = client.get(path, headers=_bearer(_tenant_admin()))
+            answers.append((response.status_code, response.json()))
+
+        assert answers == [(502, {"detail": MEMBERSHIP_LOOKUP_FAILED})] * 2
 
 
 class TestAMemberTheRealmDoesNotKnow:
