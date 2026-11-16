@@ -191,7 +191,7 @@ The tables below cover the main routes. The full, current list is in the interac
 | GET | `/api/access-checks/documents-read` | Return the request's tenant to a caller who holds `documents:read` in it |
 | GET | `/api/access-checks/settings-manage` | Return the request's tenant to a caller who holds `settings:manage` in it |
 
-Both answer a principal of any provider from the tenant resolver alone, with no provider call.
+Both answer a principal of any provider from the tenant resolver alone. The handlers call no provider; the resolver asks the provider's membership lookup only for a token that needs its sole membership confirmed (an organization-bound Keycloak token).
 
 ### User Profile & Attributes
 | Method | Path | Description |

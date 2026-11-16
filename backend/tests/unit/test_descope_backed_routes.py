@@ -151,10 +151,10 @@ UNGUARDED_ADAPTER_ROUTES: dict[tuple[str, str], str] = {
 # included, hands the tenant or a user id to Descope.
 PROVIDER_NEUTRAL_ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/api/access-checks/documents-read"): (
-        "answers the resolver's tenant to a holder of documents:read: no provider call, no table"
+        "answers the resolver's tenant to a holder of documents:read: the handler calls no provider and reads no table"
     ),
     ("GET", "/api/access-checks/settings-manage"): (
-        "answers the resolver's tenant to a holder of settings:manage: no provider call, no table"
+        "answers the resolver's tenant to a holder of settings:manage: the handler calls no provider and reads no table"
     ),
 }
 

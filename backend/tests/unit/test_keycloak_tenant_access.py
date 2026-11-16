@@ -29,7 +29,7 @@ from app.dependencies.rbac import (
     require_permission,
     require_role,
 )
-from app.dependencies.tenant import get_tenant_claims, get_tenant_id
+from app.dependencies.tenant import TENANTS_CLAIM_NOT_READ, get_tenant_claims, get_tenant_id
 from app.dependencies.tenant_access import (
     NO_TENANT_CONTEXT,
     SELECT_A_TENANT_FIRST,
@@ -406,8 +406,9 @@ class TestAnotherProvidersClaimsOnAKeycloakToken:
     def test_the_requests_tenant_is_not_the_forged_dct(self, mode):
         assert _get(_member(**self.FORGED), OWN_STATE_ROUTE, mode=mode).json() == {"tenant_id": ACME}
 
-    def test_the_tenants_claim_is_not_returned(self):
-        assert _get(_member(**self.FORGED), OWN_TENANT_CLAIMS_ROUTE).json() == {"tenants": {}}
+    @pytest.mark.parametrize("mode", [STANDALONE, GATEWAY])
+    def test_the_tenants_claim_is_refused_not_returned(self, mode):
+        _assert_403(_get(_member(**self.FORGED), OWN_TENANT_CLAIMS_ROUTE, mode=mode), TENANTS_CLAIM_NOT_READ)
 
     def test_the_owner_role_is_not_held(self):
         _assert_403(_get(_member(**self.FORGED), OWN_OWNER_ROUTE), INSUFFICIENT_PERMISSIONS)
@@ -422,14 +423,18 @@ class TestAnotherProvidersClaimsOnAKeycloakToken:
         _assert_403(_get(claims, DOCUMENTS_READ_ROUTE), NO_TENANT_CONTEXT)
         assert _get(claims, OWN_STATE_ROUTE).json() == {"tenant_id": None}
 
-    def test_the_membership_list_is_empty_and_descope_is_not_asked(self):
+    def test_the_membership_list_is_refused_and_descope_is_not_asked(self):
+        """Fail-closed: an empty list would tell the caller it belongs to no tenant."""
         app = _app(GATEWAY, _provider())
 
         response = _get(_member(**self.FORGED), "/api/tenants", app=app)
 
-        assert response.status_code == 200
-        assert response.json() == {"tenants": []}
+        _assert_403(response, TENANTS_CLAIM_NOT_READ)
         assert app.state.descope_client.mock_calls == []
+
+    def test_a_token_with_no_tenants_claim_is_refused_too(self):
+        """The refusal is about the provider, not about what the token carries."""
+        _assert_403(_get(_member(tenants=None), "/api/tenants"), TENANTS_CLAIM_NOT_READ)
 
     def test_a_descope_principal_still_gets_its_tenants_claim(self):
         """Control: only a provider with its own extractor loses the claim."""
@@ -454,7 +459,7 @@ class TestTheTenantsClaimIsNotReadFromAKeycloakToken:
     def test_a_keycloak_token_is_no_member_of_a_tenant_its_tenants_claim_names(self):
         claims = _member(tenants=self.FORGED_TENANTS)
 
-        _assert_403(_get(claims, "/api/tenants/other-tenant/resources"), "Not a member of this tenant")
+        _assert_403(_get(claims, "/api/tenants/other-tenant/resources"), TENANTS_CLAIM_NOT_READ)
 
 
 class TestAnOrganizationBoundTokenWithNoLookupWired:
