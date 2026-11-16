@@ -66,14 +66,23 @@ declared one of two ways:
   in `KEYCLOAK_PORTABLE_PERMISSIONS`, which may hold only `<domain>:read` and `<domain>:list`
   permissions. Those hold in every organization the user belongs to.
 - **Organization-bound** (`KEYCLOAK_ORGANIZATION_BOUND_TYPES`). The token is accepted only when
-  the user belongs to exactly one organization and it is the token's. The lookup that answers
-  this is not wired yet, so every token of such a type is refused with 403. A lookup that fails,
+  the user belongs to exactly one organization, it is the token's, and that organization marks
+  the user as holding the type (its `type:<type client>` attribute lists the user's id). The
+  backend asks the realm's Admin REST API on every such request, with a read-only service
+  account, for the token's `sub` only (`services/keycloak_directory.py`). A lookup that fails,
   or does not answer within `MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`, is 502 and no grant.
 
 Two limits follow. A portable permission holds in every organization the user belongs to. And
 nothing ends access when a user leaves an organization before the token expires, which is 300
-seconds with the realm's defaults: Keycloak issues no new token for that organization, but the
-backend does not ask the directory about a portable token.
+seconds with the realm's defaults: Keycloak refuses the next refresh for that organization, but
+the backend does not ask the directory about a portable token.
+
+`GET /api/identity` answers a Keycloak principal with the canonical user and linked identities,
+the organizations the same lookup lists as `tenant_memberships`, no `roles`, and a
+`token_tenant` field holding the token's organization and the permissions it grants there. Only
+principals whose tenant comes from their token get that field: switching tenant takes a new
+token. The response is 403 when the directory does not list the token's organization, and 502
+when the directory cannot be asked.
 
 The backend refuses to start with a half-configured Keycloak provider: see the `KEYCLOAK_*`
 rows of [environment-variables.md](environment-variables.md).

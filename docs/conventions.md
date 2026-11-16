@@ -159,7 +159,8 @@ Log calls **MUST** pass values as `%`-style arguments, as in
 
 Log records **MUST NOT** contain credentials. That covers bearer tokens, the Descope
 management key, `DESCOPE_WEBHOOK_SECRET`, `DESCOPE_FLOW_SYNC_SECRET`,
-`INTERNAL_IDENTITY_KEY` and raw `Authorization` headers. Log identifiers instead, such as a
+`INTERNAL_IDENTITY_KEY`, `KEYCLOAK_DIRECTORY_CLIENT_SECRET` and the service-account token
+it is exchanged for, and raw `Authorization` headers. Log identifiers instead, such as a
 user id, tenant id, provider name or HTTP status. An upstream response body **MUST** be
 truncated to 500 characters before it is logged (`exc.response.text[:500]`).
 
@@ -364,15 +365,15 @@ token alone decides (§17). A lookup **MUST** bound its own time (§6), and the 
 waits for it no longer than `MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`: a lookup that has not
 answered by then is cancelled and is a failed lookup (502). The token
 middlewares **MUST NOT** record the tenant of such an answer as `request.state.tenant_id`:
-nothing has confirmed it at authentication, so it stays `None` for the whole request. No
-lookup is wired for Keycloak yet, so every token of an
-organization-bound type is refused. Confirming the membership does not show that the
-token's client roles were granted for that organization: Keycloak keeps a user's client
-roles when the user leaves an organization, so a tenant admin of one organization who
-joins a second and then leaves the first would be confirmed as a tenant admin of the
-second. A lookup **MUST NOT** be wired for Keycloak until it confirms the grant as well
-as the membership (#559). That canonical lookup **MUST
-NOT** be served from the identity cache, and it **MUST NOT** be kept beyond the request
+nothing has confirmed it at authentication, so it stays `None` for the whole request.
+Confirming the membership does not show that the token's client roles were granted for
+that organization: Keycloak keeps a user's client roles when the user leaves an
+organization. A lookup **MUST** therefore confirm the grant as well as the membership:
+Keycloak's (`KeycloakOrganizationLookup`) counts the token's organization only where its
+`type:<type client>` attribute lists the caller's id. A lookup **MUST** ask about the
+verified token's `sub` and nothing from the request, and **MUST** refuse a `sub` that is
+not a well-formed id before any call. The canonical membership read of the third source
+**MUST NOT** be served from the identity cache, and it **MUST NOT** be kept beyond the request
 that made it. `get_tenant_id` **MUST NOT** open a database session or read the canonical
 model for any other provider. See
 [ADR-0009](adr/0009-provider-registrations-and-one-tenant-resolver.md).
@@ -395,6 +396,15 @@ adapter is Descope-backed: `POST /api/roles/assign` and `/api/roles/remove` are,
 `RoleService` sends each assignment to Descope. The second register holds the two
 `/api/access-checks` routes, which answer the resolver's tenant to a holder of
 `documents:read` or `settings:manage` and depend on nothing but the resolver.
+
+`GET /api/identity` takes the tenant and the permissions of a `token_authorized_only`
+principal (Keycloak) from the same resolver, through `app.dependencies.rbac.token_tenant`,
+and **MUST NOT** report the canonical role assignments as that principal's: provisioning's
+default tenant and role are not its grants. Its memberships come from the provider's
+`tenant_memberships` list, and a token whose tenant is not on that list **MUST** be refused
+(403): the directory is believed over the token. A list that cannot be had is 502. For
+every other provider `token_tenant` answers `None` without I/O and the response is the
+canonical identity, unchanged.
 
 A Keycloak principal **MUST** get 403 on every route that takes a tenant (`get_tenant_id`
 or `get_tenant_claims`) or is gated by a role, unless the route is in
@@ -471,7 +481,9 @@ of the application against its registers, calls each guarded route as a canonica
 principal, and calls each `require_global_role` route as an operator of one of several
 tenants who names it). `test_keycloak_routes.py` calls every route that takes a tenant or
 is gated by a role as a Keycloak `member` and as a confirmed Keycloak `tenant-admin`, and
-`test_keycloak_tenant_access.py` covers the extractor, the confirmation and the lookup. `test_provider_registration.py` fails on a writer of `request.state.claims`
+`test_keycloak_tenant_access.py` covers the extractor, the confirmation and the lookup,
+`test_keycloak_directory.py` the Admin API call and the grant marker, and
+`test_keycloak_identity.py` `GET /api/identity`. `test_provider_registration.py` fails on a writer of `request.state.claims`
 that records no provider.
 
 ## Data access

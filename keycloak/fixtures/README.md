@@ -9,8 +9,10 @@ Taken on 2026-11-15 from `quay.io/keycloak/keycloak:26.8.2`, started with
 | `discovery.json` | Body of `GET http://keycloak.localhost:8180/realms/identity-stack/.well-known/openid-configuration`, fetched from the host. The backend container returned the same document. |
 | `access-token.json` | Decoded header and claims of one access token: user `bob`, client `member-app`, scope `openid organization:acme`, authorization code flow with PKCE S256 through the login form. The signature is not stored. |
 
-The signing key is generated per container, so `kid`, `sub`, `sid`, `jti` and the times differ on
-every instance. The claim names and shapes are what the fixture is for.
+The signing key is generated per container, so `kid`, `sid`, `jti` and the times differ on every
+instance. The claim names and shapes are what the fixture is for. The users' ids are fixed in the
+realm import (table below), so a token's `sub` is the same on every instance from now on; the
+`sub` in `access-token.json` was taken before that.
 
 ## The realm
 
@@ -24,21 +26,37 @@ Every secret and password below is a local fixture. The realm's redirect URIs
 | `tenant-admin` | confidential type client, no flows | `members:invite`, `members:remove`, `settings:manage` |
 | `member-app` | public, PKCE S256, full scope off, scope-mapped to `member` | none |
 | `tenant-admin-app` | public, PKCE S256, full scope off, scope-mapped to `tenant-admin` | none |
+| `identity-stack-directory` | confidential, service account only, client scope `kc-admin-api`, full scope off | its service account holds `realm-management` `view-users` and `view-organizations` |
 
-| User | Password | Organizations | Client roles |
-|---|---|---|---|
-| `alice` | `local-only-alice` | `acme` | `member`: both |
-| `bob` | `local-only-bob` | `acme`, `globex` | `member`: `documents:read`; `tenant-admin`: all three |
-| `carol` | `local-only-carol` | `acme` | none |
-| `dave` | `local-only-dave` | `acme` | `tenant-admin`: all three |
-| `erin` | `local-only-erin` | `acme` | `member`: `documents:write` |
+`identity-stack-directory` is the backend's organization lookup (`KEYCLOAK_DIRECTORY_CLIENT_ID`,
+secret `local-only-directory-client`). Probed on 26.8.2: the endpoint
+`GET /admin/realms/identity-stack/organizations/members/{id}/organizations` opens to neither
+role alone and to both together, and both are read-only. With them the service account is
+refused (403) creating an organization, adding a member, editing an organization's attributes,
+mapping a client role and listing clients. Without the `kc-admin-api` client scope its token
+lacks the Admin API audience and every Admin API call is 401.
+
+| User | Id (`sub`) | Password | Organizations | Client roles |
+|---|---|---|---|---|
+| `alice` | `a11ce000-0000-4000-8000-000000000001` | `local-only-alice` | `acme` | `member`: both |
+| `bob` | `b0b00000-0000-4000-8000-000000000002` | `local-only-bob` | `acme`, `globex` | `member`: `documents:read`; `tenant-admin`: all three |
+| `carol` | `ca401000-0000-4000-8000-000000000003` | `local-only-carol` | `acme` | none |
+| `dave` | `da4e0000-0000-4000-8000-000000000004` | `local-only-dave` | `acme` | `tenant-admin`: all three |
+| `erin` | `e4140000-0000-4000-8000-000000000005` | `local-only-erin` | `acme` | `member`: `documents:write` |
+| `frank` | `f4a4c000-0000-4000-8000-000000000006` | `local-only-frank` | `acme` | `tenant-admin`: all three |
 
 `dave` is a tenant admin in exactly one organization, and `erin` is a `member` user without
-`documents:read`. The backend's token model for this realm declares `member` portable with
+`documents:read`. `frank` is another tenant admin of `acme` alone, whom the integration tests
+move to `globex` and back.
+
+Organization `acme` carries the attribute `type:tenant-admin` listing `bob`, `dave` and `frank`:
+the organization's record that they hold the `tenant-admin` type there. `globex` marks no one.
+Client roles are realm-wide, so the backend believes an organization-bound token only where the
+token's organization marks its user. The backend's token model for this realm declares `member` portable with
 the one portable permission `documents:read`, and `tenant-admin` organization-bound
 ([`docs/architecture.md`](../../docs/architecture.md#keycloak-token-model)). `bob`'s
-`tenant-admin` tokens are therefore refused in both of his organizations, and `erin`'s
-`member` token grants nothing.
+`tenant-admin` tokens are therefore refused in both of his organizations (he belongs to two),
+`dave`'s and `frank`'s are accepted in `acme`, and `erin`'s `member` token grants nothing.
 
 The login form is identity-first: username on one page, password on the next.
 
@@ -100,3 +118,20 @@ asked for, as a refusal.
 - Session cookies are set `Secure; SameSite=None` although the origin is plain HTTP. Chromium
   kept them for `keycloak.localhost`. `curl` with a cookie jar does not send them back, and the
   login form then answers 400.
+
+## Leaving an organization while holding a token for it
+
+Measured on 2026-11-16 against `quay.io/keycloak/keycloak:26.8.2` with this realm and realm
+default lifetimes (access token 300 s). `alice` logged in through `member-app` for `acme`
+(token with `organization: ["acme"]`), then an admin removed her from `acme`:
+
+| Step | Observed |
+|---|---|
+| The access token she holds | Unchanged and still valid until its `exp`: it is a JWT the backend verifies with the realm's keys, and nothing revokes it. A portable permission on it holds for the rest of its lifetime, at most 300 s. |
+| `userinfo` with that access token | `400 invalid_grant`, "Invalid organization". |
+| Refresh with her refresh token | `400 invalid_grant`, "Invalid organization". No new token is issued, so the `organization` claim does not survive the refresh. |
+| She is added back to `acme`, same refresh token | `200`; the new token has `organization: ["acme"]` again. |
+
+So the window after removal is the remaining lifetime of the access token already issued, and
+it ends at the next refresh. For an organization-bound type the backend asks the Admin API on
+every request, so the window there is closed by the lookup.
