@@ -20,6 +20,8 @@ from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.providers import configured_providers
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.routers import auth as auth_router
+from app.services.logout import _logout_client_id
+from tests.helpers.keycloak_model import MODEL_VARIABLES, set_model_environment
 
 ORY_ISSUER = "https://ory.example.test"
 ORY_AUDIENCE = "https://identity-stack-api"
@@ -89,6 +91,7 @@ def _environment(monkeypatch):
         "KEYCLOAK_AUDIENCES",
         "KEYCLOAK_REQUIRE_HTTPS",
         "KEYCLOAK_POST_LOGOUT_REDIRECT_URI",
+        *MODEL_VARIABLES,
         "FRONTEND_URL",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -105,6 +108,7 @@ def ory(monkeypatch):
 def keycloak(monkeypatch):
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", KEYCLOAK_ISSUER)
     monkeypatch.setenv("KEYCLOAK_AUDIENCES", KEYCLOAK_TYPE_CLIENT)
+    set_model_environment(monkeypatch, KEYCLOAK_TYPE_CLIENT)
     monkeypatch.setenv("KEYCLOAK_POST_LOGOUT_REDIRECT_URI", KEYCLOAK_REDIRECT)
     return {"sub": "kc-user", "iss": KEYCLOAK_ISSUER, "aud": KEYCLOAK_TYPE_CLIENT, "azp": KEYCLOAK_APP_CLIENT}
 
@@ -188,15 +192,28 @@ class TestKeycloakLogout:
         assert _query(response.json()["logout_url"])["post_logout_redirect_uri"] == ["https://app.example.test/login"]
 
     @pytest.mark.parametrize("azp", [None, "", 7, ["member-app"]])
-    async def test_a_token_without_a_usable_azp_sends_no_client_id(self, keycloak, azp):
+    async def test_a_token_without_a_usable_azp_does_not_authenticate(self, keycloak, azp):
+        """The token binding refuses it before logout runs: no URL is built and discovery is not asked."""
         claims = {**keycloak, "azp": azp}
         if azp is None:
             del claims["azp"]
 
-        response, _ = await _logout(claims, KEYCLOAK_END_SESSION)
+        response, disco = await _logout(claims, KEYCLOAK_END_SESSION)
 
-        assert response.status_code == 200
-        assert "client_id" not in _query(response.json()["logout_url"])
+        assert response.status_code == 401
+        assert response.json() == {"detail": "Invalid or expired token"}
+        disco.assert_not_awaited()
+
+    @pytest.mark.parametrize("azp", [None, "", 7, ["member-app"]])
+    def test_the_logout_service_sends_no_client_id_for_an_unusable_azp(self, keycloak, azp):
+        """The service does not rely on the binding: a claim it cannot use names no client."""
+        (provider,) = [p for p in configured_providers() if p.name == "Keycloak"]
+        claims = {**keycloak, "azp": azp}
+        if azp is None:
+            del claims["azp"]
+
+        assert _logout_client_id(provider, claims) is None
+        assert _logout_client_id(provider, keycloak) == KEYCLOAK_APP_CLIENT
 
     async def test_no_end_session_endpoint_fails_closed(self, keycloak):
         with (
@@ -221,9 +238,12 @@ class TestKeycloakLogout:
         assert request.policy in (None, DiscoveryPolicy())
 
     async def test_discovery_allows_plain_http_only_when_the_switch_is_off(self, keycloak, monkeypatch):
+        # Startup allows the switch off only for an issuer on loopback or a ``.localhost`` name.
+        local_issuer = "http://keycloak.localhost:8180/realms/identity-stack"
+        monkeypatch.setenv("KEYCLOAK_ISSUER_URL", local_issuer)
         monkeypatch.setenv("KEYCLOAK_REQUIRE_HTTPS", "false")
 
-        _, disco = await _logout(keycloak, KEYCLOAK_END_SESSION)
+        _, disco = await _logout({**keycloak, "iss": local_issuer}, f"{local_issuer}/protocol/openid-connect/logout")
 
         assert disco.await_args.args[0].policy == DiscoveryPolicy(require_https=False)
 

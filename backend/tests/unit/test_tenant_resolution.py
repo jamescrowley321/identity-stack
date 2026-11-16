@@ -34,7 +34,6 @@ from app.middleware.providers import (
     ProviderTokenConfig,
     TenantClaims,
     descope_config,
-    keycloak_config,
     ory_config,
 )
 
@@ -42,8 +41,8 @@ DESCOPE_PROJECT = "P123"
 DESCOPE_ISSUER = f"https://api.descope.com/{DESCOPE_PROJECT}"
 ORY_ISSUER = "https://ory.example.test"
 ORY_AUDIENCE = "https://identity-stack-api"
-KEYCLOAK_ISSUER = "https://keycloak.example.test/realms/identity-stack"
-KEYCLOAK_AUDIENCE = "member"
+UNSOURCED_ISSUER = "https://unsourced.example.test"
+UNSOURCED_AUDIENCE = "member"
 FAKE_ISSUER = "https://fake.example.test"
 
 TENANT_A = "11111111-1111-1111-1111-111111111111"
@@ -74,10 +73,19 @@ FAKE_PROVIDER = ProviderTokenConfig(
     tenant_claims=_fake_tenant_claims,
 )
 
+# Declares no extractor and is not authorized from the canonical model.
+UNSOURCED_PROVIDER = ProviderTokenConfig(
+    name="Unsourced",
+    accepted_issuers=frozenset({UNSOURCED_ISSUER}),
+    disco_address=f"{UNSOURCED_ISSUER}/.well-known/openid-configuration",
+    audience=UNSOURCED_AUDIENCE,
+    require_audience=True,
+)
+
 PROVIDERS = [
     descope_config(DESCOPE_PROJECT),
     ory_config(ORY_ISSUER, ORY_AUDIENCE),
-    keycloak_config(KEYCLOAK_ISSUER, frozenset({KEYCLOAK_AUDIENCE})),
+    UNSOURCED_PROVIDER,
     FAKE_PROVIDER,
 ]
 
@@ -99,8 +107,8 @@ def _descope(**claims) -> dict:
     return {"iss": DESCOPE_ISSUER, "sub": "descope-user", **claims}
 
 
-def _keycloak(**claims) -> dict:
-    return {"iss": KEYCLOAK_ISSUER, "aud": KEYCLOAK_AUDIENCE, "azp": "member-app", "sub": "kc-user", **claims}
+def _unsourced(**claims) -> dict:
+    return {"iss": UNSOURCED_ISSUER, "aud": UNSOURCED_AUDIENCE, "sub": "unsourced-user", **claims}
 
 
 def _fake(**claims) -> dict:
@@ -474,7 +482,7 @@ class TestTheCanonicalSessionIsOpenedOnlyWhenItIsRead:
     def test_an_unauthorized_provider_opens_no_session(self, store):
         opened: list[str] = []
 
-        response = _get(TestClient(_app(opened=opened)), "/tenant", _keycloak())
+        response = _get(TestClient(_app(opened=opened)), "/tenant", _unsourced())
 
         assert response.status_code == 403
         assert opened == []
@@ -607,9 +615,9 @@ class TestTheSourceIsTheProvidersOwn:
         assert admin.json() == NO_TENANT_FROM_RBAC
 
     def test_a_provider_with_no_source_is_refused(self, client, store):
-        """Keycloak has no extractor yet and is not authorized from the canonical model."""
+        """It declares no extractor and is not authorized from the canonical model."""
         store.holds((TENANT_A, "admin", ["documents.read"]))
-        claims = _keycloak(dct="t1", tenants={"t1": {"roles": ["admin"], "permissions": ["documents.read"]}})
+        claims = _unsourced(dct="t1", tenants={"t1": {"roles": ["admin"], "permissions": ["documents.read"]}})
 
         tenant = _get(client, "/tenant", claims, selector=TENANT_A)
         admin = _get(client, "/admin", claims, selector=TENANT_A)

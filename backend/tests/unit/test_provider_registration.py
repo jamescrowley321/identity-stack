@@ -28,6 +28,7 @@ from app.middleware import providers as provider_registry
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.providers import (
+    KeycloakTenantClaims,
     ProviderConfigurationError,
     ProviderTokenConfig,
     TenantClaims,
@@ -41,6 +42,7 @@ from app.middleware.providers import (
 )
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.routers import auth as auth_router
+from tests.helpers.keycloak_model import MODEL_VARIABLES, builder_settings, model_settings, set_model_environment
 
 DESCOPE_PROJECT = "P123"
 ORY_ISSUER = "https://ory.example.test"
@@ -70,6 +72,7 @@ _PROVIDER_VARIABLES = (
     "KEYCLOAK_AUDIENCES",
     "KEYCLOAK_REQUIRE_HTTPS",
     "KEYCLOAK_POST_LOGOUT_REDIRECT_URI",
+    *MODEL_VARIABLES,
     "FRONTEND_URL",
 )
 
@@ -191,6 +194,7 @@ class TestRegistry:
     def test_the_shipped_registrations_build_descope_ory_and_keycloak(self, with_ory):
         with_ory.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.example.test/realms/identity-stack")
         with_ory.setenv("KEYCLOAK_AUDIENCES", "member")
+        set_model_environment(with_ory, "member")
 
         assert [provider.name for provider in configured_providers()] == ["Descope", "Ory", "Keycloak"]
 
@@ -244,9 +248,15 @@ class TestClaimsExtractors:
     def test_descope_declares_the_dct_and_tenants_extractor(self):
         assert descope_config(DESCOPE_PROJECT).tenant_claims is descope_tenant_claims
 
-    def test_ory_and_keycloak_declare_none(self):
+    def test_ory_declares_none(self):
         assert ory_config(ORY_ISSUER, ORY_AUDIENCE).tenant_claims is None
-        assert keycloak_config("https://kc.test/realms/r", frozenset({"member"})).tenant_claims is None
+
+    def test_keycloak_declares_its_own(self):
+        """The organization and the client roles of its token, never the canonical model."""
+        keycloak = keycloak_config("https://kc.test/realms/r", frozenset({"member"}), **model_settings("member"))
+
+        assert isinstance(keycloak.tenant_claims, KeycloakTenantClaims)
+        assert keycloak.token_authorized_only is True
 
     def test_descope_extractor_reads_the_current_tenant_and_its_grants(self):
         claims = {
@@ -517,11 +527,13 @@ class TestAuthenticationFailsTheSameWayInBothModes:
 class TestOneAssemblyBehindBothBuilders:
     """``build_provider_configs`` is the same walk as ``configured_providers``, over explicit values."""
 
-    KEYCLOAK_ISSUER = "https://keycloak.example.test/realms/identity-stack"
+    # Plain HTTP is switched on below, which startup allows only for a local issuer.
+    KEYCLOAK_ISSUER = "http://keycloak.localhost:8180/realms/identity-stack"
 
     def test_it_builds_what_the_registrations_build_from_the_same_values(self, with_ory):
         with_ory.setenv("KEYCLOAK_ISSUER_URL", self.KEYCLOAK_ISSUER)
         with_ory.setenv("KEYCLOAK_AUDIENCES", "member")
+        set_model_environment(with_ory, "member")
         with_ory.setenv("KEYCLOAK_REQUIRE_HTTPS", "false")
         with_ory.setenv("KEYCLOAK_POST_LOGOUT_REDIRECT_URI", "https://app.example.test/kc-signed-out")
 
@@ -535,6 +547,7 @@ class TestOneAssemblyBehindBothBuilders:
             keycloak_audiences=frozenset({"member"}),
             keycloak_require_https=False,
             keycloak_post_logout_redirect_uri="https://app.example.test/kc-signed-out",
+            **builder_settings("member"),
         )
 
         assert by_hand == configured_providers()
@@ -547,6 +560,7 @@ class TestOneAssemblyBehindBothBuilders:
                 ory_audience=ORY_AUDIENCE,
                 keycloak_issuer_url=ORY_ISSUER,
                 keycloak_audiences=frozenset({"member"}),
+                **builder_settings("member"),
             )
 
     @pytest.mark.parametrize("spelling", [f"{ORY_ISSUER}/", ORY_ISSUER.upper(), f"{ORY_ISSUER.upper()}//"])
@@ -670,7 +684,9 @@ class TestOnlyDescopeIsDescopeManaged:
     def test_no_other_provider_does(self):
         others = [
             ory_config(ORY_ISSUER, ORY_AUDIENCE),
-            keycloak_config("https://keycloak.example.test/realms/r", frozenset({"member"})),
+            keycloak_config(
+                "https://keycloak.example.test/realms/r", frozenset({"member"}), **model_settings("member")
+            ),
             _second_provider(),
         ]
 

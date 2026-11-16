@@ -12,6 +12,7 @@ from app.middleware.providers import (
     ProviderTokenConfig,
     algorithm_rejected,
     audience_rejected,
+    binding_refusal,
     build_provider_configs,
     claimed_tenant_id,
     infer_single_tenant_dct,
@@ -145,6 +146,14 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
             # checked only when present (session tokens omit ``aud``).
             if audience_rejected(claims, provider):
                 logger.warning("GatewayClaims rejected: audience check failed (aud=%r)", claims.get("aud"))
+                return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+
+            # Token binding: what the provider requires of a token beyond its
+            # audience (Keycloak: exactly one ``aud`` and the ``azp`` configured
+            # for it). The same rule as in standalone mode, on every route.
+            unbound = binding_refusal(claims, provider)
+            if unbound is not None:
+                logger.warning("GatewayClaims rejected: %s token binding failed (%s)", provider.name, unbound)
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
             # Token kind: bare-project-id tokens carry no ``aud``, so the check
