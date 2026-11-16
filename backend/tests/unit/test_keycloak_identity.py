@@ -8,6 +8,7 @@ The canonical services are doubles: the canonical identity is not what this
 file is about.
 """
 
+import ast
 import asyncio
 import base64
 import json
@@ -46,7 +47,8 @@ from app.middleware.providers import (
 )
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.models.database import get_async_session
-from tests.helpers.keycloak_admin_api import TENANT_ADMIN_MARKER, AdminApi, organization
+from app.routers import protected
+from tests.helpers.keycloak_admin_api import ORGANIZATIONS_DISABLED_BODY, TENANT_ADMIN_MARKER, AdminApi, organization
 from tests.helpers.keycloak_model import (
     DIRECTORY_CLIENT_SECRET,
     MEMBER_TYPE_CLIENT,
@@ -72,8 +74,8 @@ IDENTITY = "/api/identity"
 SETTINGS_MANAGE_ROUTE = "/api/access-checks/settings-manage"
 SECONDS_OF_VALIDITY = 300
 
-# What the canonical model holds for the caller after provisioning: a user, the
-# default tenant and role provisioning grants, and the link.
+# What the canonical model holds for the caller: a user, a canonical tenant and
+# role (one another provider's provisioning gave the user it linked), and the link.
 CANONICAL = {
     "user": {
         "id": "8f0c6d4e-0000-4000-8000-00000000c0de",
@@ -191,7 +193,7 @@ class TestAKeycloakPrincipalsIdentity:
             "token_tenant": {"tenant_id": ACME, "permissions": [DOCUMENTS_READ]},
         }
 
-    def test_the_provisioning_default_tenant_and_role_are_not_reported(self):
+    def test_the_canonical_tenant_and_role_are_not_reported(self):
         response, _ = _get(IDENTITY, _member(), AdminApi([organization(ACME)]))
 
         body = response.json()
@@ -212,18 +214,9 @@ class TestAKeycloakPrincipalsIdentity:
 
         assert response.json()["token_tenant"] == {"tenant_id": GLOBEX, "permissions": [DOCUMENTS_READ]}
 
-    def test_a_first_login_is_provisioned_with_the_tokens_profile(self):
-        api = AdminApi([organization(ACME)])
-        limiter.reset()
-        services = _Services(CANONICAL)
-        services.resolver.resolve.side_effect = [
-            Error(NotFound("no canonical identity yet")),
-            Ok(CANONICAL),
-        ]
-        services.provisioner.provision.return_value = Ok("8f0c6d4e-0000-4000-8000-00000000c0de")
-        client = TestClient(_app([descope_config(DESCOPE_PROJECT), _keycloak(api)], services))
-
-        response = client.get(IDENTITY, headers=_bearer(_member()))
+    def test_a_first_login_is_provisioned_with_the_tokens_profile(self, monkeypatch):
+        monkeypatch.setattr(protected, "JIT_ENABLED_PROVIDERS", {"ory", "keycloak"})
+        response, services = _first_login()
 
         assert response.status_code == 200, response.text
         services.provisioner.provision.assert_awaited_once_with(
@@ -233,7 +226,43 @@ class TestAKeycloakPrincipalsIdentity:
             email_verified=FIXTURE_CLAIMS["email_verified"],
             given_name=FIXTURE_CLAIMS["given_name"],
             family_name=FIXTURE_CLAIMS["family_name"],
+            assign_default_role=False,
         )
+
+
+class TestKeycloakProvisioningIsOptIn:
+    """Keycloak is not provisioned just in time unless the operator names it (Decision 6)."""
+
+    def test_the_default_provisions_ory_only(self):
+        """The knob's default as written in the router (read at import, so it is read from the source)."""
+        defaults = {
+            node.args[0].value: node.args[1].value
+            for node in ast.walk(ast.parse(Path(protected.__file__).read_text()))
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "knob_set"
+        }
+
+        assert defaults["JIT_ENABLED_PROVIDERS"] == "ory"
+
+    def test_a_first_login_is_not_provisioned_by_default(self, monkeypatch):
+        monkeypatch.setattr(protected, "JIT_ENABLED_PROVIDERS", {"ory"})
+        response, services = _first_login()
+
+        _assert(response, 404, "Identity not found")
+        services.provisioner.provision.assert_not_awaited()
+
+
+def _first_login():
+    """``GET /api/identity`` for a Keycloak subject with no canonical identity yet."""
+    api = AdminApi([organization(ACME)])
+    limiter.reset()
+    services = _Services(CANONICAL)
+    services.resolver.resolve.side_effect = [
+        Error(NotFound("no canonical identity yet")),
+        Ok(CANONICAL),
+    ]
+    services.provisioner.provision.return_value = Ok("8f0c6d4e-0000-4000-8000-00000000c0de")
+    client = TestClient(_app([descope_config(DESCOPE_PROJECT), _keycloak(api)], services))
+    return client.get(IDENTITY, headers=_bearer(_member())), services
 
 
 class TestTheDirectoryIsBelievedOverTheToken:
@@ -306,6 +335,21 @@ class TestAMemberTheRealmDoesNotKnow:
         response, services = _get(path, claims, AdminApi(lookup_status=404))
 
         _assert(response, 403, detail)
+        services.provisioner.provision.assert_not_awaited()
+
+
+class TestARealmFaultAnswered404Is502:
+    """Organizations disabled in the realm: a 404 that is not an unknown member is a directory failure."""
+
+    @pytest.mark.parametrize(
+        ("path", "claims"),
+        [(IDENTITY, _member()), (IDENTITY, _tenant_admin()), (SETTINGS_MANAGE_ROUTE, _tenant_admin())],
+        ids=["identity-member", "identity-tenant-admin", "settings-manage"],
+    )
+    def test_is_502_not_a_refusal(self, path, claims):
+        response, services = _get(path, claims, AdminApi(lookup_status=404, lookup_body=ORGANIZATIONS_DISABLED_BODY))
+
+        _assert(response, 502, MEMBERSHIP_LOOKUP_FAILED)
         services.provisioner.provision.assert_not_awaited()
 
 
@@ -393,6 +437,7 @@ class TestWhatTheTokenAloneDecidesComesFirst:
         _assert(response, 403, detail)
         assert api.requests == []
         services.resolver.resolve.assert_not_awaited()
+        services.provisioner.provision.assert_not_awaited()
 
     def test_an_unbound_token_is_401_and_nothing_is_asked(self):
         api = AdminApi(transport_error=True)

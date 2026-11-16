@@ -85,8 +85,10 @@ the organizations the same lookup lists as `tenant_memberships`, no `roles`, and
 `token_tenant` field holding the token's organization and the permissions it grants there. Only
 principals whose tenant comes from their token get that field: switching tenant takes a new
 token. The directory is read once per request: the same answer confirms an organization-bound
-token and lists the memberships. The response is 403 when the directory does not list the
-token's organization, and 502 when the directory cannot be asked.
+token and lists the memberships. The response is 403 when the token names no organization
+(the user is then not provisioned either) or the directory does not list the token's
+organization, and 502 when the directory cannot be asked. Provisioning a Keycloak user is
+opt-in (`JIT_ENABLED_PROVIDERS`) and gives it no canonical role.
 
 The backend refuses to start with a half-configured Keycloak provider: see the `KEYCLOAK_*`
 rows of [environment-variables.md](environment-variables.md).

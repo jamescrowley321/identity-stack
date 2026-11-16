@@ -74,6 +74,7 @@ class IdentityProvisioningService:
         email_verified: bool = False,
         given_name: str = "",
         family_name: str = "",
+        assign_default_role: bool = True,
     ) -> Result[uuid.UUID, IdentityError]:
         """Ensure a canonical user exists for (provider, sub). Returns the user id.
 
@@ -81,8 +82,13 @@ class IdentityProvisioningService:
         otherwise a **verified** email is required. Linking a new provider identity
         to an existing canonical user is done only on a verified email — never on a
         self-asserted, unverified one — which is the account-takeover guard. When no
-        user with that email exists, a new user is created and assigned a default
-        tenant + a tenant-scoped default role.
+        user with that email exists, a new user is created.
+
+        With ``assign_default_role`` the user is also assigned the default tenant
+        and its tenant-scoped default role. A caller whose provider takes its
+        grants from the token alone passes ``False``: those grants are never read
+        from the canonical model, and a role written for a user it links would be
+        held by that user's sessions of providers that do read it.
         """
         with tracer.start_as_current_span(
             "IdentityProvisioningService.provision",
@@ -112,9 +118,6 @@ class IdentityProvisioningService:
             # new subjects on the shared default tenant/role (unique names).
             for _ in range(2):
                 try:
-                    tenant = await self._get_or_create_tenant(self._default_tenant_name)
-                    role = await self._get_or_create_role(self._default_role_name, tenant.id)
-
                     user = await self._user_repository.get_by_email(email)
                     if user is None:
                         user = User(
@@ -137,9 +140,8 @@ class IdentityProvisioningService:
                     )
                     await self._session.flush()
 
-                    if await self._assignment_repository.get(user.id, tenant.id, role.id) is None:
-                        self._session.add(UserTenantRole(user_id=user.id, tenant_id=tenant.id, role_id=role.id))
-                        await self._session.flush()
+                    if assign_default_role:
+                        await self._assign_default_role(user.id)
 
                     await self._session.commit()
                     return Ok(user.id)
@@ -152,6 +154,13 @@ class IdentityProvisioningService:
                         return Ok(existing.user_id)
                     # Otherwise a bootstrap race on the default tenant/role — retry.
             return Error(Conflict("Could not provision identity after retry; please retry"))
+
+    async def _assign_default_role(self, user_id: uuid.UUID) -> None:
+        tenant = await self._get_or_create_tenant(self._default_tenant_name)
+        role = await self._get_or_create_role(self._default_role_name, tenant.id)
+        if await self._assignment_repository.get(user_id, tenant.id, role.id) is None:
+            self._session.add(UserTenantRole(user_id=user_id, tenant_id=tenant.id, role_id=role.id))
+            await self._session.flush()
 
     async def _get_or_create_tenant(self, name: str) -> Tenant:
         tenant = await self._tenant_repository.get_by_name(name)

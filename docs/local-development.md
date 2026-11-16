@@ -107,6 +107,7 @@ KEYCLOAK_PORTABLE_PERMISSIONS=member=documents:read
 KEYCLOAK_REQUIRE_HTTPS=false   # local only: allowed because the issuer host ends in .localhost
 KEYCLOAK_DIRECTORY_CLIENT_ID=identity-stack-directory
 KEYCLOAK_DIRECTORY_CLIENT_SECRET=local-only-directory-client   # local fixture value
+JIT_ENABLED_PROVIDERS=ory,keycloak   # opt-in: provision Keycloak users on first login
 ```
 
 Register the provider row once, so that a first login is provisioned:

@@ -1,7 +1,7 @@
 """Register the Keycloak provider in the canonical `providers` registry.
 
 Keycloak users are provisioned just in time on their first ``GET /api/identity``
-(``JIT_ENABLED_PROVIDERS``), which needs this row: the provisioning service
+when ``keycloak`` is in ``JIT_ENABLED_PROVIDERS`` (opt-in), which needs this row: the provisioning service
 finds the provider by name, ``keycloak``, the lowercased name the token
 middleware gives Keycloak principals. Nothing else is imported: a Keycloak
 principal's tenant and permissions come from its token, and its organizations

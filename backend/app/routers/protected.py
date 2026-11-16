@@ -42,10 +42,13 @@ PROVIDER_FAULTS = (NetworkException, DiscoveryValidationError, JwksValidationErr
 REFUSED_DETAIL = "Invalid or expired token"
 UNAVAILABLE_DETAIL = "Identity provider unavailable"
 
-# Providers eligible for just-in-time provisioning on first login. Ory and
-# Keycloak are greenfield (every user is JIT-provisioned); Descope users are
-# pre-provisioned via the seed, so Descope is intentionally excluded by default.
-JIT_ENABLED_PROVIDERS = knob_set("JIT_ENABLED_PROVIDERS", "ory,keycloak")
+# Providers eligible for just-in-time provisioning on first login. Ory is
+# greenfield (every user is JIT-provisioned); Descope users are pre-provisioned
+# via the seed, so Descope is intentionally excluded by default. Keycloak is
+# opt-in: provisioning links a new identity to the canonical user with the same
+# verified email, which makes the realm's ``email_verified`` a linking trust
+# root (docs/security.md), so an operator names ``keycloak`` here to accept it.
+JIT_ENABLED_PROVIDERS = knob_set("JIT_ENABLED_PROVIDERS", "ory")
 
 
 def _serialize_principal(principal: ClaimsPrincipal) -> dict:
@@ -128,7 +131,7 @@ async def canonical_identity(
     Roles and tenants come from the canonical model, except for a provider
     whose tenant and grants come from its token alone (Keycloak), where they
     come from the token and the provider's directory (``token_tenant``). For
-    JIT-enabled providers (e.g. Ory, Keycloak), a first-login subject that
+    JIT-enabled providers (``JIT_ENABLED_PROVIDERS``), a first-login subject that
     resolves to no canonical user is provisioned on the fly, then resolved.
     """
     principal = getattr(request.state, "principal", None)
@@ -150,6 +153,9 @@ async def canonical_identity(
             email_verified=bool(claims.get("email_verified", False)),
             given_name=claims.get("given_name", ""),
             family_name=claims.get("family_name", ""),
+            # ``tenant`` is set exactly for a provider whose grants come from
+            # its token alone (Keycloak): none are written for it.
+            assign_default_role=tenant is None,
         )
         if provisioned.is_error():
             err = provisioned.error
