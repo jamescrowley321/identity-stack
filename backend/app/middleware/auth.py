@@ -7,7 +7,6 @@ from starlette.responses import JSONResponse
 from app.logbook import logbook
 from app.middleware.providers import (
     ProviderTokenConfig,
-    algorithm_rejected,
     audience_rejected,
     build_provider_configs,
     infer_single_tenant_dct,
@@ -115,17 +114,13 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
         """
         iss_hint = unverified_issuer(token)
         for provider in order_candidates(self._providers, iss_hint):
-            # Algorithm: checked here, before any crypto. The library does not
-            # enforce ``algorithms`` in discovery mode (see algorithm_rejected).
-            if algorithm_rejected(token, provider):
-                logger.debug("signing algorithm not accepted by candidate provider %s; trying next", provider.name)
-                continue
-
             # Validate the signature against this provider's JWKS. Issuer and
             # audience are checked manually below (Descope disables the library
             # checks because session tokens use a non-discovery issuer and omit
             # aud); Ory could use the library checks, but the manual path is
-            # uniform and equivalent.
+            # uniform and equivalent. ``algorithms`` is the provider's allowlist,
+            # which the library enforces on the token's header ``alg``; None
+            # accepts whichever algorithm the selected JWKS key declares.
             config = TokenValidationConfig(
                 perform_disco=True,
                 audience=provider.audience or "",

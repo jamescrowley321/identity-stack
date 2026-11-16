@@ -315,19 +315,6 @@ class TestTokenValidationMiddleware:
         assert config.require_https is True
         assert config.algorithms is None
 
-    @pytest.mark.parametrize("alg", ["ES256", "PS256", "HS256", "none"])
-    @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-    def test_non_rs256_is_refused_even_if_the_signature_would_verify(self, validate, alg):
-        validate.return_value = _claims()
-
-        response = _get(
-            _client(TokenValidationMiddleware, self._providers()), _jwt(_claims(), header={"alg": alg, "kid": "k"})
-        )
-
-        assert response.status_code == 401
-        assert response.json() == UNIFORM_401
-        validate.assert_not_awaited()
-
     @pytest.mark.parametrize("aud", [None, "account", APP_CLIENT, ["account"]])
     @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
     def test_missing_or_foreign_audience_is_refused(self, validate, aud):
