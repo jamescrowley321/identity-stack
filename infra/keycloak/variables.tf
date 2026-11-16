@@ -15,9 +15,9 @@ variable "keycloak_url" {
 }
 
 variable "realm" {
-  description = "Name of the realm to create. It must not exist yet. The compose import uses identity-stack, so a container that imported it needs another name here."
+  description = "Name of the realm to create. It must not exist yet. The default sits beside the realm the compose import ships (identity-stack); set realm = \"identity-stack\" only for a Keycloak that did not import it."
   type        = string
-  default     = "identity-stack"
+  default     = "identity-stack-terraform"
 }
 
 variable "frontend_url" {
@@ -26,8 +26,8 @@ variable "frontend_url" {
   default     = "http://localhost:3000"
 
   validation {
-    condition     = !endswith(var.frontend_url, "/")
-    error_message = "frontend_url must not end in a slash: it is an origin, and the post-logout redirect is <frontend_url>/login."
+    condition     = can(regex("^https?://[^/?#]+$", var.frontend_url))
+    error_message = "frontend_url must be a bare origin, scheme://host[:port] with no path, query or trailing slash: it is the clients' web origin, and the post-logout redirect is <frontend_url>/login."
   }
 
   validation {

@@ -12,7 +12,7 @@ and git-ignored; `.terraform.lock.hcl` is committed.
 
 | Resource | What |
 |---|---|
-| `keycloak_realm.this` | The realm (default name `identity-stack`): Organizations on, registration off, unique emails, `verifyEmail` on, SSL mode `var.ssl_required` (`none` for the local container). |
+| `keycloak_realm.this` | The realm (default name `identity-stack-terraform`): Organizations on, registration off, unique emails, `verifyEmail` on, SSL mode `var.ssl_required` (`none` for the local container). |
 | `keycloak_openid_client.type` | Type clients `member` and `tenant-admin`: confidential, no flows, full scope off. |
 | `keycloak_role.client` | Their client roles, the permissions: `member` has `documents:read`, `documents:write`; `tenant-admin` has `members:invite`, `members:remove`, `settings:manage`. |
 | `keycloak_openid_client.app` | App clients `member-app` and `tenant-admin-app`: public, standard flow only, PKCE `S256`, full scope off, redirect URI and web origin `var.frontend_url`, post-logout redirect `<frontend_url>/login`. |
@@ -47,16 +47,17 @@ Start the compose Keycloak, then apply. The provider logs in to the `master` rea
 bootstrap admin through `admin-cli`; the login comes from the environment, never from a tfvars
 file. `admin`/`admin` is the compose container's local fixture login.
 
-The compose `keycloak` service already imports a realm named `identity-stack`, and the realm must
-not exist before the apply. Either give the Terraform realm another name, or start a Keycloak
-without the import.
+The realm must not exist before the apply. The compose `keycloak` service already imports a realm
+named `identity-stack`, so the root's default realm is `identity-stack-terraform`, which sits
+beside it. Against a Keycloak that did not import the realm, `-var realm=identity-stack` builds it
+under the import's name.
 
 ```bash
 docker compose --profile keycloak up -d --wait keycloak
 cd infra/keycloak
 export KEYCLOAK_USER=admin KEYCLOAK_PASSWORD=admin
 terraform init
-terraform apply -var realm=identity-stack-terraform
+terraform apply
 terraform output backend_environment
 terraform output -raw keycloak_directory_client_secret
 terraform output -json user_passwords
@@ -67,8 +68,8 @@ Variables (all have defaults for the compose `keycloak` service):
 | Variable | Default | What |
 |---|---|---|
 | `keycloak_url` | `http://keycloak.localhost:8180` | The Keycloak's `KC_HOSTNAME`. The issuer is `<keycloak_url>/realms/<realm>`. `http://` only for a loopback or `*.localhost` host (validated). |
-| `realm` | `identity-stack` | Realm to create. |
-| `frontend_url` | `http://localhost:3000` | SPA origin: redirect URI, web origin, post-logout `<frontend_url>/login`. No trailing slash; `http://` only for a loopback or `*.localhost` host (both validated). |
+| `realm` | `identity-stack-terraform` | Realm to create; it must not exist yet. Not `identity-stack` beside the compose import, which already has that name. |
+| `frontend_url` | `http://localhost:3000` | SPA origin: redirect URI, web origin, post-logout `<frontend_url>/login`. A bare origin, `scheme://host[:port]`: no path, query or trailing slash; `http://` only for a loopback or `*.localhost` host (both validated). |
 | `ssl_required` | `none` | Realm SSL mode. `none` only when `keycloak_url` is a loopback or `*.localhost` host (validated); set `external` or `all` for any other Keycloak. |
 
 ## Outputs
@@ -111,9 +112,11 @@ each other in the compose `keycloak-test` container:
    the output `VITE_OIDC_SCOPE` and fails unless the token names the user's organization; and reads `bob`'s organizations
    with the directory client's generated secret. Users, organizations and members are read
    one page of `LISTING_PAGE_SIZE` at a time, and a full page fails the check as possibly cut off;
-4. destroys the realm (if the destroy fails, the temporary state directory is kept and its
-   path printed), and stops the container (deleting its volumes) only if the script started
-   it: a keycloak-test that was already running is left up.
+4. destroys the realm, and stops the container (deleting its volumes) only if the script
+   started it: a keycloak-test that was already running is left up. The temporary state
+   directory holds the generated passwords and directory secret and is deleted, except when
+   the destroy failed and the realm is still in a keycloak-test that stays up: then it is kept
+   and its path printed, and the next run deletes the realm.
 
 It copies only the root's `.tf` files git does not ignore into its working directory, so a local
 `override.tf` or `*_override.tf` never changes what it applies.

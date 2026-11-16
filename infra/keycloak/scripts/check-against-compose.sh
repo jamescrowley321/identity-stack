@@ -45,20 +45,30 @@ work=""
 applied=0
 started=0
 
+# $work holds the state and outputs.json, with the generated user passwords and
+# the directory client secret. It is kept only while the realm it describes may
+# still exist: the destroy failed and keycloak-test is still up.
 cleanup() {
   status=$?
-  keep_work=0
+  destroy_failed=0
   if [ "$applied" = 1 ]; then
     if ! terraform -chdir="$work" destroy -auto-approve -input=false "${vars[@]}" >/dev/null; then
       status=1
-      keep_work=1
-      echo "destroy failed: state kept in $work; the next run deletes realm $terraform_realm itself" >&2
+      destroy_failed=1
     fi
   fi
-  if [ "$started" = 1 ] && ! "${compose[@]}" down -v keycloak-test >/dev/null 2>&1; then
-    echo "warning: could not stop keycloak-test (docker compose down -v failed)" >&2
+  stopped=0
+  if [ "$started" = 1 ]; then
+    if "${compose[@]}" down -v keycloak-test >/dev/null 2>&1; then
+      stopped=1
+    else
+      echo "warning: could not stop keycloak-test (docker compose down -v failed)" >&2
+    fi
   fi
-  if [ -n "$work" ] && [ "$keep_work" = 0 ]; then
+  if [ "$destroy_failed" = 1 ] && [ "$stopped" = 0 ]; then
+    echo "destroy failed: realm $terraform_realm is still in keycloak-test; state kept in $work (it holds generated secrets); the next run deletes the realm itself" >&2
+  elif [ -n "$work" ]; then
+    [ "$destroy_failed" = 1 ] && echo "destroy failed, but keycloak-test was stopped with its volumes, so realm $terraform_realm is gone" >&2
     rm -rf "$work"
   fi
   exit "$status"
