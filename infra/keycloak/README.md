@@ -66,10 +66,10 @@ Variables (all have defaults for the compose `keycloak` service):
 
 | Variable | Default | What |
 |---|---|---|
-| `keycloak_url` | `http://keycloak.localhost:8180` | The Keycloak's `KC_HOSTNAME`. The issuer is `<keycloak_url>/realms/<realm>`. |
+| `keycloak_url` | `http://keycloak.localhost:8180` | The Keycloak's `KC_HOSTNAME`. The issuer is `<keycloak_url>/realms/<realm>`. `http://` only for a loopback or `*.localhost` host (validated). |
 | `realm` | `identity-stack` | Realm to create. |
-| `frontend_url` | `http://localhost:3000` | SPA origin: redirect URI, web origin, post-logout `<frontend_url>/login`. No trailing slash (validated). |
-| `ssl_required` | `none` | Realm SSL mode. |
+| `frontend_url` | `http://localhost:3000` | SPA origin: redirect URI, web origin, post-logout `<frontend_url>/login`. No trailing slash; `http://` only for a loopback or `*.localhost` host (both validated). |
+| `ssl_required` | `none` | Realm SSL mode. `none` only when `keycloak_url` is a loopback or `*.localhost` host (validated); set `external` or `all` for any other Keycloak. |
 
 ## Outputs
 

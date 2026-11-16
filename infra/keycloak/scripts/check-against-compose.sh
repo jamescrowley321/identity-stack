@@ -87,7 +87,7 @@ delete_leftover_realm() {
 # *_override.tf (git-ignored) never changes what the check applies.
 work="$(mktemp -d "${TMPDIR:-/var/tmp}/keycloak-terraform-check.XXXXXX")"
 git -C "$repo" ls-files -z --cached --others --exclude-standard -- ':(glob)infra/keycloak/*.tf' |
-  (cd "$repo" && xargs -0 cp -t "$work/")
+  (cd "$repo" && while IFS= read -r -d '' file; do cp "$file" "$work/"; done)
 cp "$root/.terraform.lock.hcl" "$work/"
 
 if [ -z "$("${compose[@]}" ps --status running --quiet keycloak-test)" ]; then
