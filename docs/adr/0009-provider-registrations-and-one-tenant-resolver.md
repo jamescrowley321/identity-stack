@@ -67,7 +67,10 @@ refused on every role-gated route.
   nothing: a document created that way would carry an owner relation its creator could
   never use. They keep serving Descope principals only, now by an explicit guard,
   `require_descope_principal`, which reads the provider's `descope_managed` field and
-  answers the same 403 as before. A test holds every route that takes a tenant to one of
+  answers 403 with a body of its own: the resolver's "select a tenant first" would send
+  the caller after a tenant that could not help. The profile is held the same way:
+  `PATCH /api/profile` carries the guard, and `GET /api/profile` looks up a Descope
+  principal only. A test holds every route that takes a tenant to one of
   two registers, Descope-backed or provider-neutral, so a new route has to choose.
   `POST /api/roles/assign` and `/api/roles/remove` are Descope-backed too: they write
   canonical rows, but `RoleService` mirrors each assignment to Descope with the canonical

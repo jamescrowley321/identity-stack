@@ -4,16 +4,24 @@ from __future__ import annotations
 
 from fastapi import HTTPException, Request
 
-from app.dependencies.tenant_access import SELECT_A_TENANT_FIRST
 from app.logbook import logbook
 from app.middleware.providers import ProviderTokenConfig
 from app.services.descope_management import DescopeManagementAdapter
 
 logger = logbook(__name__)
 
-# The answer a principal of another provider got from these routes before
-# ``get_tenant_id`` could name a canonical tenant, and still gets.
-NOT_A_DESCOPE_PRINCIPAL = SELECT_A_TENANT_FIRST
+# Its own answer, not the tenant resolver's: selecting a tenant would not help
+# a principal of another provider, so the body does not tell them to.
+NOT_A_DESCOPE_PRINCIPAL = "This route serves Descope principals only"
+
+
+def is_descope_principal(request: Request) -> bool:
+    """Whether a middleware attributed the request's claims to a ``descope_managed`` provider.
+
+    False for claims no provider is recorded for: they are never read as Descope's.
+    """
+    provider = getattr(request.state, "provider", None)
+    return isinstance(provider, ProviderTokenConfig) and provider.descope_managed
 
 
 def require_descope_principal(request: Request) -> None:
@@ -37,9 +45,9 @@ def require_descope_principal(request: Request) -> None:
     claims = getattr(request.state, "claims", None)
     if claims is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    provider = getattr(request.state, "provider", None)
-    if isinstance(provider, ProviderTokenConfig) and provider.descope_managed:
+    if is_descope_principal(request):
         return
+    provider = getattr(request.state, "provider", None)
     logger.warning(
         "refused: provider=%s sub=%r called a route that serves Descope principals only",
         provider.name if isinstance(provider, ProviderTokenConfig) else "unrecorded",

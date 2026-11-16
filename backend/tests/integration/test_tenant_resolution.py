@@ -43,7 +43,7 @@ TENANT_ROUTE = "/api/probe/tenant"
 ADMIN_ROUTE = "/api/probe/admin"
 OPERATOR_ROUTE = "/api/probe/operator"
 NO_TENANT_FROM_GET_TENANT_ID = {"detail": "No tenant context — select a tenant first"}
-DESCOPE_PRINCIPALS_ONLY = {"detail": "No tenant context — select a tenant first"}
+DESCOPE_PRINCIPALS_ONLY = {"detail": "This route serves Descope principals only"}
 
 
 def _build_app(db_session, *, issuer: str, audience: str) -> FastAPI:
