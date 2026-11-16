@@ -31,6 +31,7 @@ closed with 403. An authorization decision is never made on a guess.
 """
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -178,19 +179,37 @@ async def _canonical_memberships(
     return loaded
 
 
-async def canonical_memberships(
-    request: Request,
-    session: AsyncSession | None = Depends(get_rbac_session),
-) -> CanonicalMemberships | None:
+@asynccontextmanager
+async def _rbac_session(request: Request) -> AsyncIterator[AsyncSession | None]:
+    """Open the ``get_rbac_session`` session now, for a caller that could not declare it.
+
+    ``canonical_memberships`` must not declare ``Depends(get_rbac_session)``:
+    FastAPI would then open a session for every request to a tenant-scoped
+    route, whoever the provider. Opening it here keeps one definition of that
+    session, including whatever the application has overridden it with.
+    """
+    provide = request.app.dependency_overrides.get(get_rbac_session, get_rbac_session)
+    async with asynccontextmanager(provide)() as session:
+        yield session
+
+
+async def canonical_memberships(request: Request) -> CanonicalMemberships | None:
     """Dependency: the canonical memberships ``get_tenant_id`` resolves the tenant from.
 
     ``None`` for an unauthenticated request, which ``get_tenant_id`` answers with
-    401, and for a provider that is not authorized from the canonical model.
+    401, and for a provider that is not authorized from the canonical model. For
+    those it opens no session and reads nothing: only a provider in
+    ``CANONICAL_RBAC_PROVIDERS`` whose memberships this request has not loaded
+    yet gets a session, for that one read.
     """
     claims = getattr(request.state, "claims", None)
-    if claims is None:
+    if claims is None or _principal_provider(request) not in CANONICAL_RBAC_PROVIDERS:
         return None
-    return await _canonical_memberships(request, claims, session)
+    loaded = getattr(request.state, "canonical_memberships", None)
+    if isinstance(loaded, CanonicalMemberships):
+        return loaded
+    async with _rbac_session(request) as session:
+        return await _canonical_memberships(request, claims, session)
 
 
 async def _tenant_access(request: Request, session: AsyncSession | None) -> TenantAccess:

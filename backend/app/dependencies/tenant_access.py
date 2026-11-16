@@ -16,6 +16,7 @@ Anything else is 403. Nothing here does I/O: the canonical memberships are loade
 by ``app.dependencies.rbac`` and passed in.
 """
 
+import uuid
 from dataclasses import dataclass
 
 from fastapi import HTTPException, Request
@@ -60,57 +61,114 @@ class TenantAccess:
     permissions: list[str]
 
 
+def _caller(request: Request, claims: dict) -> tuple[str, object]:
+    """Who a refusal is logged against: the recorded provider's name and the token's ``sub``."""
+    provider = getattr(request.state, "provider", None)
+    name = provider.name if isinstance(provider, ProviderTokenConfig) else "unrecorded"
+    return name, claims.get("sub")
+
+
 def _claims_source(request: Request, claims: dict) -> TenantClaims | None:
     """What the request's provider says about the tenant, read with that provider's own extractor.
 
-    ``None`` when the provider declares no extractor. A request that no
-    middleware attributed to a provider (one built by hand, with only
-    ``request.state.claims`` set) is read with Descope's extractor, which is what
-    the claims path has always been.
+    ``None`` when the provider declares no extractor, when its extractor raises,
+    and when it names a tenant that is not a non-empty string: each is refused by
+    the caller. A request that no middleware attributed to a provider (one built
+    by hand, with only ``request.state.claims`` set) is read with Descope's
+    extractor, which is what the claims path has always been.
     """
     provider = getattr(request.state, "provider", None)
     if not isinstance(provider, ProviderTokenConfig):
-        return descope_tenant_claims(claims)
-    if provider.tenant_claims is None:
+        extractor = descope_tenant_claims
+    elif provider.tenant_claims is None:
         return None
-    return provider.tenant_claims(claims)
+    else:
+        extractor = provider.tenant_claims
+    try:
+        claimed = extractor(claims)
+    except Exception:
+        # The middlewares answer a raising extractor with 401 before a request
+        # gets here. This is the resolver failing closed by itself.
+        logger.warning(
+            "tenant resolution refused: the claims extractor of provider=%s raised for sub=%r",
+            *_caller(request, claims),
+            exc_info=True,
+        )
+        return None
+    if not isinstance(claimed.tenant_id, str) or not claimed.tenant_id:
+        return None
+    return claimed
 
 
-def _selected_tenants(request: Request, claims: dict) -> set[str] | None:
-    """The tenants this request selects, or ``None`` when it selects nothing.
+def _selector_value(value: object) -> str:
+    """One ``X-Tenant-ID`` value as it is compared with the caller's memberships.
 
-    The selector is every ``X-Tenant-ID`` value on the request. A ``dct`` claim on
+    Surrounding whitespace is dropped. A value that parses as a UUID is put in
+    the canonical lower-case hyphenated form the canonical model stores, so an
+    upper-case, braced or ``urn:uuid:`` spelling names the same tenant. Anything
+    else is compared as it is, and so matches a membership only when it is one.
+    """
+    if not isinstance(value, str):
+        return ""
+    stripped = value.strip()
+    try:
+        return str(uuid.UUID(stripped))
+    except ValueError:
+        return stripped
+
+
+def _selected_tenants(request: Request, claims: dict) -> tuple[list[str], set[str]]:
+    """The tenants this request selects by header and by ``dct`` claim; both empty when it selects nothing.
+
+    The selector is every ``X-Tenant-ID`` value on the request, one entry per
+    header line, so a header sent twice is seen as two even with one value. A ``dct`` claim on
     a canonical provider's token selects too: those providers do not normally
     emit one, but a token that carries it has always been held to it. An empty
     value or a ``dct`` that is not a string is kept as a selection that can match
     no tenant, so it is refused and not treated as absent.
     """
-    selected: set[str] = set()
     values = request.headers.getlist(TENANT_SELECTOR_HEADER)
     # Only a real header list counts: a request double in a test has none.
-    if isinstance(values, list):
-        selected.update(value.strip() if isinstance(value, str) else "" for value in values)
+    by_header = [_selector_value(value) for value in values] if isinstance(values, list) else []
+    by_claim: set[str] = set()
     claimed = claims.get("dct")
     if claimed is not None and not isinstance(claimed, str):
-        selected.add("")
+        by_claim.add("")
     elif claimed:
-        selected.add(claimed)
-    return selected or None
+        by_claim.add(claimed)
+    return by_header, by_claim
 
 
 def _canonical_tenant(request: Request, claims: dict, memberships: CanonicalMemberships) -> str | None:
-    """The one tenant a canonical-provider request is for, or ``None`` when there is not exactly one."""
+    """The one tenant a canonical-provider request is for, or ``None`` when there is not exactly one.
+
+    A refusal of something the request itself selected is logged with the
+    provider and the subject, never with the value it sent.
+    """
     tenant_ids = memberships.tenant_ids
-    selected = _selected_tenants(request, claims)
-    if selected is None:
+    by_header, by_claim = _selected_tenants(request, claims)
+    selected = set(by_header) | by_claim
+    if not selected:
         # Nothing selected: only a sole membership is unambiguous.
         return next(iter(tenant_ids)) if len(tenant_ids) == 1 else None
-    if len(selected) != 1:
-        logger.warning("tenant selection refused: the request names more than one tenant")
+    if len(by_header) > 1:
+        logger.warning(
+            "tenant selection refused: provider=%s sub=%r sent more than one tenant selector",
+            *_caller(request, claims),
+        )
+        return None
+    if len(selected) > 1:
+        logger.warning(
+            "tenant selection refused: provider=%s sub=%r sent a header that disagrees with the token's dct",
+            *_caller(request, claims),
+        )
         return None
     (tenant_id,) = selected
     if tenant_id not in tenant_ids:
-        logger.warning("tenant selection refused: the caller holds no membership in the tenant it names")
+        logger.warning(
+            "tenant selection refused: provider=%s sub=%r holds no membership in the tenant it names",
+            *_caller(request, claims),
+        )
         return None
     return tenant_id
 
@@ -131,7 +189,7 @@ def resolve_tenant_access(
     """
     if memberships is None:
         claimed = _claims_source(request, claims)
-        if claimed is None or not claimed.tenant_id:
+        if claimed is None:
             raise HTTPException(status_code=403, detail=no_tenant_detail)
         return TenantAccess(tenant_id=claimed.tenant_id, roles=claimed.roles, permissions=claimed.permissions)
 

@@ -6,11 +6,13 @@ service names it, so these tests fail if any of them stops taking its providers
 from ``configured_providers``.
 """
 
+import ast
 import base64
 import importlib
 import json
 import time
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlparse
@@ -28,6 +30,7 @@ from app.middleware.providers import (
     ProviderConfigurationError,
     ProviderTokenConfig,
     TenantClaims,
+    build_provider_configs,
     configured_providers,
     descope_config,
     descope_tenant_claims,
@@ -401,3 +404,207 @@ class TestTenantIdComesFromTheExtractor:
         response = client.get(PROBE, headers=_bearer(_ory_claims(**self.FOREIGN)))
 
         assert response.json() == {"provider": "Ory", "registered_as": "Ory", "tenant_id": None}
+
+
+def _raising_tenant_claims(claims: dict) -> TenantClaims:
+    raise KeyError("org")
+
+
+def _malformed_tenant_claims(claims: dict) -> TenantClaims:
+    return TenantClaims(tenant_id=claims.get("org"), roles=[], permissions=[])
+
+
+def _register_second_with(monkeypatch, extractor) -> None:
+    provider = replace(_second_provider(), tenant_claims=extractor)
+    monkeypatch.setattr(
+        provider_registry,
+        "PROVIDER_REGISTRATIONS",
+        [*provider_registry.PROVIDER_REGISTRATIONS, lambda: provider],
+    )
+
+
+class TestAuthenticationFailsTheSameWayInBothModes:
+    """Whatever goes wrong while a token is turned into a principal is the uniform 401."""
+
+    UNIFORM_401 = {"detail": "Invalid or expired token"}
+
+    @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+    def test_standalone_answers_401_when_the_extractor_raises(self, validate, with_ory):
+        _register_second_with(with_ory, _raising_tenant_claims)
+        validate.return_value = _second_claims()
+        client = TestClient(_configured_app(with_ory, "standalone"))
+
+        response = client.get(PROBE, headers=_bearer(_second_claims()))
+
+        assert response.status_code == 401
+        assert response.json() == self.UNIFORM_401
+
+    def test_gateway_answers_401_when_the_extractor_raises(self, with_ory):
+        _register_second_with(with_ory, _raising_tenant_claims)
+        client = TestClient(_configured_app(with_ory, "gateway"))
+
+        response = client.get(PROBE, headers=_bearer(_second_claims()))
+
+        assert response.status_code == 401
+        assert response.json() == self.UNIFORM_401
+
+    @patch("app.middleware.auth.to_principal", side_effect=ValueError("claims cannot make a principal"))
+    @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+    def test_standalone_answers_401_when_the_principal_cannot_be_built(self, validate, _to_principal, with_ory):
+        validate.return_value = _ory_claims()
+        client = TestClient(_configured_app(with_ory, "standalone"))
+
+        response = client.get(PROBE, headers=_bearer(_ory_claims()))
+
+        assert response.status_code == 401
+        assert response.json() == self.UNIFORM_401
+
+    @patch("app.middleware.claims.to_principal", side_effect=ValueError("claims cannot make a principal"))
+    def test_gateway_answers_401_when_the_principal_cannot_be_built(self, _to_principal, with_ory):
+        client = TestClient(_configured_app(with_ory, "gateway"))
+
+        response = client.get(PROBE, headers=_bearer(_ory_claims()))
+
+        assert response.status_code == 401
+        assert response.json() == self.UNIFORM_401
+
+    @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+    def test_a_downstream_failure_is_still_not_a_401(self, validate, with_ory):
+        """Only authentication is answered 401: the handler's own error keeps its status."""
+        validate.return_value = _ory_claims()
+        app = _configured_app(with_ory, "standalone")
+
+        @app.get("/api/broken")
+        async def broken():
+            raise RuntimeError("the handler failed")
+
+        response = TestClient(app, raise_server_exceptions=False).get("/api/broken", headers=_bearer(_ory_claims()))
+
+        assert response.status_code == 500
+
+    @pytest.mark.parametrize("tenant", [7, ["org-1"], {"id": "org-1"}, ""])
+    def test_a_tenant_that_is_not_a_non_empty_string_is_no_tenant(self, with_ory, tenant):
+        _register_second_with(with_ory, _malformed_tenant_claims)
+        client = TestClient(_configured_app(with_ory, "gateway"))
+
+        response = client.get(PROBE, headers=_bearer(_second_claims(org=tenant)))
+
+        assert response.json() == {"provider": SECOND_NAME, "registered_as": SECOND_NAME, "tenant_id": None}
+
+
+class TestOneAssemblyBehindBothBuilders:
+    """``build_provider_configs`` is the same walk as ``configured_providers``, over explicit values."""
+
+    KEYCLOAK_ISSUER = "https://keycloak.example.test/realms/identity-stack"
+
+    def test_it_builds_what_the_registrations_build_from_the_same_values(self, with_ory):
+        with_ory.setenv("KEYCLOAK_ISSUER_URL", self.KEYCLOAK_ISSUER)
+        with_ory.setenv("KEYCLOAK_AUDIENCES", "member")
+        with_ory.setenv("KEYCLOAK_REQUIRE_HTTPS", "false")
+        with_ory.setenv("KEYCLOAK_POST_LOGOUT_REDIRECT_URI", "https://app.example.test/kc-signed-out")
+
+        by_hand = build_provider_configs(
+            descope_project_id=DESCOPE_PROJECT,
+            ory_issuer_url=ORY_ISSUER,
+            ory_audience=ORY_AUDIENCE,
+            ory_client_id=ORY_CLIENT_ID,
+            ory_post_logout_redirect_uri=ORY_REDIRECT,
+            keycloak_issuer_url=self.KEYCLOAK_ISSUER,
+            keycloak_audiences=frozenset({"member"}),
+            keycloak_require_https=False,
+            keycloak_post_logout_redirect_uri="https://app.example.test/kc-signed-out",
+        )
+
+        assert by_hand == configured_providers()
+
+    def test_a_shared_issuer_is_refused_by_hand_too(self):
+        with pytest.raises(ProviderConfigurationError, match=ORY_ISSUER):
+            build_provider_configs(
+                descope_project_id=DESCOPE_PROJECT,
+                ory_issuer_url=ORY_ISSUER,
+                ory_audience=ORY_AUDIENCE,
+                keycloak_issuer_url=ORY_ISSUER,
+                keycloak_audiences=frozenset({"member"}),
+            )
+
+    @pytest.mark.parametrize("spelling", [f"{ORY_ISSUER}/", ORY_ISSUER.upper(), f"{ORY_ISSUER.upper()}//"])
+    def test_another_spelling_of_a_taken_issuer_is_refused(self, second_registered, spelling):
+        squatter = replace(_second_provider(), name="Squatter", accepted_issuers=frozenset({spelling}))
+        second_registered.setattr(
+            provider_registry,
+            "PROVIDER_REGISTRATIONS",
+            [*provider_registry.PROVIDER_REGISTRATIONS, lambda: squatter],
+        )
+
+        with pytest.raises(ProviderConfigurationError, match="another provider already accepts"):
+            configured_providers()
+
+
+class TestOnlyDescopeIsDescopeManaged:
+    def test_descope_says_its_ids_are_descopes(self):
+        assert descope_config(DESCOPE_PROJECT).descope_managed is True
+
+    def test_no_other_provider_does(self):
+        others = [
+            ory_config(ORY_ISSUER, ORY_AUDIENCE),
+            keycloak_config("https://keycloak.example.test/realms/r", frozenset({"member"})),
+            _second_provider(),
+        ]
+
+        assert [provider.descope_managed for provider in others] == [False, False, False]
+
+
+def _state_attribute_writes(func: ast.AST) -> set[str]:
+    """Names of the ``<something>.state.<name>`` attributes ``func`` assigns."""
+    return {
+        target.attr
+        for node in ast.walk(func)
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Attribute)
+        and isinstance(target.value, ast.Attribute)
+        and target.value.attr == "state"
+    }
+
+
+def _functions_setting_claims_without_a_provider(source: str) -> list[str]:
+    return [
+        node.name
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and "claims" in (written := _state_attribute_writes(node))
+        and "provider" not in written
+    ]
+
+
+class TestClaimsAreNeverRecordedWithoutTheirProvider:
+    """The resolver reads a request with no recorded provider as Descope's (conventions §18).
+
+    Only a hand-built request may be like that, so every place in ``app/`` that
+    sets ``request.state.claims`` must set ``request.state.provider`` beside it.
+    """
+
+    APP = Path(__file__).resolve().parents[2] / "app"
+
+    def test_every_writer_of_the_claims_records_the_provider(self):
+        offenders = {
+            str(path.relative_to(self.APP)): names
+            for path in sorted(self.APP.rglob("*.py"))
+            if (names := _functions_setting_claims_without_a_provider(path.read_text()))
+        }
+
+        assert offenders == {}
+
+    def test_both_middlewares_are_seen_as_writers(self):
+        writers = sorted(
+            str(path.relative_to(self.APP))
+            for path in self.APP.rglob("*.py")
+            if "claims" in _state_attribute_writes(ast.parse(path.read_text()))
+        )
+
+        assert writers == ["middleware/auth.py", "middleware/claims.py"]
+
+    def test_the_scan_flags_a_writer_that_records_no_provider(self):
+        source = "def dispatch(request, claims):\n    request.state.claims = claims\n"
+
+        assert _functions_setting_claims_without_a_provider(source) == ["dispatch"]

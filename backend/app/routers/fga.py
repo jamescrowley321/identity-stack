@@ -3,6 +3,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from app.dependencies.descope import require_descope_principal
 from app.dependencies.fga import resolve_fga_user_target
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
@@ -137,7 +138,7 @@ async def update_fga_schema(
 # --- Relation endpoints (tenant-scoped via resource_id prefixing) ---
 
 
-@router.post("/fga/relations", status_code=201)
+@router.post("/fga/relations", status_code=201, dependencies=[Depends(require_descope_principal)])
 @limiter.limit(RATE_LIMIT_AUTH)
 async def create_relation(
     request: Request,
@@ -177,7 +178,7 @@ async def create_relation(
         raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
 
 
-@router.delete("/fga/relations")
+@router.delete("/fga/relations", dependencies=[Depends(require_descope_principal)])
 @limiter.limit(RATE_LIMIT_AUTH)
 async def delete_relation(
     request: Request,
@@ -212,7 +213,7 @@ async def delete_relation(
         raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
 
 
-@router.get("/fga/relations")
+@router.get("/fga/relations", dependencies=[Depends(require_descope_principal)])
 async def list_relations(
     request: Request,
     # FGA identifiers; Descope uses short names/IDs — 200 is generous
@@ -258,7 +259,7 @@ async def list_relations(
         raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
 
 
-@router.post("/fga/check")
+@router.post("/fga/check", dependencies=[Depends(require_descope_principal)])
 @limiter.limit(RATE_LIMIT_AUTH)
 async def check_permission(
     request: Request,

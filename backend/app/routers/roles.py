@@ -5,6 +5,7 @@ from expression import Error, Ok
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.dependencies.descope import require_descope_principal
 from app.dependencies.identity import get_role_service
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_claims, get_tenant_id
@@ -49,7 +50,8 @@ def _parse_uuid(value: str, field_name: str) -> uuid.UUID:
 # --- Existing user-facing endpoints (must stay before /roles/{name}) ---
 
 
-@router.get("/roles/me")
+# Reads the Descope ``tenants`` claim (``get_tenant_claims``), so it serves Descope principals only.
+@router.get("/roles/me", dependencies=[Depends(require_descope_principal)])
 async def get_my_roles(
     tenant_id: str = Depends(get_tenant_id),
     tenant_claims: dict = Depends(get_tenant_claims),

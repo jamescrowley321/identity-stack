@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
 from sqlmodel import select
 
+from app.dependencies.descope import require_descope_principal
 from app.dependencies.fga import extract_user_id, require_fga
 from app.dependencies.tenant import get_tenant_id
 from app.logbook import logbook
@@ -17,7 +18,9 @@ from app.outbound import UpstreamStatusError, UpstreamTransportError
 
 logger = logbook(__name__)
 
-router = APIRouter(tags=["documents"])
+# Every route here hands the tenant id or the caller's ``sub`` to Descope, so the
+# router serves Descope principals only (conventions §18).
+router = APIRouter(tags=["documents"], dependencies=[Depends(require_descope_principal)])
 
 # Conservative limit to avoid SQLite SQLITE_MAX_VARIABLE_NUMBER (999)
 _QUERY_BATCH_SIZE = 500
