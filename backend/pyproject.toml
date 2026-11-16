@@ -18,7 +18,7 @@ dependencies = [
     # TokenValidationConfig.algorithms in discovery mode; 5.x also refuses HMAC
     # algorithms and weak keys by default. It requires cryptography>=50
     # (PYSEC-2026-3552/3553/3554).
-    "py-identity-model @ https://github.com/jamescrowley321/identity-model/releases/download/5.0.0-rc.915.40a607c/py_identity_model-5.0.0rc915-py3-none-any.whl#sha256=5e817018d78dbc21041ee95f3687a4645614f978290bb80ed9cbde6c8d719c35",
+    "py-identity-model @ https://github.com/jamescrowley321/identity-model/releases/download/5.0.0-rc.915.0e886ef/py_identity_model-5.0.0rc915-py3-none-any.whl#sha256=726dabb24c50fd094788fddbe7f07f3966cd5806cbe6f1f87ec4e1acc6d92700",
     "sqlmodel>=0.0.22,<1",
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.31.0",
