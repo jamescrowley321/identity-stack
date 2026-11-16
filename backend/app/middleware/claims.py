@@ -17,6 +17,7 @@ from app.middleware.providers import (
     claimed_tenant_id,
     infer_single_tenant_dct,
     select_by_issuer,
+    sender_constrained,
     token_kind_rejected,
 )
 
@@ -42,7 +43,8 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
 
     Defense in depth: this middleware ALSO enforces ``exp`` and ``iss`` on
     every request (and ``aud`` when the provider defines one), even though Tyk
-    should have done the same. If Tyk is ever silently bypassed, misconfigured,
+    should have done the same. It also refuses a sender-constrained token
+    (``cnf.jkt``, ``cnf["x5t#S256"]``), which Tyk does not check. If Tyk is ever silently bypassed, misconfigured,
     or not in front of the backend — the failure mode that went undetected for
     four days while ``tyk/entrypoint.sh`` was broken (issue #240) — these checks
     prevent forged or expired tokens from being trusted.
@@ -161,6 +163,16 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
             # the same JWKS and differs only in ``drn``.
             if token_kind_rejected(claims, provider):
                 logger.warning("GatewayClaims rejected: token kind on the bare issuer (drn=%r)", claims.get("drn"))
+                return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+
+            # Sender constraint: a DPoP- or certificate-bound token needs a proof
+            # or a certificate this backend never receives. The library refuses
+            # it in standalone mode; nothing here calls the library.
+            if sender_constrained(claims):
+                logger.warning(
+                    "GatewayClaims rejected: sender-constrained token presented as a bearer token (%s)",
+                    provider.name,
+                )
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
             # Descope access-key tokens set `tenants` but not `dct`; infer the
