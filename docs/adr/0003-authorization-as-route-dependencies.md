@@ -1,6 +1,6 @@
 # ADR-0003: Authorization is declared as route dependencies
 
-- **Status:** Accepted
+- **Status:** Accepted, amended by [ADR-0009](0009-provider-registrations-and-one-tenant-resolver.md)
 - **Date:** 2026-10-28 (recorded retroactively for a decision already in the code)
 - **Rules:** [conventions §15–§18](../conventions.md#authorization-and-tenancy)
 

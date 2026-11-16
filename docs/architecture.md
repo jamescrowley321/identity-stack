@@ -28,6 +28,8 @@ Descope JWTs use two custom claims the middleware understands:
 - **`dct`** — the *current* tenant for the session.
 - **`tenants`** — all tenant memberships, each with its roles and permissions.
 
+Other providers' tokens carry neither. Each provider is one registration in `backend/app/middleware/providers.py`, with its own claims extractor if its tokens name a tenant. A provider listed in `CANONICAL_RBAC_PROVIDERS` (Ory by default) is authorized from the canonical store instead: the request's tenant is the caller's sole membership, or the one the `X-Tenant-ID` header selects among several ([conventions §18](conventions.md#18-one-resolver-decides-the-tenant-and-the-grants)).
+
 Three issuer formats are supported (all signed by the same project JWKS), so validation must accept all:
 
 - `https://api.descope.com/{project_id}` — OIDC / ID tokens
