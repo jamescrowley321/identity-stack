@@ -358,13 +358,12 @@ def audience_rejected(claims: dict, provider: ProviderTokenConfig) -> bool:
 
 
 def algorithm_rejected(token: str, provider: ProviderTokenConfig) -> bool:
-    """True if the token's signing algorithm is not one this provider accepts.
+    """True if the token's header names a signing algorithm this provider does not accept.
 
-    Reads ``alg`` from the JWT header. The header is covered by the signature the
-    standalone middleware goes on to verify, so a token only authenticates when
-    its real algorithm is accepted. Enforced here because py-identity-model, in
-    discovery mode, replaces ``TokenValidationConfig.algorithms`` with the
-    algorithm of the JWKS key the token selects.
+    Gateway mode only. There the gateway verifies the signature and this backend
+    never calls py-identity-model, so the header is the only place to apply the
+    provider's ``algorithms``. In standalone mode the library enforces the same
+    set through ``TokenValidationConfig.algorithms``.
 
     Fails closed: with algorithms pinned, a header that cannot be read is rejected.
     """
