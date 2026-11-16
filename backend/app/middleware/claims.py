@@ -13,6 +13,7 @@ from app.middleware.providers import (
     algorithm_rejected,
     audience_rejected,
     build_provider_configs,
+    claimed_tenant_id,
     infer_single_tenant_dct,
     select_by_issuer,
     token_kind_rejected,
@@ -153,7 +154,10 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
 
             request.state.claims = claims
             request.state.principal = to_principal(claims, provider.name)
-            request.state.tenant_id = claims.get("dct")
+            # Recorded for the tenant resolver, which reads the tenant and the
+            # grants with this provider's own extractor (conventions §18).
+            request.state.provider = provider
+            request.state.tenant_id = claimed_tenant_id(claims, provider)
         except Exception:
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
