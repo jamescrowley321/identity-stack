@@ -2,6 +2,9 @@
   "realm": "identity-stack",
   "enabled": true,
   "sslRequired": "none",
+  "registrationAllowed": false,
+  "duplicateEmailsAllowed": false,
+  "verifyEmail": true,
   "organizationsEnabled": true,
   "organizations": [
     {

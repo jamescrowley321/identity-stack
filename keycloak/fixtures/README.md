@@ -36,6 +36,11 @@ refused (403) creating an organization, adding a member, editing an organization
 mapping a client role and listing clients. Without the `kc-admin-api` client scope its token
 lacks the Admin API audience and every Admin API call is 401.
 
+The realm brokers no identity provider, lets no one register, keeps emails unique and has
+`verifyEmail` on, because the backend links a Keycloak identity to an existing canonical user
+on a verified email ([`docs/security.md`](../../docs/security.md#authorization-rbac--fga)).
+Every fixture user's email is imported as verified.
+
 | User | Id (`sub`) | Password | Organizations | Client roles |
 |---|---|---|---|---|
 | `alice` | `a11ce000-0000-4000-8000-000000000001` | `local-only-alice` | `acme` | `member`: both |
@@ -56,7 +61,9 @@ token's organization marks its user. The backend's token model for this realm de
 the one portable permission `documents:read`, and `tenant-admin` organization-bound
 ([`docs/architecture.md`](../../docs/architecture.md#keycloak-token-model)). `bob`'s
 `tenant-admin` tokens are therefore refused in both of his organizations (he belongs to two),
-`dave`'s and `frank`'s are accepted in `acme`, and `erin`'s `member` token grants nothing.
+`dave`'s and `frank`'s are accepted in `acme`, and `erin`'s `member` token grants nothing. Removing a member
+from an organization leaves its marker alone: adding them back restores the type there unless the
+id is taken off the attribute too.
 
 The login form is identity-first: username on one page, password on the next.
 
