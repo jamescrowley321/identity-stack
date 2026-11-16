@@ -308,8 +308,9 @@ failure has one answer, in this order:
    holds nothing.
 3. **From the membership lookup**, for a token of an organization-bound type only, and only
    after the first two: 403 when no lookup is wired or when the caller's organizations are
-   anything but the token's alone, and 502 with no grant when the lookup fails or answers
-   with something that is not a collection of strings. The order **MUST NOT** depend on how
+   anything but the token's alone, and 502 with no grant when the lookup fails, does not
+   answer within `MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`, or answers with something that is not
+   a collection of strings. The order **MUST NOT** depend on how
    a route declares its dependencies: `get_tenant_id`'s own dependency applies the check of
    every `require_*` gate on the request's route before it asks the lookup.
 
@@ -353,11 +354,18 @@ resolver **MUST** refuse such an answer (403, `This tenant is not confirmed as t
 only membership`) unless it is handed the tenant that the provider's
 `sole_membership_lookup` confirmed, so a caller of the resolver that confirms nothing
 grants nothing. `app.dependencies.rbac` asks the lookup, once per request, after what the
-token alone decides (§17). A lookup **MUST** bound its own time (§6). The token
+token alone decides (§17). A lookup **MUST** bound its own time (§6), and the request
+waits for it no longer than `MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`: a lookup that has not
+answered by then is cancelled and is a failed lookup (502). The token
 middlewares **MUST NOT** record the tenant of such an answer as `request.state.tenant_id`:
 nothing has confirmed it at authentication, so it stays `None` for the whole request. No
 lookup is wired for Keycloak yet, so every token of an
-organization-bound type is refused. That canonical lookup **MUST
+organization-bound type is refused. Confirming the membership does not show that the
+token's client roles were granted for that organization: Keycloak keeps a user's client
+roles when the user leaves an organization, so a tenant admin of one organization who
+joins a second and then leaves the first would be confirmed as a tenant admin of the
+second. A lookup **MUST NOT** be wired for Keycloak until it confirms the grant as well
+as the membership (#559). That canonical lookup **MUST
 NOT** be served from the identity cache, and it **MUST NOT** be kept beyond the request
 that made it. `get_tenant_id` **MUST NOT** open a database session or read the canonical
 model for any other provider. See
@@ -429,10 +437,11 @@ with no extractor (`refuse_ambiguous_authorization_source`).
   It checks relations in Descope's FGA store, which is keyed on Descope tenant ids, so it
   serves Descope principals only.
 - Exception: `get_tenant_claims` returns the Descope `tenants` claim as it is, for the
-  routes that list a Descope principal's memberships. For a principal of any provider
-  that is not `descope_managed` (Ory, Keycloak) it returns nothing, whatever the token
-  carries, so `GET /api/tenants` lists no tenant for one and the
-  `/api/tenants/{tenant_id}/resources` routes refuse it (403).
+  routes that list a Descope principal's memberships. For a principal of a provider that
+  has its own extractor and is not `descope_managed` (Keycloak) it returns nothing,
+  whatever the token carries, so `GET /api/tenants` lists no tenant for one and the
+  `/api/tenants/{tenant_id}/resources` routes refuse it (403). A provider with no
+  extractor of its own (Ory) is still read for the claim (#597).
 - Exception: `POST /api/tenants` is gated by `require_admin_role`
   (`routers/tenants.py`), which reads a top-level `roles` claim itself, for every
   provider, and takes no tenant (#596).

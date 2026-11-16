@@ -67,8 +67,8 @@ declared one of two ways:
   permissions. Those hold in every organization the user belongs to.
 - **Organization-bound** (`KEYCLOAK_ORGANIZATION_BOUND_TYPES`). The token is accepted only when
   the user belongs to exactly one organization and it is the token's. The lookup that answers
-  this is not wired yet, so every token of such a type is refused with 403. A lookup that fails
-  is 502 and no grant.
+  this is not wired yet, so every token of such a type is refused with 403. A lookup that fails,
+  or does not answer within `MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`, is 502 and no grant.
 
 Two limits follow. A portable permission holds in every organization the user belongs to. And
 nothing ends access when a user leaves an organization before the token expires, which is 300
