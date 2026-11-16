@@ -146,7 +146,11 @@ class TestKeycloakConfig:
     def test_every_provider_accepts_rs256_only(self):
         providers = {
             provider.name: provider.algorithms
-            for provider in (descope_config("P123"), ory_config(ORY_ISSUER, "api"), keycloak_config(ISSUER, AUDIENCES))
+            for provider in (
+                descope_config("P123"),
+                ory_config(ORY_ISSUER, "api"),
+                keycloak_config(ISSUER, AUDIENCES, **MODEL),
+            )
         }
 
         assert providers == {
