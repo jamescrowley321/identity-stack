@@ -16,6 +16,13 @@ ACME = "acme"
 GLOBEX = "globex"
 TENANT_ADMIN_MARKER = f"{GRANT_ATTRIBUTE_PREFIX}{TENANT_ADMIN_TYPE_CLIENT}"
 
+# 404 bodies Keycloak 26.8.2 answers on the lookup's route, as probed against the
+# compose realm. A 404 lookup with no body given answers the unknown member's.
+UNKNOWN_MEMBER_BODY = b'{"error":"HTTP 404 Not Found"}'
+ORGANIZATIONS_DISABLED_BODY = b'{"errorMessage":"Organizations not enabled for this realm."}'
+REALM_NOT_FOUND_BODY = b'{"error":"Realm not found."}'
+NO_SUCH_ROUTE_BODY = b'{"error":"Unable to find matching target resource method"}'
+
 
 def organization(alias: str, *, name: str | None = None, attributes: object = None) -> dict:
     return {
@@ -64,6 +71,8 @@ class AdminApi:
         status = self.lookup_statuses.pop(0) if len(self.lookup_statuses) > 1 else self.lookup_statuses[0]
         if self.lookup_body is not None:
             return httpx.Response(status, content=self.lookup_body)
+        if status == 404:
+            return httpx.Response(status, content=UNKNOWN_MEMBER_BODY)
         return httpx.Response(status, json=self.organizations)
 
     def directory(self, *, issuer: str = ISSUER, secret: str = DIRECTORY_CLIENT_SECRET) -> KeycloakDirectory:

@@ -21,7 +21,10 @@ attribute; this service account cannot.
 
 A well-formed id the realm does not know (404: the user was deleted while
 their token still lives) raises ``MemberUnknown``: such a user belongs to no
-organization. A 401 from the Admin API drops the cached service-account token,
+organization. Keycloak answers 404 for realm-wide faults too (organizations
+disabled, an unknown realm, a route that does not exist), so only the unknown
+member's 404 body (``UNKNOWN_MEMBER_ANSWER``) is read that way; any other 404
+is a ``KeycloakDirectoryError``. A 401 from the Admin API drops the cached service-account token,
 and the lookup is asked once more with a fresh one.
 
 Every other failure raises ``KeycloakDirectoryError`` with the HTTP status
@@ -63,6 +66,14 @@ class MemberIdRefused(ValueError):
 
 class IssuerNamesNoRealm(ValueError):
     """The issuer is not ``<origin>/realms/<realm>``, so no realm Admin API can be derived from it."""
+
+
+# The 404 body Keycloak 26.8.2 answers on the lookup's route for a member id
+# the realm does not know. Probed alongside the 404s that are faults, which carry
+# other bodies: {"errorMessage":"Organizations not enabled for this realm."},
+# {"error":"Realm not found."} and, off the Admin API's routes,
+# {"error":"Unable to find matching target resource method"}.
+UNKNOWN_MEMBER_ANSWER = {"error": "HTTP 404 Not Found"}
 
 
 class MemberUnknown(LookupError):
@@ -245,7 +256,7 @@ class KeycloakDirectory:
             status = exc.response.status_code
             if status == 401:
                 raise _TokenRefused from exc
-            if status == 404:
+            if status == 404 and _answers_unknown_member(exc):
                 logger.warning("organization lookup answered 404, no such member in the realm (member=%s)", member_id)
                 raise MemberUnknown("the realm knows no such member") from exc
             logger.warning("organization lookup answered %s (member=%s)", status, member_id)
@@ -256,3 +267,11 @@ class KeycloakDirectory:
         except ValueError as exc:
             logger.warning("organization lookup answered something that is not JSON")
             raise KeycloakDirectoryError("organization lookup answer unreadable") from exc
+
+
+def _answers_unknown_member(refused: UpstreamStatusError) -> bool:
+    """Whether a 404 carries the unknown member's body, and not that of a realm-wide fault."""
+    try:
+        return refused.response.json() == UNKNOWN_MEMBER_ANSWER
+    except ValueError:
+        return False
