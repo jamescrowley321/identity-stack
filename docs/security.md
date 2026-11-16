@@ -12,11 +12,11 @@ Bearer tokens are validated by [`py-identity-model`](https://github.com/jamescro
 
 When `ORY_ISSUER_URL` is set, Ory access tokens are accepted too: one issuer, with the audience enforced unless `ORY_REQUIRE_AUDIENCE` is off (`middleware/providers.py`).
 
-In `gateway` mode, Tyk verifies the token signature at the edge. The backend's `GatewayClaimsMiddleware` decodes the forwarded JWT without re-checking the signature, and still checks expiry, issuer, signing algorithm and audience as defence in depth (`middleware/factory.py`, `middleware/claims.py`).
+In `gateway` mode, Tyk verifies the token signature at the edge. The backend's `GatewayClaimsMiddleware` decodes the forwarded JWT without re-checking the signature, and still checks expiry, issuer, signing algorithm, audience and sender constraint as defence in depth (`middleware/factory.py`, `middleware/claims.py`).
 
 ### Signing algorithms
 
-Every provider accepts RS256 only (`ProviderTokenConfig.algorithms` in `middleware/providers.py`). A token signed with any other algorithm is answered 401, even when its key is published in the provider's own JWKS and the signature would verify.
+Every provider accepts RS256 only (`ProviderTokenConfig.algorithms` in `middleware/providers.py`). A token signed with any other algorithm is answered 401, even when its key is published in the provider's own JWKS and the signature would verify. `POST /api/validate-id-token`, which runs behind neither middleware, validates with the Descope provider's config and answers a refused token with the same 401.
 
 | Provider | Accepted | Basis |
 |---|---|---|
@@ -26,7 +26,13 @@ Every provider accepts RS256 only (`ProviderTokenConfig.algorithms` in `middlewa
 
 In `standalone` mode the library enforces the set on the token's header `alg` (RFC 8725 §3.1). In `gateway` mode the backend never calls the library, so `GatewayClaimsMiddleware` applies the same set to the header itself.
 
-Independently of the set, the library accepts no HMAC algorithm and no unsigned token, and it refuses a DPoP-bound access token (`cnf.jkt`) presented as a plain bearer token.
+No environment variable changes the set. An Ory Network project or a Hydra deployment configured to sign access tokens with another algorithm (ES256, for example) has every token refused with 401 until that algorithm is added to the set in `ory_config()`; a Descope project's set is in `descope_config()` and a Keycloak realm's in `keycloak_config()`, all in `middleware/providers.py`. In `gateway` mode the gateway has to verify signatures of that algorithm as well.
+
+Independently of the set, the library accepts no HMAC algorithm and no unsigned token.
+
+### Sender-constrained tokens
+
+The backend accepts bearer tokens only. An access token bound to a DPoP key (`cnf.jkt`, RFC 9449) or to a client certificate (`cnf["x5t#S256"]`, RFC 8705) is valid only with its proof or its certificate, and the backend checks neither, so a bound token is answered 401 in both modes. In `standalone` mode the library refuses it (RFC 9449 §7.2). In `gateway` mode the gateway's JWT check does not read `cnf`, so `GatewayClaimsMiddleware` refuses it (`sender_constrained()` in `middleware/providers.py`).
 
 ## Authorization (RBAC + FGA)
 
@@ -68,4 +74,4 @@ Locally, `make security` runs `pip-audit` + `npm audit`.
 ## Notable dependency pins (decision record)
 
 - **`fastapi>=0.115.0,<0.137`** — capped because slowapi 0.1.10's `SlowAPIMiddleware` route matcher only recognizes top-level routes under the newer FastAPI inclusion model, which breaks rate limiting. Revisit when slowapi ships a fix (`backend/pyproject.toml`).
-- **`py-identity-model` 5.0.0 pre-release** — one wheel, pinned by its GitHub release URL and SHA-256 in `backend/pyproject.toml` and `backend/uv.lock`, because v5 pre-releases are not published to PyPI. To be replaced by `>=5.0.0,<6` when 5.0.0 is released (see Token validation above).
+- **`py-identity-model` 5.0.0 pre-release** — one wheel, pinned by its GitHub release URL and SHA-256 in `backend/pyproject.toml` and `backend/uv.lock`, because v5 pre-releases are not published to PyPI. To be replaced by `>=5.0.0,<6` when 5.0.0 is released (see Token validation above). While the pin is a URL, dependency scanning does not cover this one package: `pip-audit` skips it because the version is not on PyPI, and Dependabot proposes no update for a URL source. Until the pin is a PyPI range, advisories and new releases for the library are followed on [its repository](https://github.com/jamescrowley321/identity-model/security/advisories), and a newer pre-release is taken by changing the URL and hash by hand.
