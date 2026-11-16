@@ -20,6 +20,7 @@ before #512, and ADR-0005 replaces it.
 | [0007](0007-a-span-per-service-method.md) | Every public service method opens a span | Accepted | 2026-10-28 |
 | [0008](0008-layered-architecture-with-a-functional-domain-core.md) | Layered architecture with a functional domain core | Accepted | 2026-11-15 |
 | [0009](0009-provider-registrations-and-one-tenant-resolver.md) | Providers are registrations, and one resolver decides the tenant and the grants | Accepted | 2026-11-16 |
+| [0010](0010-keycloak-token-model.md) | A Keycloak token is one organization and one user type, and privilege does not cross organizations | Accepted | 2026-11-16 |
 
 New ADRs use the same headings: **Status**, **Date**, **Context**, **Decision**,
 **Consequences**, and **Supersedes** or **Superseded by** where they apply.

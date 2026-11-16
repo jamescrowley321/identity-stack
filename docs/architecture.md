@@ -38,6 +38,46 @@ Three issuer formats are supported (all signed by the same project JWKS), so val
 
 Token validation is delegated to [`py-identity-model`](https://github.com/jamescrowley321/py-identity-model) (`>=4.1.1`); the RBAC/FGA authorization layer sits on top of the validated claims (see [security.md](security.md)).
 
+## Keycloak token model
+
+A Keycloak realm token is for one organization and one user type
+([ADR-0010](adr/0010-keycloak-token-model.md)). The backend reads five claims and nothing else
+(`backend/app/middleware/keycloak.py`):
+
+| Concept | In Keycloak | In the token | Read where |
+|---|---|---|---|
+| User type | A confidential "type client", such as `member` or `tenant-admin` | `aud`, exactly one value | Authentication: anything else is 401 |
+| App | A public client, one per type | `azp`, the app client configured for that `aud` | Authentication: anything else is 401 |
+| Tenant | An Organization | `organization`, exactly one alias | `get_tenant_id`: anything else is 403 |
+| Permission | A client role of the type client, named `<domain>:<action>` | `resource_access[aud].roles` | `require_permission` |
+| Role | Not used | Nothing | `require_role` always answers 403 |
+
+The tenant is the organization alias, an opaque string. It is not a Descope tenant id and not a
+canonical tenant UUID, so every route that sends its tenant to Descope, parses it as a UUID or
+gates by role refuses a Keycloak principal with 403. `GET /api/access-checks/documents-read` and
+`GET /api/access-checks/settings-manage` answer one: each needs the permission in its name and
+returns the tenant the resolver decided. `realm_access`, and Descope's `dct` and `tenants` when
+they appear on a Keycloak token, are never read.
+
+Keycloak assigns client roles to the user, not to the user in an organization, so every type is
+declared one of two ways:
+
+- **Portable** (`KEYCLOAK_PORTABLE_TYPES`). The token grants only the roles listed for the type
+  in `KEYCLOAK_PORTABLE_PERMISSIONS`, which may hold only `<domain>:read` and `<domain>:list`
+  permissions. Those hold in every organization the user belongs to.
+- **Organization-bound** (`KEYCLOAK_ORGANIZATION_BOUND_TYPES`). The token is accepted only when
+  the user belongs to exactly one organization and it is the token's. The lookup that answers
+  this is not wired yet, so every token of such a type is refused with 403. A lookup that fails
+  is 502 and no grant.
+
+Two limits follow. A portable permission holds in every organization the user belongs to. And
+nothing ends access when a user leaves an organization before the token expires, which is 300
+seconds with the realm's defaults: Keycloak issues no new token for that organization, but the
+backend does not ask the directory about a portable token.
+
+The backend refuses to start with a half-configured Keycloak provider: see the `KEYCLOAK_*`
+rows of [environment-variables.md](environment-variables.md).
+
 ## Sync flows
 
 The canonical store is the source of truth for the application; Descope is kept consistent with it through two flows:

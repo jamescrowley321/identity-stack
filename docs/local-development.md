@@ -100,10 +100,22 @@ To have the backend accept this realm's tokens, set in `backend/.env`:
 ```bash
 KEYCLOAK_ISSUER_URL=http://keycloak.localhost:8180/realms/identity-stack
 KEYCLOAK_AUDIENCES=member,tenant-admin
-KEYCLOAK_REQUIRE_HTTPS=false   # local only: this issuer is plain HTTP on a non-loopback name
+KEYCLOAK_APP_CLIENTS=member=member-app,tenant-admin=tenant-admin-app
+KEYCLOAK_PORTABLE_TYPES=member
+KEYCLOAK_ORGANIZATION_BOUND_TYPES=tenant-admin
+KEYCLOAK_PORTABLE_PERMISSIONS=member=documents:read
+KEYCLOAK_REQUIRE_HTTPS=false   # local only: allowed because the issuer host ends in .localhost
 ```
 
-See [environment-variables.md](environment-variables.md) for each variable.
+The backend refuses to start with only part of this set. See
+[environment-variables.md](environment-variables.md) for each variable and
+[architecture.md](architecture.md#keycloak-token-model) for what the backend reads from a
+Keycloak token.
+
+With these settings `alice` and `bob` can call `GET /api/access-checks/documents-read` with a
+token from `member-app`, and `erin` cannot. Every `tenant-admin` token is refused on
+`GET /api/access-checks/settings-manage`: the type is organization-bound and the lookup that
+confirms a user's one organization is not wired yet.
 
 `docker-compose.test.yml` runs the same realm as `keycloak-test` on `http://keycloak-test.localhost:18180`, resolved the same way. It sits behind the `keycloak` profile there: `make test-up` leaves it out, `make test-up-keycloak` starts the test stack with it, and so does `make test-integration`.
 
