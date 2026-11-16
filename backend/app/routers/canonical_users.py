@@ -8,7 +8,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.dependencies.identity import get_user_service
-from app.dependencies.rbac import require_role
+from app.dependencies.rbac import require_global_role
 from app.models.identity.user import UserStatus
 from app.services.user import UserService
 
@@ -37,7 +37,7 @@ async def list_canonical_users(
     request: Request,
     status: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=_MAX_USERS_LIMIT),
-    _operator_roles: list[str] = Depends(require_role("operator")),
+    _operator_roles: list[str] = Depends(require_global_role("operator")),
     service: UserService = Depends(get_user_service),
 ):
     """List canonical users, optionally filtered by status."""

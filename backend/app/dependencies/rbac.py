@@ -1,6 +1,6 @@
 """Role and permission dependencies.
 
-Both dependencies take the tenant and the caller's grants from the one resolver,
+All of them take the tenant and the caller's grants from the one resolver,
 ``app.dependencies.tenant_access.resolve_tenant_access`` (conventions §18). This
 module supplies the half of it that does I/O: loading a caller's canonical
 memberships.
@@ -215,13 +215,15 @@ async def canonical_memberships(request: Request) -> CanonicalMemberships | None
         return await _canonical_memberships(request, claims, session)
 
 
-async def _tenant_access(request: Request, session: AsyncSession | None) -> TenantAccess:
+async def _tenant_access(
+    request: Request, session: AsyncSession | None, *, header_selects: bool = True
+) -> TenantAccess:
     """The request's tenant and the caller's grants in it. 401 with no claims."""
     claims = getattr(request.state, "claims", None)
     if claims is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     memberships = await _canonical_memberships(request, claims, session)
-    return resolve_tenant_access(request, claims, memberships)
+    return resolve_tenant_access(request, claims, memberships, header_selects=header_selects)
 
 
 def require_role(*roles: str):
@@ -268,5 +270,32 @@ def require_permission(*permissions: str):
         if not any(p in user_permissions for p in permissions):
             raise HTTPException(status_code=403, detail="Insufficient permissions")
         return user_permissions
+
+    return dependency
+
+
+def require_global_role(*roles: str):
+    """Dependency factory for a route over state that belongs to no tenant.
+
+    Every tenant's users, the provider records and the sync status are not one
+    tenant's, so holding one of ``roles`` in one tenant opens all of it. A
+    principal from a provider in ``CANONICAL_RBAC_PROVIDERS`` therefore cannot
+    pick the tenant that answers with the ``X-Tenant-ID`` header: it is decided
+    by the caller's sole membership, or by a ``dct`` claim on the token, and a
+    caller with several memberships who sends the header is refused
+    (conventions §18). A Descope principal is decided from its ``dct`` +
+    ``tenants`` claims, as by ``require_role``.
+
+    Returns the user's role list for downstream use.
+    """
+
+    async def dependency(
+        request: Request,
+        session: AsyncSession | None = Depends(get_rbac_session),
+    ) -> list[str]:
+        user_roles = (await _tenant_access(request, session, header_selects=False)).roles
+        if not any(r in user_roles for r in roles):
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        return user_roles
 
     return dependency

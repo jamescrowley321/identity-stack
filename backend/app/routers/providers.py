@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.dependencies.identity import get_provider_service
-from app.dependencies.rbac import require_role
+from app.dependencies.rbac import require_global_role
 from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.models.identity.provider import ProviderType
@@ -42,7 +42,7 @@ def _parse_uuid(value: str, field_name: str) -> uuid.UUID:
 @router.get("/providers")
 async def list_providers(
     request: Request,
-    _operator_roles: list[str] = Depends(require_role("operator")),
+    _operator_roles: list[str] = Depends(require_global_role("operator")),
     provider_service: ProviderService = Depends(get_provider_service),
 ):
     """List all registered providers (config_ref excluded)."""
@@ -55,7 +55,7 @@ async def list_providers(
 async def register_provider(
     request: Request,
     body: RegisterProviderRequest,
-    _operator_roles: list[str] = Depends(require_role("operator")),
+    _operator_roles: list[str] = Depends(require_global_role("operator")),
     provider_service: ProviderService = Depends(get_provider_service),
 ):
     """Register a new identity provider."""
@@ -76,7 +76,7 @@ async def deactivate_provider(
     request: Request,
     provider_id: str,
     body: DeactivateProviderRequest,
-    _operator_roles: list[str] = Depends(require_role("operator")),
+    _operator_roles: list[str] = Depends(require_global_role("operator")),
     provider_service: ProviderService = Depends(get_provider_service),
 ):
     """Deactivate a provider (set active=false)."""
@@ -91,7 +91,7 @@ async def deactivate_provider(
 async def get_provider_capabilities(
     request: Request,
     provider_id: str,
-    _operator_roles: list[str] = Depends(require_role("operator")),
+    _operator_roles: list[str] = Depends(require_global_role("operator")),
     provider_service: ProviderService = Depends(get_provider_service),
 ):
     """Get capabilities for a provider."""
