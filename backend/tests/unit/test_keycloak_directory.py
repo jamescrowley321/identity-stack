@@ -10,7 +10,7 @@ import pytest
 
 from app.middleware.keycloak import KeycloakTokenModel
 from app.middleware.providers import (
-    KeycloakOrganizationLookup,
+    CountedMemberships,
     KeycloakTenantMemberships,
     TenantMembership,
     keycloak_config,
@@ -337,13 +337,18 @@ def _tenant_admin_claims(organization: str, *, sub: object = MEMBER_ID) -> dict:
     }
 
 
+def _lookup(api: AdminApi) -> CountedMemberships:
+    """Keycloak's ``sole_membership_lookup`` as ``keycloak_config`` wires it, over ``api``."""
+    return CountedMemberships(KeycloakTenantMemberships(_model(), api.directory()))
+
+
 class TestTheLookupConfirmsTheGrantAndNotOnlyTheMembership:
     """The owner's case on #559: client roles are realm-wide, the per-organization marker is not."""
 
     async def test_a_tenant_admin_of_the_tokens_one_organization_is_confirmed(self):
         api = AdminApi([organization(ACME, attributes={TENANT_ADMIN_MARKER: [MEMBER_ID]})])
 
-        answer = await KeycloakOrganizationLookup(_model(), api.directory())(_tenant_admin_claims(ACME))
+        answer = await _lookup(api)(_tenant_admin_claims(ACME))
 
         assert answer == [ACME]
 
@@ -351,14 +356,14 @@ class TestTheLookupConfirmsTheGrantAndNotOnlyTheMembership:
         """Admin of A, joins B as a member, leaves A: the roles stay, B grants nothing."""
         api = AdminApi([organization(GLOBEX, attributes={TENANT_ADMIN_MARKER: [OTHER_MEMBER_ID]})])
 
-        answer = await KeycloakOrganizationLookup(_model(), api.directory())(_tenant_admin_claims(GLOBEX))
+        answer = await _lookup(api)(_tenant_admin_claims(GLOBEX))
 
         assert answer == []
 
     async def test_a_marker_for_another_type_does_not_grant_this_one(self):
         api = AdminApi([organization(ACME, attributes={f"{GRANT_ATTRIBUTE_PREFIX}member": [MEMBER_ID]})])
 
-        answer = await KeycloakOrganizationLookup(_model(), api.directory())(_tenant_admin_claims(ACME))
+        answer = await _lookup(api)(_tenant_admin_claims(ACME))
 
         assert answer == []
 
@@ -371,7 +376,7 @@ class TestTheLookupConfirmsTheGrantAndNotOnlyTheMembership:
             ]
         )
 
-        answer = await KeycloakOrganizationLookup(_model(), api.directory())(_tenant_admin_claims(ACME))
+        answer = await _lookup(api)(_tenant_admin_claims(ACME))
 
         assert sorted(answer) == [ACME, GLOBEX]
 
@@ -379,7 +384,7 @@ class TestTheLookupConfirmsTheGrantAndNotOnlyTheMembership:
     async def test_a_sub_that_is_not_an_id_belongs_to_no_organization_and_nothing_is_asked(self, sub):
         api = AdminApi([organization(ACME, attributes={TENANT_ADMIN_MARKER: [MEMBER_ID]})])
 
-        answer = await KeycloakOrganizationLookup(_model(), api.directory())(_tenant_admin_claims(ACME, sub=sub))
+        answer = await _lookup(api)(_tenant_admin_claims(ACME, sub=sub))
 
         assert answer == []
         assert api.requests == []
@@ -387,7 +392,7 @@ class TestTheLookupConfirmsTheGrantAndNotOnlyTheMembership:
     async def test_a_member_the_realm_does_not_know_belongs_to_no_organization(self):
         api = AdminApi(lookup_status=404)
 
-        answer = await KeycloakOrganizationLookup(_model(), api.directory())(_tenant_admin_claims(ACME))
+        answer = await _lookup(api)(_tenant_admin_claims(ACME))
 
         assert answer == []
 
@@ -395,7 +400,7 @@ class TestTheLookupConfirmsTheGrantAndNotOnlyTheMembership:
         api = AdminApi(lookup_status=503)
 
         with pytest.raises(KeycloakDirectoryError):
-            await KeycloakOrganizationLookup(_model(), api.directory())(_tenant_admin_claims(ACME))
+            await _lookup(api)(_tenant_admin_claims(ACME))
 
 
 class TestTheMembershipList:

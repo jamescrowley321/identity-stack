@@ -135,9 +135,14 @@ def _providers(lookup: _Lookup | None) -> list[ProviderTokenConfig]:
 
     ``None`` takes the lookup away: these tests are about what the token decides
     and what the resolver does with a lookup's answer, not about the realm's
-    Admin API, which ``test_keycloak_identity.py`` reads.
+    Admin API, which ``test_keycloak_identity.py`` reads. The membership list
+    goes too, as the provider refuses a lookup that is not its list's counted
+    entries (``MembershipSourcesDisagree``): these tests ask no ``GET /api/identity``.
     """
-    return [replace(p, sole_membership_lookup=lookup) if p.name == KEYCLOAK else p for p in configured_providers()]
+    return [
+        replace(p, sole_membership_lookup=lookup, tenant_memberships=None) if p.name == KEYCLOAK else p
+        for p in configured_providers()
+    ]
 
 
 def _app(lookup: _Lookup | None) -> FastAPI:

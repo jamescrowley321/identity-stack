@@ -37,8 +37,9 @@ from app.errors.identity import NotFound
 from app.main import app as shipped_app
 from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.providers import (
-    KeycloakOrganizationLookup,
+    CountedMemberships,
     KeycloakTenantMemberships,
+    MembershipSourcesDisagree,
     ProviderTokenConfig,
     TenantMembership,
     descope_config,
@@ -54,6 +55,7 @@ from tests.helpers.keycloak_model import (
     MEMBER_TYPE_CLIENT,
     TENANT_ADMIN_APP_CLIENT,
     TENANT_ADMIN_TYPE_CLIENT,
+    directory_settings,
     model_settings,
 )
 
@@ -100,12 +102,8 @@ def _keycloak(api: AdminApi | None) -> ProviderTokenConfig:
     )
     if api is None:
         return provider
-    directory = api.directory(issuer=ISSUER)
-    return replace(
-        provider,
-        sole_membership_lookup=KeycloakOrganizationLookup(provider.tenant_claims.model, directory),
-        tenant_memberships=KeycloakTenantMemberships(provider.tenant_claims.model, directory),
-    )
+    memberships = KeycloakTenantMemberships(provider.tenant_claims.model, api.directory(issuer=ISSUER))
+    return replace(provider, sole_membership_lookup=CountedMemberships(memberships), tenant_memberships=memberships)
 
 
 def _member(**changes) -> dict:
@@ -304,19 +302,78 @@ class TestOneDirectoryReadPerRequest:
         ],
         ids=["confirmed", "not-marked", "two-organizations"],
     )
-    def test_the_confirmation_is_read_from_the_list_and_the_lookup_is_not_asked(self, organizations, status):
-        async def second_read(claims):
-            raise AssertionError("GET /api/identity read the directory a second time")
+    def test_the_confirmation_is_read_from_the_one_list(self, organizations, status):
+        api = AdminApi(organizations)
 
-        provider = replace(_keycloak(AdminApi(organizations)), sole_membership_lookup=second_read)
-        limiter.reset()
-        client = TestClient(_app([descope_config(DESCOPE_PROJECT), provider], _Services(CANONICAL)))
-
-        response = client.get(IDENTITY, headers=_bearer(_tenant_admin()))
+        response, _ = _get(IDENTITY, _tenant_admin(), api)
 
         assert response.status_code == status, response.text
+        assert len(api.lookups()) == 1
         if status == 403:
             assert response.json() == {"detail": SOLE_MEMBERSHIP_NOT_CONFIRMED}
+
+
+class TestOneMembershipSource:
+    """``GET /api/identity`` and a route that confirms the token's tenant read one source, so they cannot disagree."""
+
+    @pytest.mark.parametrize(
+        ("api", "status"),
+        [
+            (AdminApi([organization(ACME, name="Acme", attributes={TENANT_ADMIN_MARKER: [SUBJECT]})]), 200),
+            (AdminApi([organization(ACME, name="Acme")]), 403),
+            (AdminApi([organization(ACME, attributes={TENANT_ADMIN_MARKER: [SUBJECT]}), organization(GLOBEX)]), 403),
+            (AdminApi([organization(GLOBEX, attributes={TENANT_ADMIN_MARKER: [SUBJECT]})]), 403),
+            (AdminApi(lookup_status=404), 403),
+        ],
+        ids=["confirmed", "not-marked", "two-organizations", "another-organization", "member-unknown"],
+    )
+    def test_the_endpoint_and_a_lookup_route_give_the_same_answer(self, api, status):
+        identity, _ = _get(IDENTITY, _tenant_admin(), api)
+        settings, _ = _get(SETTINGS_MANAGE_ROUTE, _tenant_admin(), api)
+
+        assert (identity.status_code, settings.status_code) == (status, status), (identity.text, settings.text)
+        if status == 403:
+            assert identity.json() == settings.json() == {"detail": SOLE_MEMBERSHIP_NOT_CONFIRMED}
+
+    def test_keycloak_refuses_a_lookup_given_beside_its_directory(self):
+        async def other(claims):
+            return [ACME]
+
+        with pytest.raises(MembershipSourcesDisagree):
+            keycloak_config(
+                ISSUER,
+                frozenset({MEMBER_TYPE_CLIENT, TENANT_ADMIN_TYPE_CLIENT}),
+                require_https=False,
+                organization_lookup=other,
+                **model_settings(MEMBER_TYPE_CLIENT, TENANT_ADMIN_TYPE_CLIENT),
+                **directory_settings(),
+            )
+
+    @pytest.mark.parametrize("swap", ["lookup", "no-lookup", "list"])
+    def test_a_provider_whose_lookup_is_not_its_list_is_refused(self, swap):
+        async def other_lookup(claims):
+            return [ACME]
+
+        async def other_list(claims):
+            return [TenantMembership(ACME, "Acme")]
+
+        provider = _keycloak(AdminApi([organization(ACME)]))
+        changes = {
+            "lookup": {"sole_membership_lookup": other_lookup},
+            "no-lookup": {"sole_membership_lookup": None},
+            "list": {"tenant_memberships": other_list},
+        }[swap]
+
+        with pytest.raises(MembershipSourcesDisagree):
+            replace(provider, **changes)
+
+    def test_a_lookup_with_no_list_is_a_provider_of_its_own(self):
+        async def lookup(claims):
+            return [ACME]
+
+        provider = replace(_keycloak(None), sole_membership_lookup=lookup)
+
+        assert (provider.sole_membership_lookup, provider.tenant_memberships) == (lookup, None)
 
 
 class TestAMemberTheRealmDoesNotKnow:
@@ -395,7 +452,11 @@ class TestAnUnreachableDirectoryIs502AndNoGrant:
             return [TenantMembership(ACME, "Acme")]
 
         monkeypatch.setattr(rbac, "MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS", 0.01)
-        provider = replace(_keycloak(AdminApi([organization(ACME)])), tenant_memberships=never)
+        provider = replace(
+            _keycloak(AdminApi([organization(ACME)])),
+            sole_membership_lookup=CountedMemberships(never),
+            tenant_memberships=never,
+        )
         limiter.reset()
         client = TestClient(_app([descope_config(DESCOPE_PROJECT), provider], _Services(CANONICAL)))
 
@@ -408,7 +469,11 @@ class TestAnUnreachableDirectoryIs502AndNoGrant:
         async def wrong(claims):
             return answer
 
-        provider = replace(_keycloak(AdminApi([organization(ACME)])), tenant_memberships=wrong)
+        provider = replace(
+            _keycloak(AdminApi([organization(ACME)])),
+            sole_membership_lookup=CountedMemberships(wrong),
+            tenant_memberships=wrong,
+        )
         limiter.reset()
         client = TestClient(_app([descope_config(DESCOPE_PROJECT), provider], _Services(CANONICAL)))
 

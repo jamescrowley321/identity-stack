@@ -17,7 +17,7 @@ from app.dependencies import rbac
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.providers import (
-    KeycloakOrganizationLookup,
+    CountedMemberships,
     KeycloakTenantClaims,
     KeycloakTenantMemberships,
     KeycloakTokenBinding,
@@ -124,10 +124,9 @@ class TestACompleteConfigurationStarts:
     def test_the_lookup_and_the_membership_list_read_one_directory(self, complete):
         provider = _keycloak()
 
-        assert isinstance(provider.sole_membership_lookup, KeycloakOrganizationLookup)
         assert isinstance(provider.tenant_memberships, KeycloakTenantMemberships)
-        assert provider.sole_membership_lookup.model == provider.tenant_claims.model
-        assert provider.sole_membership_lookup.directory == provider.tenant_memberships.directory
+        assert provider.sole_membership_lookup == CountedMemberships(provider.tenant_memberships)
+        assert provider.tenant_memberships.model == provider.tenant_claims.model
         assert provider.tenant_memberships.directory == KeycloakDirectory(
             issuer=LOCAL_ISSUER, client_id=DIRECTORY_CLIENT_ID, client_secret=DIRECTORY_CLIENT_SECRET
         )
