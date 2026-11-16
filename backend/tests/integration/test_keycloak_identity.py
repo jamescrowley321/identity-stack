@@ -8,6 +8,7 @@ realm's own read-only service account. The canonical services run on the test
 Postgres.
 """
 
+import uuid
 from dataclasses import replace
 
 import httpx
@@ -26,6 +27,8 @@ from app.middleware.providers import (
     ProviderTokenConfig,
     configured_providers,
 )
+from app.models.identity.provider import Provider, ProviderType
+from app.models.identity.user import IdPLink, User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
@@ -101,6 +104,9 @@ def environment(monkeypatch, keycloak):
     monkeypatch.setenv("KEYCLOAK_AUDIENCES", f"{MEMBER_TYPE_CLIENT},{TENANT_ADMIN_TYPE_CLIENT}")
     monkeypatch.setenv("KEYCLOAK_REQUIRE_HTTPS", "false")
     set_model_environment(monkeypatch, MEMBER_TYPE_CLIENT, TENANT_ADMIN_TYPE_CLIENT)
+    # Keycloak's just-in-time provisioning is opt-in, as an operator sets it with
+    # JIT_ENABLED_PROVIDERS=ory,keycloak (read once at import).
+    monkeypatch.setattr(protected, "JIT_ENABLED_PROVIDERS", {"ory", "keycloak"})
     return monkeypatch
 
 
@@ -187,6 +193,35 @@ async def test_a_first_call_provisions_the_user_and_reports_the_tokens_organizat
     link = await IdPLinkRepository(registered).get_by_provider_name_and_sub("keycloak", ALICE.id)
     assert link is not None
     assert str(link.user_id) == body["user"]["id"]
+
+
+async def test_a_first_call_grants_no_canonical_role(registered, keycloak):
+    """Decision 9: a Keycloak principal's grants come from its token, so provisioning writes none."""
+    response = await _get(_app(registered), IDENTITY, keycloak.login(ALICE, client_id=MEMBER_APP_CLIENT))
+
+    assert response.status_code == 200, response.text
+    user_id = uuid.UUID(response.json()["user"]["id"])
+    assert await UserTenantRoleRepository(registered).list_by_user(user_id) == []
+
+
+async def test_linking_an_existing_user_adds_no_canonical_role_to_it(registered, keycloak):
+    """Decision 9: a Keycloak login linked to an Ory user's verified email gives that user no grant.
+
+    An Ory session reads its grants from the canonical model (CANONICAL_RBAC_PROVIDERS),
+    so a default role written here would be held by the same person's Ory session.
+    """
+    ory = Provider(name="ory", type=ProviderType.ory, issuer_url="https://ory.example.test", capabilities=["sso"])
+    existing = User(email="alice@acme.test", user_name="alice@acme.test", status=UserStatus.active)
+    registered.add_all([ory, existing])
+    await registered.flush()
+    registered.add(IdPLink(user_id=existing.id, provider_id=ory.id, external_sub="ory|alice"))
+    await registered.flush()
+
+    response = await _get(_app(registered), IDENTITY, keycloak.login(ALICE, client_id=MEMBER_APP_CLIENT))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["user"]["id"] == str(existing.id)
+    assert await UserTenantRoleRepository(registered).list_by_user(existing.id) == []
 
 
 async def test_a_second_call_resolves_the_same_user(registered, keycloak):

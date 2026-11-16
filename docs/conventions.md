@@ -399,8 +399,10 @@ adapter is Descope-backed: `POST /api/roles/assign` and `/api/roles/remove` are,
 
 `GET /api/identity` takes the tenant and the permissions of a `token_authorized_only`
 principal (Keycloak) from the same resolver, through `app.dependencies.rbac.token_tenant`,
-and **MUST NOT** report the canonical role assignments as that principal's: provisioning's
-default tenant and role are not its grants. Its memberships come from the provider's
+and **MUST NOT** report the canonical role assignments as that principal's: canonical roles
+are not its grants, and provisioning writes none for it (`assign_default_role=False`). A
+token that names no tenant **MUST** be refused (403 `No tenant context`) before any lookup
+and before provisioning, as on every other route. Its memberships come from the provider's
 `tenant_memberships` list, and a token whose tenant is not on that list **MUST** be refused
 (403): the directory is believed over the token. A list that cannot be had is 502. The
 list is read once per request, within one `MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`, and also

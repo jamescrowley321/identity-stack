@@ -81,11 +81,21 @@ local realm and are recorded in `keycloak/fixtures/README.md`.
   does not clear the marker: re-adding them restores the type there unless the admin removed
   the id as well.
 - Linking a Keycloak identity to an existing canonical user trusts the realm's
-  `email_verified` (just-in-time provisioning links on a verified email). The realm must
+  `email_verified` (just-in-time provisioning links on a verified email). Provisioning
+  Keycloak users is therefore opt-in: an operator adds `keycloak` to
+  `JIT_ENABLED_PROVIDERS`, whose default stays `ory`. The realm must
   broker no identity provider with trusted email, allow no self-registration, keep emails
   unique and verify a changed email (`docs/security.md`). The alternative, never linking a
   Keycloak identity to another provider's user, would refuse every Keycloak user whose email
   is already canonical, because canonical emails are unique.
+- Provisioning writes no canonical role for a Keycloak user, whether it creates the user or
+  links it to another provider's user by email. Its grants come from the token, and a role
+  written for a linked user would be held by that user's sessions of a provider that reads
+  canonical roles (`CANONICAL_RBAC_PROVIDERS`).
+- A token that names no organization is refused everywhere, `GET /api/identity` included
+  (403, before provisioning). The alternative, answering the identity with no
+  `token_tenant` and the listed memberships, would let a client read the directory with a
+  token that is good for no tenant.
 - A portable permission holds in every organization its user belongs to. Measured on
   Keycloak 26.8.2 (`keycloak/fixtures/README.md`): after a user is removed from an
   organization, the access token they hold for it stays valid until it expires (300 seconds
