@@ -33,14 +33,17 @@ A third shape carries authorization in the token but not all of it: a Keycloak
 token of an organization-bound type holds only for a caller whose one
 organization is the token's. This module asks the provider's membership lookup
 for those tokens, after everything the token alone decides: no lookup wired or
-an answer of "no" is 403, and a lookup that fails is 502 and no grant. "After"
+an answer of "no" is 403, and a lookup that fails, or does not answer within
+``MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS``, is 502 and no grant. "After"
 holds however a route declares its dependencies: ``get_tenant_id``'s own
 dependency applies the checks of every gate on the route before it asks.
 """
 
+import asyncio
 import inspect
+import math
 import weakref
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -56,9 +59,9 @@ from app.dependencies.tenant_access import (
     awaiting_confirmation,
     resolve_tenant_access,
 )
-from app.knobs import knob_set
+from app.knobs import knob, knob_set
 from app.logbook import logbook
-from app.middleware.providers import ProviderTokenConfig
+from app.middleware.providers import ProviderConfigurationError, ProviderTokenConfig
 from app.models.database import get_session_factory
 from app.models.identity.user import UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
@@ -83,6 +86,28 @@ INSUFFICIENT_PERMISSIONS = "Insufficient permissions"
 _GATE_CHECKS: "weakref.WeakKeyDictionary[Callable, Callable[[TenantAccess], bool]]" = weakref.WeakKeyDictionary()
 # The provider's directory could not say which tenants the caller belongs to.
 MEMBERSHIP_LOOKUP_FAILED = "Membership lookup failed"
+
+
+def membership_lookup_timeout() -> float:
+    """``MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`` as seconds: how long a request waits for a membership lookup.
+
+    Raises ``ProviderConfigurationError`` for a value that is not a positive,
+    finite number: a limit that cannot be read is not replaced by a guess.
+    """
+    raw = knob("MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS", "5")
+    try:
+        seconds = float(raw)
+    except ValueError:
+        seconds = math.nan
+    if not (math.isfinite(seconds) and seconds > 0):
+        raise ProviderConfigurationError(
+            f"MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS must be a positive number of seconds, not {raw!r}"
+        )
+    return seconds
+
+
+# Fixed when this module is imported, so a value that is no limit stops startup.
+MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS = membership_lookup_timeout()
 
 
 async def get_rbac_session() -> AsyncIterator[AsyncSession | None]:
@@ -277,8 +302,10 @@ async def _confirm_sole_membership(request: Request, claims: dict, tenant_id: st
     For claims that are ``sole_membership_required`` (conventions §18). ``None``
     is a refusal the resolver answers with 403: no lookup is wired for the
     provider, or the caller belongs to no tenant, to another one, or to several.
-    A lookup that raises, or answers with anything but a collection of strings,
-    could not be asked: that is 502 and no grant, as for the FGA store (§17). A
+    A lookup that raises, that does not answer within
+    ``MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`` (it is cancelled then), or that answers
+    with anything but a collection of strings, could not be asked: that is 502
+    and no grant, as for the FGA store (§17). A
     confirmation is kept on ``request.state`` for the rest of the request, so a
     route that depends on both ``get_tenant_id`` and ``require_permission`` asks
     once.
@@ -293,10 +320,16 @@ async def _confirm_sole_membership(request: Request, claims: dict, tenant_id: st
     if lookup is None:
         logger.warning("membership not confirmed: provider=%s has no membership lookup (sub=%r)", name, sub)
         return None
+    limit = MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS
+    bound = asyncio.timeout(limit)
     try:
-        tenants = await lookup(claims)
+        async with bound:
+            tenants = await lookup(claims)
     except Exception as exc:
-        logger.warning("membership lookup failed for provider=%s sub=%r", name, sub, exc_info=True)
+        if bound.expired():
+            logger.warning("membership lookup of provider=%s did not answer within %s s (sub=%r)", name, limit, sub)
+        else:
+            logger.warning("membership lookup failed for provider=%s sub=%r", name, sub, exc_info=True)
         raise HTTPException(status_code=502, detail=MEMBERSHIP_LOOKUP_FAILED) from exc
     if not isinstance(tenants, (list, tuple, set, frozenset)) or not all(isinstance(entry, str) for entry in tenants):
         logger.warning("membership lookup of provider=%s gave an answer that cannot be used (sub=%r)", name, sub)
@@ -313,13 +346,23 @@ async def _confirm_sole_membership(request: Request, claims: dict, tenant_id: st
     return tenant_id
 
 
+def _is_key_of(registered: Mapping, call: object) -> bool:
+    """Whether ``call`` is a key of ``registered``. A callable that cannot be hashed is a key of nothing."""
+    try:
+        return call in registered
+    except TypeError:
+        return False
+
+
 def _route_gate_checks(request: Request) -> list[Callable[[TenantAccess], bool]]:
     """The check of every ``require_*`` gate the request's route depends on, at any depth.
 
     Read from the route FastAPI matched, so it is the same list whether a gate
     is declared in ``dependencies=[...]``, as a parameter, or on the router. A
-    gate the application has overridden is left out: its check no longer runs.
-    Empty for a request that no route was matched for (one built by hand).
+    gate the application has overridden is left out, and so is everything
+    under an overridden dependency: FastAPI runs the override in its place, and
+    none of what it depended on. Empty for a request that no route was matched
+    for (one built by hand).
     """
     scope = getattr(request, "scope", None)
     route = scope.get("route") if isinstance(scope, dict) else None
@@ -330,9 +373,11 @@ def _route_gate_checks(request: Request) -> list[Callable[[TenantAccess], bool]]
     checks = []
     while pending:
         dependant = pending.pop()
-        pending.extend(dependant.dependencies)
         call = dependant.call
-        if call is not None and call not in overridden and call in _GATE_CHECKS:
+        if _is_key_of(overridden, call):
+            continue
+        pending.extend(dependant.dependencies)
+        if _is_key_of(_GATE_CHECKS, call):
             checks.append(_GATE_CHECKS[call])
     return checks
 
