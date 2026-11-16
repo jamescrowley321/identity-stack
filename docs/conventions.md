@@ -328,7 +328,7 @@ API or its FGA store **MUST** depend on `app.dependencies.descope.require_descop
 on the route or on its router. The resolver gives a principal of a canonical provider a
 canonical tenant id, which names nothing in Descope, so the guard refuses (403) every
 principal whose provider is not `descope_managed` (§28), before the tenant is resolved and
-before Descope is called. Every route that depends on `get_tenant_id` **MUST** be listed in
+before Descope is called. A request with no claims gets 401 from the guard itself (§17). Every route that depends on `get_tenant_id` **MUST** be listed in
 `backend/tests/unit/test_descope_backed_routes.py`, either in `DESCOPE_TENANT_ROUTES` or,
 with its reason, in `PROVIDER_NEUTRAL_ROUTES`. Adding a route to the second register is a
 reviewed decision, and a route whose service mirrors its writes to Descope through a sync
@@ -363,7 +363,7 @@ configuration at startup (`refuse_canonical_descope_managed`).
   `dct` that disagrees with the header is refused.
 - Exception: a request that no middleware attributed to a provider, which only a test
   that sets `request.state.claims` by hand can make, is read with Descope's extractor by
-  the resolver. `require_descope_principal` refuses it: the guard passes only a provider
+  the resolver, which logs a warning each time. `require_descope_principal` refuses it: the guard passes only a provider
   it knows to be `descope_managed`. Code in `app/` that sets `request.state.claims`
   **MUST** set `request.state.provider` beside it.
 - Exception: `require_fga` (`dependencies/fga.py::_extract_tenant_id`) reads `dct` itself.
