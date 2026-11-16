@@ -14,11 +14,12 @@ import base64
 import json
 import time
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from expression import Ok
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
@@ -292,3 +293,50 @@ class TestRoleAssignmentIsDescopeBacked:
 
         assert response.status_code == 403
         assert response.json() == {"detail": "Cannot manage roles for a different tenant"}
+
+
+def _hand_built_request(**state: object) -> SimpleNamespace:
+    """A request no middleware touched: only what the caller puts on ``request.state``."""
+    return SimpleNamespace(state=SimpleNamespace(**state))
+
+
+class TestClaimsWithNoProviderAreRefused:
+    """The guard passes a principal it knows to be Descope's, never one it cannot place."""
+
+    @pytest.mark.parametrize(
+        "state",
+        [
+            {"claims": DESCOPE_ADMIN},
+            {"claims": DESCOPE_ADMIN, "provider": None},
+            {"claims": DESCOPE_ADMIN, "provider": "Descope"},
+        ],
+        ids=["no provider", "provider is None", "provider is only a name"],
+    )
+    def test_claims_that_no_provider_is_recorded_for(self, state):
+        with pytest.raises(HTTPException) as refused:
+            require_descope_principal(_hand_built_request(**state))
+
+        assert refused.value.status_code == 403
+        assert refused.value.detail == REFUSED["detail"]
+
+    def test_the_refusal_is_logged_with_the_subject(self, caplog):
+        with caplog.at_level("WARNING", logger="app.dependencies.descope"), pytest.raises(HTTPException):
+            require_descope_principal(_hand_built_request(claims=DESCOPE_ADMIN))
+
+        (message,) = [record.getMessage() for record in caplog.records if record.name == "app.dependencies.descope"]
+        assert message == (
+            "refused: provider=unrecorded sub='descope-admin' called a route that serves Descope principals only"
+        )
+
+    def test_a_descope_principal_passes(self):
+        request = _hand_built_request(claims=DESCOPE_ADMIN, provider=descope_config(DESCOPE_PROJECT))
+
+        assert require_descope_principal(request) is None
+
+    def test_a_request_with_no_claims_is_left_to_authentication(self, client):
+        """No token: the 401 comes from authentication, as on every other route."""
+        assert require_descope_principal(_hand_built_request()) is None
+
+        response = client.get("/api/documents")
+
+        assert response.status_code == 401

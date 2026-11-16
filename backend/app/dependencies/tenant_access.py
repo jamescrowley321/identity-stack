@@ -74,11 +74,12 @@ def _caller(request: Request, claims: dict) -> tuple[str, object]:
 def _claims_source(request: Request, claims: dict) -> TenantClaims | None:
     """What the request's provider says about the tenant, read with that provider's own extractor.
 
-    ``None`` when the provider declares no extractor, when its extractor raises,
-    and when its answer cannot be used (see ``_usable``): each is refused by the
-    caller. A request that no middleware attributed to a provider (one built
-    by hand, with only ``request.state.claims`` set) is read with Descope's
-    extractor, which is what the claims path has always been.
+    ``None`` when the provider declares no extractor, when the token names no
+    tenant, when the extractor raises, and when its answer cannot be used (see
+    ``_usable``): each is refused by the caller, the last two with a warning.
+    A request that no middleware attributed to a provider (one built by hand,
+    with only ``request.state.claims`` set) is read with Descope's extractor,
+    which is what the claims path has always been.
     """
     provider = getattr(request.state, "provider", None)
     if not isinstance(provider, ProviderTokenConfig):
@@ -97,6 +98,9 @@ def _claims_source(request: Request, claims: dict) -> TenantClaims | None:
             *_caller(request, claims),
             exc_info=True,
         )
+        return None
+    if isinstance(claimed, TenantClaims) and claimed.tenant_id is None:
+        # The token names no tenant: an everyday answer, refused without a warning.
         return None
     if not _usable(claimed):
         logger.warning(
