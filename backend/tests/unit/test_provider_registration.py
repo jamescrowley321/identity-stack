@@ -315,12 +315,17 @@ class TestRegisteredProviderReachesTheMiddlewares:
         validate.return_value = _ory_claims()
         ory = client.get(PROBE, headers=_bearer(_ory_claims()))
         ory_call = validate.await_args.kwargs
+        validate.return_value = _descope_claims()
+        descope = client.get(PROBE, headers=_bearer(_descope_claims()))
+        descope_call = validate.await_args.kwargs
 
         assert second.json() == {"provider": SECOND_NAME, "registered_as": SECOND_NAME, "tenant_id": None}
         assert second_call["disco_doc_address"] == f"{SECOND_ISSUER}/.well-known/openid-configuration"
         assert second_call["token_validation_config"].require_https is False
         assert ory.json() == {"provider": "Ory", "registered_as": "Ory", "tenant_id": None}
         assert ory_call["token_validation_config"].require_https is True
+        assert descope.json() == {"provider": "Descope", "registered_as": "Descope", "tenant_id": None}
+        assert descope_call["token_validation_config"].require_https is True
 
     def test_gateway_attributes_its_tokens_to_it(self, second_registered):
         client = TestClient(_configured_app(second_registered, "gateway"))
@@ -377,6 +382,12 @@ class TestRegisteredProviderLogsOut:
         assert second_request.address == f"{SECOND_ISSUER}/.well-known/openid-configuration"
         assert second_request.policy == DiscoveryPolicy(require_https=False)
         assert ory_request.policy == DiscoveryPolicy(require_https=True)
+
+    def test_plain_http_is_refused_for_every_provider_that_did_not_ask_for_it(self, second_registered):
+        """One provider's switch moves no other's: each one's own setting is what validation is handed."""
+        requires_https = {provider.name: provider.require_https for provider in configured_providers()}
+
+        assert requires_https == {"Descope": True, "Ory": True, SECOND_NAME: False}
 
 
 class TestTenantIdComesFromTheExtractor:
