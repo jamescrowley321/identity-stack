@@ -102,7 +102,7 @@ def _keycloak(api: AdminApi | None) -> ProviderTokenConfig:
     return replace(
         provider,
         sole_membership_lookup=KeycloakOrganizationLookup(provider.tenant_claims.model, directory),
-        tenant_memberships=KeycloakTenantMemberships(directory),
+        tenant_memberships=KeycloakTenantMemberships(provider.tenant_claims.model, directory),
     )
 
 
@@ -252,6 +252,61 @@ class TestTheDirectoryIsBelievedOverTheToken:
         response, _ = _get(IDENTITY, _member(), None)
 
         _assert(response, 403, MEMBERSHIPS_NOT_LISTED)
+
+
+class TestOneDirectoryReadPerRequest:
+    """The confirmation of an organization-bound token and the membership list come from one read, under one limit."""
+
+    @pytest.mark.parametrize("claims", [_member(), _tenant_admin()], ids=["member", "tenant-admin"])
+    def test_get_identity_asks_the_admin_api_once(self, claims):
+        api = AdminApi([organization(ACME, name="Acme", attributes={TENANT_ADMIN_MARKER: [SUBJECT]})])
+
+        response, _ = _get(IDENTITY, claims, api)
+
+        assert response.status_code == 200, response.text
+        assert len(api.lookups()) == 1
+
+    @pytest.mark.parametrize(
+        ("organizations", "status"),
+        [
+            ([organization(ACME, name="Acme", attributes={TENANT_ADMIN_MARKER: [SUBJECT]})], 200),
+            ([organization(ACME, name="Acme")], 403),
+            ([organization(ACME, attributes={TENANT_ADMIN_MARKER: [SUBJECT]}), organization(GLOBEX)], 403),
+        ],
+        ids=["confirmed", "not-marked", "two-organizations"],
+    )
+    def test_the_confirmation_is_read_from_the_list_and_the_lookup_is_not_asked(self, organizations, status):
+        async def second_read(claims):
+            raise AssertionError("GET /api/identity read the directory a second time")
+
+        provider = replace(_keycloak(AdminApi(organizations)), sole_membership_lookup=second_read)
+        limiter.reset()
+        client = TestClient(_app([descope_config(DESCOPE_PROJECT), provider], _Services(CANONICAL)))
+
+        response = client.get(IDENTITY, headers=_bearer(_tenant_admin()))
+
+        assert response.status_code == status, response.text
+        if status == 403:
+            assert response.json() == {"detail": SOLE_MEMBERSHIP_NOT_CONFIRMED}
+
+
+class TestAMemberTheRealmDoesNotKnow:
+    """A user deleted from the realm while the token lives: the Admin API answers 404, the request 403."""
+
+    @pytest.mark.parametrize(
+        ("path", "claims", "detail"),
+        [
+            (IDENTITY, _member(), TENANT_NOT_A_MEMBERSHIP),
+            (IDENTITY, _tenant_admin(), SOLE_MEMBERSHIP_NOT_CONFIRMED),
+            (SETTINGS_MANAGE_ROUTE, _tenant_admin(), SOLE_MEMBERSHIP_NOT_CONFIRMED),
+        ],
+        ids=["identity-member", "identity-tenant-admin", "settings-manage"],
+    )
+    def test_is_refused_not_answered_502(self, path, claims, detail):
+        response, services = _get(path, claims, AdminApi(lookup_status=404))
+
+        _assert(response, 403, detail)
+        services.provisioner.provision.assert_not_awaited()
 
 
 class TestAnUnreachableDirectoryIs502AndNoGrant:

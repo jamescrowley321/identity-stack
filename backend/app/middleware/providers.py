@@ -34,7 +34,7 @@ from app.middleware.keycloak import (
     single_audience,
     token_model,
 )
-from app.services.keycloak_directory import KeycloakDirectory, MemberIdRefused
+from app.services.keycloak_directory import IssuerNamesNoRealm, KeycloakDirectory, MemberIdRefused, MemberUnknown
 
 RS256 = "RS256"
 # The claim that names the client a token was issued to (OIDC Core §2).
@@ -91,17 +91,27 @@ SoleMembershipLookup = Callable[[dict], Awaitable[SoleMembershipAnswer]]
 
 @dataclass(frozen=True)
 class TenantMembership:
-    """One tenant the caller belongs to, as the provider's directory names it."""
+    """One tenant the caller belongs to, as the provider's directory names it.
+
+    ``counted`` says whether the membership counts in the sole-membership
+    confirmation (``SoleMembershipLookup``): every membership does, except the
+    token's own tenant where the directory does not grant the caller the
+    token's roles. Such a tenant is still listed, but the token is not
+    confirmed there.
+    """
 
     tenant_id: str
     tenant_name: str
+    counted: bool = True
 
 
 # A provider's membership list: every tenant the caller of these verified claims
 # belongs to, as the provider's directory has it now, for ``GET /api/identity``.
 # It raises when the directory cannot be asked and bounds its own time (§6).
 # Only a ``token_authorized_only`` provider has one: the tenant of its principals
-# is not in the canonical model.
+# is not in the canonical model. Where a provider has both, the ``counted``
+# entries of the list are exactly what its ``sole_membership_lookup`` answers,
+# so ``rbac.token_tenant`` confirms the token from the one list it reads.
 TenantMembershipsLookup = Callable[[dict], Awaitable[Sequence[TenantMembership]]]
 
 
@@ -347,71 +357,76 @@ class KeycloakTenantClaims:
 
 
 @dataclass(frozen=True)
-class KeycloakOrganizationLookup:
-    """Keycloak's ``sole_membership_lookup``: the caller's organizations, counting the token's only where granted.
+class KeycloakTenantMemberships:
+    """Keycloak's ``tenant_memberships``: every organization the caller belongs to, as the Admin API has it now.
 
-    Answers every organization the caller belongs to, as the Admin API has it
-    now, except the token's own organization when that organization does not
-    mark the caller as holding the token's type (``type:<type client>``,
-    ``app.services.keycloak_directory``). So a tenant admin of one organization
-    who joins a second and leaves the first is not confirmed in the second: the
-    roles are realm-wide, the marker is not. Every other membership counts, so
-    a caller in two organizations is still refused (decision 10).
+    The token's own organization is ``counted`` only when it marks the caller as
+    holding the token's type (``type:<type client>``,
+    ``app.services.keycloak_directory``); every other organization is counted.
 
     The member id is the verified token's ``sub`` and nothing else. A ``sub``
-    that is not a well-formed id belongs to no organization: the answer is
-    empty and no call is made.
+    that is not a well-formed id, or one the realm does not know (a user
+    deleted while the token lives), belongs to no organization: the list is
+    empty, and for a malformed id no call is made.
+    """
+
+    model: KeycloakTokenModel
+    directory: KeycloakDirectory
+
+    async def __call__(self, claims: dict) -> list[TenantMembership]:
+        try:
+            memberships = await self.directory.organizations_of(claims.get("sub"))
+        except (MemberIdRefused, MemberUnknown):
+            return []
+        token_organization = organization(claims)
+        token_type = single_audience(claims)
+        return [
+            TenantMembership(
+                tenant_id=membership.alias,
+                tenant_name=membership.name,
+                counted=membership.alias != token_organization
+                or (token_type is not None and token_type in membership.granted_types),
+            )
+            for membership in memberships
+        ]
+
+
+@dataclass(frozen=True)
+class KeycloakOrganizationLookup:
+    """Keycloak's ``sole_membership_lookup``: the ``counted`` organizations of ``KeycloakTenantMemberships``.
+
+    So a tenant admin of one organization who joins a second and leaves the
+    first is not confirmed in the second: the roles are realm-wide, the marker
+    is not. Every other membership counts, so a caller in two organizations is
+    still refused (decision 10).
     """
 
     model: KeycloakTokenModel
     directory: KeycloakDirectory
 
     async def __call__(self, claims: dict) -> list[str]:
-        try:
-            memberships = await self.directory.organizations_of(claims.get("sub"))
-        except MemberIdRefused:
-            return []
-        token_organization = organization(claims)
-        token_type = single_audience(claims)
-        return [
-            membership.alias
-            for membership in memberships
-            if membership.alias != token_organization
-            or (token_type is not None and token_type in membership.granted_types)
-        ]
-
-
-@dataclass(frozen=True)
-class KeycloakTenantMemberships:
-    """Keycloak's ``tenant_memberships``: every organization the caller belongs to, alias and name.
-
-    The member id is the verified token's ``sub``. A ``sub`` that is not a
-    well-formed id belongs to no organization: the list is empty and no call is
-    made.
-    """
-
-    directory: KeycloakDirectory
-
-    async def __call__(self, claims: dict) -> list[TenantMembership]:
-        try:
-            memberships = await self.directory.organizations_of(claims.get("sub"))
-        except MemberIdRefused:
-            return []
-        return [TenantMembership(tenant_id=m.alias, tenant_name=m.name) for m in memberships]
+        listed = await KeycloakTenantMemberships(self.model, self.directory)(claims)
+        return [membership.tenant_id for membership in listed if membership.counted]
 
 
 def keycloak_directory(issuer_url: str, client_id: str, client_secret: str) -> KeycloakDirectory:
     """The organization lookup's directory, or ``ProviderConfigurationError`` when it cannot be built.
 
     Both credentials are required: without them no organization-bound token
-    could be confirmed and no membership listed. The message names the
-    variable, never its value.
+    could be confirmed and no membership listed. So is an issuer of the form
+    ``<origin>/realms/<realm>``, the only one the Admin API can be derived
+    from. The message names the variable, never the secret.
     """
     if not client_id:
         raise ProviderConfigurationError("KEYCLOAK_DIRECTORY_CLIENT_ID must be set when KEYCLOAK_ISSUER_URL is set")
     if not client_secret:
         raise ProviderConfigurationError("KEYCLOAK_DIRECTORY_CLIENT_SECRET must be set when KEYCLOAK_ISSUER_URL is set")
-    return KeycloakDirectory(issuer=issuer_url.rstrip("/"), client_id=client_id, client_secret=client_secret)
+    try:
+        return KeycloakDirectory(issuer=issuer_url.rstrip("/"), client_id=client_id, client_secret=client_secret)
+    except IssuerNamesNoRealm as exc:
+        raise ProviderConfigurationError(
+            "KEYCLOAK_ISSUER_URL must be <origin>/realms/<realm>: the organization lookup derives its Admin API from it"
+        ) from exc
 
 
 def keycloak_config(
@@ -493,7 +508,7 @@ def keycloak_config(
         token_binding=KeycloakTokenBinding(model),
         sole_membership_lookup=organization_lookup
         or (KeycloakOrganizationLookup(model, directory) if directory is not None else None),
-        tenant_memberships=KeycloakTenantMemberships(directory) if directory is not None else None,
+        tenant_memberships=KeycloakTenantMemberships(model, directory) if directory is not None else None,
         token_authorized_only=True,
     )
 

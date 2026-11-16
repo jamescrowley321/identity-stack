@@ -19,8 +19,13 @@ in an attribute per user type: ``type:<type client>`` lists the ids of the
 members who hold that type there. Only a realm admin can write an organization
 attribute; this service account cannot.
 
-Every failure raises ``KeycloakDirectoryError`` with the HTTP status (``None``
-for no response) and logs that status. The client secret and the
+A well-formed id the realm does not know (404: the user was deleted while
+their token still lives) raises ``MemberUnknown``: such a user belongs to no
+organization. A 401 from the Admin API drops the cached service-account token,
+and the lookup is asked once more with a fresh one.
+
+Every other failure raises ``KeycloakDirectoryError`` with the HTTP status
+(``None`` for no response) and logs that status. The client secret and the
 service-account token are never logged and never in a ``repr``.
 """
 
@@ -56,6 +61,14 @@ class MemberIdRefused(ValueError):
     """The token's ``sub`` is not a well-formed member id. No call was made."""
 
 
+class IssuerNamesNoRealm(ValueError):
+    """The issuer is not ``<origin>/realms/<realm>``, so no realm Admin API can be derived from it."""
+
+
+class MemberUnknown(LookupError):
+    """The realm knows no user with this member id (the Admin API answered 404)."""
+
+
 class KeycloakDirectoryError(Exception):
     """The Admin API could not be asked: no response, a non-2xx status, or an answer of the wrong shape.
 
@@ -66,6 +79,10 @@ class KeycloakDirectoryError(Exception):
     def __init__(self, reason: str, *, status: int | None = None) -> None:
         super().__init__(reason)
         self.status = status
+
+
+class _TokenRefused(Exception):
+    """The Admin API answered 401 to the service-account token. Internal: the lookup retries once."""
 
 
 @dataclass(frozen=True)
@@ -117,6 +134,14 @@ def _memberships(body: object, member_id: str) -> tuple[OrganizationMembership, 
     return tuple(memberships)
 
 
+def _admin_api_base(issuer: str) -> str | None:
+    """The realm's Admin API base for an issuer ``<origin>/realms/<realm>``; ``None`` for any other form."""
+    origin, separator, realm = issuer.rstrip("/").rpartition("/realms/")
+    if not separator or not origin or not realm or "/" in realm:
+        return None
+    return f"{origin}/admin/realms/{realm}"
+
+
 def _default_client() -> OutboundClient:
     return outbound_client(timeout=DIRECTORY_TIMEOUT_SECONDS)
 
@@ -126,8 +151,9 @@ class KeycloakDirectory:
     """The organizations of a realm's users, read with one service account.
 
     ``issuer`` is the realm's issuer, ``<origin>/realms/<realm>``; the token
-    endpoint and the Admin API are derived from it. Two directories built from
-    the same settings compare equal.
+    endpoint and the Admin API are derived from it, and a directory is not
+    built for any other form (``IssuerNamesNoRealm``), so startup refuses it.
+    Two directories built from the same settings compare equal.
     """
 
     issuer: str
@@ -138,13 +164,13 @@ class KeycloakDirectory:
     # process; never logged.
     _token: dict = field(default_factory=dict, compare=False, repr=False)
 
+    def __post_init__(self) -> None:
+        if _admin_api_base(self.issuer) is None:
+            raise IssuerNamesNoRealm("the issuer is not <origin>/realms/<realm>")
+
     def _admin_realm(self) -> str:
-        """The realm's Admin API base. An issuer that is not ``<origin>/realms/<realm>`` names none."""
-        origin, separator, realm = self.issuer.rstrip("/").rpartition("/realms/")
-        if not separator or not origin or not realm or "/" in realm:
-            logger.warning("organization lookup: the issuer names no realm Admin API")
-            raise KeycloakDirectoryError("the issuer is not <origin>/realms/<realm>")
-        return f"{origin}/admin/realms/{realm}"
+        """The realm's Admin API base (the issuer was checked when the directory was built)."""
+        return str(_admin_api_base(self.issuer))
 
     async def _service_account_token(self, http: OutboundClient) -> str:
         cached = self._token.get("value")
@@ -181,34 +207,52 @@ class KeycloakDirectory:
         """Every organization ``member_id`` belongs to, with the types each one's markers grant them.
 
         Raises ``MemberIdRefused`` before any call for an id that is not well
-        formed, and ``KeycloakDirectoryError`` when the directory cannot be asked.
+        formed, ``MemberUnknown`` when the realm has no such user, and
+        ``KeycloakDirectoryError`` when the directory cannot be asked. A lookup
+        the Admin API answers 401 is asked once more with a fresh
+        service-account token; a second 401 is a failure.
         """
         with tracer.start_as_current_span("KeycloakDirectory.organizations_of"):
             if not _well_formed_member_id(member_id):
                 logger.warning("organization lookup refused a member id that is not well formed")
                 raise MemberIdRefused("the member id is not well formed")
-            admin_realm = self._admin_realm()
+            url = f"{self._admin_realm()}/organizations/members/{quote(member_id, safe='')}/organizations"
             async with self.client_factory() as http:
-                token = await self._service_account_token(http)
                 try:
-                    response = await http.get(
-                        f"{admin_realm}/organizations/members/{quote(member_id, safe='')}/organizations",
-                        params={"briefRepresentation": "false"},
-                        headers={"Authorization": f"Bearer {token}"},
-                    )
-                    response.raise_for_status()
-                    body = response.json()
-                except UpstreamStatusError as exc:
-                    status = exc.response.status_code
-                    if status == 401:
-                        # A token the Admin API no longer accepts is not kept.
+                    body = await self._lookup(http, url, member_id)
+                except _TokenRefused:
+                    # A token the Admin API no longer accepts is not kept: one more try with a new one.
+                    self._token.clear()
+                    logger.warning("organization lookup answered 401; asking once more with a new token")
+                    try:
+                        body = await self._lookup(http, url, member_id)
+                    except _TokenRefused as exc:
                         self._token.clear()
-                    logger.warning("organization lookup answered %s (member=%s)", status, member_id)
-                    raise KeycloakDirectoryError("organization lookup refused", status=status) from exc
-                except UpstreamTransportError as exc:
-                    logger.warning("organization lookup did not answer (%s)", type(exc).__name__)
-                    raise KeycloakDirectoryError("organization lookup unreachable") from exc
-                except ValueError as exc:
-                    logger.warning("organization lookup answered something that is not JSON")
-                    raise KeycloakDirectoryError("organization lookup answer unreadable") from exc
+                        logger.warning("organization lookup answered 401 again (member=%s)", member_id)
+                        raise KeycloakDirectoryError("organization lookup refused", status=401) from exc
             return _memberships(body, member_id)
+
+    async def _lookup(self, http: OutboundClient, url: str, member_id: str) -> object:
+        """The lookup's JSON answer. Raises ``_TokenRefused`` on a 401, the typed failures otherwise."""
+        token = await self._service_account_token(http)
+        try:
+            response = await http.get(
+                url, params={"briefRepresentation": "false"}, headers={"Authorization": f"Bearer {token}"}
+            )
+            response.raise_for_status()
+            return response.json()
+        except UpstreamStatusError as exc:
+            status = exc.response.status_code
+            if status == 401:
+                raise _TokenRefused from exc
+            if status == 404:
+                logger.warning("organization lookup answered 404, no such member in the realm (member=%s)", member_id)
+                raise MemberUnknown("the realm knows no such member") from exc
+            logger.warning("organization lookup answered %s (member=%s)", status, member_id)
+            raise KeycloakDirectoryError("organization lookup refused", status=status) from exc
+        except UpstreamTransportError as exc:
+            logger.warning("organization lookup did not answer (%s)", type(exc).__name__)
+            raise KeycloakDirectoryError("organization lookup unreachable") from exc
+        except ValueError as exc:
+            logger.warning("organization lookup answered something that is not JSON")
+            raise KeycloakDirectoryError("organization lookup answer unreadable") from exc

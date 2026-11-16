@@ -553,12 +553,15 @@ class TestOneAssemblyBehindBothBuilders:
         assert by_hand == configured_providers()
 
     def test_a_shared_issuer_is_refused_by_hand_too(self):
-        with pytest.raises(ProviderConfigurationError, match=ORY_ISSUER):
+        # A Keycloak issuer is <origin>/realms/<realm> (its Admin API is derived from it), so the
+        # issuer both providers claim has that form.
+        shared = "https://shared.example.test/realms/identity-stack"
+        with pytest.raises(ProviderConfigurationError, match=shared):
             build_provider_configs(
                 descope_project_id=DESCOPE_PROJECT,
-                ory_issuer_url=ORY_ISSUER,
+                ory_issuer_url=shared,
                 ory_audience=ORY_AUDIENCE,
-                keycloak_issuer_url=ORY_ISSUER,
+                keycloak_issuer_url=shared,
                 keycloak_audiences=frozenset({"member"}),
                 **builder_settings("member"),
             )

@@ -402,7 +402,10 @@ principal (Keycloak) from the same resolver, through `app.dependencies.rbac.toke
 and **MUST NOT** report the canonical role assignments as that principal's: provisioning's
 default tenant and role are not its grants. Its memberships come from the provider's
 `tenant_memberships` list, and a token whose tenant is not on that list **MUST** be refused
-(403): the directory is believed over the token. A list that cannot be had is 502. For
+(403): the directory is believed over the token. A list that cannot be had is 502. The
+list is read once per request, within one `MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`, and also
+confirms a `sole_membership_required` token (its `counted` entries are what the provider's
+`sole_membership_lookup` would answer), so the request does not ask the directory twice. For
 every other provider `token_tenant` answers `None` without I/O and the response is the
 canonical identity, unchanged.
 

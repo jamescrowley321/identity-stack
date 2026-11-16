@@ -143,6 +143,21 @@ class TestACompleteConfigurationStarts:
         with pytest.raises(ProviderConfigurationError, match=f"^{variable} must be set"):
             configured_providers()
 
+    @pytest.mark.parametrize(
+        "issuer",
+        [
+            "http://keycloak.localhost:8180",
+            "http://keycloak.localhost:8180/realms/",
+            "http://keycloak.localhost:8180/realms/identity-stack/extra",
+            "http://keycloak.localhost:8180/auth/identity-stack",
+        ],
+    )
+    def test_startup_refuses_an_issuer_the_admin_api_cannot_be_derived_from(self, complete, issuer):
+        complete.setenv("KEYCLOAK_ISSUER_URL", issuer)
+
+        with pytest.raises(ProviderConfigurationError, match=r"^KEYCLOAK_ISSUER_URL must be <origin>/realms/<realm>"):
+            configured_providers()
+
     def test_the_refusal_does_not_quote_the_secret(self, complete):
         complete.delenv("KEYCLOAK_DIRECTORY_CLIENT_ID")
 
