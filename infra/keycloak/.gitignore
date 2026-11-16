@@ -1,0 +1,20 @@
+# Never commit Terraform state (it holds the generated client secret and user passwords) or local provider caches.
+.terraform/
+*.tfstate
+# DO commit the provider lock file (hash-pins the provider) — re-include it here
+# because the repo-root .gitignore ignores it globally.
+!.terraform.lock.hcl
+# Saved plans can embed sensitive values
+tfplan
+*.tfplan
+*.tfstate.*
+crash.log
+crash.*.log
+# Local var files that may hold secrets/overrides
+*.auto.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.env
+.env.*
