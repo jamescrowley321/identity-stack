@@ -314,8 +314,9 @@ tenant, role or permission claim itself. The resolver takes its sources in this 
    compared in its canonical lower-case form, and any other value as it is.
 3. **The caller's sole canonical membership**, when the request selects nothing.
 
-Anything else is 403, including an extractor that raises or names a tenant that is not a
-non-empty string. Roles and permissions **MUST** be resolved from the canonical model
+Anything else is 403, including an extractor that raises, and one whose answer is not a
+`TenantClaims` with a non-empty string for the tenant and lists of strings for the roles
+and the permissions. Roles and permissions **MUST** be resolved from the canonical model
 only for a provider listed in `CANONICAL_RBAC_PROVIDERS`. That canonical lookup **MUST
 NOT** be served from the identity cache, and it **MUST NOT** be kept beyond the request
 that made it. `get_tenant_id` **MUST NOT** open a database session or read the canonical
@@ -330,12 +331,18 @@ principal whose provider is not `descope_managed` (§28), before the tenant is r
 before Descope is called. Every route that depends on `get_tenant_id` **MUST** be listed in
 `backend/tests/unit/test_descope_backed_routes.py`, either in `DESCOPE_BACKED_ROUTES` or,
 with its reason, in `PROVIDER_NEUTRAL_ROUTES`. Adding a route to the second register is a
-reviewed decision.
+reviewed decision, and a route whose service mirrors its writes to Descope through a sync
+adapter is Descope-backed: `POST /api/roles/assign` and `/api/roles/remove` are, because
+`RoleService` sends each assignment to Descope. The second register is empty today.
+
+A `descope_managed` provider **MUST NOT** be listed in `CANONICAL_RBAC_PROVIDERS`: it
+would pass the guard with a canonical tenant id. The middleware factory refuses that
+configuration at startup (`refuse_canonical_descope_managed`).
 
 - Exception: a `dct` claim on the token of a provider listed in
   `CANONICAL_RBAC_PROVIDERS` is read as a tenant selector, as it was before the header
-  existed. It is held to the same check, and a `dct` that disagrees with the header is
-  refused.
+  existed. It is put in the same spelling as the header and held to the same check, and a
+  `dct` that disagrees with the header is refused.
 - Exception: a request that no middleware attributed to a provider, which only a test
   that sets `request.state.claims` by hand can make, is read with Descope's extractor and
   passes `require_descope_principal`. Code in `app/` that sets `request.state.claims`

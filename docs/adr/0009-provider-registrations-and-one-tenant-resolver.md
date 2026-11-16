@@ -64,8 +64,15 @@ refused on every role-gated route.
   `require_descope_principal`, which reads the provider's `descope_managed` field and
   answers the same 403 as before. A test holds every route that takes a tenant to one of
   two registers, Descope-backed or provider-neutral, so a new route has to choose.
-  `POST /api/roles/assign` and `/api/roles/remove` are provider-neutral: they work on the
-  canonical model in the tenant the resolver names.
+  `POST /api/roles/assign` and `/api/roles/remove` are Descope-backed too: they write
+  canonical rows, but `RoleService` mirrors each assignment to Descope with the canonical
+  user and tenant ids. No shipped route is provider-neutral yet. The first will be one
+  whose service is given a sync adapter chosen by the caller's provider.
+- Descope cannot be listed in `CANONICAL_RBAC_PROVIDERS`. A provider that is both
+  `descope_managed` and canonical would pass the guard and hand Descope a canonical
+  tenant id, so the middleware factory refuses that configuration at startup. Before
+  this, listing Descope moved `require_role` to the canonical model and left
+  `get_tenant_id` on the `dct` claim.
 - A client can ask for any tenant id. The answer for a tenant the caller is not in is the
   same 403 as for a tenant that does not exist, so the header is not an existence oracle.
 - `require_fga` and `get_tenant_claims` still read Descope claims. The routes behind them
@@ -73,7 +80,10 @@ refused on every role-gated route.
 - Building the principal and reading the tenant with the provider's extractor are part of
   authentication in both middlewares. A failure in either is the uniform 401 in standalone
   and in gateway mode. The resolver also fails closed by itself: an extractor that raises,
-  or that names a tenant that is not a non-empty string, is 403.
+  that answers with anything but a `TenantClaims`, that names a tenant that is not a
+  non-empty string, or whose roles or permissions are not lists of strings, is 403. A
+  role list that is a string would otherwise be searched for the required role as a
+  substring.
 - `build_provider_configs` stays for the tests that build a middleware by hand, as the
   same assembly over explicit values. The middlewares' `ory_*` constructor arguments stay
   with it until those tests move to a provider list (#591).
