@@ -344,8 +344,9 @@ configuration at startup (`refuse_canonical_descope_managed`).
   existed. It is put in the same spelling as the header and held to the same check, and a
   `dct` that disagrees with the header is refused.
 - Exception: a request that no middleware attributed to a provider, which only a test
-  that sets `request.state.claims` by hand can make, is read with Descope's extractor and
-  passes `require_descope_principal`. Code in `app/` that sets `request.state.claims`
+  that sets `request.state.claims` by hand can make, is read with Descope's extractor by
+  the resolver. `require_descope_principal` refuses it: the guard passes only a provider
+  it knows to be `descope_managed`. Code in `app/` that sets `request.state.claims`
   **MUST** set `request.state.provider` beside it.
 - Exception: `require_fga` (`dependencies/fga.py::_extract_tenant_id`) reads `dct` itself.
   It checks relations in Descope's FGA store, which is keyed on Descope tenant ids, so it
@@ -356,6 +357,15 @@ configuration at startup (`refuse_canonical_descope_managed`).
   guard and answer a principal of another provider as they did before the resolver:
   `GET` and `PATCH /api/profile`, `GET` and `PUT /api/fga/schema` and `GET /api/tenants`
   (#590).
+- Exception: the role and permission definition routes (`/api/roles`,
+  `/api/roles/{name}`, `/api/permissions`, `/api/permissions/{name}`) are gated by
+  `require_role` alone and mirror each change to Descope for a principal of any
+  provider (#590).
+- Exception: `require_role` answers for one tenant, and some routes it gates act on state
+  that belongs to no tenant: the role and permission definitions above,
+  `PUT /api/fga/schema`, `/api/providers`, `/api/sync/status` and `/api/events/recent`.
+  A caller who holds the role in any one of their tenants reaches them, by naming that
+  tenant (#593).
 
 *Enforcement:* review, plus tests (`test_tenant_resolution.py`, `test_rbac_dependencies.py`,
 `test_tenant_dependencies.py`, and `test_descope_backed_routes.py`, which walks every route
