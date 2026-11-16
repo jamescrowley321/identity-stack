@@ -369,8 +369,12 @@ nothing has confirmed it at authentication, so it stays `None` for the whole req
 Confirming the membership does not show that the token's client roles were granted for
 that organization: Keycloak keeps a user's client roles when the user leaves an
 organization. A lookup **MUST** therefore confirm the grant as well as the membership:
-Keycloak's (`KeycloakOrganizationLookup`) counts the token's organization only where its
-`type:<type client>` attribute lists the caller's id. A lookup **MUST** ask about the
+Keycloak's (`CountedMemberships(KeycloakTenantMemberships)`) counts the token's organization
+only where its `type:<type client>` attribute lists the caller's id. A provider with a
+`tenant_memberships` list **MUST** have that list's `counted` entries
+(`CountedMemberships`) as its lookup and no other, so `GET /api/identity` and the routes
+that ask the lookup answer one token alike; `ProviderTokenConfig` refuses anything else
+(`MembershipSourcesDisagree`). A lookup **MUST** ask about the
 verified token's `sub` and nothing from the request, and **MUST** refuse a `sub` that is
 not a well-formed id before any call. The canonical membership read of the third source
 **MUST NOT** be served from the identity cache, and it **MUST NOT** be kept beyond the request

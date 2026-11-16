@@ -22,7 +22,7 @@ from app.dependencies.rbac import MEMBERSHIP_LOOKUP_FAILED
 from app.dependencies.tenant_access import SOLE_MEMBERSHIP_NOT_CONFIRMED
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.providers import (
-    KeycloakOrganizationLookup,
+    CountedMemberships,
     KeycloakTenantMemberships,
     ProviderTokenConfig,
     configured_providers,
@@ -115,10 +115,9 @@ def _with_directory(directory: KeycloakDirectory) -> list[ProviderTokenConfig]:
     providers = []
     for provider in configured_providers():
         if provider.name == KEYCLOAK:
+            memberships = KeycloakTenantMemberships(provider.tenant_claims.model, directory)
             provider = replace(
-                provider,
-                sole_membership_lookup=KeycloakOrganizationLookup(provider.tenant_claims.model, directory),
-                tenant_memberships=KeycloakTenantMemberships(provider.tenant_claims.model, directory),
+                provider, sole_membership_lookup=CountedMemberships(memberships), tenant_memberships=memberships
             )
         providers.append(provider)
     return providers

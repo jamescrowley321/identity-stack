@@ -50,6 +50,14 @@ class ProviderConfigurationError(ValueError):
     """A provider is configured in a way that would accept tokens it must not."""
 
 
+class MembershipSourcesDisagree(ProviderConfigurationError):
+    """A provider's membership lookup is not the ``counted`` entries of its membership list.
+
+    ``GET /api/identity`` and the routes that confirm a token's tenant would
+    then answer the same token differently.
+    """
+
+
 @dataclass(frozen=True)
 class TenantClaims:
     """What one token says about its caller's tenant.
@@ -84,7 +92,8 @@ TokenBinding = Callable[[dict], str | None]
 # where the directory also grants the caller the roles the token carries
 # (ADR-0010, docs/security.md). A lookup that checks membership only lets roles
 # granted in one organization carry over to another. Keycloak's
-# (``KeycloakOrganizationLookup``) reads a grant marker per organization.
+# (``CountedMemberships(KeycloakTenantMemberships)``) reads a grant marker per
+# organization.
 SoleMembershipAnswer = list[str] | tuple[str, ...] | set[str] | frozenset[str]
 SoleMembershipLookup = Callable[[dict], Awaitable[SoleMembershipAnswer]]
 
@@ -109,15 +118,35 @@ class TenantMembership:
 # belongs to, as the provider's directory has it now, for ``GET /api/identity``.
 # It raises when the directory cannot be asked and bounds its own time (§6).
 # Only a ``token_authorized_only`` provider has one: the tenant of its principals
-# is not in the canonical model. Where a provider has both, the ``counted``
-# entries of the list are exactly what its ``sole_membership_lookup`` answers,
-# so ``rbac.token_tenant`` confirms the token from the one list it reads.
+# is not in the canonical model. A provider that has one has
+# ``CountedMemberships(list)`` as its ``sole_membership_lookup`` and no other
+# (``ProviderTokenConfig`` refuses anything else), so ``rbac.token_tenant``
+# confirms the token from the one list it reads, as the lookup routes do.
 TenantMembershipsLookup = Callable[[dict], Awaitable[Sequence[TenantMembership]]]
 
 
 @dataclass(frozen=True)
+class CountedMemberships:
+    """A ``sole_membership_lookup`` read from a membership list: the tenant ids of its ``counted`` entries."""
+
+    memberships: TenantMembershipsLookup
+
+    async def __call__(self, claims: dict) -> list[str]:
+        listed = await self.memberships(claims)
+        return [membership.tenant_id for membership in listed if membership.counted]
+
+
+@dataclass(frozen=True)
 class ProviderTokenConfig:
-    """How to validate and interpret tokens from one OIDC provider."""
+    """How to validate and interpret tokens from one OIDC provider.
+
+    A provider with a ``tenant_memberships`` list confirms an organization-bound
+    token from that list alone: its ``sole_membership_lookup`` MUST be
+    ``CountedMemberships(tenant_memberships)``, or construction raises
+    ``MembershipSourcesDisagree``. ``rbac.token_tenant`` reads the list once and
+    the lookup routes ask the lookup, so two sources would let one token be
+    confirmed on one route and refused on the other.
+    """
 
     name: str
     accepted_issuers: frozenset[str]
@@ -183,6 +212,14 @@ class ProviderTokenConfig:
     # ``CANONICAL_RBAC_PROVIDERS``, where the canonical model would decide
     # instead (``refuse_ambiguous_authorization_source``).
     token_authorized_only: bool = False
+
+    def __post_init__(self) -> None:
+        if self.tenant_memberships is not None and self.sole_membership_lookup != CountedMemberships(
+            self.tenant_memberships
+        ):
+            raise MembershipSourcesDisagree(
+                f"provider {self.name}: the membership lookup must be the counted entries of its membership list"
+            )
 
 
 def _string_list(value: object) -> list[str]:
@@ -391,24 +428,6 @@ class KeycloakTenantMemberships:
         ]
 
 
-@dataclass(frozen=True)
-class KeycloakOrganizationLookup:
-    """Keycloak's ``sole_membership_lookup``: the ``counted`` organizations of ``KeycloakTenantMemberships``.
-
-    So a tenant admin of one organization who joins a second and leaves the
-    first is not confirmed in the second: the roles are realm-wide, the marker
-    is not. Every other membership counts, so a caller in two organizations is
-    still refused (decision 10).
-    """
-
-    model: KeycloakTokenModel
-    directory: KeycloakDirectory
-
-    async def __call__(self, claims: dict) -> list[str]:
-        listed = await KeycloakTenantMemberships(self.model, self.directory)(claims)
-        return [membership.tenant_id for membership in listed if membership.counted]
-
-
 def keycloak_directory(issuer_url: str, client_id: str, client_secret: str) -> KeycloakDirectory:
     """The organization lookup's directory, or ``ProviderConfigurationError`` when it cannot be built.
 
@@ -453,14 +472,16 @@ def keycloak_config(
     ``portable_permissions`` lists what each portable type grants (see
     ``app.middleware.keycloak``). ``directory_client_id`` and
     ``directory_client_secret`` are the service account of the read-only
-    Admin API lookup (``app.services.keycloak_directory``): it backs both the
-    membership confirmation of an organization-bound token
-    (``KeycloakOrganizationLookup``) and the membership list of
-    ``GET /api/identity``. Given at all, both must be non-empty; the
-    registration always gives them. Left out (a provider built by hand in a
-    test), no directory is wired: every token of an organization-bound type is
-    refused unless ``organization_lookup`` answers it, and the membership list
-    is not available.
+    Admin API lookup (``app.services.keycloak_directory``): it backs the
+    membership list of ``GET /api/identity`` (``KeycloakTenantMemberships``),
+    and the membership confirmation of an organization-bound token is that
+    list's ``counted`` entries (``CountedMemberships``). Given at all, both
+    must be non-empty; the registration always gives them. Left out (a
+    provider built by hand in a test), no directory is wired: every token of
+    an organization-bound type is refused unless ``organization_lookup``
+    answers it, and the membership list is not available. Both at once are
+    refused (``MembershipSourcesDisagree``): the lookup routes and
+    ``GET /api/identity`` would read different sources.
 
     Fails closed: ``aud`` is always required, only RS256 is accepted, and a
     half-configured provider is refused, because it would accept tokens it
@@ -493,6 +514,11 @@ def keycloak_config(
         if directory_client_id is not None or directory_client_secret is not None
         else None
     )
+    if directory is not None and organization_lookup is not None:
+        raise MembershipSourcesDisagree(
+            "Keycloak: organization_lookup cannot be given beside the directory, whose membership list confirms tokens"
+        )
+    memberships = KeycloakTenantMemberships(model, directory) if directory is not None else None
     return ProviderTokenConfig(
         name="Keycloak",
         accepted_issuers=frozenset({issuer}),
@@ -506,9 +532,8 @@ def keycloak_config(
         post_logout_redirect_uri=post_logout_redirect_uri,
         tenant_claims=KeycloakTenantClaims(model),
         token_binding=KeycloakTokenBinding(model),
-        sole_membership_lookup=organization_lookup
-        or (KeycloakOrganizationLookup(model, directory) if directory is not None else None),
-        tenant_memberships=KeycloakTenantMemberships(model, directory) if directory is not None else None,
+        sole_membership_lookup=organization_lookup if memberships is None else CountedMemberships(memberships),
+        tenant_memberships=memberships,
         token_authorized_only=True,
     )
 
