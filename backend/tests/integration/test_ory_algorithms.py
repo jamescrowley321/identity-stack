@@ -54,12 +54,12 @@ async def _probe(provider: ProviderTokenConfig, token: str) -> httpx.Response:
         return await client.get(PROBE, headers={"Authorization": f"Bearer {token}"})
 
 
-def test_the_shipped_config_names_no_algorithms(ory):
-    assert _shipped(ory).algorithms == frozenset()
+def test_the_shipped_config_accepts_rs256_only(ory):
+    assert _shipped(ory).algorithms == PINNED_TO_RS256
 
 
 async def test_an_algorithm_outside_the_set_is_refused(ory):
-    """Signed ES256 by Hydra, with the key in Hydra's JWKS, refused once the config names RS256."""
+    """Signed ES256 by Hydra, with the key in Hydra's JWKS, refused by the shipped config."""
     kid = f"es256-{uuid.uuid4()}"
     with ory.access_token_signing_key(ES256, kid):
         token = _mint(ory)
@@ -71,12 +71,12 @@ async def test_an_algorithm_outside_the_set_is_refused(ory):
         assert {RS256, ES256} <= {key["alg"] for key in jwks}
         assert kid in {key["kid"] for key in jwks}
 
-        refused = await _probe(replace(_shipped(ory), algorithms=PINNED_TO_RS256), token)
+        refused = await _probe(_shipped(ory), token)
         assert refused.status_code == 401
         assert refused.json() == UNIFORM_401
 
-        # What the shipped config does today: with no algorithms the same token validates.
-        unpinned = await _probe(_shipped(ory), token)
+        # Control: the algorithm set is the only reason. Without it the same token validates.
+        unpinned = await _probe(replace(_shipped(ory), algorithms=frozenset()), token)
         assert unpinned.status_code == 200, unpinned.text
 
 
@@ -85,7 +85,7 @@ async def test_an_algorithm_inside_the_set_authenticates(ory):
     header, _ = decode_unverified(token)
     assert header["alg"] == RS256
 
-    response = await _probe(replace(_shipped(ory), algorithms=PINNED_TO_RS256), token)
+    response = await _probe(_shipped(ory), token)
 
     assert response.status_code == 200, response.text
     assert response.json() == {"provider": "Ory"}

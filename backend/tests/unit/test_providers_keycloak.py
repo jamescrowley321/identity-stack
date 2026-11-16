@@ -73,6 +73,10 @@ def _keycloak(**overrides):
     return replace(keycloak_config(ISSUER, AUDIENCES, **MODEL), **overrides)
 
 
+def _provider_name(provider) -> str:
+    return provider.name
+
+
 def _client(middleware, providers) -> TestClient:
     app = FastAPI()
 
@@ -134,11 +138,22 @@ class TestKeycloakConfig:
         with pytest.raises(ProviderConfigurationError, match="KEYCLOAK_AUDIENCES"):
             keycloak_config(ISSUER, audiences)
 
-    def test_other_providers_keep_the_library_defaults(self):
+    def test_other_providers_require_https_and_take_one_audience(self):
         for provider in (descope_config("P123"), ory_config(ORY_ISSUER, "api")):
             assert provider.require_https is True
-            assert provider.algorithms == frozenset()
             assert provider.audiences == frozenset()
+
+    def test_every_provider_accepts_rs256_only(self):
+        providers = {
+            provider.name: provider.algorithms
+            for provider in (descope_config("P123"), ory_config(ORY_ISSUER, "api"), keycloak_config(ISSUER, AUDIENCES))
+        }
+
+        assert providers == {
+            "Descope": frozenset({"RS256"}),
+            "Ory": frozenset({"RS256"}),
+            "Keycloak": frozenset({"RS256"}),
+        }
 
 
 class TestBuildProviderConfigs:
@@ -286,9 +301,18 @@ class TestAlgorithmRejected:
     def test_an_unreadable_header_is_rejected(self, token):
         assert algorithm_rejected(token, _keycloak()) is True
 
+    @pytest.mark.parametrize("provider", [descope_config("P123"), ory_config(ORY_ISSUER, "api")], ids=_provider_name)
+    def test_descope_and_ory_get_the_same_rule(self, provider):
+        assert algorithm_rejected(_jwt({}, header={"alg": "RS256"}), provider) is False
+        assert algorithm_rejected(_jwt({}, header={"alg": "ES256"}), provider) is True
+        assert algorithm_rejected(_jwt({}, header={"alg": "none"}), provider) is True
+        assert algorithm_rejected("opaque", provider) is True
+
     def test_a_provider_that_pins_nothing_rejects_nothing(self):
-        assert algorithm_rejected(_jwt({}, header={"alg": "ES256"}), descope_config("P123")) is False
-        assert algorithm_rejected("opaque", ory_config(ORY_ISSUER, "api")) is False
+        unpinned = _keycloak(algorithms=frozenset())
+
+        assert algorithm_rejected(_jwt({}, header={"alg": "ES256"}), unpinned) is False
+        assert algorithm_rejected("opaque", unpinned) is False
 
 
 class TestTokenValidationMiddleware:
@@ -319,7 +343,7 @@ class TestTokenValidationMiddleware:
         assert validate.await_args.kwargs["disco_doc_address"] == f"{ISSUER}/.well-known/openid-configuration"
 
     @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-    def test_descope_and_ory_validation_config_is_unchanged(self, validate):
+    def test_library_gets_https_and_the_algorithm_for_ory(self, validate):
         ory_claims = {"iss": ORY_ISSUER, "sub": "ory-user", "aud": "api"}
         validate.return_value = ory_claims
         client = _client(TokenValidationMiddleware, [descope_config("P123"), ory_config(ORY_ISSUER, "api")])
@@ -328,7 +352,27 @@ class TestTokenValidationMiddleware:
 
         config = validate.await_args.kwargs["token_validation_config"]
         assert config.require_https is True
-        assert config.algorithms is None
+        assert config.algorithms == ["RS256"]
+
+    @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+    def test_library_gets_https_and_the_algorithm_for_descope(self, validate):
+        descope_claims = {"iss": "https://api.descope.com/P123", "sub": "descope-user", "aud": "P123"}
+        validate.return_value = descope_claims
+        client = _client(TokenValidationMiddleware, [descope_config("P123"), ory_config(ORY_ISSUER, "api")])
+
+        assert _get(client, _jwt(descope_claims)).status_code == 200
+
+        config = validate.await_args.kwargs["token_validation_config"]
+        assert config.require_https is True
+        assert config.algorithms == ["RS256"]
+
+    @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+    def test_a_provider_that_pins_nothing_leaves_the_set_to_the_library(self, validate):
+        validate.return_value = _claims()
+
+        _get(_client(TokenValidationMiddleware, [_keycloak(algorithms=frozenset())]), _jwt(_claims()))
+
+        assert validate.await_args.kwargs["token_validation_config"].algorithms is None
 
     @pytest.mark.parametrize("aud", [None, "account", APP_CLIENT, ["account"]])
     @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)

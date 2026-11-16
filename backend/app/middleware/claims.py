@@ -135,8 +135,8 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
                 logger.warning("GatewayClaims rejected: iss not in allow-list (iss=%r)", claims.get("iss"))
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
-            # Algorithm: a provider that pins its signing algorithms (Keycloak)
-            # gets the same rule here as in standalone mode, where the library
+            # Algorithm: a provider that pins its signing algorithms gets the
+            # same rule here as in standalone mode, where the library
             # enforces it. Nothing here calls the library, so the header is checked.
             if algorithm_rejected(token, provider):
                 logger.warning("GatewayClaims rejected: signing algorithm not accepted for %s", provider.name)

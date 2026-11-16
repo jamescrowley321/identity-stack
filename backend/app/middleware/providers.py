@@ -112,8 +112,10 @@ class ProviderTokenConfig:
     # Several acceptable audiences (Keycloak: the type client ids). When set it
     # is used instead of ``audience``: the token's ``aud`` must name one of them.
     audiences: frozenset[str] = frozenset()
-    # Signing algorithms accepted from this provider. Empty accepts whichever
-    # algorithm the provider's JWKS key declares.
+    # Signing algorithms accepted from this provider. Every shipped provider
+    # names its set. Empty leaves the choice to py-identity-model, which then
+    # accepts its default asymmetric algorithms (RSA, RSA-PSS, ECDSA, EdDSA) in
+    # standalone mode; gateway mode checks nothing for an empty set.
     algorithms: frozenset[str] = frozenset()
     # Require HTTPS for discovery, JWKS and the logout discovery fetch. The
     # library still allows plain HTTP on loopback when this is on.
@@ -212,6 +214,9 @@ def descope_config(project_id: str) -> ProviderTokenConfig:
     ``order_candidates`` (before any crypto), 401ing the admin E2E path. With no
     project id the allow-list is empty (issuer validation skipped), which
     preserves the historical test path.
+
+    Only RS256 is accepted: it is the one algorithm a Descope project's JWKS
+    publishes and its discovery document advertises.
     """
     accepted = (
         frozenset(
@@ -233,6 +238,7 @@ def descope_config(project_id: str) -> ProviderTokenConfig:
         bare_issuer=project_id or None,
         tenant_claims=descope_tenant_claims,
         descope_managed=True,
+        algorithms=frozenset({RS256}),
     )
 
 
@@ -254,6 +260,10 @@ def ory_config(
     Audience is enforced fail-closed by default (``require_audience=True``): without
     it, any token the Ory project issues — for any client/audience, or with no
     ``aud`` at all — would authenticate (confused-deputy).
+
+    Only RS256 is accepted: it is what Ory Network and a default Hydra sign
+    access tokens with. A key of another algorithm added to the provider's JWKS
+    does not widen what this API accepts.
     """
     issuer = issuer_url.rstrip("/")
     return ProviderTokenConfig(
@@ -263,6 +273,7 @@ def ory_config(
         audience=audience or None,
         infer_single_tenant_dct=False,
         require_audience=require_audience,
+        algorithms=frozenset({RS256}),
         logout_kind="rp_initiated",
         logout_client_id=client_id or None,
         post_logout_redirect_uri=post_logout_redirect_uri,

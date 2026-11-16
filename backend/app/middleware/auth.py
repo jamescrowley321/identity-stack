@@ -141,7 +141,7 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
             # aud); Ory could use the library checks, but the manual path is
             # uniform and equivalent. ``algorithms`` is the provider's allowlist,
             # which the library enforces on the token's header ``alg``; None
-            # accepts whichever algorithm the selected JWKS key declares.
+            # accepts the library's default asymmetric algorithms.
             config = TokenValidationConfig(
                 perform_disco=True,
                 audience=provider.audience or "",

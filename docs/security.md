@@ -4,7 +4,7 @@ This documents the application-level security controls. For vulnerability report
 
 ## Token validation
 
-Bearer tokens are validated by [`py-identity-model`](https://github.com/jamescrowley321/py-identity-model) (`>=4.1.1`, a security-pinned floor — it enforces a provider's signing-algorithm allowlist in discovery mode and pulls `cryptography>=50` with the PYSEC-2026-3552/3553/3554 fixes). Validation accepts all three Descope issuer formats (all signed by the same project JWKS — the signature is the security boundary, not the issuer string):
+Bearer tokens are validated by [`py-identity-model`](https://github.com/jamescrowley321/identity-model) (the 5.0.0 pre-release, pinned to one wheel by URL and hash; it enforces a provider's signing-algorithm allowlist and pulls `cryptography>=50` with the PYSEC-2026-3552/3553/3554 fixes). Validation accepts all three Descope issuer formats (all signed by the same project JWKS — the signature is the security boundary, not the issuer string):
 
 - `https://api.descope.com/{project_id}` — OIDC / ID tokens
 - `https://api.descope.com/v1/apps/{project_id}` — OIDC inbound-app tokens
@@ -12,7 +12,21 @@ Bearer tokens are validated by [`py-identity-model`](https://github.com/jamescro
 
 When `ORY_ISSUER_URL` is set, Ory access tokens are accepted too: one issuer, with the audience enforced unless `ORY_REQUIRE_AUDIENCE` is off (`middleware/providers.py`).
 
-In `gateway` mode, Tyk verifies the token signature at the edge. The backend's `GatewayClaimsMiddleware` decodes the forwarded JWT without re-checking the signature, and still checks expiry, issuer and audience as defence in depth (`middleware/factory.py`, `middleware/claims.py`).
+In `gateway` mode, Tyk verifies the token signature at the edge. The backend's `GatewayClaimsMiddleware` decodes the forwarded JWT without re-checking the signature, and still checks expiry, issuer, signing algorithm and audience as defence in depth (`middleware/factory.py`, `middleware/claims.py`).
+
+### Signing algorithms
+
+Every provider accepts RS256 only (`ProviderTokenConfig.algorithms` in `middleware/providers.py`). A token signed with any other algorithm is answered 401, even when its key is published in the provider's own JWKS and the signature would verify.
+
+| Provider | Accepted | Basis |
+|---|---|---|
+| Descope | RS256 | The project's JWKS publishes one RSA key with `alg: RS256`, and its discovery document advertises RS256 only. |
+| Ory | RS256 | Ory Network and a default Hydra sign access tokens with RS256 keys. |
+| Keycloak | RS256 | Project policy for the realm. |
+
+In `standalone` mode the library enforces the set on the token's header `alg` (RFC 8725 §3.1). In `gateway` mode the backend never calls the library, so `GatewayClaimsMiddleware` applies the same set to the header itself.
+
+Independently of the set, the library accepts no HMAC algorithm and no unsigned token, and it refuses a DPoP-bound access token (`cnf.jkt`) presented as a plain bearer token.
 
 ## Authorization (RBAC + FGA)
 
@@ -54,4 +68,4 @@ Locally, `make security` runs `pip-audit` + `npm audit`.
 ## Notable dependency pins (decision record)
 
 - **`fastapi>=0.115.0,<0.137`** — capped because slowapi 0.1.10's `SlowAPIMiddleware` route matcher only recognizes top-level routes under the newer FastAPI inclusion model, which breaks rate limiting. Revisit when slowapi ships a fix (`backend/pyproject.toml`).
-- **`py-identity-model>=4.1.1,<5`** — security floor (see Token validation above).
+- **`py-identity-model` 5.0.0 pre-release** — one wheel, pinned by its GitHub release URL and SHA-256 in `backend/pyproject.toml` and `backend/uv.lock`, because v5 pre-releases are not published to PyPI. To be replaced by `>=5.0.0,<6` when 5.0.0 is released (see Token validation above).
