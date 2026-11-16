@@ -296,7 +296,7 @@ belong to, a non-active canonical user and a malformed `dct`. An error from the 
 
 ### 18. One resolver decides the tenant and the grants
 
-`get_tenant_id`, `require_role` and `require_permission` **MUST** take the request's tenant
+`get_tenant_id`, `require_role`, `require_global_role` and `require_permission` **MUST** take the request's tenant
 and the caller's roles and permissions from
 `app.dependencies.tenant_access.resolve_tenant_access`. A dependency **MUST NOT** read a
 tenant, role or permission claim itself. The resolver takes its sources in this order:
@@ -342,6 +342,17 @@ whose services mirror each change to Descope, and `GET` and `PUT /api/fga/schema
 `require_role` answers for one tenant, so without the guard a canonical principal who is
 an admin of any one of several tenants would reach them by naming that tenant.
 
+A route over state that belongs to no tenant and that Descope does not hold **MUST** be
+gated by `app.dependencies.rbac.require_global_role`, not `require_role`: `GET /api/users`
+(every tenant's users), `/api/providers`, `/api/sync/status` and `/api/events/recent`. One
+role in one tenant opens all of that state, so on these routes the `X-Tenant-ID` header
+chooses nothing. A canonical principal is decided by their sole membership, or by a `dct`
+claim on the token, and one with several memberships who sends the header is refused. A
+Descope principal is decided from its claims, as by `require_role`. The project-level
+grant these routes need is #593. A route gated by `require_role` or `require_permission`
+**MUST** depend on `get_tenant_id` or on the guard, or be listed with its reason in
+`SELF_SCOPED_ROLE_ROUTES` in the same test file.
+
 A `descope_managed` provider **MUST NOT** be listed in `CANONICAL_RBAC_PROVIDERS`: it
 would pass the guard with a canonical tenant id. The middleware factory refuses that
 configuration at startup (`refuse_canonical_descope_managed`).
@@ -363,17 +374,18 @@ configuration at startup (`refuse_canonical_descope_managed`).
 - Exception: the Descope-backed routes that take no tenant from `get_tenant_id` carry no
   guard and answer a principal of another provider as they did before the resolver:
   `GET` and `PATCH /api/profile` and `GET /api/tenants` (#590).
-- Exception: `require_role` answers for one tenant, and some routes it gates act on state
-  that belongs to no tenant. On `/api/providers`, `/api/sync/status` and
-  `/api/events/recent`, a caller of any provider who holds the role in any one of their
-  tenants is served, a canonical principal by naming that tenant. On the role and
-  permission definitions and the FGA schema the same holds for Descope principals only,
-  as it did before the resolver (#593).
+- Exception: the role and permission definitions and the FGA schema belong to no tenant
+  and are gated by `require_role`, which answers for one tenant. A Descope principal who
+  holds the role in their current tenant is served there, as before the resolver (#593).
+- Exception: the `/api/users/{user_id}/idp-links` routes are gated by `require_role` and
+  take no tenant from `get_tenant_id`. `_require_user_in_tenant` reads `dct` itself and
+  answers 404 without one (#590).
 
 *Enforcement:* review, plus tests (`test_tenant_resolution.py`, `test_rbac_dependencies.py`,
 `test_tenant_dependencies.py`, and `test_descope_backed_routes.py`, which walks every route
-of the application against its registers and calls each guarded route as a canonical
-principal). `test_provider_registration.py` fails on a writer of `request.state.claims`
+of the application against its registers, calls each guarded route as a canonical
+principal, and calls each `require_global_role` route as an operator of one of several
+tenants who names it). `test_provider_registration.py` fails on a writer of `request.state.claims`
 that records no provider.
 
 ## Data access

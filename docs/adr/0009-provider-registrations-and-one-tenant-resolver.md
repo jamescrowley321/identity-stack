@@ -76,7 +76,11 @@ refused on every role-gated route.
   to Descope, and the FGA schema. `require_role` answers for one tenant, and the selector
   lets a canonical principal with several memberships name the one they administer, which
   would have reached those routes where the sole-membership rule used to refuse them. The
-  project-level grant they need is #593. No shipped route is provider-neutral yet. The first will be one
+  project-level grant they need is #593. The global routes Descope does not hold (`GET
+  /api/users`, `/api/providers`, `/api/sync/status`, `/api/events/recent`) are gated by
+  `require_global_role`, for the same reason: on them the header chooses nothing, so a
+  canonical principal is served on a sole membership only, as before the header existed.
+  No shipped route is provider-neutral yet. The first will be one
   whose service is given a sync adapter chosen by the caller's provider.
 - Descope cannot be listed in `CANONICAL_RBAC_PROVIDERS`. A provider that is both
   `descope_managed` and canonical would pass the guard and hand Descope a canonical
