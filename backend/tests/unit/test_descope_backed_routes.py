@@ -153,7 +153,7 @@ PROVIDER_NEUTRAL_ROUTES: dict[tuple[str, str], str] = {}
 
 
 # (method, path) of every route over state that belongs to no tenant and is not
-# Descope's: one role in one tenant opens all of it, so the header picks nothing.
+# Descope's: one role in one tenant opens all of it, so the request picks nothing.
 GLOBAL_ROLE_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
         ("GET", "/api/users"),
@@ -649,7 +649,7 @@ class TestStateThatBelongsToNoTenant:
         assert response.json() == {"users": []}
 
     def test_a_sole_membership_named_by_the_header_is_served(self, client, store):
-        """The header picks nothing here, but a request that names the caller's one tenant is not wrong."""
+        """The request picks nothing here, but a request that names the caller's one tenant is not wrong."""
         store.roles = SOLE_OPERATOR
 
         response = client.get("/api/users", headers={**_bearer(ORY_OWNER), "X-Tenant-ID": TENANT_A})
@@ -666,13 +666,57 @@ class TestStateThatBelongsToNoTenant:
         assert response.json() == NO_TENANT
         assert user_service.mock_calls == []
 
-    def test_a_dct_on_the_token_selects_as_it_did_before_the_header(self, client, store):
+    @pytest.mark.parametrize(("method", "path"), sorted(GLOBAL_ROLE_ROUTES))
+    def test_an_operator_of_one_of_several_tenants_cannot_name_it_with_a_dct(
+        self, client, store, user_service, provider_service, sync_status_service, method, path
+    ):
+        """A ``dct`` on the token is a selection too: it chooses nothing here either."""
         store.roles = MEMBER_OF_A_OPERATOR_OF_B
 
-        response = client.get("/api/users", headers=_bearer({**ORY_OWNER, "dct": TENANT_B}))
+        response = client.request(method, _url(path), headers=_bearer({**ORY_OWNER, "dct": TENANT_B}))
+
+        assert response.status_code == 403
+        assert response.json() == NO_TENANT
+        assert user_service.mock_calls == []
+        assert provider_service.mock_calls == []
+        assert sync_status_service.mock_calls == []
+
+    def test_the_dct_does_name_that_tenant_on_a_tenant_scoped_gate(self, store):
+        """The caller above is an operator where the ``dct`` points: only the global gate refuses them."""
+        store.roles = MEMBER_OF_A_OPERATOR_OF_B
+        app = FastAPI()
+
+        @app.get("/tenant-scoped")
+        async def tenant_scoped(roles: list[str] = Depends(require_role("operator"))):
+            return {"roles": roles}
+
+        async def _session():
+            yield MagicMock()
+
+        app.dependency_overrides[get_rbac_session] = _session
+        app.add_middleware(GatewayClaimsMiddleware, providers=[ory_config(ORY_ISSUER, ORY_AUDIENCE)])
+
+        response = TestClient(app).get("/tenant-scoped", headers=_bearer({**ORY_OWNER, "dct": TENANT_B}))
+
+        assert response.status_code == 200
+        assert response.json() == {"roles": ["operator"]}
+
+    def test_a_sole_membership_named_by_a_dct_is_served(self, client, store):
+        store.roles = SOLE_OPERATOR
+
+        response = client.get("/api/users", headers=_bearer({**ORY_OWNER, "dct": TENANT_A}))
 
         assert response.status_code == 200
         assert response.json() == {"users": []}
+
+    def test_a_dct_naming_another_tenant_is_refused_even_with_one_membership(self, client, store, user_service):
+        store.roles = SOLE_OPERATOR
+
+        response = client.get("/api/users", headers=_bearer({**ORY_OWNER, "dct": TENANT_B}))
+
+        assert response.status_code == 403
+        assert response.json() == NO_TENANT
+        assert user_service.mock_calls == []
 
     def test_a_dct_and_a_header_together_are_refused_with_several_memberships(self, client, store, user_service):
         store.roles = MEMBER_OF_A_OPERATOR_OF_B

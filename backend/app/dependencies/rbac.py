@@ -245,14 +245,14 @@ async def canonical_memberships(request: Request) -> CanonicalMemberships | None
 
 
 async def _tenant_access(
-    request: Request, session: AsyncSession | None, *, header_selects: bool = True
+    request: Request, session: AsyncSession | None, *, request_selects: bool = True
 ) -> TenantAccess:
     """The request's tenant and the caller's grants in it. 401 with no claims."""
     claims = getattr(request.state, "claims", None)
     if claims is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     memberships = await _canonical_memberships(request, claims, session)
-    return resolve_tenant_access(request, claims, memberships, header_selects=header_selects)
+    return resolve_tenant_access(request, claims, memberships, request_selects=request_selects)
 
 
 def require_role(*roles: str):
@@ -309,11 +309,11 @@ def require_global_role(*roles: str):
     Every tenant's users, the provider records and the sync status are not one
     tenant's, so holding one of ``roles`` in one tenant opens all of it. A
     principal from a provider in ``CANONICAL_RBAC_PROVIDERS`` therefore cannot
-    pick the tenant that answers with the ``X-Tenant-ID`` header: it is decided
-    by the caller's sole membership, or by a ``dct`` claim on the token, and a
-    caller with several memberships who sends the header is refused
-    (conventions §18). A Descope principal is decided from its ``dct`` +
-    ``tenants`` claims, as by ``require_role``.
+    pick the tenant that answers, with the ``X-Tenant-ID`` header or with a
+    ``dct`` claim on the token: it is decided by the caller's sole membership,
+    and a caller with several memberships is refused (conventions §18). A
+    Descope principal is decided from its ``dct`` + ``tenants`` claims, as by
+    ``require_role``.
 
     Returns the user's role list for downstream use.
     """
@@ -322,7 +322,7 @@ def require_global_role(*roles: str):
         request: Request,
         session: AsyncSession | None = Depends(get_rbac_session),
     ) -> list[str]:
-        user_roles = (await _tenant_access(request, session, header_selects=False)).roles
+        user_roles = (await _tenant_access(request, session, request_selects=False)).roles
         if not any(r in user_roles for r in roles):
             raise HTTPException(status_code=403, detail="Insufficient permissions")
         return user_roles
