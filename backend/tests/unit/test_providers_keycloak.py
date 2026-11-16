@@ -23,7 +23,15 @@ from app.middleware.providers import (
     keycloak_config,
     ory_config,
 )
-from tests.helpers.keycloak_model import MODEL_VARIABLES, builder_settings, model_settings, set_model_environment
+from tests.helpers.keycloak_model import (
+    DIRECTORY_CLIENT_ID,
+    DIRECTORY_CLIENT_SECRET,
+    MODEL_VARIABLES,
+    builder_settings,
+    directory_settings,
+    model_settings,
+    set_model_environment,
+)
 
 ISSUER = "http://keycloak.example.test:8180/realms/identity-stack"
 MEMBER = "member"
@@ -220,7 +228,11 @@ class TestConfiguredProviders:
         providers = {provider.name: provider for provider in configured_providers()}
 
         assert providers["Keycloak"] == keycloak_config(
-            ISSUER, AUDIENCES, post_logout_redirect_uri="https://app.example.test/login", **MODEL
+            ISSUER,
+            AUDIENCES,
+            post_logout_redirect_uri="https://app.example.test/login",
+            **MODEL,
+            **directory_settings(),
         )
 
     def test_audience_client_ids_keep_their_case(self, clean_env):
@@ -229,6 +241,8 @@ class TestConfiguredProviders:
         clean_env.setenv("KEYCLOAK_APP_CLIENTS", "Member=Member-App")
         clean_env.setenv("KEYCLOAK_PORTABLE_TYPES", "Member")
         clean_env.setenv("KEYCLOAK_PORTABLE_PERMISSIONS", "Member=documents:read")
+        clean_env.setenv("KEYCLOAK_DIRECTORY_CLIENT_ID", DIRECTORY_CLIENT_ID)
+        clean_env.setenv("KEYCLOAK_DIRECTORY_CLIENT_SECRET", DIRECTORY_CLIENT_SECRET)
 
         providers = {provider.name: provider for provider in configured_providers()}
 

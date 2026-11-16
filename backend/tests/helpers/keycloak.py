@@ -26,6 +26,8 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
+from tests.helpers.keycloak_model import DIRECTORY_CLIENT_ID, DIRECTORY_CLIENT_SECRET
+
 KEYCLOAK_BASE_URL = os.environ.get("KEYCLOAK_TEST_BASE_URL", "http://keycloak-test.localhost:18180")
 KEYCLOAK_REALM = "identity-stack"
 KEYCLOAK_ADMIN_REALM = "master"
@@ -64,16 +66,20 @@ class KeycloakFlowError(Exception):
 class KeycloakUser:
     username: str
     password: str
+    # Fixed in the realm import, so it is the ``sub`` of every token on every instance.
+    id: str
 
 
-ALICE = KeycloakUser("alice", "local-only-alice")
-BOB = KeycloakUser("bob", "local-only-bob")
+ALICE = KeycloakUser("alice", "local-only-alice", "a11ce000-0000-4000-8000-000000000001")
+BOB = KeycloakUser("bob", "local-only-bob", "b0b00000-0000-4000-8000-000000000002")
 # In ``acme`` with no client role: her access token carries no ``aud``.
-CAROL = KeycloakUser("carol", "local-only-carol")
+CAROL = KeycloakUser("carol", "local-only-carol", "ca401000-0000-4000-8000-000000000003")
 # A tenant admin in ``acme`` only.
-DAVE = KeycloakUser("dave", "local-only-dave")
+DAVE = KeycloakUser("dave", "local-only-dave", "da4e0000-0000-4000-8000-000000000004")
 # A ``member`` user in ``acme`` whose one client role is ``documents:write``.
-ERIN = KeycloakUser("erin", "local-only-erin")
+ERIN = KeycloakUser("erin", "local-only-erin", "e4140000-0000-4000-8000-000000000005")
+# A tenant admin in ``acme`` only, whom tests move between organizations.
+FRANK = KeycloakUser("frank", "local-only-frank", "f4a4c000-0000-4000-8000-000000000006")
 
 
 @dataclass(frozen=True)
@@ -191,6 +197,61 @@ class KeycloakTokenSource:
         )
         response.raise_for_status()
         return response.json()["access_token"]
+
+    def directory_token(self) -> str:
+        """The organization lookup client's own service-account token, as the backend gets it."""
+        response = httpx.post(
+            f"{self.issuer}/protocol/openid-connect/token",
+            data={"grant_type": "client_credentials"},
+            auth=(DIRECTORY_CLIENT_ID, DIRECTORY_CLIENT_SECRET),
+            timeout=_HTTP_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        return response.json()["access_token"]
+
+    def _admin(self) -> httpx.Client:
+        return httpx.Client(
+            base_url=f"{self.base_url}/admin/realms/{self.realm}",
+            headers={"Authorization": f"Bearer {self.admin_access_token()}"},
+            timeout=_HTTP_TIMEOUT_SECONDS,
+        )
+
+    @staticmethod
+    def _organization_id(http: httpx.Client, alias: str) -> str:
+        matches = [o for o in http.get("/organizations", params={"search": alias}).json() if o["alias"] == alias]
+        if len(matches) != 1:
+            raise KeycloakFlowError(f"expected one organization {alias!r}, found {len(matches)}")
+        return matches[0]["id"]
+
+    @contextmanager
+    def moved(self, user: KeycloakUser, *, out_of: str, into: str) -> Iterator[None]:
+        """Add ``user`` to organization ``into`` and remove them from ``out_of``; undo both afterwards."""
+        with self._admin() as http:
+            source, target = self._organization_id(http, out_of), self._organization_id(http, into)
+            http.post(f"/organizations/{target}/members", json=user.id).raise_for_status()
+            try:
+                http.delete(f"/organizations/{source}/members/{user.id}").raise_for_status()
+                try:
+                    yield
+                finally:
+                    http.post(f"/organizations/{source}/members", json=user.id).raise_for_status()
+            finally:
+                http.delete(f"/organizations/{target}/members/{user.id}").raise_for_status()
+
+    @contextmanager
+    def directory_without(self, role: str) -> Iterator[None]:
+        """Take one ``realm-management`` role from the lookup client's service account; give it back afterwards."""
+        with self._admin() as http:
+            (client,) = http.get("/clients", params={"clientId": DIRECTORY_CLIENT_ID}).json()
+            account = http.get(f"/clients/{client['id']}/service-account-user").json()
+            (management,) = http.get("/clients", params={"clientId": "realm-management"}).json()
+            mapping = f"/users/{account['id']}/role-mappings/clients/{management['id']}"
+            (removed,) = [r for r in http.get(mapping).json() if r["name"] == role]
+            http.request("DELETE", mapping, json=[removed]).raise_for_status()
+            try:
+                yield
+            finally:
+                http.post(mapping, json=[removed]).raise_for_status()
 
     @contextmanager
     def client_attribute(self, client_id: str, name: str, value: str) -> Iterator[None]:

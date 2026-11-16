@@ -17,7 +17,9 @@ from app.dependencies import rbac
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.providers import (
+    KeycloakOrganizationLookup,
     KeycloakTenantClaims,
+    KeycloakTenantMemberships,
     KeycloakTokenBinding,
     ProviderConfigurationError,
     configured_providers,
@@ -26,10 +28,14 @@ from app.middleware.providers import (
     ory_config,
     refuse_ambiguous_authorization_source,
 )
+from app.services.keycloak_directory import KeycloakDirectory
 from tests.helpers.keycloak_model import (
+    DIRECTORY_CLIENT_ID,
+    DIRECTORY_CLIENT_SECRET,
     MEMBER_TYPE_CLIENT,
     MODEL_VARIABLES,
     TENANT_ADMIN_TYPE_CLIENT,
+    directory_settings,
     model_settings,
     set_model_environment,
 )
@@ -108,14 +114,45 @@ class TestACompleteConfigurationStarts:
             require_https=False,
             post_logout_redirect_uri="http://localhost:3000/login",
             **model_settings(MEMBER_TYPE_CLIENT, TENANT_ADMIN_TYPE_CLIENT),
+            **directory_settings(),
         )
         assert isinstance(provider.token_binding, KeycloakTokenBinding)
         assert isinstance(provider.tenant_claims, KeycloakTenantClaims)
         assert provider.token_binding.model == provider.tenant_claims.model
         assert provider.token_authorized_only is True
 
-    def test_no_membership_lookup_is_wired(self, complete):
-        assert _keycloak().sole_membership_lookup is None
+    def test_the_lookup_and_the_membership_list_read_one_directory(self, complete):
+        provider = _keycloak()
+
+        assert isinstance(provider.sole_membership_lookup, KeycloakOrganizationLookup)
+        assert isinstance(provider.tenant_memberships, KeycloakTenantMemberships)
+        assert provider.sole_membership_lookup.model == provider.tenant_claims.model
+        assert provider.sole_membership_lookup.directory == provider.tenant_memberships.directory
+        assert provider.tenant_memberships.directory == KeycloakDirectory(
+            issuer=LOCAL_ISSUER, client_id=DIRECTORY_CLIENT_ID, client_secret=DIRECTORY_CLIENT_SECRET
+        )
+
+    @pytest.mark.parametrize("variable", ["KEYCLOAK_DIRECTORY_CLIENT_ID", "KEYCLOAK_DIRECTORY_CLIENT_SECRET"])
+    @pytest.mark.parametrize("value", [None, ""], ids=["unset", "empty"])
+    def test_startup_refuses_a_keycloak_without_the_directory(self, complete, variable, value):
+        if value is None:
+            complete.delenv(variable)
+        else:
+            complete.setenv(variable, value)
+
+        with pytest.raises(ProviderConfigurationError, match=f"^{variable} must be set"):
+            configured_providers()
+
+    def test_the_refusal_does_not_quote_the_secret(self, complete):
+        complete.delenv("KEYCLOAK_DIRECTORY_CLIENT_ID")
+
+        with pytest.raises(ProviderConfigurationError) as refused:
+            configured_providers()
+
+        assert DIRECTORY_CLIENT_SECRET not in str(refused.value)
+
+    def test_the_secret_is_not_in_the_providers_repr(self, complete):
+        assert DIRECTORY_CLIENT_SECRET not in repr(_keycloak())
 
     def test_a_remote_issuer_starts_with_https_enforced(self, complete):
         complete.setenv("KEYCLOAK_ISSUER_URL", REMOTE_ISSUER)

@@ -12,6 +12,9 @@ TENANT_ADMIN_TYPE_CLIENT = "tenant-admin"
 MEMBER_APP_CLIENT = "member-app"
 TENANT_ADMIN_APP_CLIENT = "tenant-admin-app"
 DOCUMENTS_READ = "documents:read"
+# The realm's read-only organization lookup client. Local fixture values.
+DIRECTORY_CLIENT_ID = "identity-stack-directory"
+DIRECTORY_CLIENT_SECRET = "local-only-directory-client"
 
 _APP_CLIENTS = {MEMBER_TYPE_CLIENT: MEMBER_APP_CLIENT, TENANT_ADMIN_TYPE_CLIENT: TENANT_ADMIN_APP_CLIENT}
 _PORTABLE_PERMISSIONS = {MEMBER_TYPE_CLIENT: frozenset({DOCUMENTS_READ})}
@@ -23,6 +26,8 @@ MODEL_VARIABLES = (
     "KEYCLOAK_PORTABLE_TYPES",
     "KEYCLOAK_ORGANIZATION_BOUND_TYPES",
     "KEYCLOAK_PORTABLE_PERMISSIONS",
+    "KEYCLOAK_DIRECTORY_CLIENT_ID",
+    "KEYCLOAK_DIRECTORY_CLIENT_SECRET",
 )
 
 
@@ -40,9 +45,18 @@ def model_settings(*type_clients: str) -> dict:
     }
 
 
+def directory_settings() -> dict:
+    """``keycloak_config`` keyword arguments for the realm's organization lookup client."""
+    return {"directory_client_id": DIRECTORY_CLIENT_ID, "directory_client_secret": DIRECTORY_CLIENT_SECRET}
+
+
 def builder_settings(*type_clients: str) -> dict:
-    """The same settings under ``build_provider_configs``'s argument names."""
-    return {f"keycloak_{name}": value for name, value in model_settings(*type_clients).items()}
+    """The same settings under ``build_provider_configs``'s argument names, with the directory's credentials."""
+    return {
+        **{f"keycloak_{name}": value for name, value in model_settings(*type_clients).items()},
+        "keycloak_directory_client_id": DIRECTORY_CLIENT_ID,
+        "keycloak_directory_client_secret": DIRECTORY_CLIENT_SECRET,
+    }
 
 
 def model_environment(*type_clients: str) -> dict[str, str]:
@@ -57,6 +71,8 @@ def model_environment(*type_clients: str) -> dict[str, str]:
             for t, permissions in sorted(settings["portable_permissions"].items())
             for permission in sorted(permissions)
         ),
+        "KEYCLOAK_DIRECTORY_CLIENT_ID": DIRECTORY_CLIENT_ID,
+        "KEYCLOAK_DIRECTORY_CLIENT_SECRET": DIRECTORY_CLIENT_SECRET,
     }
 
 

@@ -62,7 +62,7 @@ from app.dependencies.tenant_access import (
 )
 from app.knobs import knob, knob_set
 from app.logbook import logbook
-from app.middleware.providers import ProviderConfigurationError, ProviderTokenConfig
+from app.middleware.providers import ProviderConfigurationError, ProviderTokenConfig, TenantMembership
 from app.models.database import get_session_factory
 from app.models.identity.user import UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
@@ -91,6 +91,12 @@ _GATE_CHECKS: "weakref.WeakKeyDictionary[Callable, Callable[[TenantAccess], bool
 _TOKEN_GUARDS: "weakref.WeakSet[Callable[[Request], object]]" = weakref.WeakSet()
 # The provider's directory could not say which tenants the caller belongs to.
 MEMBERSHIP_LOOKUP_FAILED = "Membership lookup failed"
+# The provider has no directory to list the caller's tenants from.
+MEMBERSHIPS_NOT_LISTED = "The caller's memberships cannot be listed"
+# The directory does not list the token's tenant among the caller's (decision 12):
+# the membership changed after the token was issued, and the token is not
+# believed over the directory.
+TENANT_NOT_A_MEMBERSHIP = "The token's tenant is not one of the caller's memberships"
 
 
 def membership_lookup_timeout() -> float:
@@ -505,6 +511,85 @@ async def _tenant_access(
             confirmed = await _confirm_sole_membership(request, claims, unconfirmed.tenant_id)
     return resolve_tenant_access(
         request, claims, memberships, request_selects=request_selects, confirmed_tenant=confirmed
+    )
+
+
+@dataclass(frozen=True)
+class TokenTenant:
+    """The tenant a principal's own token names, what the token grants there, and every tenant the caller is in.
+
+    For a ``token_authorized_only`` provider only: its principals' tenant and
+    grants are not in the canonical model, and switching tenant takes a new
+    token.
+    """
+
+    tenant_id: str
+    permissions: tuple[str, ...]
+    memberships: tuple[TenantMembership, ...]
+
+
+async def _list_memberships(request: Request, provider: ProviderTokenConfig, claims: dict) -> list[TenantMembership]:
+    """The provider's membership list for the caller, bounded like the lookup. 502 when it cannot be had."""
+    if provider.tenant_memberships is None:
+        logger.warning(
+            "memberships not listed: provider=%s has no membership list (sub=%r)", provider.name, claims.get("sub")
+        )
+        raise HTTPException(status_code=403, detail=MEMBERSHIPS_NOT_LISTED)
+    limit = MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS
+    bound = asyncio.timeout(limit)
+    try:
+        async with bound:
+            listed = await provider.tenant_memberships(claims)
+    except Exception as exc:
+        if bound.expired():
+            _log_lookup_timeout(provider.name, limit, claims.get("sub"))
+        else:
+            logger.warning(
+                "membership list failed for provider=%s sub=%r", provider.name, claims.get("sub"), exc_info=True
+            )
+        raise HTTPException(status_code=502, detail=MEMBERSHIP_LOOKUP_FAILED) from exc
+    if bound.expired():
+        _log_lookup_timeout(provider.name, limit, claims.get("sub"))
+        raise HTTPException(status_code=502, detail=MEMBERSHIP_LOOKUP_FAILED)
+    if not isinstance(listed, (list, tuple)) or not all(isinstance(entry, TenantMembership) for entry in listed):
+        logger.warning("membership list of provider=%s cannot be used (sub=%r)", provider.name, claims.get("sub"))
+        raise HTTPException(status_code=502, detail=MEMBERSHIP_LOOKUP_FAILED)
+    return list(listed)
+
+
+async def token_tenant(request: Request) -> TokenTenant | None:
+    """Dependency: the tenant and grants of a principal whose provider authorizes from its token alone.
+
+    ``None``, with no I/O, for every other request: an unauthenticated one and
+    a principal of any provider that is not ``token_authorized_only``, so
+    ``GET /api/identity`` answers them as before.
+
+    Otherwise the tenant and the permissions come from the token through the
+    one resolver (conventions §18): a token that names no tenant is refused
+    (403) before any lookup, and a token that needs its tenant confirmed is
+    confirmed by the provider's lookup (403 or 502, §17). Only then is the
+    caller's membership list asked for: 502 when it fails, and 403 when the
+    token's tenant is not on it (decision 12).
+    """
+    provider = getattr(request.state, "provider", None)
+    claims = getattr(request.state, "claims", None)
+    if not isinstance(provider, ProviderTokenConfig) or not provider.token_authorized_only:
+        return None
+    if not isinstance(claims, dict):
+        return None
+    access = await _tenant_access(request, None)
+    memberships = await _list_memberships(request, provider, claims)
+    if access.tenant_id not in {membership.tenant_id for membership in memberships}:
+        logger.warning(
+            "membership list of provider=%s sub=%r does not hold the token's tenant",
+            provider.name,
+            claims.get("sub"),
+        )
+        raise HTTPException(status_code=403, detail=TENANT_NOT_A_MEMBERSHIP)
+    return TokenTenant(
+        tenant_id=access.tenant_id,
+        permissions=tuple(access.permissions),
+        memberships=tuple(memberships),
     )
 
 
