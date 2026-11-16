@@ -12,7 +12,9 @@
       "members": [
         { "username": "alice", "membershipType": "UNMANAGED" },
         { "username": "bob", "membershipType": "UNMANAGED" },
-        { "username": "carol", "membershipType": "UNMANAGED" }
+        { "username": "carol", "membershipType": "UNMANAGED" },
+        { "username": "dave", "membershipType": "UNMANAGED" },
+        { "username": "erin", "membershipType": "UNMANAGED" }
       ]
     },
     {
@@ -143,6 +145,30 @@
       "firstName": "Carol",
       "lastName": "No-Role",
       "credentials": [{ "type": "password", "value": "local-only-carol", "temporary": false }]
+    },
+    {
+      "username": "dave",
+      "enabled": true,
+      "email": "dave@acme.test",
+      "emailVerified": true,
+      "firstName": "Dave",
+      "lastName": "One-Org-Admin",
+      "credentials": [{ "type": "password", "value": "local-only-dave", "temporary": false }],
+      "clientRoles": {
+        "tenant-admin": ["members:invite", "members:remove", "settings:manage"]
+      }
+    },
+    {
+      "username": "erin",
+      "enabled": true,
+      "email": "erin@acme.test",
+      "emailVerified": true,
+      "firstName": "Erin",
+      "lastName": "Write-Only",
+      "credentials": [{ "type": "password", "value": "local-only-erin", "temporary": false }],
+      "clientRoles": {
+        "member": ["documents:write"]
+      }
     }
   ]
 }
