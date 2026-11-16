@@ -58,6 +58,15 @@ class MembershipSourcesDisagree(ProviderConfigurationError):
     """
 
 
+class TenantMembershipMistyped(TypeError):
+    """A ``TenantMembership`` built with a field of the wrong type.
+
+    ``counted`` must be a ``bool`` and the ids strings: the lookup routes and
+    ``GET /api/identity`` read the same list, and a truthy non-bool or a
+    non-string id would let them count it differently.
+    """
+
+
 @dataclass(frozen=True)
 class TenantClaims:
     """What one token says about its caller's tenant.
@@ -113,6 +122,17 @@ class TenantMembership:
     tenant_name: str
     counted: bool = True
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.tenant_id, str) or not isinstance(self.tenant_name, str):
+            raise TenantMembershipMistyped("a membership's tenant_id and tenant_name must be strings")
+        if not isinstance(self.counted, bool):
+            raise TenantMembershipMistyped("a membership's counted must be a bool")
+
+
+def counted_tenant_ids(memberships: Iterable[TenantMembership]) -> list[str]:
+    """The tenant ids of the ``counted`` entries of a membership list: the one reading both routes use."""
+    return [membership.tenant_id for membership in memberships if membership.counted]
+
 
 # A provider's membership list: every tenant the caller of these verified claims
 # belongs to, as the provider's directory has it now, for ``GET /api/identity``.
@@ -132,8 +152,7 @@ class CountedMemberships:
     memberships: TenantMembershipsLookup
 
     async def __call__(self, claims: dict) -> list[str]:
-        listed = await self.memberships(claims)
-        return [membership.tenant_id for membership in listed if membership.counted]
+        return counted_tenant_ids(await self.memberships(claims))
 
 
 @dataclass(frozen=True)

@@ -62,7 +62,12 @@ from app.dependencies.tenant_access import (
 )
 from app.knobs import knob, knob_set
 from app.logbook import logbook
-from app.middleware.providers import ProviderConfigurationError, ProviderTokenConfig, TenantMembership
+from app.middleware.providers import (
+    ProviderConfigurationError,
+    ProviderTokenConfig,
+    TenantMembership,
+    counted_tenant_ids,
+)
 from app.models.database import get_session_factory
 from app.models.identity.user import UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
@@ -600,7 +605,7 @@ async def token_tenant(request: Request) -> TokenTenant | None:
             request,
             provider.name,
             claims.get("sub"),
-            (membership.tenant_id for membership in memberships if membership.counted is True),
+            counted_tenant_ids(memberships),
             unconfirmed.tenant_id,
         )
         access = resolve_tenant_access(request, claims, None, confirmed_tenant=confirmed)
