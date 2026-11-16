@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request
 
-from app.dependencies.rbac import canonical_memberships, confirmed_tenant
+from app.dependencies.rbac import canonical_memberships, confirmed_tenant, refuses_from_the_token_alone
 from app.dependencies.tenant_access import SELECT_A_TENANT_FIRST, CanonicalMemberships, resolve_tenant_access
 from app.logbook import logbook
 from app.middleware.providers import ProviderTokenConfig
@@ -44,6 +44,7 @@ def get_tenant_id(
     return access.tenant_id
 
 
+@refuses_from_the_token_alone
 def get_tenant_claims(request: Request) -> dict:
     """Return the `tenants` claim mapping from the JWT.
 

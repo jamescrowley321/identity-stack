@@ -22,6 +22,8 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from slowapi.errors import RateLimitExceeded
 
+from app.dependencies import rbac
+from app.dependencies.descope import require_descope_principal
 from app.dependencies.identity import (
     get_permission_service,
     get_provider_service,
@@ -127,8 +129,18 @@ def stores() -> dict[str, AsyncMock]:
     }
 
 
-@pytest.fixture
-def client(stores) -> TestClient:
+class _DirectoryDown:
+    """A test double of a membership lookup whose directory is unreachable: it raises, and records each call."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def __call__(self, claims: dict) -> list[str]:
+        self.calls.append(claims)
+        raise RuntimeError("directory unreachable")
+
+
+def _client(stores: dict[str, AsyncMock], lookup) -> TestClient:
     """Every shipped route behind the shipped gateway middleware, with Keycloak as the provider."""
     limiter.reset()
     app = FastAPI()
@@ -153,11 +165,16 @@ def client(stores) -> TestClient:
         ISSUER,
         frozenset({MEMBER_TYPE_CLIENT, TENANT_ADMIN_TYPE_CLIENT}),
         require_https=False,
-        organization_lookup=_only_acme,
+        organization_lookup=lookup,
         **model_settings(MEMBER_TYPE_CLIENT, TENANT_ADMIN_TYPE_CLIENT),
     )
     app.add_middleware(GatewayClaimsMiddleware, providers=[keycloak])
     return TestClient(app)
+
+
+@pytest.fixture
+def client(stores) -> TestClient:
+    return _client(stores, _only_acme)
 
 
 class TestTheWalkCoversTheApplication:
@@ -226,6 +243,88 @@ class TestAKeycloakPrincipalIsRefused:
         assert response.status_code == 403
         assert response.json() == {"detail": TENANTS_CLAIM_NOT_READ}
         assert stores["descope"].mock_calls == []
+
+
+class TestEveryRefusalComesBeforeTheMembershipLookup:
+    """What the token alone decides is answered before the directory is asked, whichever dependency decides it.
+
+    The tenant admin's token is organization-bound, so its tenant needs the
+    lookup. With the directory down, a route that refuses this principal must
+    still answer 403, with its own refusal, and must not ask: a 502 would mean a
+    refusing guard was left until after the lookup.
+    """
+
+    @pytest.mark.parametrize(("method", "path"), sorted(MUST_REFUSE))
+    def test_on_every_route_that_is_not_registered(self, stores, method, path):
+        lookup = _DirectoryDown()
+
+        response = _client(stores, lookup).request(
+            method, _url(path), headers=_bearer(TENANT_ADMIN), json={"name": "a name"}
+        )
+
+        assert response.status_code == 403, response.text
+        assert lookup.calls == []
+
+    @pytest.mark.parametrize(("method", "path"), sorted(DESCOPE_BACKED_ROUTES))
+    def test_by_the_guard_on_every_descope_backed_route(self, stores, method, path):
+        lookup = _DirectoryDown()
+
+        response = _client(stores, lookup).request(
+            method, _url(path), headers=_bearer(TENANT_ADMIN), json={"name": "a name"}
+        )
+
+        assert response.status_code == 403
+        assert response.json() == REFUSED_BY_THE_GUARD
+        assert lookup.calls == []
+
+
+# What a route that asks the membership lookup may depend on besides its gates
+# and its ``refuses_from_the_token_alone`` guards, each with the reason it is
+# not answered before the lookup. A new dependency on such a route is put in
+# one of the three, so one that refuses from the token is not left until after.
+RUNS_AFTER_THE_LOOKUP = {
+    "get_tenant_id": "the resolver: it is what the lookup confirms",
+    "canonical_memberships": "the resolver's database half; answers None for a token-authorized provider",
+    "confirmed_tenant": "asks the lookup itself, after the guards and gates",
+    "get_rbac_session": "opens a session, refuses nothing",
+    "get_async_session": "opens a session, refuses nothing",
+    "get_descope_management": "builds the Descope adapter, refuses nothing",
+    "get_role_service": "builds a service, refuses nothing",
+    "require_fga.<locals>.dependency": "asks Descope FGA, so it needs a resolved tenant",
+}
+
+
+def _qualname(call: object) -> str:
+    return getattr(call, "__qualname__", repr(call))
+
+
+class TestEveryDependencyOfALookupRouteIsClassified:
+    def test_the_guards_that_refuse_from_the_token_alone(self):
+        assert set(rbac._TOKEN_GUARDS) == {require_descope_principal, get_tenant_claims}
+
+    def test_every_dependency_of_a_route_that_asks_the_lookup_is_a_gate_a_guard_or_registered(self):
+        unclassified = {
+            (method, route.path, _qualname(call))
+            for route in shipped_app.routes
+            if isinstance(route, APIRoute) and confirmed_tenant in _dependency_calls(route.dependant)
+            for call in _dependency_calls(route.dependant)
+            if call not in rbac._GATE_CHECKS
+            and call not in rbac._TOKEN_GUARDS
+            and _qualname(call) not in RUNS_AFTER_THE_LOOKUP
+            for method in route.methods
+        }
+
+        assert unclassified == set()
+
+    def test_the_register_holds_no_stale_entry(self):
+        depended_on = {
+            _qualname(call)
+            for route in shipped_app.routes
+            if isinstance(route, APIRoute) and confirmed_tenant in _dependency_calls(route.dependant)
+            for call in _dependency_calls(route.dependant)
+        }
+
+        assert set(RUNS_AFTER_THE_LOOKUP) <= depended_on
 
 
 class TestTheProviderNeutralRoutesAnswer:

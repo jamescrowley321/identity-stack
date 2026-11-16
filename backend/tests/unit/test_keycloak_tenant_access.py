@@ -10,6 +10,7 @@ import asyncio
 import base64
 import json
 import time
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -21,6 +22,7 @@ from fastapi.testclient import TestClient
 from slowapi.errors import RateLimitExceeded
 
 from app.dependencies import rbac
+from app.dependencies.descope import NOT_A_DESCOPE_PRINCIPAL, require_descope_principal
 from app.dependencies.identity import get_identity_provisioning_service, get_identity_resolution_service
 from app.dependencies.rbac import (
     INSUFFICIENT_PERMISSIONS,
@@ -725,6 +727,85 @@ class TestAnOrganizationBoundTokenAgainstALookupDouble:
         _assert_403(_get(_tenant_admin(), "/own/two-gates", app=app), INSUFFICIENT_PERMISSIONS)
         assert lookup.calls == []
 
+    def test_a_guard_declared_after_the_tenant_refuses_before_the_lookup(self):
+        """A refusing guard that is not a ``require_*`` gate is answered first too, with its own refusal."""
+        lookup = _Lookup(error=RuntimeError("directory unreachable"))
+        app = _app(GATEWAY, _provider(lookup))
+
+        @app.get("/own/tenant-then-guard")
+        async def tenant_then_guard(
+            tenant_id: str = Depends(get_tenant_id), _guard: None = Depends(require_descope_principal)
+        ):
+            return {"tenant_id": tenant_id}
+
+        _assert_403(_get(_tenant_admin(), "/own/tenant-then-guard", app=app), NOT_A_DESCOPE_PRINCIPAL)
+        assert lookup.calls == []
+
+    def test_a_guard_inside_a_gate_refuses_before_the_lookup_too(self):
+        lookup = _Lookup(error=RuntimeError("directory unreachable"))
+        app = _app(GATEWAY, _provider(lookup))
+
+        async def descope_writer(
+            _guard: None = Depends(require_descope_principal),
+            permissions: list[str] = Depends(require_permission(SETTINGS_MANAGE)),
+        ) -> list[str]:
+            return permissions
+
+        @app.get("/own/tenant-then-nested-guard")
+        async def tenant_then_nested_guard(
+            tenant_id: str = Depends(get_tenant_id), permissions: list[str] = Depends(descope_writer)
+        ):
+            return {"tenant_id": tenant_id, "permissions": permissions}
+
+        _assert_403(_get(_tenant_admin(), "/own/tenant-then-nested-guard", app=app), NOT_A_DESCOPE_PRINCIPAL)
+        assert lookup.calls == []
+
+    def test_the_tenants_claim_refusal_declared_after_the_tenant_comes_before_the_lookup(self):
+        lookup = _Lookup(error=RuntimeError("directory unreachable"))
+        app = _app(GATEWAY, _provider(lookup))
+
+        @app.get("/own/tenant-then-tenants-claim")
+        async def tenant_then_tenants_claim(
+            tenant_id: str = Depends(get_tenant_id), tenants: dict = Depends(get_tenant_claims)
+        ):
+            return {"tenant_id": tenant_id, "tenants": tenants}
+
+        _assert_403(_get(_tenant_admin(), "/own/tenant-then-tenants-claim", app=app), TENANTS_CLAIM_NOT_READ)
+        assert lookup.calls == []
+
+    def test_a_guard_refuses_before_the_lookup_a_gate_asks_for(self):
+        """The gate's own resolution (``require_permission`` declared after the tenant) waits for the guard too."""
+        lookup = _Lookup(error=RuntimeError("directory unreachable"))
+        app = _app(GATEWAY, _provider(lookup))
+
+        @app.get("/own/gate-then-guard")
+        async def gate_then_guard(
+            permissions: list[str] = Depends(require_permission(SETTINGS_MANAGE)),
+            _guard: None = Depends(require_descope_principal),
+        ):
+            return {"permissions": permissions}
+
+        _assert_403(_get(_tenant_admin(), "/own/gate-then-guard", app=app), NOT_A_DESCOPE_PRINCIPAL)
+        assert lookup.calls == []
+
+    def test_a_guard_the_application_overrode_does_not_answer_for_the_token(self):
+        """FastAPI runs the override in its place, so the guard refuses nothing here: the lookup is asked."""
+        lookup = _Lookup([ACME])
+        app = _app(GATEWAY, _provider(lookup))
+        app.dependency_overrides[require_descope_principal] = lambda: None
+
+        @app.get("/own/tenant-then-overridden-guard")
+        async def tenant_then_overridden_guard(
+            tenant_id: str = Depends(get_tenant_id), _guard: None = Depends(require_descope_principal)
+        ):
+            return {"tenant_id": tenant_id}
+
+        response = _get(_tenant_admin(), "/own/tenant-then-overridden-guard", app=app)
+
+        assert response.status_code == 200, response.text
+        assert response.json() == {"tenant_id": ACME}
+        assert len(lookup.calls) == 1
+
     def test_a_lookup_that_raises_a_timeout_of_its_own_is_logged_as_a_failure(self, caplog):
         """Only the limit running out is logged as the limit running out."""
         lookup = _Lookup(error=TimeoutError("the directory client gave up"))
@@ -884,6 +965,48 @@ class TestTheGateWalk:
         request = self._request(self._dependant(parent, self._dependant(gate)), overrides={parent: lambda: None})
 
         assert rbac._route_gate_checks(request) == []
+
+
+class TestTheGuardRegister:
+    """``refuses_from_the_token_alone`` takes only a guard that can be answered before the lookup."""
+
+    @pytest.fixture(autouse=True)
+    def _own_register(self, monkeypatch):
+        """The guards these tests register do not join the application's register."""
+        monkeypatch.setattr(rbac, "_TOKEN_GUARDS", weakref.WeakSet())
+
+    def test_an_asynchronous_guard_is_refused_at_registration(self):
+        async def asks_someone(request: Request) -> None:
+            return None
+
+        with pytest.raises(TypeError, match="asks_someone is asynchronous"):
+            rbac.refuses_from_the_token_alone(asks_someone)
+
+        assert asks_someone not in rbac._TOKEN_GUARDS
+
+    def test_the_guards_are_run_in_the_order_fastapi_runs_them(self):
+        def first(request: Request) -> None:
+            return None
+
+        def second(request: Request) -> None:
+            return None
+
+        rbac.refuses_from_the_token_alone(first)
+        rbac.refuses_from_the_token_alone(second)
+        dependant = TestTheGateWalk._dependant
+        request = TestTheGateWalk._request(dependant(_Unhashable(), dependant(second)), dependant(first))
+
+        assert rbac._route_token_guards(request) == [second, first]
+
+    def test_a_guard_the_route_depends_on_twice_is_run_once(self):
+        def guard(request: Request) -> None:
+            return None
+
+        rbac.refuses_from_the_token_alone(guard)
+        dependant = TestTheGateWalk._dependant
+        request = TestTheGateWalk._request(dependant(guard), dependant(_Unhashable(), dependant(guard)))
+
+        assert rbac._route_token_guards(request) == [guard]
 
 
 class TestTheMembershipLookupLimit:
