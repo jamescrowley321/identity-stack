@@ -280,6 +280,15 @@ class TestClaimsExtractors:
             tenant_id="t1", roles=[], permissions=[]
         )
 
+    def test_descope_extractor_keeps_the_strings_of_a_mixed_grant_list(self):
+        """An entry that is not a string is dropped and the strings beside it
+        stay granted, as ``"admin" in ["admin", 7]`` always answered."""
+        tenants = {"t1": {"roles": ["admin", 7, None], "permissions": [{"p": 1}, "projects.read"]}}
+
+        assert descope_tenant_claims({"dct": "t1", "tenants": tenants}) == TenantClaims(
+            tenant_id="t1", roles=["admin"], permissions=["projects.read"]
+        )
+
     def test_descope_extractor_grants_nothing_without_a_tenants_claim(self):
         assert descope_tenant_claims({"dct": "t1"}) == TenantClaims(tenant_id="t1", roles=[], permissions=[])
 
