@@ -95,8 +95,9 @@ change adds it here. `make keycloak-terraform-check`
 ([`scripts/check-against-compose.sh`](scripts/check-against-compose.sh)) checks the two against
 each other in the compose `keycloak-test` container:
 
-1. applies this root to a new realm `identity-stack-terraform` beside the imported
-   `identity-stack`, with its own state in a temporary directory;
+1. deletes any `identity-stack-terraform` realm an earlier killed or failed run left in a
+   keycloak-test that is still up, then applies this root to a new realm of that name beside
+   the imported `identity-stack`, with its own state in a temporary directory;
 2. runs `terraform plan` again and fails unless it is empty;
 3. runs [`scripts/check_realm.py`](scripts/check_realm.py), which compares the realm settings,
    clients, client roles, scope mappings, users and their roles, organizations, domains, members
@@ -105,9 +106,11 @@ each other in the compose `keycloak-test` container:
    compares the claim names with [`keycloak/fixtures/access-token.json`](../../keycloak/fixtures/access-token.json);
    fails on any protocol mapper that writes a user attribute or property to `aud`, `azp`,
    `organization`, `resource_access`, `dct` or `tenants`; and reads `bob`'s organizations
-   with the directory client's generated secret;
-4. destroys the realm, and stops the container (deleting its volumes) only if the
-   script started it: a keycloak-test that was already running is left up.
+   with the directory client's generated secret. Users, organizations and members are read
+   one page of `LISTING_PAGE_SIZE` at a time, and a full page fails the check as possibly cut off;
+4. destroys the realm (if the destroy fails, the temporary state directory is kept and its
+   path printed), and stops the container (deleting its volumes) only if the script started
+   it: a keycloak-test that was already running is left up.
 
 It needs Docker, `terraform` and the backend virtual environment
 (`cd backend && uv sync --locked --extra dev`). On a Docker host shared with other sessions, hold

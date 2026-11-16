@@ -110,10 +110,29 @@ class Realm:
         )
 
 
+# Keycloak pages /users, /organizations and their members. Every listing asks for
+# one page this size and refuses a full page: it may have been cut off.
+LISTING_PAGE_SIZE = 500
+
+
+class TruncatedListing(RuntimeError):
+    """An Admin API listing came back with a full page, so items past it would be missed."""
+
+
 def _get(http: httpx.Client, path: str, **params: object) -> object:
     response = http.get(path, params=params)
     response.raise_for_status()
     return response.json()
+
+
+def _list(http: httpx.Client, path: str, **params: object) -> list:
+    """One page of a paged Admin API listing, refused if it may be truncated."""
+    items = _get(http, path, **params, first=0, max=LISTING_PAGE_SIZE)
+    if len(items) >= LISTING_PAGE_SIZE:
+        raise TruncatedListing(
+            f"{str(http.base_url).rstrip('/')}{path} returned {len(items)} items, the page size: raise LISTING_PAGE_SIZE"
+        )
+    return items
 
 
 def _sorted(value: object) -> object:
@@ -147,7 +166,7 @@ def describe(realm: Realm) -> dict:
 
         users = {}
         names_by_id = {}
-        for user in _get(http, "/users", briefRepresentation="false", max=100):
+        for user in _list(http, "/users", briefRepresentation="false"):
             names_by_id[user["id"]] = user["username"]
             if user["username"] not in WANTED_USERS:
                 continue
@@ -162,8 +181,8 @@ def describe(realm: Realm) -> dict:
             }
 
         organizations = {}
-        for organization in _get(http, "/organizations", briefRepresentation="false"):
-            members = _get(http, f"/organizations/{organization['id']}/members")
+        for organization in _list(http, "/organizations", briefRepresentation="false"):
+            members = _list(http, f"/organizations/{organization['id']}/members")
             organizations[organization["alias"]] = {
                 "name": organization["name"],
                 "enabled": organization["enabled"],
@@ -196,9 +215,7 @@ def token_shape(source: KeycloakTokenSource, token: str) -> dict:
         "aud": claims.get("aud", ABSENT),
         "azp": claims.get("azp", ABSENT),
         "organization": _sorted(claims.get("organization", ABSENT)),
-        "resource_access": {
-            client: sorted(entry["roles"]) for client, entry in claims["resource_access"].items()
-        }
+        "resource_access": {client: sorted(entry["roles"]) for client, entry in claims["resource_access"].items()}
         if "resource_access" in claims
         else ABSENT,
         "scope": sorted(claims.get("scope", "").split()),
