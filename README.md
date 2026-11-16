@@ -185,6 +185,14 @@ The tables below cover the main routes. The full, current list is in the interac
 | GET, POST | `/api/permissions` | List or create permission definitions (requires owner/admin) |
 | PUT, DELETE | `/api/permissions/{name}` | Update or delete a permission definition (requires owner/admin) |
 
+### Access checks
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/access-checks/documents-read` | Return the request's tenant to a caller who holds `documents:read` in it |
+| GET | `/api/access-checks/settings-manage` | Return the request's tenant to a caller who holds `settings:manage` in it |
+
+Both answer a principal of any provider from the tenant resolver alone, with no provider call.
+
 ### User Profile & Attributes
 | Method | Path | Description |
 |--------|------|-------------|
