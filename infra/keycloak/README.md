@@ -106,7 +106,8 @@ each other in the compose `keycloak-test` container:
    fails on any protocol mapper that writes a user attribute or property to `aud`, `azp`,
    `organization`, `resource_access`, `dct` or `tenants`; and reads `bob`'s organizations
    with the directory client's generated secret;
-4. destroys the realm and stops the container.
+4. destroys the realm, and stops the container (deleting its volumes) only if the
+   script started it: a keycloak-test that was already running is left up.
 
 It needs Docker, `terraform` and the backend virtual environment
 (`cd backend && uv sync --locked --extra dev`). On a Docker host shared with other sessions, hold
