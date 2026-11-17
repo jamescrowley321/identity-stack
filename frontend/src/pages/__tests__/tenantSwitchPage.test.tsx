@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, render, screen, waitFor, fireEvent } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import type { ComponentType } from "react";
 import { IdentityProvider, useIdentityContext, type CanonicalIdentity } from "@/contexts/IdentityContext";
 import { AppShell } from "@/components/layout/AppShell";
@@ -54,10 +54,12 @@ function json(status: number, body: unknown): Response {
 /** A response the test releases when it chooses. */
 function deferred() {
   let release!: (response: Response) => void;
-  const promise = new Promise<Response>((resolve) => {
+  let fail!: (error: Error) => void;
+  const promise = new Promise<Response>((resolve, reject) => {
     release = resolve;
+    fail = reject;
   });
-  return { promise, release };
+  return { promise, release, fail };
 }
 
 interface ListPage {
@@ -124,14 +126,21 @@ function SwitchToGlobex() {
   return <button onClick={() => setCurrentTenantId("tenant-globex")}>switch to globex</button>;
 }
 
+function GoElsewhere() {
+  const navigate = useNavigate();
+  return <button onClick={() => navigate("/elsewhere")}>go elsewhere</button>;
+}
+
 function renderPage(Page: ComponentType) {
   return render(
     <MemoryRouter>
       <IdentityProvider>
         <SwitchToGlobex />
+        <GoElsewhere />
         <Routes>
           <Route element={<AppShell />}>
             <Route index element={<Page />} />
+            <Route path="elsewhere" element={<p>another page</p>} />
           </Route>
         </Routes>
       </IdentityProvider>
@@ -183,6 +192,30 @@ describe.each(pages)("$name across a tenant switch", (page) => {
     await waitFor(() => expect(screen.getByText("tenant-globex-row")).toBeInTheDocument());
     expect(screen.queryByText("tenant-acme-row")).not.toBeInTheDocument();
     expect(sent.filter((r) => r.tenant === "tenant-acme")).toEqual([]);
+    // The shell's toaster outlives the page: a toast now would read as if the
+    // action ran in the tenant on screen.
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("a row action that fails after the switch shows no error over the new tenant", async () => {
+    stubNetwork(page);
+    renderPage(page.Page);
+    expect(await screen.findByText("tenant-acme-row")).toBeInTheDocument();
+
+    const action = hold("DELETE", `${page.list}/tenant-acme-row-id`, "tenant-acme");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: page.rowAction }));
+    });
+    await switchToGlobex();
+    expect(await screen.findByText("tenant-globex-row")).toBeInTheDocument();
+
+    await act(async () => {
+      action.fail(new TypeError("network down"));
+    });
+
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
   });
 
   it("shows no row of the previous tenant, and so offers no action on one, while the new tenant loads", async () => {
@@ -210,6 +243,9 @@ describe("AccessKeys across a tenant switch", () => {
     r.method === "POST" && r.url === "/api/keys"
       ? json(200, { cleartext: `secret-of-${r.tenant}` })
       : undefined;
+
+  const keyCreatedAfterLeaving =
+    "An access key was created after you left this page. Its secret can't be shown: revoke the key if you need it.";
 
   async function createKey(name: string) {
     fireEvent.change(screen.getByPlaceholderText("Key name"), { target: { value: name } });
@@ -275,11 +311,85 @@ describe("AccessKeys across a tenant switch", () => {
       vi.advanceTimersByTime(5000);
     });
 
-    expect(vi.mocked(toast.warning).mock.calls).toEqual([
-      ["An access key was created in the tenant you left. Its secret can't be shown: revoke the key there if you need it."],
-    ]);
+    expect(vi.mocked(toast.warning).mock.calls).toEqual([[keyCreatedAfterLeaving]]);
     expect(toast.success).not.toHaveBeenCalled();
     expect(screen.queryByText("secret-of-tenant-acme")).not.toBeInTheDocument();
+    expect(sent.filter((r) => r.tenant === "tenant-acme")).toEqual([]);
+  });
+
+  it("a key created as the user leaves for another page: the warning names no tenant switch", async () => {
+    stubNetwork(keysPage, created);
+    renderPage(AccessKeys);
+    expect(await screen.findByText("tenant-acme-row")).toBeInTheDocument();
+
+    const creation = hold("POST", "/api/keys", "tenant-acme");
+    await createKey("in flight");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "go elsewhere" }));
+    });
+    expect(await screen.findByText("another page")).toBeInTheDocument();
+
+    await act(async () => {
+      creation.release(json(200, { cleartext: "secret-of-tenant-acme" }));
+    });
+
+    expect(vi.mocked(toast.warning).mock.calls).toEqual([[keyCreatedAfterLeaving]]);
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["is refused", (c: ReturnType<typeof deferred>) => c.release(json(400, { detail: "name taken" }))],
+    ["does not reach the API", (c: ReturnType<typeof deferred>) => c.fail(new TypeError("network down"))],
+  ])("a key creation that %s after the switch shows no error over the new tenant", async (_label, finish) => {
+    stubNetwork(keysPage, created);
+    renderPage(AccessKeys);
+    expect(await screen.findByText("tenant-acme-row")).toBeInTheDocument();
+
+    const creation = hold("POST", "/api/keys", "tenant-acme");
+    await createKey("in flight");
+    await switchToGlobex();
+    expect(await screen.findByText("tenant-globex-row")).toBeInTheDocument();
+
+    await act(async () => {
+      finish(creation);
+    });
+
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+});
+
+describe("MemberManagement across a tenant switch", () => {
+  const membersPage = pages.find((p) => p.name === "MemberManagement")!;
+
+  async function invite(email: string) {
+    fireEvent.change(screen.getByPlaceholderText("Email address"), { target: { value: email } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Invite" }));
+    });
+  }
+
+  it.each([
+    ["succeeds", (c: ReturnType<typeof deferred>) => c.release(json(200, {}))],
+    ["is refused", (c: ReturnType<typeof deferred>) => c.release(json(400, { detail: "already a member" }))],
+    ["does not reach the API", (c: ReturnType<typeof deferred>) => c.fail(new TypeError("network down"))],
+  ])("an invitation that %s after the switch toasts nothing and reloads nothing there", async (_label, finish) => {
+    stubNetwork(membersPage);
+    renderPage(MemberManagement);
+    expect(await screen.findByText("tenant-acme-row")).toBeInTheDocument();
+
+    const invitation = hold("POST", "/api/members/invite", "tenant-acme");
+    await invite("bob@acme.example");
+    await switchToGlobex();
+    expect(await screen.findByText("tenant-globex-row")).toBeInTheDocument();
+
+    sent.length = 0;
+    await act(async () => {
+      finish(invitation);
+    });
+
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.error).not.toHaveBeenCalled();
     expect(sent.filter((r) => r.tenant === "tenant-acme")).toEqual([]);
   });
 });

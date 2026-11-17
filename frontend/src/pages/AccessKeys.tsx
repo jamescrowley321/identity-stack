@@ -57,7 +57,9 @@ export default function AccessKeys() {
 
   // The page is mounted afresh for each tenant, so once it has gone, a call it
   // started finishes in a tenant the user has left: nothing more is loaded or
-  // shown there.
+  // shown there, and no toast is shown, since the shell's toaster outlives the
+  // page and the toast would read as if the call ran in the tenant now on screen.
+  // The one exception is a key created after the page went (see handleCreate).
   const mounted = useRef(false);
   useEffect(() => {
     mounted.current = true;
@@ -112,10 +114,10 @@ export default function AccessKeys() {
       if (res.ok) {
         const data = await res.json();
         if (!mounted.current) {
-          // The user switched tenant while the key was created: its secret,
-          // shown only once, belongs to a page that is gone.
+          // The page went (a tenant switch or another page) while the key was
+          // created: its secret, shown only once, has nowhere to be shown.
           toast.warning(
-            "An access key was created in the tenant you left. Its secret can't be shown: revoke the key there if you need it.",
+            "An access key was created after you left this page. Its secret can't be shown: revoke the key if you need it.",
           );
           return;
         }
@@ -131,10 +133,10 @@ export default function AccessKeys() {
         delayedReload.current = setTimeout(loadKeys, 1500);
       } else {
         const err = await res.json();
-        toast.error(err.detail || "Failed to create key");
+        if (mounted.current) toast.error(err.detail || "Failed to create key");
       }
     } catch {
-      toast.error("Failed to create key");
+      if (mounted.current) toast.error("Failed to create key");
     }
   }, [name, expirationDays, apiFetch, loadKeys]);
 
@@ -142,10 +144,11 @@ export default function AccessKeys() {
     async (keyId: string) => {
       try {
         await apiFetch(`/api/keys/${keyId}/deactivate`, { method: "POST" });
+        if (!mounted.current) return;
         toast.success("Key revoked");
         loadKeys();
       } catch {
-        toast.error("Failed to revoke key");
+        if (mounted.current) toast.error("Failed to revoke key");
       }
     },
     [apiFetch, loadKeys],
@@ -155,10 +158,11 @@ export default function AccessKeys() {
     async (keyId: string) => {
       try {
         await apiFetch(`/api/keys/${keyId}/activate`, { method: "POST" });
+        if (!mounted.current) return;
         toast.success("Key activated");
         loadKeys();
       } catch {
-        toast.error("Failed to activate key");
+        if (mounted.current) toast.error("Failed to activate key");
       }
     },
     [apiFetch, loadKeys],
@@ -168,10 +172,11 @@ export default function AccessKeys() {
     async (keyId: string) => {
       try {
         await apiFetch(`/api/keys/${keyId}`, { method: "DELETE" });
+        if (!mounted.current) return;
         toast.success("Key deleted");
         loadKeys();
       } catch {
-        toast.error("Failed to delete key");
+        if (mounted.current) toast.error("Failed to delete key");
       }
     },
     [apiFetch, loadKeys],
