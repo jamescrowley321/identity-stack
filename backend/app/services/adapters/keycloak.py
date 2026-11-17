@@ -34,16 +34,27 @@ Through ``KeycloakAdminApi`` (the Admin REST API, one service account):
   tenant (``LAST_ROLE_IN_TENANT``); otherwise another role still holds it and
   nothing is called. ``ends_memberships`` is set, so ``RoleService.delete_role``
   also sends that for each user the deleted role was the last role of.
+- Ending a membership (last role, leaving a tenant) first takes the member's id
+  out of the organization's ``type:<type client>`` grant markers, so a later
+  membership does not bring back a grant the realm admin gave the earlier one.
+  Other attributes are kept.
+
+Memberships and status changes reach the Keycloak account the canonical user's
+``keycloak`` IdP link names (``linked_subject``, from the JIT link of a user who
+signed in through Keycloak) and, when there is none or Keycloak no longer has it,
+the account under the canonical id. Profile pushes (create, email) and deletes
+reach only the account under the canonical id, and no email is pushed to a
+linked account.
 - Roles and permissions stay canonical: their methods call nothing, as
   ``OrySyncAdapter``'s do.
 
-The adapter manages only the users it created. A Keycloak user who signed up
-through the login page has another username and is not taken over by email: a
-push for an email such a user holds is refused by Keycloak (409) and returned as
-an error.
+A Keycloak user who signed up through the login page and has no IdP link has
+another username and is not taken over by email: a push for an email such a user
+holds is refused by Keycloak (409) and returned as an error.
 
-Every failure is ``Error(SyncError)`` with ``context["status"]``, the HTTP status
-or ``None``; nothing raises.
+Every Keycloak failure is ``Error(SyncError)`` with ``context["status"]``, the HTTP
+status or ``None``, and ``context[UNANSWERED]`` when Keycloak gave no readable
+answer. Only a failure of ``linked_subject`` (the service's own database) raises.
 """
 
 from __future__ import annotations
@@ -55,16 +66,38 @@ from typing import ClassVar
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
-from app.services.adapters.base import LAST_ROLE_IN_TENANT, STATUS_CHANGED, IdentityProviderAdapter, SyncError
+from app.services.adapters.base import (
+    LAST_ROLE_IN_TENANT,
+    STATUS_CHANGED,
+    UNANSWERED,
+    IdentityProviderAdapter,
+    SyncError,
+)
 from app.services.keycloak_admin import KeycloakAdminApi, KeycloakAdminError
+from app.services.keycloak_directory import GRANT_ATTRIBUTE_PREFIX
 
 tracer = trace.get_tracer(__name__)
 
-# A membership removal or status change found no Keycloak user under the canonical
-# id. A user the adapter did not create (login-page sign-up, JIT-linked) may hold
-# the membership or the account under another username, so it is reported, not
-# counted as done, and no account is created for it.
-USER_NOT_IN_KEYCLOAK = "the user is not in Keycloak under the canonical user id: nothing was changed"
+# A membership removal or status change found no Keycloak account: none named by
+# the user's IdP link and none under the canonical id. A user who signed up through
+# the login page and was never linked may hold one under another username, so it
+# is reported, not counted as done, and no account is created for it.
+USER_NOT_IN_KEYCLOAK = (
+    "the user has no Keycloak account under its IdP link or the canonical user id: nothing was changed"
+)
+
+# The canonical provider row whose IdP links name Keycloak accounts (seeded by
+# scripts/seed_keycloak.py; a Keycloak principal's provider name, lower-cased).
+PROVIDER_NAME = "keycloak"
+
+# The Keycloak account id (the token's ``sub``) a canonical user's ``keycloak`` IdP
+# link names, or ``None`` when the user has no such link.
+LinkedSubject = Callable[[uuid.UUID], Awaitable[str | None]]
+
+
+async def _no_link(_user_id: uuid.UUID) -> str | None:
+    return None
+
 
 # Canonical user status -> Keycloak ``enabled``.
 _ENABLED: dict[str, bool] = {"active": True, "provisioned": True, "inactive": False}
@@ -82,7 +115,8 @@ async def _run(operation: str, context: dict, push: Callable[[], Awaitable[None]
     try:
         await push()
     except KeycloakAdminError as exc:
-        return _error(operation, str(exc), context, exc.status)
+        unanswered = {UNANSWERED: True} if exc.status is None else {}
+        return _error(operation, str(exc), {**context, **unanswered}, exc.status)
     except _Refused as exc:
         return _error(operation, str(exc), context, None)
     return Ok(None)
@@ -115,6 +149,22 @@ def _merged(found: dict, representation: dict) -> dict:
     return {**kept, **representation}
 
 
+def _without_member(attributes: dict, member_id: str) -> dict:
+    """The organization's attributes with ``member_id`` taken out of every ``type:`` grant marker.
+
+    A marker left with no member is dropped (Keycloak drops it too); every other
+    attribute is kept as it is.
+    """
+    kept: dict = {}
+    for name, value in attributes.items():
+        if name.startswith(GRANT_ATTRIBUTE_PREFIX) and isinstance(value, list):
+            value = [holder for holder in value if holder != member_id]
+            if not value:
+                continue
+        kept[name] = value
+    return kept
+
+
 def _same_email(held: object, sent: str) -> bool:
     """Whether ``sent`` is the address Keycloak holds; Keycloak stores emails in lower case."""
     return isinstance(held, str) and held.lower() == sent.lower()
@@ -125,8 +175,33 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
 
     ends_memberships: ClassVar[bool] = True
 
-    def __init__(self, api: KeycloakAdminApi) -> None:
+    def __init__(self, api: KeycloakAdminApi, *, linked_subject: LinkedSubject = _no_link) -> None:
         self._api = api
+        self._linked_subject = linked_subject
+
+    async def _account(self, user_id: uuid.UUID) -> dict | None:
+        """The canonical user's Keycloak account: the one their IdP link names, else the one under the canonical id."""
+        subject = await self._linked_subject(user_id)
+        if subject is not None:
+            linked = await self._api.get_user(subject)
+            if linked is not None:
+                return linked
+        return await self._api.find_user(str(user_id))
+
+    async def _end_membership(self, organization_id: str, member_id: str) -> None:
+        """Take the member out of the organization's grant markers, then end the membership.
+
+        Markers first: should the removal fail, the member is left without the
+        grant rather than with it.
+        """
+        organization = await self._api.get_organization(organization_id)
+        attributes = organization.get("attributes")
+        if isinstance(attributes, dict):
+            trimmed = _without_member(attributes, member_id)
+            if trimmed != attributes:
+                kept = {key: value for key, value in organization.items() if key != "attributes"}
+                await self._api.update_organization(organization_id, {**kept, "attributes": trimmed})
+        await self._api.remove_member(organization_id, member_id)
 
     async def sync_tenant(self, *, tenant_id: uuid.UUID, data: dict) -> Result[None, SyncError]:
         """Create or update the organization whose alias is ``tenant_id``.
@@ -191,21 +266,26 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
         except _Refused as exc:
             return _error("sync_user", str(exc), context, None)
 
+        offboarding = left_alias is not None or status_changed
+
         async def push() -> None:
-            user = await self._api.find_user(username)
-            if user is None and (left_alias is not None or status_changed):
+            # Offboarding reaches the account the user's IdP link names; a profile push only the one the adapter names.
+            user = await (self._account(user_id) if offboarding else self._api.find_user(username))
+            if user is None and offboarding:
                 # Offboarding and a status change never provision an account: a
                 # disabled account beside the user's real one would disable nothing.
                 raise _Refused(USER_NOT_IN_KEYCLOAK)
             if user is None:
                 await self._api.create_user({"username": username, "email": email, "enabled": _ENABLED[status]})
                 return
-            changed_email = not _same_email(user.get("email"), email)
+            # A linked account's email is its owner's own: it is never pushed.
+            named = user.get("username") == username
+            changed_email = named and not _same_email(user.get("email"), email)
             if left_alias is not None:
                 # Before the profile update: a refused update must not keep the user in the tenant.
                 organization = await self._api.find_organization(left_alias)
                 if organization is not None:
-                    await self._api.remove_member(organization["id"], user["id"])
+                    await self._end_membership(organization["id"], user["id"])
                 # Leaving a tenant says nothing about the account's status: ``enabled``
                 # is not sent, so a realm admin's disable stands. Only a new email is pushed.
                 if changed_email:
@@ -219,7 +299,7 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
             if status_changed:
                 update["enabled"] = _ENABLED[status]
             if update:
-                await self._api.update_user(user["id"], {"email": email, **update})
+                await self._api.update_user(user["id"], {"email": email, **update} if named else update)
 
         with tracer.start_as_current_span("keycloak.sync_user") as span:
             span.set_attribute("user.id", username)
@@ -252,7 +332,7 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
             organization = await self._api.find_organization(alias)
             if organization is None:
                 raise _Refused("the tenant has no organization in Keycloak")
-            user = await self._api.find_user(username)
+            user = await self._account(user_id)
             if user is None:
                 raise _Refused("the user is not in Keycloak")
             await self._api.add_member(organization["id"], user["id"])
@@ -285,10 +365,10 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
             organization = await self._api.find_organization(alias)
             if organization is None:
                 return
-            user = await self._api.find_user(username)
+            user = await self._account(user_id)
             if user is None:
                 raise _Refused(USER_NOT_IN_KEYCLOAK)
-            await self._api.remove_member(organization["id"], user["id"])
+            await self._end_membership(organization["id"], user["id"])
 
         with tracer.start_as_current_span("keycloak.delete_role_assignment") as span:
             span.set_attribute("user.id", username)

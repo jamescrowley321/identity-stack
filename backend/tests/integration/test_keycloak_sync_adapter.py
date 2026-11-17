@@ -361,6 +361,90 @@ class TestMembers:
         assert result.error.operation == "sync_role_assignment"
 
 
+def get_organization(realm: httpx.Client, organization: dict) -> dict:
+    response = realm.get(f"/organizations/{organization['id']}")
+    response.raise_for_status()
+    return response.json()
+
+
+@pytest.fixture
+def linked_account(realm: httpx.Client) -> Iterator[dict]:
+    """A Keycloak account the adapter did not create, as a user who signed in through Keycloak holds one."""
+    username = f"signed-up-{uuid.uuid4().hex[:12]}"
+    created = realm.post("/users", json={"username": username, "email": f"{username}@sync.test", "enabled": True})
+    created.raise_for_status()
+    account_id = created.headers["location"].rsplit("/", 1)[1]
+    yield realm.get(f"/users/{account_id}").json()
+    realm.delete(f"/users/{account_id}")
+
+
+def linked_to(account_id: str):
+    async def linked_subject(_user_id: uuid.UUID) -> str | None:
+        return account_id
+
+    return linked_subject
+
+
+class TestGrantMarkers:
+    async def test_ending_a_membership_takes_the_member_out_of_the_markers_and_keeps_the_rest(
+        self, sync, realm, tenant_id, user_id
+    ):
+        await sync.sync_tenant(tenant_id=tenant_id, data={"name": f"Sync {tenant_id}"})
+        await sync.sync_user(user_id=user_id, data={"email": email_of(user_id), "status": "active"})
+        organization = find_organization(realm, tenant_id)
+        account_id = find_user(realm, user_id)["id"]
+        await sync.sync_role_assignment(user_id=user_id, tenant_id=tenant_id, role_id=uuid.uuid4())
+        marked = {"type:tenant-admin": [account_id, "another-member"], "type:viewer": [account_id], "note": ["kept"]}
+        realm.put(
+            f"/organizations/{organization['id']}", json={**organization, "attributes": marked}
+        ).raise_for_status()
+
+        last = {"role_name": "member", LAST_ROLE_IN_TENANT: True}
+        removed = await sync.delete_role_assignment(
+            user_id=user_id, tenant_id=tenant_id, role_id=uuid.uuid4(), data=last
+        )
+        await sync.sync_role_assignment(user_id=user_id, tenant_id=tenant_id, role_id=uuid.uuid4())
+
+        assert removed == Ok(None)
+        assert members(realm, organization) == [str(user_id)]
+        assert get_organization(realm, organization)["attributes"] == {
+            "type:tenant-admin": ["another-member"],
+            "note": ["kept"],
+        }
+
+
+class TestLinkedAccounts:
+    async def test_memberships_and_status_reach_the_account_the_link_names(
+        self, environment, realm, tenant_id, user_id, linked_account
+    ):
+        async with httpx.AsyncClient(timeout=ADMIN_TIMEOUT_SECONDS) as http:
+            sync = KeycloakSyncAdapter(
+                await connect_keycloak_admin(http), linked_subject=linked_to(linked_account["id"])
+            )
+            await sync.sync_tenant(tenant_id=tenant_id, data={"name": f"Sync {tenant_id}"})
+            organization = find_organization(realm, tenant_id)
+
+            added = await sync.sync_role_assignment(user_id=user_id, tenant_id=tenant_id, role_id=uuid.uuid4())
+            assert (added, members(realm, organization)) == (Ok(None), [linked_account["username"]])
+
+            disabled = await sync.sync_user(
+                user_id=user_id, data={"email": email_of(user_id), "status": "inactive", STATUS_CHANGED: True}
+            )
+            last = {"role_name": "member", LAST_ROLE_IN_TENANT: True}
+            removed = await sync.delete_role_assignment(
+                user_id=user_id, tenant_id=tenant_id, role_id=uuid.uuid4(), data=last
+            )
+
+        account = realm.get(f"/users/{linked_account['id']}").json()
+        assert (disabled, removed) == (Ok(None), Ok(None))
+        assert members(realm, organization) == []
+        assert {key: account[key] for key in ("enabled", "email")} == {
+            "enabled": False,
+            "email": linked_account["email"],
+        }
+        assert find_user(realm, user_id) is None
+
+
 class TestDeletingARole:
     """RoleService over Postgres and the compose Keycloak: a role delete ends the memberships it held alone."""
 

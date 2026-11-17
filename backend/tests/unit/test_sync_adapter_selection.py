@@ -23,10 +23,19 @@ from app.models.identity.assignment import UserTenantRole
 from app.models.identity.role import Role
 from app.models.identity.user import User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
+from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.permission import PermissionRepository
 from app.repositories.role import RoleRepository
 from app.repositories.user import UserRepository
-from app.services.adapters.base import LAST_ROLE_IN_TENANT, STATUS_CHANGED, IdentityProviderAdapter, SyncError
+from app.services.adapters.base import (
+    LAST_ROLE_IN_TENANT,
+    PROVIDER_SYNC,
+    PROVIDER_SYNC_FAILED,
+    STATUS_CHANGED,
+    UNANSWERED,
+    IdentityProviderAdapter,
+    SyncError,
+)
 from app.services.adapters.descope import DescopeSyncAdapter
 from app.services.adapters.keycloak import KeycloakSyncAdapter
 from app.services.adapters.noop import NoOpSyncAdapter
@@ -84,6 +93,23 @@ class TestSelection:
 
         assert type(service._adapter) is KeycloakSyncAdapter
         assert service._adapter._api is keycloak_admin
+
+    async def test_the_keycloak_adapter_reads_the_users_keycloak_link_in_the_requests_session(self, monkeypatch):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        session = AsyncMock()
+        user_id = uuid.uuid4()
+        asked = []
+
+        async def external_sub_of(self, user: uuid.UUID, provider_name: str) -> str | None:
+            asked.append((self._session, user, provider_name))
+            return "keycloak-account-id"
+
+        monkeypatch.setattr(IdPLinkRepository, "external_sub_of", external_sub_of)
+
+        service = await get_role_service(request=mock_request(keycloak_admin=object()), session=session)
+
+        assert await service._adapter._linked_subject(user_id) == "keycloak-account-id"
+        assert asked == [(session, user_id, "keycloak")]
 
 
 def recorded_client(api: RecordedAdminApi):
@@ -264,6 +290,47 @@ class TestLeavingATenant:
         )
 
 
+class TestRevocationsThatFail:
+    """Where the adapter keeps memberships, a deactivation or tenant exit the provider did not apply is told."""
+
+    @staticmethod
+    def users(ends_memberships: bool) -> tuple[UserService, AsyncMock, User, uuid.UUID]:
+        service, adapter, user, tenant_id = TestStatusChanges.users(UserStatus.active)
+        service._assignment_repository = AsyncMock(spec=UserTenantRoleRepository)
+        service._assignment_repository.delete_by_user_tenant.return_value = 1
+        adapter.ends_memberships = ends_memberships
+        adapter.sync_user.return_value = Error(SyncError(message="no account", operation="sync_user"))
+        return service, adapter, user, tenant_id
+
+    @pytest.mark.parametrize("operation", ["deactivate_user", "remove_user_from_tenant"])
+    async def test_keycloak_failures_are_error_logs_and_told_to_the_caller(self, caplog, operation):
+        service, _adapter, user, tenant_id = self.users(ends_memberships=True)
+
+        with caplog.at_level("WARNING", logger="app.services.user"):
+            result = await getattr(service, operation)(tenant_id=tenant_id, user_id=user.id)
+
+        assert result.ok[PROVIDER_SYNC] == PROVIDER_SYNC_FAILED
+        assert [record.levelname for record in caplog.records if record.name == "app.services.user"] == ["ERROR"]
+
+    @pytest.mark.parametrize("operation", ["deactivate_user", "remove_user_from_tenant"])
+    async def test_other_adapters_failures_are_warnings_and_the_answer_is_unchanged(self, caplog, operation):
+        service, _adapter, user, tenant_id = self.users(ends_memberships=False)
+
+        with caplog.at_level("WARNING", logger="app.services.user"):
+            result = await getattr(service, operation)(tenant_id=tenant_id, user_id=user.id)
+
+        assert PROVIDER_SYNC not in result.ok
+        assert [record.levelname for record in caplog.records if record.name == "app.services.user"] == ["WARNING"]
+
+    async def test_a_keycloak_push_that_succeeds_tells_nothing(self):
+        service, adapter, user, tenant_id = self.users(ends_memberships=True)
+        adapter.sync_user.return_value = Ok(None)
+
+        result = await service.deactivate_user(tenant_id=tenant_id, user_id=user.id)
+
+        assert PROVIDER_SYNC not in result.ok
+
+
 class TestStatusChanges:
     """Only activate and deactivate say the status changed, so a profile update leaves an IdP-side disable."""
 
@@ -405,6 +472,65 @@ class TestLosingTheLastRole:
         )
 
 
+class TestLosingTheLastRoleWithAMembership:
+    """For an adapter that keeps memberships, ending the last one is a revocation: a failure is told."""
+
+    @staticmethod
+    def roles() -> tuple[RoleService, AsyncMock, AsyncMock, Role]:
+        service, assignments, adapter, role = TestLosingTheLastRole.roles([])
+        adapter.ends_memberships = True
+        assignments.list_by_user_tenants.return_value = []
+        return service, assignments, adapter, role
+
+    async def test_a_failed_removal_is_an_error_log_and_told_to_the_caller(self, caplog):
+        user_id, tenant_id = uuid.uuid4(), uuid.uuid4()
+        service, _assignments, adapter, role = self.roles()
+        adapter.delete_role_assignment.return_value = Error(
+            SyncError(message="no answer", operation="delete_role_assignment", context={UNANSWERED: True})
+        )
+
+        with caplog.at_level("WARNING", logger="app.services.role"):
+            result = await service.unassign_role_from_user(user_id=user_id, tenant_id=tenant_id, role_id=role.id)
+
+        assert result.ok[PROVIDER_SYNC] == PROVIDER_SYNC_FAILED
+        logged = [record for record in caplog.records if record.name == "app.services.role"]
+        assert [record.levelname for record in logged] == ["ERROR"]
+
+    async def test_an_ended_membership_given_a_role_meanwhile_is_added_back(self):
+        user_id, tenant_id = uuid.uuid4(), uuid.uuid4()
+        service, assignments, adapter, role = self.roles()
+        assigned = UserTenantRole(user_id=user_id, tenant_id=tenant_id, role_id=uuid.uuid4())
+        assignments.list_by_user_tenants.return_value = [assigned]
+        adapter.sync_role_assignment.return_value = Ok(None)
+
+        result = await service.unassign_role_from_user(user_id=user_id, tenant_id=tenant_id, role_id=role.id)
+
+        assert PROVIDER_SYNC not in result.ok
+        assignments.list_by_user_tenants.assert_awaited_once_with([(user_id, tenant_id)])
+        adapter.sync_role_assignment.assert_awaited_once_with(
+            user_id=user_id, tenant_id=tenant_id, role_id=assigned.role_id
+        )
+
+    async def test_an_ended_membership_with_no_role_since_stays_ended(self):
+        service, _assignments, adapter, role = self.roles()
+
+        result = await service.unassign_role_from_user(user_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role_id=role.id)
+
+        assert result.is_ok()
+        adapter.sync_role_assignment.assert_not_awaited()
+
+    async def test_an_adapter_that_keeps_no_memberships_is_not_recounted(self):
+        """Descope and Ory: the push and its warning as before, nothing added back."""
+        service, assignments, adapter, role = TestLosingTheLastRole.roles([])
+        adapter.delete_role_assignment.return_value = Error(SyncError(message="down", operation="x"))
+
+        result = await service.unassign_role_from_user(user_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role_id=role.id)
+
+        assert PROVIDER_SYNC not in result.ok
+        assignments.list_by_user_tenants.assert_not_awaited()
+        adapter.sync_role_assignment.assert_not_awaited()
+
+
 class TestDeletingARole:
     """Deleting a role ends the memberships it was the last role of, for an adapter that keeps memberships."""
 
@@ -416,6 +542,7 @@ class TestDeletingARole:
         calls: list[str] = []
         repo = AsyncMock(spec=RoleRepository)
         repo.get.return_value = role
+        repo.lock.side_effect = lambda *_args: calls.append("lock")
         repo.delete.side_effect = lambda *_args: calls.append("delete") or True
         repo.commit.side_effect = lambda: calls.append("commit")
         assignments = AsyncMock(spec=UserTenantRoleRepository)
@@ -424,12 +551,12 @@ class TestDeletingARole:
             calls.append("holders")
             return holders
 
-        async def left(user_id: uuid.UUID, tenant_id: uuid.UUID) -> list[UserTenantRole]:
+        async def left(pairs) -> list[UserTenantRole]:
             calls.append("count")
-            return remaining[(user_id, tenant_id)]
+            return [row for pair in pairs for row in remaining.get(pair, [])]
 
         assignments.list_by_role.side_effect = held
-        assignments.list_by_user_tenant.side_effect = left
+        assignments.list_by_user_tenants.side_effect = left
         adapter = AsyncMock(spec=IdentityProviderAdapter)
         adapter.ends_memberships = True
         adapter.delete_role.return_value = Ok(None)
@@ -460,6 +587,10 @@ class TestDeletingARole:
 
         assert result == Ok({"status": "deleted", "name": "editor"})
         assignments.list_by_role.assert_awaited_once_with(role.id)
+        assert [set(call.args[0]) for call in assignments.list_by_user_tenants.await_args_list] == [
+            {(alone, tenant_id), (kept, tenant_id)},
+            {(alone, tenant_id)},
+        ]
         adapter.delete_role.assert_awaited_once_with(role_id=role.id)
         adapter.delete_role_assignment.assert_awaited_once_with(
             user_id=alone,
@@ -468,16 +599,65 @@ class TestDeletingARole:
             data={"role_name": "editor", LAST_ROLE_IN_TENANT: True},
         )
 
-    async def test_the_holders_are_read_before_the_delete_and_counted_after_the_commit(self):
-        """The delete cascades to the assignments: read after it, there are none left to name the holders."""
+    async def test_the_holders_are_read_under_the_role_lock_before_the_delete_and_counted_after_the_commit(self):
+        """The delete cascades to the assignments: read after it, there are none left to name the holders.
+        The role's row is locked first, so no assignment of it commits unseen between the read and the delete.
+        Counted once after the commit, and once more after the removals (a role assigned meanwhile)."""
         user_id, tenant_id = uuid.uuid4(), uuid.uuid4()
         holders = [UserTenantRole(user_id=user_id, tenant_id=tenant_id, role_id=uuid.uuid4())]
         service, _assignments, adapter, role, calls = self.roles(holders, {(user_id, tenant_id): []})
 
         await service.delete_role(role_id=role.id)
 
-        assert calls == ["holders", "delete", "commit", "count"]
+        assert calls == ["lock", "holders", "delete", "commit", "count", "count"]
         adapter.delete_role_assignment.assert_awaited_once()
+
+    async def test_the_pushes_stop_at_the_first_the_provider_gave_no_answer_to(self, caplog):
+        """Each push would wait out the same timeout: the rest are logged as not pushed."""
+        tenant_id, role_id = uuid.uuid4(), uuid.uuid4()
+        users = sorted(uuid.uuid4() for _ in range(3))
+        holders = [UserTenantRole(user_id=user_id, tenant_id=tenant_id, role_id=role_id) for user_id in users]
+        service, _assignments, adapter, role, _calls = self.roles(holders, {})
+        adapter.delete_role_assignment.return_value = Error(
+            SyncError(message="no answer", operation="delete_role_assignment", context={UNANSWERED: True})
+        )
+
+        with caplog.at_level("ERROR", logger="app.services.role"):
+            result = await service.delete_role(role_id=role.id)
+
+        assert result == Ok({"status": "deleted", "name": "editor", PROVIDER_SYNC: PROVIDER_SYNC_FAILED})
+        adapter.delete_role_assignment.assert_awaited_once()
+        logged = [record.getMessage() for record in caplog.records if record.name == "app.services.role"]
+        assert [str(user_id) in message for message, user_id in zip(logged, users, strict=True)] == [True] * 3
+
+    async def test_a_refused_push_does_not_stop_the_others(self):
+        tenant_id, role_id = uuid.uuid4(), uuid.uuid4()
+        users = sorted(uuid.uuid4() for _ in range(2))
+        holders = [UserTenantRole(user_id=user_id, tenant_id=tenant_id, role_id=role_id) for user_id in users]
+        service, _assignments, adapter, role, _calls = self.roles(holders, {})
+        adapter.delete_role_assignment.return_value = Error(
+            SyncError(message="USER_NOT_IN_KEYCLOAK", operation="delete_role_assignment", context={"status": None})
+        )
+
+        await service.delete_role(role_id=role.id)
+
+        assert [call.kwargs["user_id"] for call in adapter.delete_role_assignment.await_args_list] == users
+
+    async def test_a_membership_given_a_role_while_it_was_ending_is_added_back(self):
+        """An assign racing the removal pushed its membership first; the removal undid it."""
+        user_id, tenant_id = uuid.uuid4(), uuid.uuid4()
+        holders = [UserTenantRole(user_id=user_id, tenant_id=tenant_id, role_id=uuid.uuid4())]
+        service, assignments, adapter, role, _calls = self.roles(holders, {})
+        assigned = UserTenantRole(user_id=user_id, tenant_id=tenant_id, role_id=uuid.uuid4())
+        assignments.list_by_user_tenants.side_effect = [[], [assigned]]
+        adapter.sync_role_assignment.return_value = Ok(None)
+
+        await service.delete_role(role_id=role.id)
+
+        adapter.delete_role_assignment.assert_awaited_once()
+        adapter.sync_role_assignment.assert_awaited_once_with(
+            user_id=user_id, tenant_id=tenant_id, role_id=assigned.role_id
+        )
 
     async def test_one_membership_per_user_and_tenant_whatever_the_rows(self):
         user_id, first, second = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
@@ -503,7 +683,7 @@ class TestDeletingARole:
             for tenant_id in (first, second)
         }
 
-    async def test_a_failed_membership_push_is_logged_and_the_delete_still_succeeds(self, caplog):
+    async def test_a_failed_membership_push_is_logged_as_an_error_and_told_to_the_caller(self, caplog):
         user_id, tenant_id = uuid.uuid4(), uuid.uuid4()
         holders = [UserTenantRole(user_id=user_id, tenant_id=tenant_id, role_id=uuid.uuid4())]
         service, _assignments, adapter, role, _calls = self.roles(holders, {(user_id, tenant_id): []})
@@ -514,9 +694,9 @@ class TestDeletingARole:
         with caplog.at_level("WARNING", logger="app.services.role"):
             result = await service.delete_role(role_id=role.id)
 
-        assert result == Ok({"status": "deleted", "name": "editor"})
-        warnings = [record for record in caplog.records if record.name == "app.services.role"]
-        assert [record.levelname for record in warnings] == ["WARNING"]
+        assert result == Ok({"status": "deleted", "name": "editor", PROVIDER_SYNC: PROVIDER_SYNC_FAILED})
+        logged = [record for record in caplog.records if record.name == "app.services.role"]
+        assert [record.levelname for record in logged] == ["ERROR"]
 
     async def test_an_adapter_that_keeps_no_memberships_is_sent_what_it_was_sent_before(self):
         """Descope and Ory: the role delete alone, no holder read and no assignment push."""
@@ -526,6 +706,7 @@ class TestDeletingARole:
         await service.delete_role(role_id=role.id)
 
         adapter.delete_role.assert_awaited_once_with(role_id=role.id)
+        service._repository.lock.assert_not_awaited()
         assignments.list_by_role.assert_not_awaited()
         adapter.delete_role_assignment.assert_not_awaited()
 
@@ -599,6 +780,22 @@ class TestLifespan:
         assert str(refused.value) == "SYNC_PROVIDER is keycloak but KEYCLOAK_ADMIN_CLIENT_SECRET is not set"
         assert served == []
         assert api.sent == []
+        assert [client.is_closed for client in started] == [True, True]
+
+    async def test_a_refused_start_also_shuts_down_telemetry_and_disposes_the_engine(self, monkeypatch, started):
+        """Both were started before the sync provider: a startup it stops leaves neither open."""
+        set_settings(monkeypatch, **{ADMIN_CREDENTIAL_VARIABLE: "wrong"})
+        engine = FakeEngine()
+        monkeypatch.setattr(main, "get_engine", lambda: engine)
+        shut_down = []
+        monkeypatch.setattr(main, "shutdown_telemetry", lambda: shut_down.append(True))
+        self.build_into(monkeypatch, started, RecordedAdminApi(["token_wrong_secret"]))
+
+        with pytest.raises(RuntimeError, match="status 401"):
+            async with main.lifespan(FastAPI()):
+                pass
+
+        assert (engine.disposed, shut_down) == (True, [True])
         assert [client.is_closed for client in started] == [True, True]
 
     async def test_a_wrong_admin_secret_stops_startup_before_serving(self, monkeypatch, started):

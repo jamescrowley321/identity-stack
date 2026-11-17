@@ -58,6 +58,14 @@ class RoleRepository(BaseRepository[Role]):
 
     _model = Role
 
+    async def lock(self, role_id: uuid.UUID) -> None:
+        """Hold the role's row (``FOR UPDATE``) until the transaction ends.
+
+        An assignment of the role checks its foreign key against this row and
+        waits, so the role's holders cannot change until the transaction commits.
+        """
+        await self._session.execute(sa.select(Role.id).where(Role.id == role_id).with_for_update())
+
     async def get_by_name(self, name: str, tenant_id: uuid.UUID | None = None) -> Role | None:
         """Fetch a role by name within a tenant scope. Returns None if not found."""
         stmt = sa.select(Role).where(Role.name == name)

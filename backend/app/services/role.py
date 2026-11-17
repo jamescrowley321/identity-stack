@@ -22,7 +22,14 @@ from app.repositories.assignment import UserTenantRoleRepository, assignment_fro
 from app.repositories.base import RepositoryConflictError
 from app.repositories.permission import PermissionRepository, permission_from_row
 from app.repositories.role import RoleRepository, apply_role, role_from_row, role_to_row
-from app.services.adapters.base import LAST_ROLE_IN_TENANT, IdentityProviderAdapter, SyncError
+from app.services.adapters.base import (
+    LAST_ROLE_IN_TENANT,
+    PROVIDER_SYNC,
+    PROVIDER_SYNC_FAILED,
+    UNANSWERED,
+    IdentityProviderAdapter,
+    SyncError,
+)
 from app.services.cache_invalidation import CacheInvalidationPublisher
 
 logger = logbook(__name__)
@@ -373,9 +380,12 @@ class RoleService:
                 return Error(identity_error(decision.error))
             deleted = decision.ok
 
-            # The delete cascades to the role's assignments: who held it is read first.
+            # The delete cascades to the role's assignments: who held it is read
+            # first, under a lock on the role's row so no assignment of it can
+            # commit between the read and the delete and be dropped unseen.
             holders: list[tuple[uuid.UUID, uuid.UUID]] = []
             if self._adapter.ends_memberships is True:
+                await self._repository.lock(role_id)
                 assignments = await self._assignment_repository.list_by_role(role_id)
                 holders = sorted({(row.user_id, row.tenant_id) for row in assignments})
 
@@ -392,23 +402,10 @@ class RoleService:
                 "delete_role",
             )
 
-            # A holder with no role left in the tenant no longer belongs to it, as
-            # after unassigning their last role. Counted after the commit, as there.
-            for user_id, tenant_id in holders:
-                if await self._assignment_repository.list_by_user_tenant(user_id, tenant_id):
-                    continue
-                self._log_sync_failure(
-                    await self._adapter.delete_role_assignment(
-                        user_id=user_id,
-                        tenant_id=tenant_id,
-                        role_id=role_id,
-                        data={"role_name": deleted.name, LAST_ROLE_IN_TENANT: True},
-                    ),
-                    role_id,
-                    "delete_role",
-                )
-
-            return Ok({"status": "deleted", "name": deleted.name})
+            payload: dict = {"status": "deleted", "name": deleted.name}
+            if holders and not await self._end_memberships(holders, role_id, deleted.name):
+                payload[PROVIDER_SYNC] = PROVIDER_SYNC_FAILED
+            return Ok(payload)
 
     async def unassign_role_from_user(
         self,
@@ -451,24 +448,98 @@ class RoleService:
             if not await self._assignment_repository.list_by_user_tenant(user_id, tenant_id):
                 sync_data[LAST_ROLE_IN_TENANT] = True
 
+            pushed = await self._adapter.delete_role_assignment(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                role_id=role_id,
+                data=sync_data,
+            )
+            payload: dict = {
+                "status": "removed",
+                "user_id": str(unassigned.user_id),
+                "tenant_id": str(unassigned.tenant_id),
+                "role_id": str(unassigned.role_id),
+            }
+            if self._adapter.ends_memberships is not True or LAST_ROLE_IN_TENANT not in sync_data:
+                self._log_sync_failure(pushed, role_id, "unassign_role_from_user")
+            elif pushed.is_error():
+                self._log_revocation_failure(pushed, user_id, tenant_id)
+                payload[PROVIDER_SYNC] = PROVIDER_SYNC_FAILED
+            else:
+                await self._restore_reassigned([(user_id, tenant_id)])
+            return Ok(payload)
+
+    async def _end_memberships(
+        self,
+        pairs: list[tuple[uuid.UUID, uuid.UUID]],
+        role_id: uuid.UUID,
+        role_name: str,
+    ) -> bool:
+        """End the membership of each (user, tenant) pair left with no role; whether every push succeeded.
+
+        Who still holds a role is read once for all the pairs, after the commit.
+        The pushes stop at the first the provider gave no answer to: each would
+        wait out the same timeout, so the rest are logged as not pushed instead.
+        """
+        still = {(row.user_id, row.tenant_id) for row in await self._assignment_repository.list_by_user_tenants(pairs)}
+        leaving = [pair for pair in pairs if pair not in still]
+        ended: list[tuple[uuid.UUID, uuid.UUID]] = []
+        succeeded = True
+        for index, (user_id, tenant_id) in enumerate(leaving):
+            pushed = await self._adapter.delete_role_assignment(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                role_id=role_id,
+                data={"role_name": role_name, LAST_ROLE_IN_TENANT: True},
+            )
+            if pushed.is_ok():
+                ended.append((user_id, tenant_id))
+                continue
+            succeeded = False
+            self._log_revocation_failure(pushed, user_id, tenant_id)
+            if (pushed.error.context or {}).get(UNANSWERED) is True:
+                for skipped_user, skipped_tenant in leaving[index + 1 :]:
+                    logger.error(
+                        "IdP revocation not pushed: membership of user %s in tenant %s left after no answer",
+                        skipped_user,
+                        skipped_tenant,
+                    )
+                break
+        await self._restore_reassigned(ended)
+        return succeeded
+
+    async def _restore_reassigned(self, ended: list[tuple[uuid.UUID, uuid.UUID]]) -> None:
+        """Add back the memberships just ended whose user was given a role in the tenant meanwhile.
+
+        A role assigned while the membership was ending pushed its membership
+        before the removal reached the provider, so the removal undid it. Counted
+        after every removal, a role assigned later pushes its own membership.
+        """
+        if not ended:
+            return
+        restored: set[tuple[uuid.UUID, uuid.UUID]] = set()
+        for row in await self._assignment_repository.list_by_user_tenants(ended):
+            if (row.user_id, row.tenant_id) in restored:
+                continue
+            restored.add((row.user_id, row.tenant_id))
             self._log_sync_failure(
-                await self._adapter.delete_role_assignment(
-                    user_id=user_id,
-                    tenant_id=tenant_id,
-                    role_id=role_id,
-                    data=sync_data,
+                await self._adapter.sync_role_assignment(
+                    user_id=row.user_id, tenant_id=row.tenant_id, role_id=row.role_id
                 ),
-                role_id,
-                "unassign_role_from_user",
+                row.role_id,
+                "restore_membership",
             )
 
-            return Ok(
-                {
-                    "status": "removed",
-                    "user_id": str(unassigned.user_id),
-                    "tenant_id": str(unassigned.tenant_id),
-                    "role_id": str(unassigned.role_id),
-                }
+    @staticmethod
+    def _log_revocation_failure(result: Result[None, SyncError], user_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
+        """A membership the provider still holds after the canonical one ended: an error, not a warning."""
+        if result.is_error():
+            logger.error(
+                "IdP revocation failed: membership of user %s in tenant %s not ended (%s): %s",
+                user_id,
+                tenant_id,
+                result.error.operation,
+                result.error.message,
             )
 
     async def _invalidate(
