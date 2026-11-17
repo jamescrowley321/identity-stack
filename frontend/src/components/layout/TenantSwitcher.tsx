@@ -70,7 +70,7 @@ export default function TenantSwitcher() {
       // to the current tenant: say so beside the switch, which stays usable.
       setRequestFailedFor(null)
       signInToTenant(tenantId).catch((error: unknown) => {
-        console.error(`Tenant sign-in request for ${tenantId} failed`, error)
+        console.error("Tenant sign-in request failed", tenantId, error)
         setRequestFailedFor(tenantId)
       })
       return

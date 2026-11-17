@@ -130,7 +130,7 @@ describe("TenantSwitcher for a tenant that comes from the token", () => {
     await waitFor(() =>
       expect(screen.getByRole("alert")).toHaveTextContent("Could not switch to acme"),
     );
-    expect(logged).toHaveBeenCalledWith("Tenant sign-in request for acme failed", reason);
+    expect(logged).toHaveBeenCalledWith("Tenant sign-in request failed", "acme", reason);
     expect(screen.getByRole("combobox")).toHaveTextContent("Globex");
 
     fireEvent.click(screen.getByRole("combobox"));
