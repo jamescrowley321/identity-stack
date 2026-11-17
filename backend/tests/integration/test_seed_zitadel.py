@@ -159,6 +159,49 @@ async def test_an_unlinked_user_with_the_same_email_is_refused_not_linked_or_gra
     assert grants.all() == []
 
 
+async def _provider_row(session) -> tuple:
+    session.expire_all()
+    provider = (await session.execute(select(Provider).where(Provider.name == PROVIDER_NAME))).scalars().one()
+    return (provider.type, provider.issuer_url, provider.base_url, provider.capabilities, provider.active)
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        pytest.param(
+            {"issuer_url": "http://other.localhost:8480", "base_url": "http://other.localhost:8480"}, id="issuer"
+        ),
+        pytest.param({"type": ProviderType.ory}, id="type"),
+        pytest.param({"active": False}, id="inactive"),
+    ],
+)
+async def test_a_zitadel_provider_the_seed_did_not_write_is_refused_and_left_as_it_was(db_session, existing):
+    row = {"type": ProviderType.oidc, "issuer_url": ISSUER, "base_url": ISSUER, "capabilities": ["sso"]} | existing
+    db_session.add(Provider(name=PROVIDER_NAME, **row))
+    await db_session.commit()
+    before = await _provider_row(db_session)
+
+    refusal = await _refused(db_session, SEED)
+
+    assert PROVIDER_NAME in str(refusal)
+    assert await _provider_row(db_session) == before
+    tenants = (await db_session.execute(select(Tenant).where(Tenant.name.in_(["acme", "globex"])))).scalars()
+    assert tenants.all() == []
+
+
+async def test_an_organization_held_by_another_tenant_is_refused_not_shared(db_session):
+    db_session.add(Tenant(name="acme-legacy", external_org_id=SEED.tenants["acme"]))
+    await db_session.commit()
+
+    refusal = await _refused(db_session, SEED)
+
+    assert SEED.tenants["acme"] in str(refusal)
+    db_session.expire_all()
+    holders = (await db_session.execute(select(Tenant).where(Tenant.external_org_id == SEED.tenants["acme"]))).scalars()
+    assert {tenant.name for tenant in holders} == {"acme-legacy"}
+    assert await _provider_count(db_session) == 0
+
+
 async def test_existing_canonical_roles_are_reused_not_duplicated(db_session):
     db_session.add(Role(name="admin", description="existing"))
     await db_session.flush()
