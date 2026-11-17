@@ -44,4 +44,19 @@ describe("useTenants with a tenant that comes from the token", () => {
       },
     });
   });
+
+  it("lists the token's tenant with the token's permissions when it is not among the memberships", () => {
+    const unlisted: CanonicalIdentity = {
+      ...identity,
+      tenant_memberships: [],
+      token_tenant: { tenant_id: "initech", permissions: ["documents.read"] },
+    };
+    mockUseIdentityContext.mockReturnValue({ identity: unlisted, currentTenantId: "initech" });
+
+    const { result } = renderHook(() => useTenants());
+
+    expect(result.current.tenants).toEqual([
+      { id: "initech", name: "initech", roles: [], permissions: ["documents.read"] },
+    ]);
+  });
 });
