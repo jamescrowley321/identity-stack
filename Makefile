@@ -111,6 +111,11 @@ zitadel-admin-pat: ## print the bootstrap admin machine user's personal access t
 zitadel-terraform-check: ## apply infra/zitadel to a fresh local Zitadel (make zitadel-reset first), check plan is empty and read the instance back
 	TF_VAR_zitadel_access_token="$$($(MAKE) -s zitadel-admin-pat)" infra/zitadel/scripts/check-against-compose.sh
 
+.PHONY: zitadel-terraform-integration
+zitadel-terraform-integration: ## zitadel-terraform-check, then the backend's live Zitadel suite (tests/integration_zitadel) against the applied root (make zitadel-reset and make test-up first)
+	TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TF_VAR_zitadel_access_token="$$($(MAKE) -s zitadel-admin-pat)" \
+	infra/zitadel/scripts/check-against-compose.sh --integration-tests
+
 zitadel-seed: ## link the applied infra/zitadel root to canonical tenants in DATABASE_URL (migrated database; idempotent)
 	terraform -chdir=infra/zitadel output -json canonical_seed | (cd backend && python -m scripts.seed_zitadel)
 
