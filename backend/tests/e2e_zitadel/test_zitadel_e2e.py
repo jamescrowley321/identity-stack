@@ -103,6 +103,9 @@ def test_a_first_login_creates_a_member_of_the_home_tenant_only(
     page: Page, frontend_url: str, api, zitadel: Instance, database: Database
 ):
     email, home = NEWCOMER.email, NEWCOMER.home
+    # The organization claim decides the first grant: `member`, the fixture's role for this user.
+    # Checked before the sign-in, which uses up the fresh seed.
+    assert NEWCOMER.roles == {home: "member"}
     assert database.user_ids_with_email(email) == [], f"{NEWCOMER.key} exists already: run against a fresh seed"
 
     token = _sign_in_to_the_spa(page, frontend_url, zitadel.users[NEWCOMER.key])["access_token"]
@@ -114,8 +117,6 @@ def test_a_first_login_creates_a_member_of_the_home_tenant_only(
     assert body["user"]["email"] == email
     assert database.user_ids_with_email(email) == [body["user"]["id"]]
     assert body["tenant_memberships"] == [{"tenant_id": tenant_id, "tenant_name": home}]
-    # The organization claim decides the first grant: `member`, the fixture's role for this user.
-    assert NEWCOMER.roles == {home: "member"}
     assert body["roles"] == [{"tenant_id": tenant_id, "role_name": "member", "permissions": []}]
     assert body["linked_idps"] == [{"provider_name": "zitadel", "external_sub": zitadel.user_ids[NEWCOMER.key]}]
     expect(page.locator("header").get_by_text(home, exact=True)).to_be_visible()
