@@ -317,3 +317,28 @@ async def test_a_linked_user_that_is_not_active_is_refused_and_left_as_it_was(db
     db_session.expire_all()
     user = (await db_session.execute(select(User).where(User.email == SEED.linked_user.email))).scalars().one()
     assert user.status == status
+
+
+@pytest.mark.parametrize("metadata", [None, {"note": "seeded earlier"}], ids=["none", "other-keys"])
+async def test_a_rerun_marks_a_seed_link_made_before_link_origins_were_recorded(db_session, metadata):
+    """Else the sync adapter, which follows only sign-in or backend links, would never follow the seeded user."""
+    await apply_seed(db_session, SEED)
+    link = (
+        (await db_session.execute(select(IdPLink).where(IdPLink.external_sub == SEED.linked_user.external_sub)))
+        .scalars()
+        .one()
+    )
+    link.metadata_ = metadata
+    await db_session.commit()
+
+    changes = await apply_seed(db_session, SEED)
+
+    assert changes == [f"marked the link of user {SEED.linked_user.email!r} as the backend's"]
+    assert await _state(db_session) == EXPECTED
+    link = (
+        (await db_session.execute(select(IdPLink).where(IdPLink.external_sub == SEED.linked_user.external_sub)))
+        .scalars()
+        .one()
+    )
+    assert link.metadata_ == (metadata or {}) | {LINK_ORIGIN: LINKED_BY_BACKEND}
+    assert await apply_seed(db_session, SEED) == []
