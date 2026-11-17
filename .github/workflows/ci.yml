@@ -133,6 +133,7 @@ jobs:
   keycloak-terraform-check:
     name: Keycloak Terraform Check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # No credential: the realm is built in the keycloak-test container, so this
     # runs on every pull request, forks and Dependabot included. It fails when
     # infra/keycloak and keycloak/realm/identity-stack-realm.json disagree.
