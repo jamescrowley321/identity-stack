@@ -12,8 +12,11 @@ Through ``KeycloakAdminApi`` (the Admin REST API, one service account):
   grant markers stay, and when the key is absent its domains stay as they are.
 - ``delete_tenant`` deletes that organization; one not there is deleted.
 - ``sync_user`` creates or updates the user whose **username is the canonical
-  user id**, with the canonical email, enabled while the status is ``active`` or
-  ``provisioned`` and disabled when ``inactive``. A changed email is sent with
+  user id**, with the canonical email. A new user is enabled while the status is
+  ``active`` or ``provisioned`` and disabled when ``inactive``; an existing one
+  gets ``enabled`` only on a status change (``STATUS_CHANGED``, from activate and
+  deactivate), so a profile update keeps a realm admin's disable, and a profile
+  update with the same email sends nothing. A changed email is sent with
   ``emailVerified: false``: the realm trusts a verified email to link identities
   across providers, and the new address has not been verified. With
   ``left_tenant_id`` in the data (``UserService.remove_user_from_tenant``) it
@@ -48,7 +51,7 @@ from collections.abc import Awaitable, Callable
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
-from app.services.adapters.base import LAST_ROLE_IN_TENANT, IdentityProviderAdapter, SyncError
+from app.services.adapters.base import LAST_ROLE_IN_TENANT, STATUS_CHANGED, IdentityProviderAdapter, SyncError
 from app.services.keycloak_admin import KeycloakAdminApi, KeycloakAdminError
 
 tracer = trace.get_tracer(__name__)
@@ -162,7 +165,9 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
         """Create or update the user whose username is ``user_id``.
 
         Expected data keys: email, status (required); left_tenant_id (optional):
-        the tenant whose organization the user has left.
+        the tenant whose organization the user has left; STATUS_CHANGED (optional):
+        ``True`` to push ``enabled`` for an existing user, which otherwise keeps
+        the enable or disable a realm admin set.
         """
         context = {"user_id": str(user_id)}
         email = data.get("email")
@@ -172,6 +177,7 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
         if status not in _ENABLED:
             return _error("sync_user", f"Unknown status '{status}': expected one of {list(_ENABLED)}", context, None)
         username = str(user_id)
+        status_changed = data.get(STATUS_CHANGED) is True
         left = data.get("left_tenant_id")
         try:
             left_alias = None if left is None else _tenant_uuid(left)
@@ -197,10 +203,15 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
                 if changed_email:
                     await self._api.update_user(user["id"], {"email": email, "emailVerified": False})
                 return
-            update: dict = {"email": email, "enabled": _ENABLED[status]}
+            # ``enabled`` only on a status change: a profile update does not undo a
+            # realm admin's disable. With neither, there is nothing to push.
+            update: dict = {}
             if changed_email:
                 update["emailVerified"] = False
-            await self._api.update_user(user["id"], update)
+            if status_changed:
+                update["enabled"] = _ENABLED[status]
+            if update:
+                await self._api.update_user(user["id"], {"email": email, **update})
 
         with tracer.start_as_current_span("keycloak.sync_user") as span:
             span.set_attribute("user.id", username)

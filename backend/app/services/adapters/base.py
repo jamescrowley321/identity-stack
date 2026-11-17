@@ -15,6 +15,11 @@ from expression import Result
 # user's last role in the tenant, so they no longer belong to it (RoleService).
 LAST_ROLE_IN_TENANT = "last_role_in_tenant"
 
+# ``sync_user`` data key: ``True`` when the change is the user's status (activate,
+# deactivate). Without it an adapter does not push the status, so a profile update
+# does not undo an enable or disable made in the identity provider (UserService).
+STATUS_CHANGED = "status_changed"
+
 
 @dataclass(frozen=True)
 class SyncError:

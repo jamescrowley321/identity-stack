@@ -417,6 +417,10 @@ class RoleService:
 
             await self._assignment_repository.commit()
 
+            # The unassignment is committed: its cached permissions go first, so a
+            # failure below cannot leave the revoked role live.
+            await self._invalidate(unassigned, role_id, tenant_id)
+
             # No role left in the tenant: the user no longer belongs to it, and an
             # adapter that keeps a membership (Keycloak organizations) ends it.
             # Counted after the commit: counted before it, two concurrent unassigns
@@ -424,8 +428,6 @@ class RoleService:
             sync_data: dict = {"role_name": role_name}
             if not await self._assignment_repository.list_by_user_tenant(user_id, tenant_id):
                 sync_data[LAST_ROLE_IN_TENANT] = True
-
-            await self._invalidate(unassigned, role_id, tenant_id)
 
             self._log_sync_failure(
                 await self._adapter.delete_role_assignment(

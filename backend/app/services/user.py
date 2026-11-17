@@ -18,7 +18,7 @@ from app.models.identity.user import User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.base import RepositoryConflictError
 from app.repositories.user import UserRepository
-from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.adapters.base import STATUS_CHANGED, IdentityProviderAdapter, SyncError
 from app.services.cache_invalidation import CacheInvalidationPublisher
 
 logger = logbook(__name__)
@@ -209,7 +209,7 @@ class UserService:
                 return Error(Conflict(message="User deactivation conflicts with existing data"))
 
             result_dict = user.model_dump()
-            sync_data = {"email": user.email, "status": user.status.value}
+            sync_data = {"email": user.email, "status": user.status.value, STATUS_CHANGED: True}
             await self._repository.commit()
 
             await self._publisher.publish(
@@ -253,7 +253,7 @@ class UserService:
                 return Error(Conflict(message="User activation conflicts with existing data"))
 
             result_dict = user.model_dump()
-            sync_data = {"email": user.email, "status": user.status.value}
+            sync_data = {"email": user.email, "status": user.status.value, STATUS_CHANGED: True}
             await self._repository.commit()
 
             await self._publisher.publish(
