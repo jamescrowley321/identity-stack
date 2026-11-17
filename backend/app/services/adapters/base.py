@@ -32,6 +32,11 @@ UNANSWERED = "unanswered"
 PROVIDER_SYNC = "provider_sync"
 PROVIDER_SYNC_FAILED = "failed"
 
+# ``sync_user`` data key: the id of the tenant a user was just created in
+# (UserService.create_user), so an adapter that keeps users in the tenant's
+# organization (Zitadel) creates the user there. Absent on every other change.
+CREATED_IN_TENANT = "created_in_tenant"
+
 
 @dataclass(frozen=True)
 class SyncError:
