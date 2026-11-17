@@ -4,13 +4,13 @@ These tests require DESCOPE_CLIENT_ID and DESCOPE_CLIENT_SECRET env vars.
 They use client credentials (access key) flow for OIDC-compatible tokens.
 """
 
-import os
-
 import pytest
 from playwright.sync_api import APIRequestContext
 
+from tests.e2e.not_applicable import descope_credentials_missing
+
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("DESCOPE_CLIENT_ID") or not os.environ.get("DESCOPE_CLIENT_SECRET"),
+    descope_credentials_missing("DESCOPE_CLIENT_ID", "DESCOPE_CLIENT_SECRET"),
     reason="DESCOPE_CLIENT_ID/DESCOPE_CLIENT_SECRET not set",
 )
 

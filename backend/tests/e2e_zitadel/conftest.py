@@ -25,7 +25,6 @@ import json
 import os
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 
 import httpx
 import pytest
@@ -35,72 +34,21 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from tests.e2e_zitadel.browser_login import BrowserLogin, ZitadelUser
+from tests.e2e_zitadel.browser_login import BrowserLogin
+from tests.e2e_zitadel.instance import Instance, read_outputs
 from tests.helpers.identity_fixture import IDENTITIES
 
 BACKEND_URL = os.environ.get("E2E_BACKEND_URL", "http://localhost:8000")
 FRONTEND_URL = os.environ.get("E2E_FRONTEND_URL", "http://localhost:3000")
-OUTPUTS_VARIABLE = "ZITADEL_TERRAFORM_OUTPUTS"
 _PROBE_TIMEOUT_SECONDS = 10
 # The fixture user the suite signs in for the first time: the one-tenant member,
 # whose first login the organization claim decides.
 NEWCOMER = IDENTITIES.cases.member
-# The outputs the suite reads as objects keyed by name.
-_MAP_OUTPUTS = (
-    "backend_environment",
-    "frontend_environment",
-    "test_credentials",
-    "organization_ids",
-    "test_user_ids",
-    "test_user_login_names",
-)
-
-
-@dataclass(frozen=True)
-class Instance:
-    """What the suite reads from the applied ``infra/zitadel`` root."""
-
-    issuer: str
-    spa_client_id: str
-    other_client_id: str
-    organization_ids: dict[str, str]
-    user_ids: dict[str, str]
-    users: dict[str, ZitadelUser]
-
-
-def _read_outputs() -> Instance:
-    raw = os.environ.get(OUTPUTS_VARIABLE, "")
-    if not raw:
-        pytest.fail(f"{OUTPUTS_VARIABLE} is not set: run this suite with `make test-e2e-zitadel` (docs/zitadel.md)")
-    try:
-        parsed = json.loads(raw)
-        if not isinstance(parsed, dict):
-            raise TypeError(f"expected a JSON object, got {type(parsed).__name__}")
-        outputs = {name: output["value"] for name, output in parsed.items()}
-        if not outputs:
-            pytest.fail(f"{OUTPUTS_VARIABLE} holds no outputs: apply infra/zitadel first (docs/zitadel.md)")
-        for name in _MAP_OUTPUTS:
-            if not isinstance(outputs[name], dict):
-                raise TypeError(f"output {name} is a {type(outputs[name]).__name__}, not an object")
-        passwords = outputs["test_credentials"]["users"]
-        return Instance(
-            issuer=outputs["backend_environment"]["ZITADEL_ISSUER_URL"],
-            spa_client_id=outputs["frontend_environment"]["VITE_OIDC_CLIENT_ID"],
-            other_client_id=outputs["other_client_id"],
-            organization_ids=outputs["organization_ids"],
-            user_ids=outputs["test_user_ids"],
-            users={
-                key: ZitadelUser(login_name=login_name, password=passwords[key])
-                for key, login_name in outputs["test_user_login_names"].items()
-            },
-        )
-    except (ValueError, KeyError, TypeError) as exc:
-        pytest.fail(f"{OUTPUTS_VARIABLE} is not the applied infra/zitadel root's outputs ({exc!r})")
 
 
 @pytest.fixture(scope="session")
 def zitadel() -> Instance:
-    instance = _read_outputs()
+    instance = read_outputs()
     try:
         httpx.get(
             f"{instance.issuer}/.well-known/openid-configuration", timeout=_PROBE_TIMEOUT_SECONDS

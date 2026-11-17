@@ -1,91 +1,87 @@
-"""E2E test configuration and fixtures."""
+"""E2E test configuration and fixtures.
+
+The suite runs against the identity provider ``E2E_PROVIDER`` names (Descope
+when unset): ``helpers/providers.py`` holds everything that differs between
+providers, and ``not_applicable.py`` the one table of tests a provider's run
+leaves out, with the reason. A left-out test is deselected and listed at the end
+of the run; it is never skipped by environment.
+"""
 
 import os
 from pathlib import Path
 
 import pytest
 
-from tests.e2e.helpers.auth import (
-    create_authenticated_context,
-    ensure_test_user,
-    get_admin_session_token,
-    get_oidc_access_token,
-    sweep_leaked_e2e_access_keys,
-    sweep_leaked_e2e_rbac,
-    sweep_leaked_e2e_users,
-)
+from tests.e2e.helpers.providers import ADMIN, MEMBER, PROVIDER_CLASSES, E2EProvider
+from tests.e2e.not_applicable import SUITE, UnknownE2EProvider, reason_not_applicable, selected_provider
 
 FRONTEND_URL = os.environ.get("E2E_FRONTEND_URL", "http://localhost:3000")
 BACKEND_URL = os.environ.get("E2E_BACKEND_URL", "http://localhost:8000")
 
-_has_mgmt_key = bool(os.environ.get("DESCOPE_MANAGEMENT_KEY"))
-_has_client_creds = bool(os.environ.get("DESCOPE_CLIENT_ID") and os.environ.get("DESCOPE_CLIENT_SECRET"))
-
-#: Every credential the CI E2E job passes in. Locally these may be absent and the
-#: authenticated fixtures skip; in CI their absence is the failure this suite spent
-#: months hiding — 164 of 220 tests skipped on empty credentials while the job
-#: reported green. The workflow gates the step on DESCOPE_PROJECT_ID alone, so any
-#: OTHER variable going missing (renamed secret, expired client secret removed from
-#: the repo) silently re-hollows the suite.
-#
-# E2E_ORY_ISSUER_URL and E2E_DATABASE_URL are listed for the same reason, one step
-# further on: test_ory_sso_e2e.py skips its whole module without the first and its
-# tier-3 authorization test without the second, so either going missing would
-# silently retire the Ory end-to-end coverage (FR-21) while the job stayed green.
-_CI_REQUIRED_ENV = (
-    "DESCOPE_PROJECT_ID",
-    "DESCOPE_MANAGEMENT_KEY",
-    "DESCOPE_CLIENT_ID",
-    "DESCOPE_CLIENT_SECRET",
-    "E2E_TEST_EMAIL",
-    "E2E_TEST_TENANT_ID",
-    "E2E_ORY_ISSUER_URL",
-    "E2E_DATABASE_URL",
-)
+_SUITE_DIR = Path(__file__).parent
+_NOT_APPLICABLE = pytest.StashKey[list[tuple[str, str]]]()
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _credentials_are_present_in_ci():
-    """In CI, a missing credential fails the run instead of skipping the suite."""
-    if not os.environ.get("CI"):
-        return
-    missing = [name for name in _CI_REQUIRED_ENV if not os.environ.get(name)]
-    if missing:
-        pytest.fail(
-            "E2E credentials missing in CI: "
-            + ", ".join(missing)
-            + ". The authenticated tests would skip and the job would report green; "
-            "fix the secret rather than letting the gate go hollow."
-        )
+def _provider_name() -> str:
+    try:
+        return selected_provider(os.environ)
+    except UnknownE2EProvider as exc:
+        raise pytest.UsageError(str(exc)) from exc
 
 
-def _sweep_all() -> None:
-    """Remove every class of object the suite is known to strand.
-
-    Users, the per-session owner+admin access key, and the roles/permissions the
-    RBAC fixtures create. Each sweep is independent: one failing must not stop
-    the others, since they leak for different reasons and at different rates.
-    """
-    for sweep in (sweep_leaked_e2e_users, sweep_leaked_e2e_access_keys, sweep_leaked_e2e_rbac):
+def pytest_collection_modifyitems(config, items):
+    """Deselect the tests ``NOT_APPLICABLE`` lists for this run's provider."""
+    provider = _provider_name()
+    kept, left_out, listed = [], [], []
+    for item in items:
         try:
-            sweep()
-        except Exception as exc:  # noqa: BLE001 - a sweep must never fail the run
-            print(f"[E2E] {sweep.__name__} failed: {exc!r}")
+            module = item.path.relative_to(_SUITE_DIR).as_posix()
+        except ValueError:
+            kept.append(item)
+            continue
+        _path, _, rest = item.nodeid.partition("::")
+        reason = reason_not_applicable(f"{SUITE}{module}::{rest}", provider)
+        if reason is None:
+            kept.append(item)
+        else:
+            left_out.append(item)
+            listed.append((item.nodeid, reason))
+    if left_out:
+        config.hook.pytest_deselected(items=left_out)
+        items[:] = kept
+    config.stash[_NOT_APPLICABLE] = listed
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    listed = config.stash.get(_NOT_APPLICABLE, [])
+    if listed:
+        terminalreporter.section(f"not applicable to {_provider_name()} (tests/e2e/not_applicable.py)")
+        for nodeid, reason in listed:
+            terminalreporter.write_line(f"{nodeid}: {reason}")
+
+
+@pytest.fixture(scope="session")
+def e2e_provider() -> E2EProvider:
+    return PROVIDER_CLASSES[_provider_name()](BACKEND_URL, FRONTEND_URL)
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _sweep_leaked_users():
-    """Remove users stranded by this or an earlier E2E run.
+def _provider_is_ready(e2e_provider, request):
+    """Fail the run, never skip it, when what the provider's tests need is missing."""
+    e2e_provider.check_ready(request)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _sweep_leaked_users(e2e_provider, _provider_is_ready):
+    """Remove objects stranded by this or an earlier E2E run.
 
     Runs on the way in as well as out: a run that is cancelled or killed never
-    reaches its teardown, so sweeping only at the end would let those users
-    accumulate until someone noticed the project was at its user limit.
+    reaches its teardown, so sweeping only at the end would let them accumulate
+    until someone noticed the project was at its user limit.
     """
-    if _has_mgmt_key:
-        _sweep_all()
+    e2e_provider.sweep()
     yield
-    if _has_mgmt_key:
-        _sweep_all()
+    e2e_provider.sweep()
 
 
 @pytest.fixture(scope="session")
@@ -115,79 +111,55 @@ def api_context(playwright):
 
 
 @pytest.fixture(scope="session")
-def _ensure_test_user():
-    if not _has_mgmt_key:
-        pytest.skip("DESCOPE_MANAGEMENT_KEY not set")
-    return ensure_test_user()
+def _ensure_test_user(e2e_provider):
+    """The Descope test user, created when missing (Descope runs only)."""
+    return e2e_provider.ensure_test_user()
 
 
 @pytest.fixture(scope="session")
-def auth_access_token():
-    """OIDC-compatible access token via client credentials flow."""
-    if not _has_client_creds:
-        pytest.skip("DESCOPE_CLIENT_ID/DESCOPE_CLIENT_SECRET not set")
-    return get_oidc_access_token()
+def auth_access_token(e2e_provider, request):
+    """A token for a signed-in principal with no admin role in its tenant."""
+    return e2e_provider.access_token(MEMBER, request)
 
 
 @pytest.fixture
-def auth_api_context(playwright, auth_access_token):
-    """API request context with valid OIDC auth token."""
+def auth_api_context(playwright, e2e_provider, auth_access_token):
+    """API request context with the member's token (and tenant header, where the provider needs one)."""
     context = playwright.request.new_context(
         base_url=BACKEND_URL,
-        extra_http_headers={"Authorization": f"Bearer {auth_access_token}"},
+        extra_http_headers={"Authorization": f"Bearer {auth_access_token}", **e2e_provider.headers(MEMBER)},
     )
     yield context
     context.dispose()
 
 
 @pytest.fixture(scope="session")
-def admin_access_token():
-    """OIDC token from a tenant-scoped access key with admin/owner roles.
-
-    Creates a temporary access key with tenant/role associations, then uses it
-    in the OIDC client credentials flow. The resulting token passes OIDC
-    validation AND contains dct/tenants claims needed by require_role().
-    """
-    if not _has_mgmt_key:
-        pytest.skip("DESCOPE_MANAGEMENT_KEY not set")
-    return get_admin_session_token()
+def admin_access_token(e2e_provider, request):
+    """A token for an owner/admin of the test tenant, carrying what require_role() reads."""
+    return e2e_provider.access_token(ADMIN, request)
 
 
 @pytest.fixture
-def admin_api_context(playwright, admin_access_token):
-    """API request context with admin-level session token (has tenant/role claims)."""
+def admin_api_context(playwright, e2e_provider, admin_access_token):
+    """API request context with the admin's token (and tenant header, where the provider needs one)."""
     context = playwright.request.new_context(
         base_url=BACKEND_URL,
-        extra_http_headers={"Authorization": f"Bearer {admin_access_token}"},
+        extra_http_headers={"Authorization": f"Bearer {admin_access_token}", **e2e_provider.headers(ADMIN)},
     )
     yield context
     context.dispose()
 
 
 @pytest.fixture(scope="session")
-def test_user_id(_ensure_test_user) -> str:
-    """The Descope login ID (email) of the E2E test user.
-
-    Uses loginIds[0] (the user's email) because the Descope Management API's
-    /v1/mgmt/user/update/role/add expects loginId, not the internal userId.
-    """
-    login_ids = _ensure_test_user.get("loginIds", [])
-    if login_ids:
-        return login_ids[0]
-    # Fallback to userId if loginIds not present
-    user_id = _ensure_test_user.get("userId", "")
-    if not user_id:
-        pytest.fail("Descope returned a test user with neither loginIds nor userId")
-    return user_id
+def test_user_id(e2e_provider, request) -> str:
+    """The id the backend's routes take for the member principal (Descope: its login ID)."""
+    return e2e_provider.user_id(request)
 
 
 @pytest.fixture(scope="session")
-def test_tenant_id() -> str:
-    """The Descope tenant ID for E2E tests."""
-    tid = os.environ.get("E2E_TEST_TENANT_ID", "")
-    if not tid:
-        pytest.skip("E2E_TEST_TENANT_ID not set")
-    return tid
+def test_tenant_id(e2e_provider, request) -> str:
+    """The tenant the admin principal administers."""
+    return e2e_provider.tenant_id(request)
 
 
 # --- Failure evidence for browser tests -------------------------------------
@@ -242,39 +214,35 @@ def _capture_on_failure(page, request, label: str, console: list[str] | None = N
         print(f"[e2e] could not capture failure evidence for {stem}: {exc}")
 
 
-@pytest.fixture
-def admin_page(browser, _ensure_test_user, admin_access_token, frontend_url, request):
-    """Browser page authenticated as an admin/owner of the test tenant.
-
-    ``auth_page`` injects the plain client-credentials token, which carries no
-    ``dct``/``tenants`` claims — so ``useRBAC`` reports isAdmin=false and every
-    admin-gated card stays unrendered. A test that creates something through the
-    admin API and then looks for it in the UI needs the browser session to be that
-    same admin, or it is asserting against a page the identity can never see.
-    """
-    context = create_authenticated_context(browser, frontend_url, admin_access_token)
+def _signed_in_page(browser, e2e_provider, principal, request, label):
+    context = e2e_provider.signed_in_context(browser, principal, request)
     page = context.new_page()
     console = _record_console(page)
-    page.goto(frontend_url + "/")
+    e2e_provider.open_app(page, principal)
     page.wait_for_load_state("networkidle")
     yield page
-    _capture_on_failure(page, request, "admin_page", console)
+    _capture_on_failure(page, request, label, console)
     context.close()
 
 
 @pytest.fixture
-def auth_page(browser, _ensure_test_user, auth_access_token, frontend_url, request):
-    """Browser page with OIDC tokens injected for authenticated testing.
+def admin_page(browser, e2e_provider, request):
+    """Browser page signed in to the SPA as an admin/owner of the test tenant.
 
-    Uses client credentials access token injected into sessionStorage
-    via add_init_script, so react-oidc-context treats the session as
-    authenticated on first render.
+    ``auth_page`` is the member, for which ``useRBAC`` reports isAdmin=false and
+    every admin-gated card stays unrendered. A test that creates something through
+    the admin API and then looks for it in the UI needs the browser session to be
+    that same admin, or it is asserting against a page the identity can never see.
     """
-    context = create_authenticated_context(browser, frontend_url, auth_access_token)
-    page = context.new_page()
-    console = _record_console(page)
-    page.goto(frontend_url + "/")
-    page.wait_for_load_state("networkidle")
-    yield page
-    _capture_on_failure(page, request, "auth_page", console)
-    context.close()
+    yield from _signed_in_page(browser, e2e_provider, ADMIN, request, "admin_page")
+
+
+@pytest.fixture
+def auth_page(browser, e2e_provider, request):
+    """Browser page signed in to the SPA as the member principal.
+
+    Descope injects the client-credentials token into sessionStorage via
+    add_init_script, so react-oidc-context treats the session as authenticated on
+    first render; Keycloak and Zitadel sign in through their own forms.
+    """
+    yield from _signed_in_page(browser, e2e_provider, MEMBER, request, "auth_page")
