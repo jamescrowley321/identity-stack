@@ -226,3 +226,89 @@ class TestAnEmailAlreadyHeldIsNeverLinked:
         await db_session.flush()
 
         await self._refused(db_session, GLOBEX_ORG)
+
+
+class TestAnOrganizationsEmailIsNeverLinkedFromAnotherProvider:
+    """The other direction: a user an organization's first login created holds an email that
+    organization's administrators chose, so no other provider's first login links to it by
+    email either, however verified that provider says the email is.
+    """
+
+    async def _zitadel_user(self, session) -> uuid.UUID:
+        await _seeded(session)
+        session.add(Provider(name="ory", type=ProviderType.ory))
+        await session.flush()
+        created = await _provision(session, GLOBEX_ORG)
+        assert created.is_ok(), created
+        return created.ok
+
+    async def test_the_created_user_is_marked_as_holding_an_organizations_email(self, db_session):
+        user_id = await self._zitadel_user(db_session)
+
+        user = await UserRepository(db_session).get_by_email(EMAIL)
+
+        assert (user.id, user.email_from_organization) == (user_id, True)
+
+    async def test_an_ory_first_login_with_that_email_links_and_grants_nothing(self, db_session):
+        user_id = await self._zitadel_user(db_session)
+        before = await _written(db_session)
+
+        result = await _service(db_session).provision(
+            provider_name="ory", sub="ory-victim", email=EMAIL, email_verified=True
+        )
+
+        assert result.is_error()
+        assert type(result.error) is EmailLinkRefused
+        assert await _written(db_session) == before
+        assert await IdPLinkRepository(db_session).get_by_provider_name_and_sub("ory", "ory-victim") is None
+        assert await _memberships(db_session, user_id) == {("globex", MEMBER, True)}
+
+    async def test_an_ory_first_login_still_links_a_user_whose_email_no_organization_chose(self, db_session):
+        await self._zitadel_user(db_session)
+        other = User(email="ory-user@example.test", user_name="ory-user@example.test")
+        db_session.add(other)
+        await db_session.flush()
+        other_id = other.id
+
+        result = await _service(db_session).provision(
+            provider_name="ory", sub="ory-user", email="ory-user@example.test", email_verified=True
+        )
+
+        assert result.is_ok() and result.ok == other_id, result
+
+
+class _StaleFirstRead(IdPLinkRepository):
+    """Answers the first (provider, sub) lookup as a login racing another one would: no link yet."""
+
+    def __init__(self, session) -> None:
+        super().__init__(session)
+        self._reads = 0
+
+    async def get_by_provider_and_sub(self, provider_id, external_sub):
+        self._reads += 1
+        if self._reads == 1:
+            return None
+        return await super().get_by_provider_and_sub(provider_id, external_sub)
+
+
+async def test_a_login_that_lost_the_race_for_its_own_subject_gets_the_winners_user(db_session):
+    await _seeded(db_session)
+    winner = await _provision(db_session, GLOBEX_ORG)
+    assert winner.is_ok(), winner
+    before = await _written(db_session)
+    service = IdentityProvisioningService(
+        session=db_session,
+        provider_repository=ProviderRepository(db_session),
+        idp_link_repository=_StaleFirstRead(db_session),
+        user_repository=UserRepository(db_session),
+        tenant_repository=TenantRepository(db_session),
+        role_repository=RoleRepository(db_session),
+        assignment_repository=UserTenantRoleRepository(db_session),
+    )
+
+    result = await service.provision(
+        provider_name=PROVIDER, sub=SUB, email=EMAIL, email_verified=True, organization_id=GLOBEX_ORG
+    )
+
+    assert result.is_ok() and result.ok == winner.ok, result
+    assert await _written(db_session) == before

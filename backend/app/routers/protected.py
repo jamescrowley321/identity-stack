@@ -20,7 +20,7 @@ from app.dependencies.rbac import TokenTenant, token_tenant
 from app.errors.identity import EmailLinkRefused, Forbidden, NotFound, ValidationError
 from app.knobs import knob, knob_set
 from app.logbook import logbook
-from app.middleware.providers import ProviderTokenConfig, descope_config
+from app.middleware.providers import ZITADEL_PROVIDER_NAME, ProviderTokenConfig, descope_config
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.first_login_profile import userinfo_profile
 from app.services.identity_provisioning import IdentityProvisioningService
@@ -133,11 +133,12 @@ def _recorded_provider(recorded: object, provider_name: str) -> ProviderTokenCon
     Both middlewares record one beside the claims (conventions §18, and
     ``test_provider_registration.py::TestClaimsAreNeverRecordedWithoutTheirProvider``),
     so ``None`` is only a hand-built request, read as before: the profile from
-    the token's claims. Anything recorded that is not the principal's own
-    provider config is refused (500), never read as no provider: a first login
-    whose organization and UserInfo rules cannot be found is not provisioned.
+    the token's claims. Not for a Zitadel principal: its first login needs its
+    config's organization and UserInfo rules, so ``None`` is refused (500) for
+    it, as is anything recorded that is not the principal's own provider
+    config. A first login whose rules cannot be found is not provisioned.
     """
-    if recorded is None:
+    if recorded is None and provider_name != ZITADEL_PROVIDER_NAME.lower():
         return None
     if not isinstance(recorded, ProviderTokenConfig) or recorded.name.lower() != provider_name:
         logger.error("first login refused: no provider config recorded for provider %s", provider_name)

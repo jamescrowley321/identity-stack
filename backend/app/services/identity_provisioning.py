@@ -102,6 +102,14 @@ class IdentityProvisioningService:
         email and mark it verified, so on this path a verified email is not
         proof the login is that user's. An administrator links such a user
         beforehand (``scripts/seed_zitadel.py`` writes the ``idp_links`` row).
+
+        The user such a login creates is marked ``email_from_organization``,
+        and no later first login, of any provider, links to it by email either:
+        that is ``EmailLinkRefused`` too. Otherwise an organization's
+        administrator could create a user with another person's email, and
+        that person's own first login elsewhere would join the
+        administrator's account. A login that finds, by email, the user a
+        concurrent login for its own subject just created gets that user.
         """
         with tracer.start_as_current_span(
             "IdentityProvisioningService.provision",
@@ -139,7 +147,12 @@ class IdentityProvisioningService:
             for _ in range(2):
                 try:
                     user = await self._user_repository.get_by_email(email)
-                    if user is not None and organization_tenant_id is not None:
+                    if user is not None and (organization_tenant_id is not None or user.email_from_organization):
+                        # A login racing one for its own subject finds the winner's
+                        # user by email: that is not a link, so answer the winner's.
+                        existing = await self._idp_link_repository.get_by_provider_and_sub(provider_id, sub)
+                        if existing is not None:
+                            return Ok(existing.user_id)
                         return Error(EmailLinkRefused("The email is held by a canonical user this login may not link"))
                     if user is None:
                         user = User(
@@ -148,6 +161,7 @@ class IdentityProvisioningService:
                             given_name=given_name,
                             family_name=family_name,
                             status=UserStatus.active,
+                            email_from_organization=organization_tenant_id is not None,
                         )
                         self._session.add(user)
                         await self._session.flush()

@@ -39,7 +39,9 @@ class EmailLinkRefused(Conflict):
 
     Just-in-time provisioning of a provider whose organization picks the tenant
     (Zitadel) returns it: an organization's administrators can set any email on
-    their users, so the email does not show the login is that user's.
+    their users, so the email does not show the login is that user's. Any first
+    login (just-in-time provisioning, the Descope flow sync) returns it too for
+    a user such a login created (``User.email_from_organization``).
     """
 
 
