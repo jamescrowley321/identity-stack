@@ -30,6 +30,13 @@ services:
       context: ./frontend
       args:
         VITE_DESCOPE_PROJECT_ID: ${DESCOPE_PROJECT_ID}
+        # Provider-neutral OIDC login (frontend/.env.example). Unset, the SPA
+        # logs in through Descope as before.
+        VITE_OIDC_AUTHORITY: ${VITE_OIDC_AUTHORITY:-}
+        VITE_OIDC_CLIENT_ID: ${VITE_OIDC_CLIENT_ID:-}
+        VITE_OIDC_SCOPE: ${VITE_OIDC_SCOPE:-}
+        VITE_OIDC_REDIRECT_URI: ${VITE_OIDC_REDIRECT_URI:-}
+        VITE_OIDC_TENANT_SCOPE_TEMPLATE: ${VITE_OIDC_TENANT_SCOPE_TEMPLATE:-}
         # VITE_API_BASE_URL controls where the browser sends API requests.
         # Default is empty so the frontend uses RELATIVE URLs (`/api/...`)
         # and nginx's `/api/` proxy forwards them to backend:8000 — same
