@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup lint test-up test-down test-unit test-frontend test-integration test-e2e test-all security dev-backend dev-frontend dev test-gateway-proxy dev-gateway test-integration-standalone test-integration-gateway seed zitadel-up zitadel-reset zitadel-admin-pat zitadel-terraform-check zitadel-seed
+.PHONY: help setup lint test-up test-down test-unit test-frontend test-integration test-e2e test-all security dev-backend dev-frontend dev test-gateway-proxy dev-gateway test-integration-standalone test-integration-gateway seed zitadel-up zitadel-reset zitadel-admin-pat zitadel-terraform-check zitadel-seed zitadel-frontend
 
 COMPOSE_TEST := docker compose -f docker-compose.test.yml
 TEST_DATABASE_URL := postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
@@ -113,3 +113,16 @@ zitadel-terraform-check: ## apply infra/zitadel to a fresh local Zitadel (make z
 
 zitadel-seed: ## link the applied infra/zitadel root to canonical tenants in DATABASE_URL (migrated database; idempotent)
 	terraform -chdir=infra/zitadel output -json canonical_seed | (cd backend && python -m scripts.seed_zitadel)
+
+# The SPA's VITE_OIDC_* values are the applied root's frontend_environment
+# output. The tenant scope template is passed empty: a Zitadel user switches
+# tenant on the client, so a template in frontend/.env must not reach the build.
+# `docker compose up` without --build then starts this image.
+zitadel-frontend: ## build the frontend image against the applied infra/zitadel root (its frontend_environment output)
+	@env_json="$$(terraform -chdir=infra/zitadel output -json frontend_environment)" || { \
+		echo "zitadel-frontend: no frontend_environment output; apply infra/zitadel first (docs/zitadel.md)." >&2; \
+		exit 1; \
+	}; \
+	exports="$$(printf '%s' "$$env_json" | jq -er 'to_entries[] | "export \(.key)=\(.value | @sh)"')" || exit 1; \
+	eval "$$exports"; \
+	VITE_OIDC_TENANT_SCOPE_TEMPLATE= $(COMPOSE_ZITADEL) build frontend

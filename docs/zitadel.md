@@ -61,6 +61,25 @@ The other direction holds too. A user a Zitadel first login creates is marked `e
 
 **Logout** returns the instance's `end_session_endpoint` with `id_token_hint`, the SPA's client id and `ZITADEL_POST_LOGOUT_REDIRECT_URI`, which must be registered on the SPA application.
 
+## The SPA against this instance
+
+The SPA has no Zitadel code path: it is pointed at Zitadel by its `VITE_OIDC_*` variables alone ([environment variables](environment-variables.md#frontend-vite--inlined-at-build-time)). `terraform -chdir=infra/zitadel output frontend_environment` prints them for the applied instance:
+
+```bash
+VITE_OIDC_AUTHORITY=http://zitadel.localhost:8480
+VITE_OIDC_CLIENT_ID=<SPA client id>
+VITE_OIDC_REDIRECT_URI=http://localhost:3000
+VITE_OIDC_SCOPE=openid profile email offline_access urn:zitadel:iam:user:resourceowner
+```
+
+`make zitadel-frontend` builds the compose `frontend` image with those values, read from the Terraform output, and with `VITE_OIDC_TENANT_SCOPE_TEMPLATE` empty, so a template left in `frontend/.env` for another provider does not reach the build. `docker compose up` without `--build` then starts that image; `--build` would rebuild it from the shell and `.env` values. With no applied root the target fails and builds nothing.
+
+- **Sign-in** is authorization code with PKCE (S256), as for every provider. `urn:zitadel:iam:user:resourceowner` puts the user's organization in the access token, and the backend provisions a first login from it; without it the backend refuses the first login. The project-audience scope is not needed: a human's access token already lists the project id in `aud`.
+- **Renewal.** `offline_access` gives a refresh token, and the SPA renews the access token with it before it expires (15 minutes on this instance), so a session outlives its access token.
+- **Logout** goes through the backend's `logout_url` (above). The SPA drops its tokens first, and Zitadel ends its own session, so the next sign-in asks for credentials again.
+- **Tenant.** Zitadel puts no tenant in the token. The SPA's tenant switcher chooses among the user's canonical memberships, and every API call names the active one in the `X-Tenant-ID` header; the backend refuses a tenant the caller does not belong to. `GET /api/identity` names none: it is what the memberships come from.
+- **A refused first login** (organization not linked, email already held, no verified email) leaves the SPA with no identity: it shows no tenants, and a role-gated page shows Access Denied.
+
 ## Bootstrap
 
 First start creates everything below from `ZITADEL_FIRSTINSTANCE_*` settings. Anything else inside the instance belongs to Terraform: [`infra/zitadel/`](../infra/zitadel/README.md) declares the organizations, the project and its applications, the test users, registration off and the 15-minute access-token lifetime, and `make zitadel-seed` links the tenant organizations to canonical tenants.
