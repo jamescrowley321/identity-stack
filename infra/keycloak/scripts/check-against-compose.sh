@@ -138,6 +138,7 @@ if [ "$integration_tests" = 1 ]; then
       KEYCLOAK_TEST_USER_IDS="$(jq -c .user_ids.value "$work/outputs.json")" \
       KEYCLOAK_TEST_USER_PASSWORDS="$(jq -c .user_passwords.value "$work/outputs.json")" \
       KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET="$(jq -er .keycloak_directory_client_secret.value "$work/outputs.json")" \
+      KEYCLOAK_TEST_ADMIN_CLIENT_SECRET="$(jq -er .keycloak_admin_client_secret.value "$work/outputs.json")" \
       "$python" -m pytest tests/integration/test_keycloak_*.py -v
   )
 fi

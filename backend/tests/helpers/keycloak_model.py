@@ -20,6 +20,9 @@ DOCUMENTS_READ = "documents:read"
 # fixture value unless the KEYCLOAK_TEST_* variables name the Terraform realm.
 DIRECTORY_CLIENT_ID = "identity-stack-directory"
 DIRECTORY_CLIENT_SECRET = keycloak_test_target(os.environ).directory_client_secret
+# The realm's admin client, which the Keycloak sync adapter writes with.
+ADMIN_CLIENT_ID = "identity-stack-admin"
+ADMIN_CLIENT_SECRET = keycloak_test_target(os.environ).admin_client_secret
 
 _APP_CLIENTS = {MEMBER_TYPE_CLIENT: MEMBER_APP_CLIENT, TENANT_ADMIN_TYPE_CLIENT: TENANT_ADMIN_APP_CLIENT}
 _PORTABLE_PERMISSIONS = {MEMBER_TYPE_CLIENT: frozenset({DOCUMENTS_READ})}

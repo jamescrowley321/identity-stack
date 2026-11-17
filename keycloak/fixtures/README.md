@@ -31,6 +31,7 @@ Every secret and password below is a local fixture. The realm's redirect URIs
 | `member-app` | public, PKCE S256, full scope off, scope-mapped to `member` | none |
 | `tenant-admin-app` | public, PKCE S256, full scope off, scope-mapped to `tenant-admin` | none |
 | `identity-stack-directory` | confidential, service account only, client scope `kc-admin-api`, full scope off | its service account holds `realm-management` `view-users` and `view-organizations` |
+| `identity-stack-admin` | confidential, service account only, client scope `kc-admin-api`, full scope off | its service account holds `realm-management` `manage-users` and `manage-organizations` |
 
 `identity-stack-directory` is the backend's organization lookup (`KEYCLOAK_DIRECTORY_CLIENT_ID`,
 secret `local-only-directory-client`). Probed on 26.8.2: the endpoint
@@ -39,6 +40,13 @@ role alone and to both together, and both are read-only. With them the service a
 refused (403) creating an organization, adding a member, editing an organization's attributes,
 mapping a client role and listing clients. Without the `kc-admin-api` client scope its token
 lacks the Admin API audience and every Admin API call is 401.
+
+`identity-stack-admin` is the backend's Keycloak admin adapter (`KEYCLOAK_ADMIN_CLIENT_ID`,
+secret `local-only-admin-client`), which pushes canonical tenants and users to the realm
+(`backend/app/services/adapters/keycloak.py`). Probed on 26.8.2: `manage-users` and
+`manage-organizations` together let it find, create, update and delete users and
+organizations and add and remove organization members, and nothing else it needs; it is
+refused (403) listing realm roles.
 
 The realm brokers no identity provider, lets no one register, keeps emails unique and has
 `verifyEmail` on, because the backend links a Keycloak identity to an existing canonical user

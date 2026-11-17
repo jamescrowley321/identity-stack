@@ -82,6 +82,11 @@ locals {
   directory_client_id    = "identity-stack-directory"
   directory_client_roles = ["view-users", "view-organizations"]
 
+  # The backend's service account for the Keycloak admin adapter, which pushes
+  # canonical tenants and users (organizations, users, memberships).
+  admin_client_id    = "identity-stack-admin"
+  admin_client_roles = ["manage-users", "manage-organizations"]
+
   # The provider's separator for a multi-valued attribute in a map(string).
   multivalue_separator = "##"
 }
@@ -265,7 +270,7 @@ data "keycloak_openid_client" "realm_management" {
 }
 
 data "keycloak_role" "realm_management" {
-  for_each = toset(local.directory_client_roles)
+  for_each = toset(concat(local.directory_client_roles, local.admin_client_roles))
 
   realm_id  = keycloak_realm.this.id
   client_id = data.keycloak_openid_client.realm_management.id
@@ -316,5 +321,53 @@ resource "keycloak_generic_role_mapper" "directory" {
 
   realm_id  = keycloak_realm.this.id
   client_id = keycloak_openid_client.directory.id
+  role_id   = data.keycloak_role.realm_management[each.key].id
+}
+
+# --- Admin service account ---------------------------------------------------------
+
+resource "keycloak_openid_client" "admin" {
+  realm_id                     = keycloak_realm.this.id
+  client_id                    = local.admin_client_id
+  name                         = "Backend service account: pushes canonical tenants and users"
+  enabled                      = true
+  access_type                  = "CONFIDENTIAL"
+  standard_flow_enabled        = false
+  implicit_flow_enabled        = false
+  direct_access_grants_enabled = false
+  service_accounts_enabled     = true
+  full_scope_allowed           = false
+  # "+": the redirect URIs, of which there are none. What the import sets.
+  valid_post_logout_redirect_uris = ["+"]
+}
+
+# Without kc-admin-api the service account's token lacks the Admin API
+# audience and every Admin API call is 401.
+resource "keycloak_openid_client_default_scopes" "admin" {
+  realm_id       = keycloak_realm.this.id
+  client_id      = keycloak_openid_client.admin.id
+  default_scopes = ["kc-admin-api"]
+}
+
+resource "keycloak_openid_client_optional_scopes" "admin" {
+  realm_id        = keycloak_realm.this.id
+  client_id       = keycloak_openid_client.admin.id
+  optional_scopes = []
+}
+
+# Authoritative, as for the directory client: exactly these realm-management
+# roles and no realm role.
+resource "keycloak_user_roles" "admin" {
+  realm_id   = keycloak_realm.this.id
+  user_id    = keycloak_openid_client.admin.service_account_user_id
+  role_ids   = [for role in local.admin_client_roles : data.keycloak_role.realm_management[role].id]
+  exhaustive = true
+}
+
+resource "keycloak_generic_role_mapper" "admin" {
+  for_each = toset(local.admin_client_roles)
+
+  realm_id  = keycloak_realm.this.id
+  client_id = keycloak_openid_client.admin.id
   role_id   = data.keycloak_role.realm_management[each.key].id
 }

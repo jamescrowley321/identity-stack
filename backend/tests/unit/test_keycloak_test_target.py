@@ -1,7 +1,7 @@
 """Which Keycloak realm the Keycloak integration tests log in to.
 
 By default the realm ``keycloak-test`` imports, with its fixed user ids and
-fixture passwords. The four ``KEYCLOAK_TEST_*`` variables point the same tests
+fixture passwords. The five ``KEYCLOAK_TEST_*`` variables point the same tests
 at the realm ``infra/keycloak/`` builds, whose ids and secrets Keycloak and
 Terraform generate. Half a target is refused, so a run can never mix the two.
 """
@@ -11,6 +11,7 @@ import json
 import pytest
 
 from tests.helpers.keycloak_target import (
+    IMPORT_ADMIN_CLIENT_SECRET,
     IMPORT_DIRECTORY_CLIENT_SECRET,
     IMPORT_REALM,
     IMPORT_USERS,
@@ -30,6 +31,7 @@ def _terraform_environment(**overrides: str) -> dict[str, str]:
         "KEYCLOAK_TEST_USER_IDS": json.dumps(TERRAFORM_IDS),
         "KEYCLOAK_TEST_USER_PASSWORDS": json.dumps(TERRAFORM_PASSWORDS),
         "KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET": "generated-directory-secret",
+        "KEYCLOAK_TEST_ADMIN_CLIENT_SECRET": "generated-admin-secret",
         **overrides,
     }
 
@@ -40,6 +42,7 @@ def test_no_variable_targets_the_imported_realm():
     assert target.realm == IMPORT_REALM == "identity-stack"
     assert target.users == IMPORT_USERS
     assert target.directory_client_secret == IMPORT_DIRECTORY_CLIENT_SECRET == "local-only-directory-client"
+    assert target.admin_client_secret == IMPORT_ADMIN_CLIENT_SECRET == "local-only-admin-client"
 
 
 def test_the_imported_realm_has_the_fixture_users():
@@ -47,7 +50,7 @@ def test_the_imported_realm_has_the_fixture_users():
     assert IMPORT_USERS["alice"] == KeycloakUser("alice", "local-only-alice", "a11ce000-0000-4000-8000-000000000001")
 
 
-def test_the_four_variables_target_the_terraform_realm():
+def test_the_five_variables_target_the_terraform_realm():
     target = keycloak_test_target(_terraform_environment())
 
     assert target.realm == "identity-stack-terraform"
@@ -55,6 +58,7 @@ def test_the_four_variables_target_the_terraform_realm():
         name: KeycloakUser(name, TERRAFORM_PASSWORDS[name], TERRAFORM_IDS[name]) for name in USERNAMES
     }
     assert target.directory_client_secret == "generated-directory-secret"
+    assert target.admin_client_secret == "generated-admin-secret"
 
 
 @pytest.mark.parametrize(
@@ -64,6 +68,7 @@ def test_the_four_variables_target_the_terraform_realm():
         "KEYCLOAK_TEST_USER_IDS",
         "KEYCLOAK_TEST_USER_PASSWORDS",
         "KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET",
+        "KEYCLOAK_TEST_ADMIN_CLIENT_SECRET",
     ],
 )
 def test_half_a_target_is_refused(unset):
@@ -126,3 +131,4 @@ def test_a_target_repr_never_carries_a_secret():
 
     assert not any(password in repr(target) for password in TERRAFORM_PASSWORDS.values())
     assert "generated-directory-secret" not in repr(target)
+    assert "generated-admin-secret" not in repr(target)
