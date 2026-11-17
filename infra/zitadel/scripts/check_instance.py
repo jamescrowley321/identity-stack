@@ -13,7 +13,8 @@ Checks:
 - allow_register is false in the instance default login policy, and every
   organization has its own login policy with allow_register false.
 - Login V2 refuses a registration in every organization: the register page shows
-  no registration form, only "registration is disabled".
+  no registration form, only "registration is disabled". This is the self-service
+  register flow only; the user API is not refused (see README.md).
 - The project checks no roles and asserts none, has the four role definitions, and
   is granted to the two tenant organizations only.
 - Nobody holds a role grant, in any organization.

@@ -8,8 +8,8 @@ from sqlmodel import select
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.role import Role
-from app.models.identity.tenant import Tenant
-from app.models.identity.user import IdPLink, User
+from app.models.identity.tenant import Tenant, TenantStatus
+from app.models.identity.user import IdPLink, User, UserStatus
 from scripts.seed_zitadel import PROVIDER_NAME, LinkedUser, SeedConflictError, SeedInput, apply_seed
 
 ISSUER = "http://zitadel.localhost:8480"
@@ -210,3 +210,39 @@ async def test_existing_canonical_roles_are_reused_not_duplicated(db_session):
 
     admins = (await db_session.execute(select(Role).where(Role.name == "admin", Role.tenant_id.is_(None)))).scalars()
     assert [role.description for role in admins] == ["existing"]
+
+
+@pytest.mark.parametrize(
+    "external_org_id",
+    [pytest.param(None, id="unlinked"), pytest.param(SEED.tenants["acme"], id="linked")],
+)
+async def test_a_suspended_tenant_is_refused_not_linked_or_granted(db_session, external_org_id):
+    db_session.add(Tenant(name="acme", external_org_id=external_org_id, status=TenantStatus.suspended))
+    await db_session.commit()
+
+    refusal = await _refused(db_session, SEED)
+
+    assert "acme" in str(refusal)
+    db_session.expire_all()
+    acme = (await db_session.execute(select(Tenant).where(Tenant.name == "acme"))).scalars().one()
+    assert (acme.external_org_id, acme.status) == (external_org_id, TenantStatus.suspended)
+    grants = (await db_session.execute(select(UserTenantRole).where(UserTenantRole.tenant_id == acme.id))).scalars()
+    assert grants.all() == []
+    assert await _provider_count(db_session) == 0
+
+
+@pytest.mark.parametrize("status", [UserStatus.inactive, UserStatus.provisioned])
+async def test_a_linked_user_that_is_not_active_is_refused_and_left_as_it_was(db_session, status):
+    await apply_seed(db_session, SEED)
+    user = (await db_session.execute(select(User).where(User.email == SEED.linked_user.email))).scalars().one()
+    user.status = status
+    await db_session.commit()
+    before = await _state(db_session)
+
+    refusal = await _refused(db_session, SEED)
+
+    assert SEED.linked_user.email in str(refusal)
+    assert await _state(db_session) == before
+    db_session.expire_all()
+    user = (await db_session.execute(select(User).where(User.email == SEED.linked_user.email))).scalars().one()
+    assert user.status == status
