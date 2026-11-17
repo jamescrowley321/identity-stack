@@ -56,10 +56,12 @@ def zitadel_admin_settings() -> ZitadelAdminSettings:
     (``ZITADEL_AUDIENCE``), and the credential is a personal access token of a machine
     user with the instance role ``IAM_ORG_MANAGER`` (``ZITADEL_ADMIN_TOKEN``).
     """
+    # Stripped: a value of only whitespace is not set, and a trailing newline from a
+    # pasted value would otherwise go out in the URL or the Authorization header.
     values = {
-        ISSUER_VARIABLE: knob("ZITADEL_ISSUER_URL") or "",
-        PROJECT_VARIABLE: knob("ZITADEL_AUDIENCE") or "",
-        ADMIN_CREDENTIAL_VARIABLE: knob("ZITADEL_ADMIN_TOKEN") or "",
+        ISSUER_VARIABLE: (knob("ZITADEL_ISSUER_URL") or "").strip(),
+        PROJECT_VARIABLE: (knob("ZITADEL_AUDIENCE") or "").strip(),
+        ADMIN_CREDENTIAL_VARIABLE: (knob("ZITADEL_ADMIN_TOKEN") or "").strip(),
     }
     missing = [name for name, value in values.items() if not value]
     if missing:
@@ -95,7 +97,11 @@ class TenantLinkedElsewhere(Exception):
 
 
 class RepositoryZitadelLinks:
-    """The adapter's canonical side, in the request's session. Each write commits."""
+    """The adapter's canonical side, in the request's session.
+
+    Each write commits, and a write that fails is rolled back before it raises: the
+    session is the request's, and the service has already committed its own change.
+    """
 
     def __init__(self, session: AsyncSession) -> None:
         self._providers = ProviderRepository(session)
@@ -112,6 +118,15 @@ class RepositoryZitadelLinks:
             return None
         return tenant.external_org_id
 
+    async def linked_elsewhere(self, tenant_id: uuid.UUID, provider_id: uuid.UUID) -> bool:
+        """Whether the tenant is linked to an organization of another provider, or of none."""
+        tenant = await self._tenants.get(tenant_id)
+        return (
+            tenant is not None
+            and tenant.external_org_id is not None
+            and (tenant.external_org_provider_id != provider_id)
+        )
+
     async def link_organization(self, tenant_id: uuid.UUID, provider_id: uuid.UUID, org_id: str) -> None:
         """Record ``org_id`` as the tenant's organization. A tenant linked to anything else is left as it is."""
         tenant = await self._tenants.get(tenant_id)
@@ -124,8 +139,12 @@ class RepositoryZitadelLinks:
             raise TenantLinkedElsewhere(f"Tenant {tenant_id} is already linked to another organization")
         tenant.external_org_id = org_id
         tenant.external_org_provider_id = provider_id
-        await self._tenants.update(tenant)
-        await self._tenants.commit()
+        try:
+            await self._tenants.update(tenant)
+            await self._tenants.commit()
+        except Exception:
+            await self._tenants.rollback()
+            raise
 
     async def subject_of(self, user_id: uuid.UUID, provider_id: uuid.UUID) -> str | None:
         """The subject of the user's Zitadel link, if a sign-in or the backend made it (FOLLOWED_LINK_ORIGINS)."""
@@ -148,17 +167,27 @@ class RepositoryZitadelLinks:
         return await self._tenants.external_org_ids_of_user(user_id, provider_id)
 
     async def link_subject(self, user_id: uuid.UUID, provider_id: uuid.UUID, sub: str, email: str) -> None:
-        """Link the user to the Zitadel user the adapter created for it, marked as the backend's link."""
-        await self._idp_links.create(
-            IdPLink(
-                user_id=user_id,
-                provider_id=provider_id,
-                external_sub=sub,
-                external_email=email,
-                metadata_={LINK_ORIGIN: LINKED_BY_BACKEND},
+        """Link the user to the Zitadel user the adapter created for it, marked as the backend's link.
+
+        The same link already there (a concurrent sync wrote it first) counts as written.
+        """
+        try:
+            await self._idp_links.create(
+                IdPLink(
+                    user_id=user_id,
+                    provider_id=provider_id,
+                    external_sub=sub,
+                    external_email=email,
+                    metadata_={LINK_ORIGIN: LINKED_BY_BACKEND},
+                )
             )
-        )
-        await self._idp_links.commit()
+            await self._idp_links.commit()
+        except Exception:
+            await self._idp_links.rollback()
+            existing = await self._idp_links.get_by_provider_and_sub(provider_id, sub)
+            if existing is not None and existing.user_id == user_id:
+                return
+            raise
 
 
 def build_zitadel_sync_adapter(settings: ZitadelAdminSettings, session: AsyncSession) -> ZitadelSyncAdapter:

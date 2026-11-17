@@ -153,6 +153,28 @@ def test_an_incomplete_zitadel_configuration_is_refused_by_name(variable, unset,
     assert TOKEN not in str(refused.value)
 
 
+@pytest.mark.parametrize("variable", ["ZITADEL_ISSUER_URL", "ZITADEL_AUDIENCE", ADMIN_CREDENTIAL_VARIABLE])
+@pytest.mark.parametrize("blank", [" ", "\n", " \t\n"], ids=["space", "newline", "mixed"])
+def test_a_whitespace_only_zitadel_setting_is_refused_by_name(variable, blank, monkeypatch, zitadel_environment):
+    monkeypatch.setenv(variable, blank)
+
+    with pytest.raises(ZitadelSyncNotConfigured) as refused:
+        zitadel_admin_settings()
+
+    assert variable in str(refused.value)
+
+
+def test_surrounding_whitespace_is_not_part_of_a_setting(monkeypatch, zitadel_environment):
+    """A value pasted with a trailing newline would otherwise go out in the URL or the Authorization header."""
+    monkeypatch.setenv("ZITADEL_ISSUER_URL", f" {ISSUER}/\n")
+    monkeypatch.setenv("ZITADEL_AUDIENCE", f"{PROJECT_ID}\n")
+    monkeypatch.setenv(ADMIN_CREDENTIAL_VARIABLE, f"{TOKEN}\n")
+
+    assert zitadel_admin_settings() == ZitadelAdminSettings(
+        base_url=ISSUER, project_id=PROJECT_ID, token=TOKEN, timeout_seconds=10.0
+    )
+
+
 @pytest.mark.parametrize("value", ["0", "-1", "soon", "nan", "inf"])
 def test_a_timeout_that_is_not_a_positive_finite_number_is_refused(value, monkeypatch, zitadel_environment):
     monkeypatch.setenv(ADMIN_TIMEOUT_VARIABLE, value)

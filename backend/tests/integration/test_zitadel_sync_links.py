@@ -17,6 +17,7 @@ from app.models.identity.role import Role
 from app.models.identity.tenant import Tenant
 from app.models.identity.user import LINK_ORIGIN, LINKED_AT_SIGN_IN, LINKED_BY_BACKEND, IdPLink, User
 from app.repositories.assignment import UserTenantRoleRepository
+from app.repositories.base import RepositoryConflictError
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
@@ -104,6 +105,63 @@ async def test_linking_a_tenant_again_to_the_same_organization_is_allowed(db_ses
     await RepositoryZitadelLinks(db_session).link_organization(tenant_id, provider_id, ORG_ID)
 
     assert await RepositoryZitadelLinks(db_session).organization_of(tenant_id, provider_id) == ORG_ID
+
+
+@pytest.mark.parametrize(
+    ("linked", "expected"),
+    [("none", False), ("zitadel", False), ("keycloak", True), ("no provider", True)],
+)
+async def test_a_tenant_is_linked_elsewhere_when_its_organization_is_not_one_of_zitadel(db_session, linked, expected):
+    provider_id = await _provider(db_session)
+    owners = {"none": None, "zitadel": provider_id, "no provider": None}
+    owner_id = owners[linked] if linked in owners else await _provider(db_session, linked)
+    org_id = None if linked == "none" else ORG_ID
+    tenant_id = await _tenant(db_session, external_org_id=org_id, external_org_provider_id=owner_id)
+
+    assert await RepositoryZitadelLinks(db_session).linked_elsewhere(tenant_id, provider_id) is expected
+
+
+async def test_a_failed_organization_link_leaves_the_session_usable(db_session):
+    """The session is the request's: a failed write is rolled back, not left for the next use to trip on."""
+    provider_id = await _provider(db_session)
+    tenant_id = await _tenant(db_session)
+    await db_session.commit()
+    links = RepositoryZitadelLinks(db_session)
+
+    with pytest.raises(RepositoryConflictError):
+        # No such provider row: the foreign key refuses the write.
+        await links.link_organization(tenant_id, uuid.uuid4(), ORG_ID)
+
+    assert await links.provider_id() == provider_id
+    assert await links.organization_of(tenant_id, provider_id) is None
+
+
+async def test_linking_the_same_subject_again_is_done_and_leaves_the_session_usable(db_session):
+    """A concurrent sync wrote the same link first: the unique key refuses the second, which counts as done."""
+    provider_id = await _provider(db_session)
+    user_id = await _user(db_session)
+    await db_session.commit()
+    links = RepositoryZitadelLinks(db_session)
+    await links.link_subject(user_id, provider_id, str(user_id), "ada@initech.test")
+
+    await links.link_subject(user_id, provider_id, str(user_id), "ada@initech.test")
+
+    assert await links.subject_of(user_id, provider_id) == str(user_id)
+
+
+async def test_a_subject_another_user_holds_is_refused_and_leaves_the_session_usable(db_session):
+    provider_id = await _provider(db_session)
+    holder_id = await _user(db_session, "holder@initech.test")
+    user_id = await _user(db_session)
+    await db_session.commit()
+    links = RepositoryZitadelLinks(db_session)
+    await links.link_subject(holder_id, provider_id, str(user_id), "holder@initech.test")
+
+    with pytest.raises(RepositoryConflictError):
+        await links.link_subject(user_id, provider_id, str(user_id), "ada@initech.test")
+
+    assert await links.subject_of(user_id, provider_id) is None
+    assert await links.subject_of(holder_id, provider_id) == str(user_id)
 
 
 async def test_linking_a_tenant_that_does_not_exist_raises(db_session):
