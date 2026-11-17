@@ -219,8 +219,9 @@ RFC 9457 problem-detail bodies (`application/problem+json`) **MUST** be built on
   endpoint's published contract. The first-login refusals of a provider whose
   organization picks the tenant (Zitadel) answer in the same `{"detail": ...}` style:
   403 for no organization, an organization linked to no single active tenant, or a
-  UserInfo `sub` that differs, 409 for an email a canonical user already holds, and
-  503 when UserInfo cannot be read, as for every provider fault in the module.
+  UserInfo `sub` that differs, 409 for an email a canonical user already holds, 500
+  when the provider has no `providers` row, and 503 when UserInfo cannot be read, as
+  for every provider fault in the module.
 - Exception: the handlers in `routers/users.py` and `routers/attributes.py`, and
   `routers/accesskeys.py::_verify_key_tenant`. They answer an `Error` from
   `DescopeManagementAdapter` with the `{"detail": ...}` 400/403/502 bodies those routes had

@@ -86,7 +86,8 @@ DATABASE_URL=postgresql+asyncpg://... make zitadel-seed
 It pipes `terraform output -json canonical_seed` to
 [`backend/scripts/seed_zitadel.py`](../../backend/scripts/seed_zitadel.py), which writes:
 
-- canonical tenants `acme` and `globex`, with `external_org_id` set to their organization ids;
+- canonical tenants `acme` and `globex`, with `external_org_id` set to their organization ids and
+  `external_org_provider_id` to the `zitadel` provider row;
 - a `providers` row `zitadel` of type `oidc` on the issuer;
 - the `acme` test user, linked (`idp_links`) on its Zitadel user id, with role `admin` in `acme`
   and `viewer` in `globex`, so the tenant switch has a user in two tenants. The roles are the
@@ -95,10 +96,12 @@ It pipes `terraform output -json canonical_seed` to
 A second run changes nothing. The seed takes over nothing it did not write: it refuses, and
 writes nothing, when a `zitadel` provider row exists that differs from the one it writes or is
 inactive, when `acme` or `globex` is already linked to another organization or another tenant
-holds its organization (`external_org_id` is shared with the other providers), or when a user
+holds its organization (`external_org_id` is shared with the other providers), or when `acme`
+or `globex` is linked to its organization id for another provider, or when a user
 with the test user's email exists without a link to its Zitadel user, or when `acme` or
 `globex` is suspended or the linked user is not active. An active `acme` or `globex` tenant
-with no organization is linked to its organization. After `make zitadel-reset` and a new apply the ids are
+with no organization is linked to its organization, and one linked to it for no provider (a
+database seeded before migration 007) gets the `zitadel` provider. After `make zitadel-reset` and a new apply the ids are
 new, so seed a database the seed has not seeded before. The `globex` test user is left for first
 login to provision; `Unlinked` gets no tenant.
 

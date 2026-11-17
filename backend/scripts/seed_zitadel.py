@@ -4,7 +4,8 @@ Reads the ``canonical_seed`` output of the ``infra/zitadel`` Terraform root on
 standard input and writes, idempotently:
 
 - canonical tenants ``acme`` and ``globex``, each with ``external_org_id`` set to
-  its Zitadel organization id;
+  its Zitadel organization id and ``external_org_provider_id`` to the ``zitadel``
+  provider row;
 - a ``providers`` row ``zitadel`` of type ``oidc`` on the instance's issuer;
 - the ``acme`` test user, linked (``idp_links``) on its Zitadel user id, with
   the global canonical roles the output names: ``admin`` in ``acme`` and
@@ -15,9 +16,12 @@ it did not write: it refuses, writing nothing, when a ``zitadel`` provider row
 exists that differs from the one it writes or is inactive, when ``acme`` or
 ``globex`` is already linked to another organization or another tenant holds
 its organization (``external_org_id`` is shared with the other providers), or
+when ``acme`` or ``globex`` is linked to its organization id for another provider, or
 when a user with the test user's email exists without a link to its Zitadel
 user, or when ``acme`` or ``globex`` is suspended or the linked user is not
-active. An active ``acme`` or ``globex`` tenant with no organization is linked. After
+active. An active ``acme`` or ``globex`` tenant with no organization is linked, and
+one linked to its organization for no provider (before migration 007) gets the
+``zitadel`` provider. After
 ``make zitadel-reset`` and a new ``terraform apply`` the ids are new, so the
 seed needs a database it has not seeded. The ``globex`` test user is left for
 first login to provision, and the third organization gets no tenant.
@@ -155,7 +159,9 @@ async def _ensure_provider(session: AsyncSession, seed: SeedInput, changes: list
     return provider
 
 
-async def _ensure_tenants(session: AsyncSession, seed: SeedInput, changes: list[str]) -> dict[str, Tenant]:
+async def _ensure_tenants(
+    session: AsyncSession, seed: SeedInput, provider: Provider, changes: list[str]
+) -> dict[str, Tenant]:
     tenants: dict[str, Tenant] = {}
     for name, org_id in sorted(seed.tenants.items()):
         # external_org_id is not unique: an organization another tenant holds is not the seed's to share.
@@ -165,11 +171,14 @@ async def _ensure_tenants(session: AsyncSession, seed: SeedInput, changes: list[
             raise SeedConflictError(f"organization {org_id} is already linked to tenant {holder!r}, not {name!r}")
         tenant = (await session.execute(select(Tenant).where(Tenant.name == name))).scalars().first()
         if tenant is None:
-            tenant = Tenant(name=name, external_org_id=org_id, status=TenantStatus.active)
+            tenant = Tenant(
+                name=name, external_org_id=org_id, external_org_provider_id=provider.id, status=TenantStatus.active
+            )
             session.add(tenant)
             changes.append(f"created tenant {name!r} (organization {org_id})")
         elif tenant.external_org_id is None:
             tenant.external_org_id = org_id
+            tenant.external_org_provider_id = provider.id
             changes.append(f"linked tenant {name!r} to organization {org_id}")
         elif tenant.external_org_id != org_id:
             # external_org_id is shared with the other providers' organizations
@@ -177,6 +186,13 @@ async def _ensure_tenants(session: AsyncSession, seed: SeedInput, changes: list[
             raise SeedConflictError(
                 f"tenant {name!r} is already linked to organization {tenant.external_org_id}, not {org_id}"
             )
+        elif tenant.external_org_provider_id is None:
+            # The seed's own link from before migration 007 named no provider.
+            tenant.external_org_provider_id = provider.id
+            changes.append(f"linked tenant {name!r} to organization {org_id} of provider {PROVIDER_NAME!r}")
+        elif tenant.external_org_provider_id != provider.id:
+            # The same id string, but another provider's organization.
+            raise SeedConflictError(f"tenant {name!r} is linked to organization {org_id} of another provider")
         if tenant.status != TenantStatus.active:
             # A suspended tenant, like an inactive provider, is someone else's decision.
             raise SeedConflictError(f"tenant {name!r} is {tenant.status.value}, not {TenantStatus.active.value}")
@@ -263,7 +279,7 @@ async def apply_seed(session: AsyncSession, seed: SeedInput) -> list[str]:
     """
     changes: list[str] = []
     provider = await _ensure_provider(session, seed, changes)
-    tenants = await _ensure_tenants(session, seed, changes)
+    tenants = await _ensure_tenants(session, seed, provider, changes)
     roles = await _ensure_roles(session, set(seed.linked_user.roles.values()), changes)
     user = await _ensure_user(session, seed, provider, changes)
     await _ensure_assignments(session, seed, user, tenants, roles, changes)

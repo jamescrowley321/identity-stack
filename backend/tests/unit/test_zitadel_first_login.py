@@ -266,7 +266,16 @@ class TestAFirstLogin:
 
         assert response.status_code == 403
         assert response.json() == {"detail": protected.ORGANIZATION_NOT_LINKED}
-        services.provisioner.organization_tenant_id.assert_awaited_once_with(ORGANIZATION)
+        services.provisioner.organization_tenant_id.assert_awaited_once_with("zitadel", ORGANIZATION)
+        services.provisioner.provision.assert_not_awaited()
+        assert op.userinfo_authorizations == []
+
+    def test_without_the_provider_row_is_500_before_userinfo(self, op, userinfo):
+        """The misconfiguration gets one answer, whatever the organization or UserInfo would have said."""
+        response, services = _get(op, _token(op), linked=Error(NotFound("no provider row")))
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": protected.PROVIDER_NOT_CONFIGURED}
         services.provisioner.provision.assert_not_awaited()
         assert op.userinfo_authorizations == []
 

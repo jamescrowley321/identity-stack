@@ -31,9 +31,11 @@ class TenantRepository(BaseRepository[Tenant]):
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def list_by_external_org_id(self, external_org_id: str) -> list[Tenant]:
-        """Every tenant linked to the provider organization ``external_org_id``."""
-        stmt = sa.select(Tenant).where(Tenant.external_org_id == external_org_id)
+    async def list_by_external_org_id(self, provider_id: uuid.UUID, external_org_id: str) -> list[Tenant]:
+        """Every tenant linked to the organization ``external_org_id`` of the provider ``provider_id``."""
+        stmt = sa.select(Tenant).where(
+            Tenant.external_org_provider_id == provider_id, Tenant.external_org_id == external_org_id
+        )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
