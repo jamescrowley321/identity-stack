@@ -50,7 +50,7 @@ from app.models.identity.assignment import UserTenantRole
 from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.role import Role
 from app.models.identity.tenant import Tenant, TenantStatus
-from app.models.identity.user import IdPLink, User, UserStatus
+from app.models.identity.user import LINK_ORIGIN, LINKED_BY_BACKEND, IdPLink, User, UserStatus
 
 PROVIDER_NAME = "zitadel"
 CANONICAL_ROLES = frozenset({"owner", "admin", "member", "viewer"})
@@ -258,7 +258,13 @@ async def _ensure_user(session: AsyncSession, seed: SeedInput, provider: Provide
     session.add(user)
     await session.flush()
     session.add(
-        IdPLink(user_id=user.id, provider_id=provider.id, external_sub=wanted.external_sub, external_email=wanted.email)
+        IdPLink(
+            user_id=user.id,
+            provider_id=provider.id,
+            external_sub=wanted.external_sub,
+            external_email=wanted.email,
+            metadata_={LINK_ORIGIN: LINKED_BY_BACKEND},
+        )
     )
     await session.flush()
     changes.append(f"created user {wanted.email!r}, linked to Zitadel user {wanted.external_sub}")

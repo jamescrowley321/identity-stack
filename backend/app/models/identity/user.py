@@ -52,13 +52,16 @@ class User(SQLModel, table=True):
     )
 
 
-# ``IdPLink.metadata_`` key recording how a link was made, and its value for a
-# link made from a validated sign-in (just-in-time provisioning). The admin route
-# may not set the key (``IdPLinkService.create_idp_link``), so only a sign-in can.
-# A provider adapter that writes to the linked account follows only such links:
-# an admin-made link names whatever account the admin typed in.
+# ``IdPLink.metadata_`` key recording how a link was made, and its values: a link
+# made from a validated sign-in (just-in-time provisioning), and one the backend
+# wrote for an account it created or that the operator's seed names (the Zitadel
+# sync adapter and seed). The admin route may not set the key
+# (``IdPLinkService.create_idp_link``), so only the backend can. A provider adapter
+# that writes to the linked account follows only such links: an admin-made link
+# names whatever account the admin typed in.
 LINK_ORIGIN = "linked_by"
 LINKED_AT_SIGN_IN = "sign_in"
+LINKED_BY_BACKEND = "backend"
 
 
 class IdPLink(SQLModel, table=True):

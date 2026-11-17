@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.knobs import knob
-from app.models.identity.user import IdPLink
+from app.models.identity.user import LINK_ORIGIN, LINKED_AT_SIGN_IN, LINKED_BY_BACKEND, IdPLink
 from app.outbound import outbound_client
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
@@ -28,6 +28,11 @@ ISSUER_VARIABLE = "ZITADEL_ISSUER_URL"
 PROJECT_VARIABLE = "ZITADEL_AUDIENCE"
 ADMIN_CREDENTIAL_VARIABLE = "ZITADEL_ADMIN_TOKEN"
 ADMIN_TIMEOUT_VARIABLE = "ZITADEL_ADMIN_TIMEOUT_SECONDS"
+
+# The link origins the adapter follows: a sign-in's, and its own (or the seed's). An
+# admin-made link is not followed: the adapter's token may change any organization's
+# users, and that link names whatever account the admin typed in.
+FOLLOWED_LINK_ORIGINS = frozenset({LINKED_AT_SIGN_IN, LINKED_BY_BACKEND})
 
 
 class ZitadelSyncNotConfigured(RuntimeError):
@@ -123,14 +128,27 @@ class RepositoryZitadelLinks:
         await self._tenants.commit()
 
     async def subject_of(self, user_id: uuid.UUID, provider_id: uuid.UUID) -> str | None:
+        """The subject of the user's Zitadel link, if a sign-in or the backend made it (FOLLOWED_LINK_ORIGINS)."""
         for link in await self._idp_links.get_by_user(user_id):
-            if link.provider_id == provider_id:
+            metadata = link.metadata_
+            if (
+                link.provider_id == provider_id
+                and isinstance(metadata, dict)
+                and metadata.get(LINK_ORIGIN) in FOLLOWED_LINK_ORIGINS
+            ):
                 return link.external_sub
         return None
 
     async def link_subject(self, user_id: uuid.UUID, provider_id: uuid.UUID, sub: str, email: str) -> None:
+        """Link the user to the Zitadel user the adapter created for it, marked as the backend's link."""
         await self._idp_links.create(
-            IdPLink(user_id=user_id, provider_id=provider_id, external_sub=sub, external_email=email)
+            IdPLink(
+                user_id=user_id,
+                provider_id=provider_id,
+                external_sub=sub,
+                external_email=email,
+                metadata_={LINK_ORIGIN: LINKED_BY_BACKEND},
+            )
         )
         await self._idp_links.commit()
 

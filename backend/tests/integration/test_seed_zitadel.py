@@ -9,7 +9,7 @@ from app.models.identity.assignment import UserTenantRole
 from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.role import Role
 from app.models.identity.tenant import Tenant, TenantStatus
-from app.models.identity.user import IdPLink, User, UserStatus
+from app.models.identity.user import LINK_ORIGIN, LINKED_BY_BACKEND, IdPLink, User, UserStatus
 from scripts.seed_zitadel import PROVIDER_NAME, LinkedUser, SeedConflictError, SeedInput, apply_seed
 
 ISSUER = "http://zitadel.localhost:8480"
@@ -47,7 +47,15 @@ async def _state(session) -> dict:
         },
         "provider": (provider.type, provider.issuer_url, provider.base_url, provider.capabilities),
         "user": (user.user_name, user.given_name, user.family_name),
-        "links": {(link.provider_id == provider.id, link.external_sub, link.external_email) for link in links},
+        "links": {
+            (
+                link.provider_id == provider.id,
+                link.external_sub,
+                link.external_email,
+                (link.metadata_ or {}).get(LINK_ORIGIN),
+            )
+            for link in links
+        },
         "assignments": {(tenant_names[a.tenant_id], role_names[a.role_id]) for a in assignments},
     }
 
@@ -56,7 +64,7 @@ EXPECTED = {
     "tenants": {"acme": ("399943487992119299", True), "globex": ("399943487958564867", True)},
     "provider": (ProviderType.oidc, ISSUER, ISSUER, ["sso"]),
     "user": ("acme-user", "Acme", "User"),
-    "links": {(True, "399943491398025219", "acme-user@acme.test")},
+    "links": {(True, "399943491398025219", "acme-user@acme.test", LINKED_BY_BACKEND)},
     "assignments": {("acme", "admin"), ("globex", "viewer")},
 }
 
