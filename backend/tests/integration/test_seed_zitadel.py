@@ -342,3 +342,32 @@ async def test_a_rerun_marks_a_seed_link_made_before_link_origins_were_recorded(
     )
     assert link.metadata_ == (metadata or {}) | {LINK_ORIGIN: LINKED_BY_BACKEND}
     assert await apply_seed(db_session, SEED) == []
+
+
+@pytest.mark.parametrize("changed", ["user", "link"])
+async def test_a_rerun_does_not_mark_an_origin_less_link_to_another_email_as_the_backend_s(db_session, changed):
+    """An admin-made link has no origin either: the seed marks only its own, whose emails are the seed's."""
+    await apply_seed(db_session, SEED)
+    link = (
+        (await db_session.execute(select(IdPLink).where(IdPLink.external_sub == SEED.linked_user.external_sub)))
+        .scalars()
+        .one()
+    )
+    link.metadata_ = None
+    if changed == "link":
+        link.external_email = "someone-else@acme.test"
+    else:
+        user = (await db_session.execute(select(User).where(User.id == link.user_id))).scalars().one()
+        user.email = "someone-else@acme.test"
+    await db_session.commit()
+
+    refusal = await _refused(db_session, SEED)
+
+    assert SEED.linked_user.external_sub in str(refusal)
+    db_session.expire_all()
+    link = (
+        (await db_session.execute(select(IdPLink).where(IdPLink.external_sub == SEED.linked_user.external_sub)))
+        .scalars()
+        .one()
+    )
+    assert link.metadata_ is None

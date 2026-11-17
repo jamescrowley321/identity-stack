@@ -242,6 +242,11 @@ async def _ensure_user(session: AsyncSession, seed: SeedInput, provider: Provide
         metadata = link.metadata_ if isinstance(link.metadata_, dict) else {}
         if LINK_ORIGIN not in metadata:
             # A link seeded before link origins were recorded: the sync adapter follows it only once marked.
+            # An admin-made link has no origin either; the seed's own has the seed's email, on both rows.
+            if (user.email, link.external_email) != (wanted.email, wanted.email):
+                raise SeedConflictError(
+                    f"Zitadel user {wanted.external_sub} is linked to a user other than {wanted.email!r}"
+                )
             link.metadata_ = metadata | {LINK_ORIGIN: LINKED_BY_BACKEND}
             await session.flush()
             changes.append(f"marked the link of user {wanted.email!r} as the backend's")
