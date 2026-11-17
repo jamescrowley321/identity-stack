@@ -48,8 +48,12 @@ variable "access_token_lifetime" {
   default     = "15m0s"
 
   validation {
-    condition     = can(regex("^([0-9]+h)?([0-9]+m)?[0-9]+s$", var.access_token_lifetime))
-    error_message = "access_token_lifetime must read like 15m0s or 1h0m0s, the form Zitadel answers, or the next plan is not empty."
+    # Go's canonical form for a whole, non-zero number of seconds: 45s, 15m0s, 1h0m0s.
+    # Minutes and seconds below 60, no leading zeros, every unit below the largest
+    # written out. Any other spelling (900s, 60m0s, 0h15m0s) is read back
+    # differently and the next plan is not empty.
+    condition     = can(regex("^([1-9][0-9]*h[1-5]?[0-9]m[1-5]?[0-9]s|([1-9]|[1-5][0-9])m[1-5]?[0-9]s|([1-9]|[1-5][0-9])s)$", var.access_token_lifetime))
+    error_message = "access_token_lifetime must be a non-zero Go duration in the form Zitadel answers (like 45s, 15m0s or 1h0m0s), or the next plan is not empty."
   }
 }
 

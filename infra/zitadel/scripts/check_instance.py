@@ -186,8 +186,12 @@ def main() -> int:
         check_settings(instance, org_ids)
         check_project(instance, outputs, org_ids)
         check_users(instance, outputs, org_ids)
-    except urllib.error.URLError as exc:
-        failures.append(f"the instance did not answer: {exc}")
+    except urllib.error.HTTPError as exc:
+        failures.append(f"the instance answered {exc.code} {exc.reason} to {exc.url}; later checks did not run")
+    except (urllib.error.URLError, TimeoutError) as exc:
+        failures.append(f"the instance did not answer: {exc}; later checks did not run")
+    except (json.JSONDecodeError, KeyError) as exc:
+        failures.append(f"the instance's answer is not the expected shape ({exc!r}); later checks did not run")
 
     for failure in failures:
         print(f"FAIL: {failure}", file=sys.stderr)
