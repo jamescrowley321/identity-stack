@@ -24,9 +24,13 @@ Outbound only, with a machine user's token (``ZitadelAdminApi``):
 
 Which Zitadel user: the adapter's token may change users of every organization, so it
 follows only a link a sign-in or the backend made (``ZitadelLinks.subject_of``), never
-one an admin typed in. A user with no such link is looked up by its canonical id, the
-id the adapter gives the users it creates: a create whose answer was lost, or whose link
-write failed, is found and linked by the next call instead of being made again.
+one an admin typed in; a user whose Zitadel link is of another origin is refused before
+Zitadel is called. A user with no link is looked up by its canonical id, the id the
+adapter gives the users it creates: a create whose answer was lost, or whose link write
+failed, is found and linked by the next call instead of being made again. Zitadel lets
+any user manager choose a new user's id, so the user found by id is acted on, and
+linked, only when it is in the organization of one of the user's tenants (on create,
+the tenant it was created in).
 
 Every method returns ``Error(SyncError)`` for any failure, Zitadel unreachable included,
 and raises nothing; ``context[UNANSWERED]`` is set when Zitadel gave no readable answer
@@ -87,6 +91,14 @@ class ZitadelLinks(Protocol):
         ...
 
     async def link_subject(self, user_id: uuid.UUID, provider_id: uuid.UUID, sub: str, email: str) -> None: ...
+
+    async def has_link(self, user_id: uuid.UUID, provider_id: uuid.UUID) -> bool:
+        """Whether the user has a Zitadel link of any origin (a user has at most one per provider)."""
+        ...
+
+    async def organizations_of_user(self, user_id: uuid.UUID, provider_id: uuid.UUID) -> frozenset[str]:
+        """The Zitadel organizations of the tenants the user holds a role in."""
+        ...
 
 
 ApiOpener = Callable[[], AbstractAsyncContextManager[ZitadelAdminApi]]
@@ -164,6 +176,23 @@ async def _create_user(api: ZitadelAdminApi, new_user: dict) -> ZitadelUser | No
             raise
         return found
     return await api.find_user(new_user["user_id"])
+
+
+async def _same_id_user(api: ZitadelAdminApi, user_id: uuid.UUID, organizations: frozenset[str]) -> ZitadelUser:
+    """The Zitadel user with the canonical id, if it is in one of ``organizations``; refused otherwise."""
+    found = await api.find_user(str(user_id))
+    if found is None:
+        raise _Refused("No Zitadel user is linked to this user", {})
+    _check_organization(found, organizations)
+    return found
+
+
+def _check_organization(found: ZitadelUser, organizations: frozenset[str]) -> None:
+    if found.organization_id not in organizations:
+        raise _Refused(
+            "A Zitadel user with this user's id is in an organization of none of the user's tenants",
+            {"organization_id": found.organization_id},
+        )
 
 
 async def _bring_to(api: ZitadelAdminApi, sub: str, state: str, wanted: str) -> None:
@@ -258,32 +287,43 @@ class ZitadelSyncAdapter(IdentityProviderAdapter):
                 if sub is not None and not status_changed:
                     # Already in Zitadel (linked before this call): nothing was created, no status changed.
                     return Ok(None)
-                new_user = None
-                if sub is None and created_in is not None:
-                    new_user = await self._new_user(user_id, provider_id, uuid.UUID(str(created_in)), data)
-                async with self._open_api() as api:
-                    if sub is not None:
+                if sub is not None:
+                    async with self._open_api() as api:
                         found = await api.find_user(sub)
                         if found is None:
                             raise _Refused("The linked Zitadel user does not exist", {})
                         await _bring_to(api, sub, found.state, wanted)
-                        return Ok(None)
-                    sub = str(user_id)
-                    found = await api.find_user(sub)
-                    if found is None and new_user is not None:
-                        found = await _create_user(api, new_user)
-                    if found is None:
-                        raise _Refused("No Zitadel user is linked to this user", {})
-                    if new_user is not None and found.organization_id != new_user["org_id"]:
-                        raise _Refused(
-                            "A Zitadel user with this user's id is in another organization",
-                            {"organization_id": found.organization_id},
-                        )
-                    await _bring_to(api, sub, found.state, wanted)
-                await self._links.link_subject(user_id, provider_id, sub, data.get("email") or "")
+                    return Ok(None)
+                await self._refuse_unfollowed_link(user_id, provider_id)
+                if created_in is not None:
+                    new_user = await self._new_user(user_id, provider_id, uuid.UUID(str(created_in)), data)
+                    async with self._open_api() as api:
+                        found = await api.find_user(str(user_id)) or await _create_user(api, new_user)
+                        if found is None:
+                            raise _Refused("Zitadel has no user with this user's id after creating it", {})
+                        _check_organization(found, frozenset({new_user["org_id"]}))
+                        await _bring_to(api, str(user_id), found.state, wanted)
+                else:
+                    organizations = await self._links.organizations_of_user(user_id, provider_id)
+                    async with self._open_api() as api:
+                        found = await _same_id_user(api, user_id, organizations)
+                        await _bring_to(api, str(user_id), found.state, wanted)
+                await self._links.link_subject(user_id, provider_id, str(user_id), data.get("email") or "")
                 return Ok(None)
             except Exception as exc:
                 return Error(_sync_error("sync_user", exc, context))
+
+    async def _refuse_unfollowed_link(self, user_id: uuid.UUID, provider_id: uuid.UUID) -> None:
+        """Refuse a user whose Zitadel link the adapter does not follow, before Zitadel is called.
+
+        The adapter would act on a Zitadel user that link does not name, and its own link
+        could not be written beside it (one link per user and provider).
+        """
+        if await self._links.has_link(user_id, provider_id):
+            raise _Refused(
+                "The user has a Zitadel link the adapter does not follow: neither a sign-in nor the backend made it",
+                {},
+            )
 
     async def _new_user(self, user_id: uuid.UUID, provider_id: uuid.UUID, tenant_id: uuid.UUID, data: dict) -> dict:
         """The human user to create in the tenant's organization, checked before Zitadel is called.
@@ -309,7 +349,8 @@ class ZitadelSyncAdapter(IdentityProviderAdapter):
     async def delete_user(self, *, user_id: uuid.UUID) -> Result[None, SyncError]:
         """Remove the linked Zitadel user, or the one this adapter created with the canonical id.
 
-        A linked user Zitadel no longer has counts as removed.
+        A linked user Zitadel no longer has counts as removed. One found by the canonical id
+        is removed only when it is in the organization of one of the user's tenants.
         """
         with tracer.start_as_current_span("zitadel.delete_user") as span:
             span.set_attribute("user.id", str(user_id))
@@ -317,12 +358,17 @@ class ZitadelSyncAdapter(IdentityProviderAdapter):
             try:
                 provider_id = await self._provider_id()
                 sub = await self._links.subject_of(user_id, provider_id)
+                if sub is not None:
+                    async with self._open_api() as api:
+                        if not await api.delete_user(sub):
+                            logger.info("Zitadel had no user %s to delete for canonical user %s", sub, user_id)
+                    return Ok(None)
+                await self._refuse_unfollowed_link(user_id, provider_id)
+                organizations = await self._links.organizations_of_user(user_id, provider_id)
                 async with self._open_api() as api:
-                    if sub is None:
-                        if not await api.delete_user(str(user_id)):
-                            raise _Refused("No Zitadel user is linked to this user", {})
-                    elif not await api.delete_user(sub):
-                        logger.info("Zitadel had no user %s to delete for canonical user %s", sub, user_id)
+                    await _same_id_user(api, user_id, organizations)
+                    if not await api.delete_user(str(user_id)):
+                        raise _Refused("No Zitadel user is linked to this user", {})
                 return Ok(None)
             except Exception as exc:
                 return Error(_sync_error("delete_user", exc, context))

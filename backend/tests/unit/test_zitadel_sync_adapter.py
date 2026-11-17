@@ -143,10 +143,16 @@ class FakeLinks:
         provider_id: uuid.UUID | None = PROVIDER_ID,
         organizations: dict[uuid.UUID, str] | None = None,
         subjects: dict[uuid.UUID, str] | None = None,
+        unfollowed: set[uuid.UUID] | None = None,
+        memberships: dict[uuid.UUID, set[uuid.UUID]] | None = None,
     ) -> None:
         self._provider_id = provider_id
         self.organizations = organizations or {}
         self.subjects = subjects or {}
+        # Users with a zitadel link the adapter does not follow (admin-made or origin-less).
+        self.unfollowed = unfollowed or set()
+        # user id -> the tenants it holds a role in.
+        self.memberships = memberships or {}
         self.writes: list[tuple] = []
 
     async def provider_id(self) -> uuid.UUID | None:
@@ -167,6 +173,20 @@ class FakeLinks:
     async def link_subject(self, user_id: uuid.UUID, provider_id: uuid.UUID, sub: str, email: str) -> None:
         self.writes.append(("subject", user_id, provider_id, sub, email))
         self.subjects[user_id] = sub
+
+    async def has_link(self, user_id: uuid.UUID, provider_id: uuid.UUID) -> bool:
+        assert provider_id == self._provider_id
+        return user_id in self.subjects or user_id in self.unfollowed
+
+    async def organizations_of_user(self, user_id: uuid.UUID, provider_id: uuid.UUID) -> frozenset[str]:
+        assert provider_id == self._provider_id
+        tenants = self.memberships.get(user_id, set())
+        return frozenset(org for tenant, org in self.organizations.items() if tenant in tenants)
+
+
+def _member_links(**overrides) -> FakeLinks:
+    """USER_ID holds a role in TENANT_ID, whose Zitadel organization is ORG_ID."""
+    return FakeLinks(**({"organizations": {TENANT_ID: ORG_ID}, "memberships": {USER_ID: {TENANT_ID}}} | overrides))
 
 
 class Opener:
@@ -517,7 +537,7 @@ class TestSyncUserStatus:
     async def test_an_unlinked_user_the_adapter_created_gets_the_status_and_the_link(self):
         """A create whose link write failed: the Zitadel user has the canonical id, so it is found and linked."""
         api = FakeApi(users={str(USER_ID): _user(ACTIVE)})
-        adapter, _, links = _adapter(api)
+        adapter, _, links = _adapter(api, _member_links())
 
         result = await adapter.sync_user(user_id=USER_ID, data=_status_change("inactive"))
 
@@ -527,6 +547,39 @@ class TestSyncUserStatus:
             ("deactivate_user", {"user_id": str(USER_ID)}),
         ]
         assert links.writes == [("subject", USER_ID, PROVIDER_ID, str(USER_ID), "ada@initech.test")]
+
+    @pytest.mark.parametrize("status", ["inactive", "active"])
+    @pytest.mark.parametrize(
+        "memberships",
+        [{}, {USER_ID: {uuid.UUID("00000000-0000-4000-8000-0000000000dd")}}],
+        ids=["no-membership", "member-of-another-tenant"],
+    )
+    async def test_a_user_with_this_id_outside_the_user_tenants_is_not_changed_and_not_linked(
+        self, status, memberships
+    ):
+        """Zitadel takes a caller-chosen id: a user planted with the canonical id in a foreign org is left alone."""
+        api = FakeApi(users={str(USER_ID): _user(INACTIVE if status == "active" else ACTIVE, OTHER_ORG_ID)})
+        adapter, _, links = _adapter(api, FakeLinks(organizations={TENANT_ID: ORG_ID}, memberships=memberships))
+
+        result = await adapter.sync_user(user_id=USER_ID, data=_status_change(status))
+
+        assert result.is_error()
+        assert result.error.context == {"user_id": str(USER_ID), "organization_id": OTHER_ORG_ID}
+        assert api.calls == [("find_user", {"user_id": str(USER_ID)})]
+        assert links.writes == []
+
+    @pytest.mark.parametrize("data", [_created(), _status_change("inactive")], ids=["create", "status-change"])
+    async def test_a_user_with_a_zitadel_link_the_adapter_does_not_follow_is_refused_before_any_call(self, data):
+        """An admin-made or origin-less link: a backend link would collide with it (one link per provider)."""
+        api = FakeApi(users={str(USER_ID): _user()})
+        adapter, opener, links = _adapter(api, _member_links(unfollowed={USER_ID}))
+
+        result = await adapter.sync_user(user_id=USER_ID, data=data)
+
+        assert result.is_error()
+        assert result.error.context == {"user_id": str(USER_ID)}
+        assert opener.opened == 0
+        assert links.writes == []
 
     async def test_an_unknown_status_is_refused_before_any_call(self):
         adapter, opener, _ = _adapter(links=FakeLinks(subjects={USER_ID: SUB}))
@@ -584,21 +637,44 @@ class TestDeleteUser:
 
     async def test_an_unlinked_user_the_adapter_created_is_removed(self):
         api = FakeApi(users={str(USER_ID): _user()})
-        adapter, _, _ = _adapter(api)
+        adapter, _, _ = _adapter(api, _member_links())
 
         result = await adapter.delete_user(user_id=USER_ID)
 
         assert result.is_ok()
-        assert api.calls == [("delete_user", {"user_id": str(USER_ID)})]
+        assert api.calls == [
+            ("find_user", {"user_id": str(USER_ID)}),
+            ("delete_user", {"user_id": str(USER_ID)}),
+        ]
 
     async def test_an_unlinked_user_zitadel_does_not_have_is_an_error(self):
         api = FakeApi()
-        adapter, _, _ = _adapter(api)
+        adapter, _, _ = _adapter(api, _member_links())
 
         result = await adapter.delete_user(user_id=USER_ID)
 
         assert result.is_error()
-        assert api.calls == [("delete_user", {"user_id": str(USER_ID)})]
+        assert api.calls == [("find_user", {"user_id": str(USER_ID)})]
+
+    async def test_a_user_with_this_id_outside_the_user_tenants_is_not_deleted(self):
+        api = FakeApi(users={str(USER_ID): _user(org_id=OTHER_ORG_ID)})
+        adapter, _, _ = _adapter(api, _member_links())
+
+        result = await adapter.delete_user(user_id=USER_ID)
+
+        assert result.is_error()
+        assert result.error.context == {"user_id": str(USER_ID), "organization_id": OTHER_ORG_ID}
+        assert api.calls == [("find_user", {"user_id": str(USER_ID)})]
+        assert str(USER_ID) in api.users
+
+    async def test_a_user_with_a_zitadel_link_the_adapter_does_not_follow_is_refused_before_any_call(self):
+        api = FakeApi(users={str(USER_ID): _user()})
+        adapter, opener, _ = _adapter(api, _member_links(unfollowed={USER_ID}))
+
+        result = await adapter.delete_user(user_id=USER_ID)
+
+        assert result.is_error()
+        assert opener.opened == 0
 
 
 class TestCanonicalOnly:

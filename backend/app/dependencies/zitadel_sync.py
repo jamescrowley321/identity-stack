@@ -139,6 +139,14 @@ class RepositoryZitadelLinks:
                 return link.external_sub
         return None
 
+    async def has_link(self, user_id: uuid.UUID, provider_id: uuid.UUID) -> bool:
+        """Whether the user has a Zitadel link, whatever made it."""
+        return any(link.provider_id == provider_id for link in await self._idp_links.get_by_user(user_id))
+
+    async def organizations_of_user(self, user_id: uuid.UUID, provider_id: uuid.UUID) -> frozenset[str]:
+        """The Zitadel organizations of the tenants the user holds a role in."""
+        return await self._tenants.external_org_ids_of_user(user_id, provider_id)
+
     async def link_subject(self, user_id: uuid.UUID, provider_id: uuid.UUID, sub: str, email: str) -> None:
         """Link the user to the Zitadel user the adapter created for it, marked as the backend's link."""
         await self._idp_links.create(

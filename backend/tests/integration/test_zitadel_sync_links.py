@@ -11,7 +11,9 @@ import uuid
 import pytest
 
 from app.dependencies.zitadel_sync import RepositoryZitadelLinks, TenantLinkedElsewhere
+from app.models.identity.assignment import UserTenantRole
 from app.models.identity.provider import Provider, ProviderType
+from app.models.identity.role import Role
 from app.models.identity.tenant import Tenant
 from app.models.identity.user import LINK_ORIGIN, LINKED_AT_SIGN_IN, LINKED_BY_BACKEND, IdPLink, User
 from app.repositories.assignment import UserTenantRoleRepository
@@ -194,3 +196,45 @@ async def test_the_first_zitadel_login_of_a_created_user_is_that_user(db_session
 
     assert result.is_ok(), result
     assert result.ok == user_id
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [None, {"note": "typed in"}, {LINK_ORIGIN: LINKED_AT_SIGN_IN}, {LINK_ORIGIN: LINKED_BY_BACKEND}],
+    ids=["none", "other-keys", "sign-in", "backend"],
+)
+async def test_a_zitadel_link_of_any_origin_is_a_link(db_session, metadata):
+    provider_id = await _provider(db_session)
+    other_id = await _provider(db_session, "ory")
+    user_id = await _user(db_session)
+    links = RepositoryZitadelLinks(db_session)
+    db_session.add(IdPLink(user_id=user_id, provider_id=other_id, external_sub="ory-sub", metadata_=metadata))
+    await db_session.flush()
+    assert await links.has_link(user_id, provider_id) is False
+
+    db_session.add(
+        IdPLink(user_id=user_id, provider_id=provider_id, external_sub="399979638798950001", metadata_=metadata)
+    )
+    await db_session.flush()
+
+    assert await links.has_link(user_id, provider_id) is True
+
+
+async def test_the_users_organizations_are_those_of_its_tenants_linked_to_zitadel(db_session):
+    provider_id = await _provider(db_session)
+    other_id = await _provider(db_session, "keycloak")
+    member_of = await _tenant(db_session, external_org_id=ORG_ID, external_org_provider_id=provider_id)
+    elsewhere = await _tenant(db_session, "globex", external_org_id=OTHER_ORG_ID, external_org_provider_id=other_id)
+    unlinked = await _tenant(db_session, "umbrella")
+    await _tenant(db_session, "hooli", external_org_id="399979343167632000", external_org_provider_id=provider_id)
+    user_id = await _user(db_session)
+    other_user = await _user(db_session, "bob@initech.test")
+    role = await RoleRepository(db_session).create(Role(name="member"))
+    assignments = UserTenantRoleRepository(db_session)
+    for tenant_id in (member_of, elsewhere, unlinked):
+        await assignments.create(UserTenantRole(user_id=user_id, tenant_id=tenant_id, role_id=role.id))
+    await db_session.flush()
+    links = RepositoryZitadelLinks(db_session)
+
+    assert await links.organizations_of_user(user_id, provider_id) == frozenset({ORG_ID})
+    assert await links.organizations_of_user(other_user, provider_id) == frozenset()

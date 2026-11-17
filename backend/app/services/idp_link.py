@@ -24,8 +24,8 @@ logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
 
 
-# Only a sign-in records a link's origin: a link made here claims none.
-RESERVED_LINK_METADATA = f"metadata key '{LINK_ORIGIN}' is set only by sign-in"
+# Only the backend records a link's origin (a sign-in, or a link it wrote itself): a link made here claims none.
+RESERVED_LINK_METADATA = f"metadata key '{LINK_ORIGIN}' is set only by the backend"
 
 
 class IdPLinkService:

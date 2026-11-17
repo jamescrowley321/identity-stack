@@ -39,6 +39,21 @@ class TenantRepository(BaseRepository[Tenant]):
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def external_org_ids_of_user(self, user_id: uuid.UUID, provider_id: uuid.UUID) -> frozenset[str]:
+        """The provider's organization ids of the tenants the user holds a role in."""
+        stmt = (
+            sa.select(Tenant.external_org_id)
+            .join(UserTenantRole, UserTenantRole.tenant_id == Tenant.id)
+            .where(
+                UserTenantRole.user_id == user_id,
+                Tenant.external_org_provider_id == provider_id,
+                Tenant.external_org_id.is_not(None),
+            )
+            .distinct()
+        )
+        result = await self._session.execute(stmt)
+        return frozenset(result.scalars().all())
+
     async def list_all(self) -> list[Tenant]:
         """List all tenants ordered by creation time."""
         stmt = sa.select(Tenant).order_by(Tenant.created_at.desc())
