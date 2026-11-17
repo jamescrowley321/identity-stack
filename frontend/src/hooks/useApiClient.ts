@@ -1,6 +1,7 @@
 import { useAuth } from "react-oidc-context";
-import { useCallback, useRef, useEffect } from "react";
+import { useCallback, useContext, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { TENANT_SELECTOR_HEADER, TenantSelectorContext } from "../contexts/TenantSelector";
 
 /**
  * Absolute base URL the browser uses for API calls.
@@ -31,6 +32,11 @@ export function apiUrl(path: string): string {
  * Hook that provides an authenticated fetch wrapper.
  *
  * - Attaches the current access token as a Bearer header.
+ * - Names the active tenant in the `X-Tenant-ID` header when there is one
+ *   (`TenantSelectorContext`, supplied by `IdentityProvider`). It replaces a
+ *   value the caller set, so a call never acts in a tenant the UI does not
+ *   show. `apiFetch` changes when the tenant does, so a page that loads with
+ *   it loads again in the new tenant.
  * - Prepends API_BASE_URL to the request path so the same call site
  *   works in both standalone (relative URL → nginx proxy) and gateway
  *   (absolute URL → Tyk) modes.
@@ -40,6 +46,7 @@ export function apiUrl(path: string): string {
 export function useApiClient() {
   const auth = useAuth();
   const navigate = useNavigate();
+  const tenantId = useContext(TenantSelectorContext);
 
   // Keep a ref so the callback always sees the latest auth state
   // without needing auth in its dependency array (avoids re-creating
@@ -61,10 +68,12 @@ export function useApiClient() {
 
       const url = apiUrl(path);
 
+      const tenantHeader: Record<string, string> =
+        tenantId === null ? {} : { [TENANT_SELECTOR_HEADER]: tenantId };
       const makeRequest = (t: string) =>
         fetch(url, {
           ...options,
-          headers: { ...options.headers, Authorization: `Bearer ${t}` },
+          headers: { ...options.headers, ...tenantHeader, Authorization: `Bearer ${t}` },
         });
 
       const response = await makeRequest(token);
@@ -84,7 +93,7 @@ export function useApiClient() {
 
       return response;
     },
-    [navigate],
+    [navigate, tenantId],
   );
 
   return { apiFetch };
