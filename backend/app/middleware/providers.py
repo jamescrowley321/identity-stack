@@ -34,6 +34,8 @@ from app.middleware.keycloak import (
     single_audience,
     token_model,
 )
+from app.middleware.zitadel import binding_failure as zitadel_binding_failure
+from app.middleware.zitadel import organization_id as zitadel_organization_id
 from app.services.keycloak_directory import IssuerNamesNoRealm, KeycloakDirectory, MemberIdRefused, MemberUnknown
 
 RS256 = "RS256"
@@ -105,6 +107,10 @@ TokenBinding = Callable[[dict], str | None]
 # organization.
 SoleMembershipAnswer = list[str] | tuple[str, ...] | set[str] | frozenset[str]
 SoleMembershipLookup = Callable[[dict], Awaitable[SoleMembershipAnswer]]
+# A provider's first-login organization: the id of the organization whose
+# canonical tenant (``tenants.external_org_id``) a user provisioned at first
+# login joins, read from the verified claims, or ``None`` when they name none.
+FirstLoginOrganization = Callable[[dict], str | None]
 
 
 @dataclass(frozen=True)
@@ -231,6 +237,15 @@ class ProviderTokenConfig:
     # ``CANONICAL_RBAC_PROVIDERS``, where the canonical model would decide
     # instead (``refuse_ambiguous_authorization_source``).
     token_authorized_only: bool = False
+    # Just-in-time provisioning (``GET /api/identity``) places a first-login user,
+    # as ``member``, in the one tenant whose ``external_org_id`` this returns,
+    # and refuses when it returns ``None`` or no tenant has it. ``None`` here:
+    # the provider's first-login users get the default tenant (Ory).
+    first_login_organization: FirstLoginOrganization | None = None
+    # True when the email, ``email_verified`` and names of a first-login user come
+    # from the provider's UserInfo endpoint, whose ``sub`` must equal the
+    # token's, rather than from the access token (Zitadel's carries no email).
+    profile_from_userinfo: bool = False
 
     def __post_init__(self) -> None:
         if self.tenant_memberships is not None and self.sole_membership_lookup != CountedMemberships(
@@ -557,6 +572,95 @@ def keycloak_config(
     )
 
 
+@dataclass(frozen=True)
+class ZitadelTokenBinding:
+    """Zitadel's ``token_binding``: issued to the SPA client, and not an ID token (``app.middleware.zitadel``).
+
+    A frozen value, not a closure, so that two providers built from the same
+    settings compare equal.
+    """
+
+    client_id: str
+
+    def __call__(self, claims: dict) -> str | None:
+        return zitadel_binding_failure(self.client_id, claims)
+
+
+def zitadel_config(
+    issuer_url: str,
+    audience: str,
+    client_id: str,
+    *,
+    require_https: bool = True,
+    post_logout_redirect_uri: str | None = None,
+) -> ProviderTokenConfig:
+    """Zitadel instance provider config.
+
+    ``issuer_url`` is the instance's issuer, ``audience`` the project id every
+    token for this API names in its ``aud``, and ``client_id`` the SPA's
+    application. A token is accepted only with that issuer, a signature from the
+    instance's keys, the project id in ``aud`` and the token binding
+    (``ZitadelTokenBinding``): the SPA's ``client_id`` and no ID-token claim.
+
+    Authorization is canonical: there is no claims extractor, so tenant, roles
+    and permissions come from the canonical model for a deployment that lists
+    ``zitadel`` in ``CANONICAL_RBAC_PROVIDERS`` (and nothing grants otherwise).
+    The organization claim is read once, at first login
+    (``first_login_organization``), and the profile comes from UserInfo.
+
+    Fails closed: no audience, no client id, or HTTPS enforcement on with an
+    ``http`` issuer (any host, loopback included) is refused, which stops
+    startup. Only RS256 is accepted: the instance's JWKS holds RS256 keys only.
+    """
+    issuer = issuer_url.rstrip("/")
+    if not audience:
+        raise ProviderConfigurationError("ZITADEL_AUDIENCE must name the project id when ZITADEL_ISSUER_URL is set")
+    if not client_id:
+        raise ProviderConfigurationError(
+            "ZITADEL_CLIENT_ID must name the SPA application when ZITADEL_ISSUER_URL is set"
+        )
+    if require_https and urlsplit(issuer).scheme.casefold() != "https":
+        raise ProviderConfigurationError(
+            "ZITADEL_ISSUER_URL must be https while ZITADEL_REQUIRE_HTTPS is on; "
+            "set ZITADEL_REQUIRE_HTTPS=false for a local plain-HTTP instance"
+        )
+    return ProviderTokenConfig(
+        name="Zitadel",
+        accepted_issuers=frozenset({issuer}),
+        disco_address=f"{issuer}/.well-known/openid-configuration",
+        audience=audience,
+        require_audience=True,
+        algorithms=frozenset({RS256}),
+        require_https=require_https,
+        logout_kind="rp_initiated",
+        logout_client_id=client_id,
+        post_logout_redirect_uri=post_logout_redirect_uri,
+        token_binding=ZitadelTokenBinding(client_id),
+        first_login_organization=zitadel_organization_id,
+        profile_from_userinfo=True,
+    )
+
+
+def _zitadel_provider(
+    issuer_url: str,
+    audience: str,
+    client_id: str,
+    *,
+    require_https: bool,
+    post_logout_redirect_uri: str | None,
+) -> ProviderTokenConfig | None:
+    """Zitadel when it has an issuer. A half-configured one raises (see ``zitadel_config``)."""
+    if not issuer_url:
+        return None
+    return zitadel_config(
+        issuer_url,
+        audience,
+        client_id,
+        require_https=require_https,
+        post_logout_redirect_uri=post_logout_redirect_uri,
+    )
+
+
 def _ory_provider(
     issuer_url: str,
     audience: str | None,
@@ -676,6 +780,17 @@ def _keycloak_registration() -> ProviderTokenConfig | None:
     )
 
 
+def _zitadel_registration() -> ProviderTokenConfig | None:
+    """Zitadel, when ``ZITADEL_ISSUER_URL`` is set. Client ids keep their case."""
+    return _zitadel_provider(
+        knob("ZITADEL_ISSUER_URL", ""),
+        knob("ZITADEL_AUDIENCE", "").strip(),
+        knob("ZITADEL_CLIENT_ID", "").strip(),
+        require_https=knob_flag("ZITADEL_REQUIRE_HTTPS", "true"),
+        post_logout_redirect_uri=knob("ZITADEL_POST_LOGOUT_REDIRECT_URI") or _default_post_logout_redirect_uri(),
+    )
+
+
 # One entry per provider this backend can be configured with. An entry reads its
 # own settings from the environment and returns the provider, or ``None`` when
 # the deployment does not configure it. Adding a provider is adding its entry
@@ -687,6 +802,7 @@ PROVIDER_REGISTRATIONS: list[ProviderRegistration] = [
     _descope_registration,
     _ory_registration,
     _keycloak_registration,
+    _zitadel_registration,
 ]
 
 
@@ -813,6 +929,11 @@ def build_provider_configs(
     keycloak_portable_permissions: Mapping[str, frozenset[str]] | None = None,
     keycloak_directory_client_id: str = "",
     keycloak_directory_client_secret: str = "",
+    zitadel_issuer_url: str = "",
+    zitadel_audience: str = "",
+    zitadel_client_id: str = "",
+    zitadel_require_https: bool = True,
+    zitadel_post_logout_redirect_uri: str | None = None,
 ) -> list[ProviderTokenConfig]:
     """``configured_providers`` over explicit values, for a middleware built by hand.
 
@@ -822,8 +943,8 @@ def build_provider_configs(
     its registration calls, and an ambiguous list is refused the same way.
 
     Descope is always present (preserving single-provider behavior, including the
-    no-project-id path). Ory and Keycloak are each added when an issuer is given.
-    A half-configured Keycloak raises (see ``keycloak_config``), and so
+    no-project-id path). Ory, Keycloak and Zitadel are each added when an issuer
+    is given. A half-configured Keycloak or Zitadel raises (see ``keycloak_config``), and so
     does an Ory issuer with audience enforcement on (the default) and no
     ``ory_audience``. Pass ``ory_require_audience=False`` to knowingly opt out.
     """
@@ -848,6 +969,13 @@ def build_provider_configs(
                 portable_permissions=keycloak_portable_permissions or {},
                 directory_client_id=keycloak_directory_client_id,
                 directory_client_secret=keycloak_directory_client_secret,
+            ),
+            lambda: _zitadel_provider(
+                zitadel_issuer_url,
+                zitadel_audience,
+                zitadel_client_id,
+                require_https=zitadel_require_https,
+                post_logout_redirect_uri=zitadel_post_logout_redirect_uri,
             ),
         ]
     )

@@ -6,6 +6,7 @@ come from cannot change a byte of what Ory's SPA receives.
 
 import base64
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlparse
@@ -34,6 +35,14 @@ KEYCLOAK_END_SESSION = f"{KEYCLOAK_ISSUER}/protocol/openid-connect/logout"
 KEYCLOAK_TYPE_CLIENT = "member"
 KEYCLOAK_APP_CLIENT = "member-app"
 KEYCLOAK_REDIRECT = "https://app.example.test/login"
+
+ZITADEL_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "zitadel"
+ZITADEL_DISCOVERY = json.loads((ZITADEL_FIXTURES / "discovery.json").read_text())
+ZITADEL_ISSUER = ZITADEL_DISCOVERY["issuer"]
+ZITADEL_END_SESSION = ZITADEL_DISCOVERY["end_session_endpoint"]
+ZITADEL_PROJECT_ID = "399781183140937731"
+ZITADEL_SPA_CLIENT_ID = "399781187016540163"
+ZITADEL_REDIRECT = "http://localhost:3000/signed-out"
 
 ID_TOKEN = "the-id-token"
 
@@ -92,6 +101,11 @@ def _environment(monkeypatch):
         "KEYCLOAK_REQUIRE_HTTPS",
         "KEYCLOAK_POST_LOGOUT_REDIRECT_URI",
         *MODEL_VARIABLES,
+        "ZITADEL_ISSUER_URL",
+        "ZITADEL_AUDIENCE",
+        "ZITADEL_CLIENT_ID",
+        "ZITADEL_REQUIRE_HTTPS",
+        "ZITADEL_POST_LOGOUT_REDIRECT_URI",
         "FRONTEND_URL",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -111,6 +125,17 @@ def keycloak(monkeypatch):
     set_model_environment(monkeypatch, KEYCLOAK_TYPE_CLIENT)
     monkeypatch.setenv("KEYCLOAK_POST_LOGOUT_REDIRECT_URI", KEYCLOAK_REDIRECT)
     return {"sub": "kc-user", "iss": KEYCLOAK_ISSUER, "aud": KEYCLOAK_TYPE_CLIENT, "azp": KEYCLOAK_APP_CLIENT}
+
+
+@pytest.fixture
+def zitadel(monkeypatch):
+    """The local instance's settings; the claims are the recorded SPA access token's."""
+    monkeypatch.setenv("ZITADEL_ISSUER_URL", ZITADEL_ISSUER)
+    monkeypatch.setenv("ZITADEL_AUDIENCE", ZITADEL_PROJECT_ID)
+    monkeypatch.setenv("ZITADEL_CLIENT_ID", ZITADEL_SPA_CLIENT_ID)
+    monkeypatch.setenv("ZITADEL_REQUIRE_HTTPS", "false")
+    monkeypatch.setenv("ZITADEL_POST_LOGOUT_REDIRECT_URI", ZITADEL_REDIRECT)
+    return json.loads((ZITADEL_FIXTURES / "human-access-token-project.json").read_text())["claims"]
 
 
 class TestOryResponseIsUnchanged:
@@ -268,3 +293,41 @@ class TestTwoRpInitiatedProviders:
             "client_id": [KEYCLOAK_APP_CLIENT],
             "post_logout_redirect_uri": [KEYCLOAK_REDIRECT],
         }
+
+
+class TestZitadelLogout:
+    async def test_url_is_the_end_session_endpoint_with_the_hint_the_spa_client_and_the_redirect(self, zitadel):
+        response, _ = await _logout(zitadel, ZITADEL_END_SESSION)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "logout_redirect"
+        assert body["logout_url"].split("?")[0] == ZITADEL_END_SESSION
+        assert _query(body["logout_url"]) == {
+            "id_token_hint": [ID_TOKEN],
+            "client_id": [ZITADEL_SPA_CLIENT_ID],
+            "post_logout_redirect_uri": [ZITADEL_REDIRECT],
+        }
+
+    async def test_the_redirect_defaults_to_the_frontend_login_page(self, zitadel, monkeypatch):
+        monkeypatch.delenv("ZITADEL_POST_LOGOUT_REDIRECT_URI")
+        monkeypatch.setenv("FRONTEND_URL", "http://localhost:3000")
+
+        response, _ = await _logout(zitadel, ZITADEL_END_SESSION)
+
+        assert _query(response.json()["logout_url"])["post_logout_redirect_uri"] == ["http://localhost:3000/login"]
+
+    async def test_discovery_takes_the_providers_https_switch(self, zitadel):
+        _, disco = await _logout(zitadel, ZITADEL_END_SESSION)
+
+        request = disco.await_args.args[0]
+        assert request.address == f"{ZITADEL_ISSUER}/.well-known/openid-configuration"
+        assert request.policy == DiscoveryPolicy(require_https=False)
+
+    async def test_the_id_token_itself_cannot_call_logout(self, zitadel):
+        id_token_claims = json.loads((ZITADEL_FIXTURES / "human-id-token-project.json").read_text())["claims"]
+
+        response, disco = await _logout(id_token_claims, ZITADEL_END_SESSION)
+
+        assert response.status_code == 401
+        assert disco.await_count == 0
