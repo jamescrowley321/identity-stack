@@ -111,3 +111,18 @@ def test_the_refusal_never_carries_a_password():
         keycloak_test_target(_terraform_environment(KEYCLOAK_TEST_USER_PASSWORDS=json.dumps(passwords)))
 
     assert not any(password in str(refused.value) for password in TERRAFORM_PASSWORDS.values())
+
+
+def test_a_user_repr_never_carries_the_password():
+    # pytest prints the repr of values in a failed assertion to the CI log.
+    user = keycloak_test_target(_terraform_environment()).users["alice"]
+
+    assert TERRAFORM_PASSWORDS["alice"] not in repr(user)
+    assert user.id in repr(user)
+
+
+def test_a_target_repr_never_carries_a_secret():
+    target = keycloak_test_target(_terraform_environment())
+
+    assert not any(password in repr(target) for password in TERRAFORM_PASSWORDS.values())
+    assert "generated-directory-secret" not in repr(target)
