@@ -130,6 +130,32 @@ jobs:
         if: always()
         run: docker compose -f docker-compose.test.yml --profile keycloak down -v
 
+  keycloak-terraform-check:
+    name: Keycloak Terraform Check
+    runs-on: ubuntu-latest
+    # No credential: the realm is built in the keycloak-test container, so this
+    # runs on every pull request, forks and Dependabot included. It fails when
+    # infra/keycloak and keycloak/realm/identity-stack-realm.json disagree.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-backend
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.2"
+          terraform_wrapper: false
+
+      - name: Start keycloak-test
+        # The Keycloak issuer is a fixed *.localhost name; pin it to loopback
+        # rather than depend on the runner's resolver.
+        run: |
+          echo "127.0.0.1 keycloak-test.localhost" | sudo tee -a /etc/hosts
+          make test-up-keycloak
+
+      - name: Apply infra/keycloak and compare it with the imported realm
+        run: make keycloak-terraform-check
+
   e2e-tests:
     name: E2E Tests
     runs-on: ubuntu-latest
