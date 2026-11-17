@@ -13,8 +13,9 @@ export interface TenantInfo {
  * `GET /api/identity` payload (provider-neutral — no Descope `dct`/`tenants`
  * claim decoding).
  *
- * - `currentTenantId`: the active tenant (client-side selection from
- *   IdentityContext; defaults to the first membership).
+ * - `currentTenantId`: the active tenant from IdentityContext: the token's
+ *   tenant when it comes from the token, otherwise the client-side selection
+ *   (defaulting to the first membership).
  * - `tenants`: every tenant the user belongs to. `tenant_memberships` is the
  *   source of id + display name; roles and permissions are aggregated across
  *   all of that tenant's role assignments (permissions de-duped).
@@ -31,6 +32,9 @@ export function useTenants() {
     // the whole app tree.
     const memberships = identity.tenant_memberships ?? [];
     const allRoles = identity.roles ?? [];
+    // A tenant that comes from the token: its permissions are the token's, and
+    // the token grants nothing in any other membership.
+    const tokenTenant = identity.token_tenant ?? null;
 
     const tenants: TenantInfo[] = memberships.map((membership) => {
       const tenantRoles = allRoles.filter(
@@ -40,7 +44,14 @@ export function useTenants() {
         id: membership.tenant_id,
         name: membership.tenant_name || membership.tenant_id,
         roles: tenantRoles.map((r) => r.role_name),
-        permissions: [...new Set(tenantRoles.flatMap((r) => r.permissions ?? []))],
+        permissions: [
+          ...new Set([
+            ...tenantRoles.flatMap((r) => r.permissions ?? []),
+            ...(tokenTenant?.tenant_id === membership.tenant_id
+              ? (tokenTenant.permissions ?? [])
+              : []),
+          ]),
+        ],
       };
     });
 
