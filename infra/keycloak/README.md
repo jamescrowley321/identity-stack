@@ -116,7 +116,13 @@ recreate it with `make test-down && make test-up-keycloak`, as a failed comparis
    the output `VITE_OIDC_SCOPE` and fails unless the token names the user's organization; and reads `bob`'s organizations
    with the directory client's generated secret. Users, organizations and members are read
    one page of `LISTING_PAGE_SIZE` at a time, and a full page fails the check as possibly cut off;
-4. destroys the realm. The run's state directory holds the generated passwords and directory
+4. with `--integration-tests` (`make keycloak-terraform-integration`), runs the backend's
+   Keycloak integration tests (`backend/tests/integration/test_keycloak_*.py`) against the
+   built realm, logging in with the generated user ids and passwords and asking the directory
+   with its generated secret (`backend/tests/helpers/keycloak_target.py`). They need the rest of
+   the test stack up and, for one test, a Descope client (`DESCOPE_PROJECT_ID`,
+   `DESCOPE_CLIENT_ID`, `DESCOPE_CLIENT_SECRET`, read from `backend/.env` when present);
+5. destroys the realm. The run's state directory holds the generated passwords and directory
    secret and is deleted, except when the destroy failed: then it is kept and its path printed.
    The next run deletes the realm (step 1) and then every state directory an earlier run kept
    or was killed with.

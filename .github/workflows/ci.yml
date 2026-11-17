@@ -126,6 +126,22 @@ jobs:
           TEST_DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
           TEST_REDIS_URL: redis://localhost:16379/0
 
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.2"
+          terraform_wrapper: false
+
+      - name: Run the Keycloak integration tests against a realm built by infra/keycloak
+        # The same tests again, logged in to the realm the Terraform root builds
+        # beside the import (generated user ids, passwords and directory secret)
+        # instead of the import. Here rather than in the credential-free
+        # keycloak-terraform-check job: one of them needs a live Descope token.
+        run: make keycloak-terraform-integration
+        env:
+          DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
+          DESCOPE_CLIENT_ID: ${{ secrets.DESCOPE_CLIENT_ID }}
+          DESCOPE_CLIENT_SECRET: ${{ secrets.DESCOPE_CLIENT_SECRET }}
+
       - name: Stop test stack
         if: always()
         run: docker compose -f docker-compose.test.yml --profile keycloak down -v
@@ -420,6 +436,138 @@ jobs:
       - name: Stop test stack
         if: always()
         run: docker compose -f docker-compose.test.yml down -v
+
+  e2e-keycloak:
+    name: E2E Tests (Keycloak)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # No credential: the realm is the keycloak-test import, so this runs on
+    # every pull request, forks and Dependabot included. The Descope E2E job
+    # above needs secrets and serves its own SPA on localhost:3000, the only
+    # origin the realm's app clients redirect to, so the Keycloak suite has a
+    # job of its own (backend/tests/e2e_keycloak/).
+    env:
+      DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
+      KEYCLOAK_ISSUER_URL: http://keycloak-test.localhost:18180/realms/identity-stack
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: ./.github/actions/setup-backend
+
+      - name: Install Playwright browsers
+        run: playwright install --with-deps chromium
+
+      - name: Install frontend dependencies
+        run: cd frontend && npm ci
+
+      - name: Build frontend for the realm's member-app
+        run: cd frontend && npm run build
+        env:
+          VITE_OIDC_AUTHORITY: ${{ env.KEYCLOAK_ISSUER_URL }}
+          VITE_OIDC_CLIENT_ID: member-app
+          VITE_OIDC_SCOPE: "openid profile email organization:acme"
+          VITE_OIDC_TENANT_SCOPE_TEMPLATE: "openid profile email organization:{tenant}"
+
+      - name: Start test stack (postgres + redis + hydra + keycloak)
+        # The Keycloak issuer is a fixed *.localhost name; pin it to loopback
+        # rather than depend on the runner's resolver.
+        run: |
+          echo "127.0.0.1 keycloak-test.localhost" | sudo tee -a /etc/hosts
+          make test-up-keycloak
+
+      - name: Apply database schema
+        run: cd backend && python -m alembic upgrade head
+
+      - name: Register the Keycloak provider
+        run: cd backend && python -m scripts.seed_keycloak
+
+      - name: Start backend
+        # Configured for the realm as docs/local-development.md says. Descope is
+        # left unconfigured: these tests present Keycloak tokens only. The log
+        # goes to a file: the backend outlives this step.
+        run: |
+          cd backend
+          uvicorn app.main:app --host 127.0.0.1 --port 8000 > "$RUNNER_TEMP/backend.log" 2>&1 &
+          curl -fsS --retry 30 --retry-connrefused --retry-delay 1 -o /dev/null http://localhost:8000/api/health
+        env:
+          DESCOPE_PROJECT_ID: ""
+          DESCOPE_MANAGEMENT_KEY: ""
+          REDIS_URL: redis://localhost:16379/0
+          KEYCLOAK_AUDIENCES: member,tenant-admin
+          KEYCLOAK_APP_CLIENTS: member=member-app,tenant-admin=tenant-admin-app
+          KEYCLOAK_PORTABLE_TYPES: member
+          KEYCLOAK_ORGANIZATION_BOUND_TYPES: tenant-admin
+          KEYCLOAK_PORTABLE_PERMISSIONS: member=documents:read
+          KEYCLOAK_REQUIRE_HTTPS: "false"
+          KEYCLOAK_DIRECTORY_CLIENT_ID: identity-stack-directory
+          # Local fixture value from keycloak/realm/identity-stack-realm.json.
+          KEYCLOAK_DIRECTORY_CLIENT_SECRET: local-only-directory-client
+          JIT_ENABLED_PROVIDERS: keycloak
+
+      - name: Start frontend (preview)
+        run: |
+          cd frontend
+          npx vite preview --port 3000 --strictPort > "$RUNNER_TEMP/frontend.log" 2>&1 &
+          curl -fsS --retry 30 --retry-connrefused --retry-delay 1 -o /dev/null http://localhost:3000/login
+
+      - name: Run Keycloak E2E tests
+        # The suite's session fixture fails every test, never skips, when
+        # keycloak-test, the backend or the SPA does not answer.
+        run: >-
+          cd backend && python -m pytest tests/e2e_keycloak/ -v
+          --screenshot=only-on-failure
+          --tracing=retain-on-failure
+          --output="$RUNNER_TEMP/playwright"
+        env:
+          E2E_BACKEND_URL: "http://localhost:8000"
+
+      # Same scrub as the Descope E2E job before anything leaves the runner:
+      # this repository is public and artifacts are world-readable.
+      - name: Redact credentials from the logs
+        id: redact
+        if: always()
+        run: |
+          for f in "$RUNNER_TEMP/backend.log" "$RUNNER_TEMP/frontend.log"; do
+            [ -f "$f" ] || continue
+            sed -i -E \
+              -e 's/eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]+/<redacted-jwt>/g' \
+              -e 's/(bearer )[A-Za-z0-9._~+:\/-]+=*/\1<redacted>/gI' \
+              -e 's/(basic )[A-Za-z0-9+\/=]+/\1<redacted>/gI' \
+              -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^:/@ ]+:[^@ ]+@#\1<redacted>:<redacted>@#g' \
+              "$f"
+          done
+
+      - name: Upload logs
+        if: always() && steps.redact.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-keycloak-logs
+          path: |
+            ${{ runner.temp }}/backend.log
+            ${{ runner.temp }}/frontend.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      # Screenshots and traces hold only the fixture realm's throwaway users,
+      # but traces carry their tokens, so retention is short.
+      - name: Upload Playwright failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-keycloak-playwright-failures
+          path: ${{ runner.temp }}/playwright
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Stop test stack
+        if: always()
+        run: make test-down
 
   docker-build:
     name: Docker Build

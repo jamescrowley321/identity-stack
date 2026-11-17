@@ -3,11 +3,25 @@
 # that a second plan is empty, compare the result with the imported realm
 # (check_realm.py), then destroy it.
 #
+# With --integration-tests it also runs the backend's Keycloak integration tests
+# (backend/tests/integration/test_keycloak_*.py) against the Terraform-built
+# realm before the destroy, with the generated user ids, passwords and directory
+# secret (backend/tests/helpers/keycloak_target.py). Those tests also need the
+# rest of the test stack (TEST_DATABASE_URL) and, for one of them, a Descope
+# client (DESCOPE_PROJECT_ID, DESCOPE_CLIENT_ID, DESCOPE_CLIENT_SECRET).
+#
 # The script needs keycloak-test up and healthy (`make test-up-keycloak`) and
 # fails when it is not. It never starts, stops or removes the container. Linux
 # and CI only. Run from anywhere in the repo, with terraform, curl, jq and the
 # backend venv (cd backend && uv sync --locked --extra dev).
 set -euo pipefail
+
+integration_tests=0
+case "${1:-}" in
+  "") ;;
+  --integration-tests) integration_tests=1 ;;
+  *) echo "usage: $0 [--integration-tests]" >&2; exit 2 ;;
+esac
 
 repo="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 root="$repo/infra/keycloak"
@@ -115,3 +129,15 @@ PYTHONPATH="$repo/backend" "$python" "$root/scripts/check_realm.py" \
   echo "realm $import_realm is the import from when keycloak-test was created; if keycloak/realm/identity-stack-realm.json changed since, run 'make test-down && make test-up-keycloak' and run the check again" >&2
   exit "$compare_status"
 }
+
+if [ "$integration_tests" = 1 ]; then
+  echo "--- the backend's Keycloak integration tests against realm $terraform_realm"
+  (
+    cd "$repo/backend"
+    KEYCLOAK_TEST_REALM="$terraform_realm" \
+      KEYCLOAK_TEST_USER_IDS="$(jq -c .user_ids.value "$work/outputs.json")" \
+      KEYCLOAK_TEST_USER_PASSWORDS="$(jq -c .user_passwords.value "$work/outputs.json")" \
+      KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET="$(jq -er .keycloak_directory_client_secret.value "$work/outputs.json")" \
+      "$python" -m pytest tests/integration/test_keycloak_*.py -v
+  )
+fi

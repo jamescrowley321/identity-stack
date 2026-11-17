@@ -39,6 +39,12 @@ test-down: ## tear down the test stack, keycloak-test included
 keycloak-terraform-check: ## apply infra/keycloak to a fresh realm in a running keycloak-test (make test-up-keycloak), check plan is empty and the realm matches the import
 	infra/keycloak/scripts/check-against-compose.sh
 
+.PHONY: keycloak-terraform-integration
+keycloak-terraform-integration: ## keycloak-terraform-check, then the backend Keycloak integration tests against the Terraform-built realm (needs the running test stack)
+	set -a; [ -f backend/.env ] && . backend/.env; set +a; \
+	TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TEST_REDIS_URL='$(TEST_REDIS_URL)' \
+	infra/keycloak/scripts/check-against-compose.sh --integration-tests
+
 test-unit: test-up ## run backend unit tests (auto-brings-up test stack)
 	set -a; [ -f backend/.env ] && . backend/.env; set +a; \
 	cd backend && TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TEST_REDIS_URL='$(TEST_REDIS_URL)' \
@@ -54,6 +60,10 @@ test-frontend: ## run frontend unit tests
 
 test-e2e: ## run e2e tests (requires running frontend + backend)
 	cd backend && python -m pytest tests/e2e/ -v
+
+.PHONY: test-e2e-keycloak
+test-e2e-keycloak: ## run the Keycloak e2e suite (requires keycloak-test, the backend and the Keycloak-built SPA on localhost:3000; see docs/keycloak.md)
+	cd backend && python -m pytest tests/e2e_keycloak/ -v
 
 test-all: lint test-unit test-frontend test-integration ## run all checks
 
