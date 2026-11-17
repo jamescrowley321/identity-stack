@@ -8,6 +8,7 @@ from __future__ import annotations
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 from expression import Result
 
@@ -35,6 +36,13 @@ class IdentityProviderAdapter(ABC):
 
     Implementations push canonical state changes to external IdPs (e.g. Descope).
     """
+
+    # True for an adapter that keeps a tenant membership beside the role
+    # assignments (Keycloak organizations) and ends it on ``delete_role_assignment``
+    # with ``LAST_ROLE_IN_TENANT``. ``RoleService.delete_role`` then tells it which
+    # users the deleted role was the last role of; other adapters get the role
+    # delete alone.
+    ends_memberships: ClassVar[bool] = False
 
     @abstractmethod
     async def sync_user(self, *, user_id: uuid.UUID, data: dict) -> Result[None, SyncError]: ...

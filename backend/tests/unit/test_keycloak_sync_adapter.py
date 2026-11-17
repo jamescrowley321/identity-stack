@@ -437,6 +437,22 @@ class TestMembers:
 
         assert (error.message, api.script) == (USER_NOT_IN_KEYCLOAK, [])
 
+    @pytest.mark.parametrize("status", ["active", "provisioned", "inactive"])
+    async def test_a_status_change_does_not_create_a_user_keycloak_lacks_and_says_so(self, status):
+        """A deactivation must not leave a disabled shadow account beside the user's real one
+        (login-page sign-up, JIT-linked) and report success: nothing changed, so it is an error."""
+        api = RecordedAdminApi(["token", "user_find_none"])
+
+        error = refused(
+            await adapter(api).sync_user(
+                user_id=USER, data={"email": RECORDED_EMAIL, "status": status, STATUS_CHANGED: True}
+            ),
+            "sync_user",
+            None,
+        )
+
+        assert (error.message, api.script) == (USER_NOT_IN_KEYCLOAK, [])
+
     async def test_a_realm_wide_404_on_leaving_is_an_error(self):
         api = RecordedAdminApi(["token", "user_find", "organization_find", organizations_disabled()])
 

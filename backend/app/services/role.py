@@ -373,6 +373,12 @@ class RoleService:
                 return Error(identity_error(decision.error))
             deleted = decision.ok
 
+            # The delete cascades to the role's assignments: who held it is read first.
+            holders: list[tuple[uuid.UUID, uuid.UUID]] = []
+            if self._adapter.ends_memberships is True:
+                assignments = await self._assignment_repository.list_by_role(role_id)
+                holders = sorted({(row.user_id, row.tenant_id) for row in assignments})
+
             if not await self._repository.delete(role_id):
                 return Error(identity_error(access.RoleNotFound(role_id=role_id)))
 
@@ -385,6 +391,22 @@ class RoleService:
                 role_id,
                 "delete_role",
             )
+
+            # A holder with no role left in the tenant no longer belongs to it, as
+            # after unassigning their last role. Counted after the commit, as there.
+            for user_id, tenant_id in holders:
+                if await self._assignment_repository.list_by_user_tenant(user_id, tenant_id):
+                    continue
+                self._log_sync_failure(
+                    await self._adapter.delete_role_assignment(
+                        user_id=user_id,
+                        tenant_id=tenant_id,
+                        role_id=role_id,
+                        data={"role_name": deleted.name, LAST_ROLE_IN_TENANT: True},
+                    ),
+                    role_id,
+                    "delete_role",
+                )
 
             return Ok({"status": "deleted", "name": deleted.name})
 

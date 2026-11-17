@@ -9,6 +9,7 @@ fresh id, and removed afterwards whatever the outcome.
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -18,6 +19,13 @@ from fastapi import FastAPI
 
 from app import main
 from app.dependencies import identity
+from app.models.identity.assignment import UserTenantRole
+from app.models.identity.role import Role
+from app.models.identity.tenant import Tenant
+from app.models.identity.user import User
+from app.repositories.assignment import UserTenantRoleRepository
+from app.repositories.permission import PermissionRepository
+from app.repositories.role import RoleRepository
 from app.services.adapters.base import LAST_ROLE_IN_TENANT, STATUS_CHANGED
 from app.services.adapters.keycloak import USER_NOT_IN_KEYCLOAK, KeycloakSyncAdapter
 from app.services.keycloak_admin import (
@@ -30,6 +38,7 @@ from app.services.keycloak_admin import (
     KeycloakAdminRolesMissing,
     connect_keycloak_admin,
 )
+from app.services.role import RoleService
 from tests.helpers.keycloak import KeycloakTokenSource
 from tests.helpers.keycloak_model import (
     ADMIN_CLIENT_ID,
@@ -77,6 +86,15 @@ def user_id(realm: httpx.Client) -> Iterator[uuid.UUID]:
     user_id = uuid.uuid4()
     yield user_id
     user = find_user(realm, user_id)
+    if user is not None:
+        realm.delete(f"/users/{user['id']}").raise_for_status()
+
+
+@pytest.fixture
+def other_user_id(realm: httpx.Client) -> Iterator[uuid.UUID]:
+    other_user_id = uuid.uuid4()
+    yield other_user_id
+    user = find_user(realm, other_user_id)
     if user is not None:
         realm.delete(f"/users/{user['id']}").raise_for_status()
 
@@ -206,6 +224,16 @@ class TestUsers:
         assert find_user(realm, user_id) is None
         assert await sync.delete_user(user_id=user_id) == Ok(None)
 
+    async def test_a_status_change_for_a_user_keycloak_lacks_is_an_error_and_creates_no_user(
+        self, sync, realm, user_id
+    ):
+        deactivated = {"email": email_of(user_id), "status": "inactive", STATUS_CHANGED: True}
+
+        result = await sync.sync_user(user_id=user_id, data=deactivated)
+
+        assert (result.error.operation, result.error.message) == ("sync_user", USER_NOT_IN_KEYCLOAK)
+        assert find_user(realm, user_id) is None
+
     async def test_a_profile_update_keeps_a_realm_disabled_account_disabled(self, sync, realm, user_id):
         await sync.sync_user(user_id=user_id, data={"email": email_of(user_id), "status": "active"})
         realm.put(f"/users/{find_user(realm, user_id)['id']}", json={"enabled": False}).raise_for_status()
@@ -331,6 +359,45 @@ class TestMembers:
 
         assert result.is_error()
         assert result.error.operation == "sync_role_assignment"
+
+
+class TestDeletingARole:
+    """RoleService over Postgres and the compose Keycloak: a role delete ends the memberships it held alone."""
+
+    async def test_deleting_a_users_only_role_ends_the_membership_and_another_role_keeps_one(
+        self, db_session, sync, realm, tenant_id, user_id, other_user_id
+    ):
+        db_session.add(Tenant(id=tenant_id, name=f"Sync {tenant_id}"))
+        db_session.add_all([User(id=uid, email=email_of(uid), user_name=str(uid)) for uid in (user_id, other_user_id)])
+        await db_session.flush()
+        deleted, kept = Role(name=f"deleted-{tenant_id.hex}"), Role(name=f"kept-{tenant_id.hex}")
+        db_session.add_all([deleted, kept])
+        await db_session.flush()
+        db_session.add_all(
+            [
+                UserTenantRole(user_id=user_id, tenant_id=tenant_id, role_id=deleted.id),
+                UserTenantRole(user_id=other_user_id, tenant_id=tenant_id, role_id=deleted.id),
+                UserTenantRole(user_id=other_user_id, tenant_id=tenant_id, role_id=kept.id),
+            ]
+        )
+        await db_session.flush()
+        await sync.sync_tenant(tenant_id=tenant_id, data={"name": f"Sync {tenant_id}"})
+        for uid in (user_id, other_user_id):
+            await sync.sync_user(user_id=uid, data={"email": email_of(uid), "status": "active"})
+            await sync.sync_role_assignment(user_id=uid, tenant_id=tenant_id, role_id=deleted.id)
+        organization = find_organization(realm, tenant_id)
+        service = RoleService(
+            repository=RoleRepository(db_session),
+            permission_repository=PermissionRepository(db_session),
+            assignment_repository=UserTenantRoleRepository(db_session),
+            adapter=sync,
+            publisher=AsyncMock(),
+        )
+
+        result = await service.delete_role(role_id=deleted.id)
+
+        assert result == Ok({"status": "deleted", "name": deleted.name})
+        assert members(realm, organization) == [str(other_user_id)]
 
 
 class TestCredential:
