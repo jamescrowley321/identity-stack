@@ -152,7 +152,10 @@ and the rows the request loaded stay loaded), so a request never waits for a sec
 connection. A push waits for the lock at most `KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS` (default
 20, shorter than the pool's 30 s checkout timeout; it does not bound how long a holder keeps the lock,
 so a push queued behind a holder slower than the limit gives up): requests queued behind a slow holder each hold their connection while they wait, and the limit
-lets them go before they stall other routes waiting for the pool. A push that gives up is a failed
+lets them go before they stall other routes waiting for the pool. It does so only while the
+requests holding or waiting for one organization's lock are no more than the pool's connections: a
+route queued behind more of them waits through two rounds of waiters (2 x 20 s) and its 30 s checkout
+times out. A push that gives up is a failed
 push, logged and told as below (a membership ending is an `IdP revocation failed`); making it again
 ends the membership. A realm admin's edit in Keycloak takes no
 such lock: one made between the adapter's read and its write is overwritten. A later membership therefore starts with no grant a realm admin gave the earlier one. Markers
