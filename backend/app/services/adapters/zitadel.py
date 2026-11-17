@@ -8,21 +8,29 @@ Outbound only, with a machine user's token (``ZitadelAdminApi``):
   ``zitadel`` provider row). The link is written last: an organization that failed part
   way is named by no tenant, and a first login into it provisions nobody.
 - ``sync_user`` creates a human user in the tenant's organization when the user was just
-  created there (``CREATED_IN_TENANT``), with the canonical user's id as its Zitadel id,
-  and records it as the user's ``zitadel`` IdP link, so that user's first login finds
-  them. For a linked user it brings the Zitadel user's state in line with the canonical
-  status: deactivated when inactive, reactivated when active or provisioned.
+  created there (``CREATED_IN_TENANT``) and has no link yet, with the canonical user's id
+  as its Zitadel id, and records it as the user's ``zitadel`` IdP link, so that user's
+  first login finds them; the new user is brought to the canonical status. Otherwise it
+  pushes only a status change (``STATUS_CHANGED``, from activate and deactivate):
+  deactivated when inactive, reactivated when active or provisioned. A profile update or
+  a tenant left sends no status change and reaches nothing, so it does not undo an enable
+  or disable made in Zitadel, and memberships stay canonical.
 - ``delete_user`` removes the linked Zitadel user.
 - Roles, permissions and role assignments stay canonical: those methods, and
   ``delete_tenant``, return ``Ok`` and call nothing, as in ``OrySyncAdapter``.
 
 Every method returns ``Error(SyncError)`` for any failure, Zitadel unreachable included,
-and raises nothing. A user that was never in Zitadel through this adapter or a first
-login has no link, so a status change or delete for it is an error, not a silent pass.
+and raises nothing; ``context[UNANSWERED]`` is set when Zitadel gave no readable answer
+(no response, a timeout, a body that is not JSON). A user that was never in Zitadel
+through this adapter or a first login has no link, so a status change or delete for it
+is an error, not a silent pass. The adapter keeps no membership beside the canonical role
+assignments (``ends_memberships`` is false): a user stays in the organization it was
+created in, and the canonical model decides what it is granted.
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
@@ -32,8 +40,14 @@ from expression import Error, Ok, Result
 from opentelemetry import trace
 
 from app.logbook import logbook
-from app.outbound import UpstreamStatusError
-from app.services.adapters.base import CREATED_IN_TENANT, IdentityProviderAdapter, SyncError
+from app.outbound import UpstreamStatusError, UpstreamTransportError
+from app.services.adapters.base import (
+    CREATED_IN_TENANT,
+    STATUS_CHANGED,
+    UNANSWERED,
+    IdentityProviderAdapter,
+    SyncError,
+)
 from app.services.adapters.zitadel_api import ZitadelAdminApi, login_policy_without_registration
 
 logger = logbook(__name__)
@@ -88,6 +102,9 @@ def _sync_error(operation: str, exc: Exception, context: dict) -> SyncError:
             operation=operation,
             context=context | {"status": status},
         )
+    if isinstance(exc, (UpstreamTransportError, json.JSONDecodeError)):
+        # No response, a timeout, or a body that is not JSON: Zitadel gave no readable answer.
+        context = context | {UNANSWERED: True}
     return SyncError(message=f"Zitadel {operation} failed: {type(exc).__name__}", operation=operation, context=context)
 
 
@@ -131,27 +148,34 @@ class ZitadelSyncAdapter(IdentityProviderAdapter):
                 return Error(_sync_error("sync_tenant", exc, context))
 
     async def sync_user(self, *, user_id: uuid.UUID, data: dict) -> Result[None, SyncError]:
-        """Create the user in its tenant's organization when just created, then match the canonical status.
+        """Create the user in its tenant's organization when just created; push a status change.
 
         Expected data keys: email, status; on creation also ``CREATED_IN_TENANT``,
-        user_name, given_name and family_name. An empty given or family name is
-        sent as the user name: Zitadel refuses an empty one.
+        user_name, given_name and family_name; ``STATUS_CHANGED: True`` on activate and
+        deactivate. An empty given or family name is sent as the user name: Zitadel
+        refuses an empty one. Any other change reaches nothing.
         """
         with tracer.start_as_current_span("zitadel.sync_user") as span:
             span.set_attribute("user.id", str(user_id))
             context: dict = {"user_id": str(user_id)}
             try:
+                status_changed = data.get(STATUS_CHANGED) is True
+                created_in = data.get(CREATED_IN_TENANT)
+                if not status_changed and created_in is None:
+                    return Ok(None)
                 wanted = _STATE_OF_STATUS.get(data.get("status") or "")
                 if wanted is None:
                     raise _Refused(f"Unknown status: expected one of {sorted(_STATE_OF_STATUS)}", {})
                 provider_id = await self._provider_id()
                 sub = await self._links.subject_of(user_id, provider_id)
-                created_in = data.get(CREATED_IN_TENANT)
                 new_user: dict | None = None
                 if sub is None:
                     if created_in is None:
                         raise _Refused("No Zitadel user is linked to this user", {})
                     new_user = await self._new_user(user_id, provider_id, uuid.UUID(str(created_in)), data)
+                elif not status_changed:
+                    # Already in Zitadel (linked before this call): nothing was created, no status changed.
+                    return Ok(None)
                 async with self._open_api() as api:
                     if new_user is not None:
                         await api.add_human_user(**new_user)
