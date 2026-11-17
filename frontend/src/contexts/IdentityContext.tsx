@@ -11,6 +11,7 @@ import type { ReactNode } from "react";
 import { useAuth } from "react-oidc-context";
 import { useApiClient } from "../hooks/useApiClient";
 import { tenantScope } from "../config/oidc";
+import { TenantSelectorContext } from "./TenantSelector";
 
 /**
  * Shape of the canonical `GET /api/identity` payload (provider-neutral).
@@ -351,7 +352,13 @@ export function IdentityProvider({
     ],
   );
 
-  return <IdentityContext.Provider value={value}>{children}</IdentityContext.Provider>;
+  // Every API call below names the active tenant; the identity fetch above,
+  // outside this provider, names none.
+  return (
+    <IdentityContext.Provider value={value}>
+      <TenantSelectorContext.Provider value={currentTenantId}>{children}</TenantSelectorContext.Provider>
+    </IdentityContext.Provider>
+  );
 }
 
 /**
