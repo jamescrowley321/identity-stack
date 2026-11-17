@@ -21,23 +21,38 @@ interface Member {
 
 export default function MemberManagement() {
   const { apiFetch } = useApiClient();
-  const [members, setMembers] = useState<Member[]>([]);
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState("member");
 
-  // The list reloads when the tenant changes (apiFetch does). Only the latest
-  // load fills it, so an earlier tenant's answer arriving late is dropped, and a
-  // failed load empties it rather than leaving the previous tenant's rows.
+  // The page is mounted afresh for each tenant, so once it has gone, a call it
+  // started finishes in a tenant the user has left: nothing more is loaded there.
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  // The list reloads when apiFetch changes. Only the latest load fills it, so
+  // an earlier answer arriving late is dropped. Rows are kept only for the
+  // apiFetch that loaded them; a failed load keeps them and says so.
+  const [loaded, setLoaded] = useState<{ by: typeof apiFetch | null; members: Member[] }>({ by: null, members: [] });
+  const members = loaded.by === apiFetch ? loaded.members : [];
   const latestLoad = useRef(0);
   const loadMembers = useCallback(() => {
+    if (!mounted.current) return;
     const load = ++latestLoad.current;
-    const show = (rows: Member[]) => {
-      if (load === latestLoad.current) setMembers(rows);
-    };
+    const isLatest = () => mounted.current && load === latestLoad.current;
     apiFetch("/api/members")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => show(Array.isArray(data?.members) ? data.members : []))
-      .catch(() => show([]));
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`members load failed: ${res.status}`);
+        const data = await res.json();
+        if (isLatest()) setLoaded({ by: apiFetch, members: Array.isArray(data?.members) ? data.members : [] });
+      })
+      .catch(() => {
+        if (isLatest()) toast.error("Failed to load members");
+      });
   }, [apiFetch]);
 
   useEffect(() => {

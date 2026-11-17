@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
+import { fireEvent } from "@testing-library/react";
+import { toast } from "sonner";
 import type { ComponentType } from "react";
 import MemberManagement from "../MemberManagement";
 import AccessKeys from "../AccessKeys";
@@ -97,5 +99,48 @@ describe.each(pages)("$name after a tenant switch", ({ Page, path, body }) => {
     switchTo(vi.fn((p: string) => Promise.resolve(p === path ? json(403, { detail: "Forbidden" }) : json(200, {}))));
 
     await waitFor(() => expect(screen.queryByText("acme-row")).not.toBeInTheDocument());
+  });
+});
+
+interface ReloadPage {
+  name: string;
+  Page: ComponentType;
+  path: string;
+  rowAction: string;
+  loadError: string;
+  body: (row: string) => unknown;
+}
+
+const reloadPages: ReloadPage[] = [
+  { ...pages.find((p) => p.name === "MemberManagement")!, rowAction: "Remove", loadError: "Failed to load members" },
+  { ...pages.find((p) => p.name === "AccessKeys")!, rowAction: "Delete", loadError: "Failed to load access keys" },
+];
+
+describe.each(reloadPages)("$name when a reload fails", ({ Page, path, rowAction, loadError, body }) => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it.each([
+    ["is answered with an error", () => Promise.resolve(json(500, { detail: "Internal Server Error" }))],
+    ["does not reach the API", () => Promise.reject(new TypeError("Failed to fetch"))],
+  ])("keeps the rows and says so when the reload %s", async (_how, failedLoad) => {
+    let loads = 0;
+    currentFetch = vi.fn((p: string, init?: RequestInit) => {
+      if (p === path && (init?.method ?? "GET") === "GET") {
+        loads += 1;
+        return loads === 1 ? Promise.resolve(json(200, body("acme-row"))) : failedLoad();
+      }
+      return Promise.resolve(json(200, {}));
+    });
+    renderIn(Page);
+    expect(await screen.findByText("acme-row")).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: rowAction }));
+    });
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(loadError));
+    expect(screen.getByText("acme-row")).toBeInTheDocument();
   });
 });
