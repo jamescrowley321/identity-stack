@@ -7,6 +7,7 @@ from scalar_fastapi import get_scalar_api_reference
 from slowapi.errors import RateLimitExceeded
 
 from app.dependencies import identity as identity_dependencies
+from app.dependencies.zitadel_sync import zitadel_admin_settings
 from app.errors.identity import IdentityErrorRaised
 from app.errors.problem_detail import identity_error_raised_handler
 from app.knobs import knob, required_knob
@@ -91,14 +92,17 @@ async def _start_sync_provider(app: FastAPI) -> OutboundClient | None:
 
     ``SYNC_PROVIDER=keycloak`` builds the Keycloak admin client's one HTTP client
     and checks its credential, and the roles of its service account, against the
-    realm before any request is served.
-    Returns that HTTP client for the lifespan to close, or ``None``.
+    realm before any request is served. ``SYNC_PROVIDER=zitadel`` reads the Zitadel
+    adapter's settings (``app.state.zitadel_admin``); an incomplete configuration
+    raises ``ZitadelSyncNotConfigured``. That adapter opens a client per operation.
+    Returns the Keycloak HTTP client for the lifespan to close, or ``None``.
     """
     provider = identity_dependencies.SYNC_PROVIDER
     known = sorted(identity_dependencies.SYNC_ADAPTERS)
     if provider not in known:
         raise RuntimeError(f"SYNC_PROVIDER {provider!r} is not one of {known}")
     app.state.keycloak_admin = None
+    app.state.zitadel_admin = zitadel_admin_settings() if provider == "zitadel" else None
     if provider != "keycloak":
         return None
     http = outbound_client(timeout=KEYCLOAK_ADMIN_TIMEOUT_SECONDS)

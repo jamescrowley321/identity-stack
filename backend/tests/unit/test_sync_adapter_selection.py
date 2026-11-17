@@ -40,6 +40,7 @@ from app.services.adapters.descope import DescopeSyncAdapter
 from app.services.adapters.keycloak import KeycloakSyncAdapter
 from app.services.adapters.noop import NoOpSyncAdapter
 from app.services.adapters.ory import OrySyncAdapter
+from app.services.adapters.zitadel import ZitadelSyncAdapter
 from app.services.keycloak_admin import ADMIN_CLIENT_ID_VARIABLE, ADMIN_CREDENTIAL_VARIABLE, KeycloakAdminApi
 from app.services.reconciliation import ReconciliationService
 from app.services.role import NOT_A_MEMBER_OF_THE_TENANT, RoleService
@@ -68,7 +69,7 @@ def mock_request(**state) -> AsyncMock:
 
 class TestSelection:
     def test_the_shipped_providers(self):
-        assert sorted(SYNC_ADAPTERS) == ["descope", "keycloak"]
+        assert sorted(SYNC_ADAPTERS) == ["descope", "keycloak", "zitadel"]
 
     def test_descope_is_the_default(self):
         assert identity.SYNC_PROVIDER == "descope"
@@ -169,7 +170,7 @@ class TestStartup:
         with pytest.raises(RuntimeError) as refused:
             await main._start_sync_provider(FakeApp())
 
-        assert str(refused.value) == "SYNC_PROVIDER 'zitadel-typo' is not one of ['descope', 'keycloak']"
+        assert str(refused.value) == "SYNC_PROVIDER 'zitadel-typo' is not one of ['descope', 'keycloak', 'zitadel']"
 
     async def test_keycloak_checks_the_credential_and_keeps_the_client(self, monkeypatch):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
@@ -831,7 +832,14 @@ class TestDeletingARole:
         adapter.delete_role_assignment.assert_not_awaited()
 
     def test_only_the_keycloak_adapter_keeps_memberships(self):
-        adapters = [IdentityProviderAdapter, DescopeSyncAdapter, OrySyncAdapter, NoOpSyncAdapter, KeycloakSyncAdapter]
+        adapters = [
+            IdentityProviderAdapter,
+            DescopeSyncAdapter,
+            OrySyncAdapter,
+            NoOpSyncAdapter,
+            KeycloakSyncAdapter,
+            ZitadelSyncAdapter,
+        ]
 
         assert {adapter.__name__: adapter.ends_memberships for adapter in adapters} == {
             "IdentityProviderAdapter": False,
@@ -839,6 +847,7 @@ class TestDeletingARole:
             "OrySyncAdapter": False,
             "NoOpSyncAdapter": False,
             "KeycloakSyncAdapter": True,
+            "ZitadelSyncAdapter": False,
         }
 
 

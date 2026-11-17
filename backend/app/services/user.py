@@ -19,6 +19,7 @@ from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.base import RepositoryConflictError
 from app.repositories.user import UserRepository
 from app.services.adapters.base import (
+    CREATED_IN_TENANT,
     PROVIDER_SYNC,
     PROVIDER_SYNC_FAILED,
     STATUS_CHANGED,
@@ -84,7 +85,14 @@ class UserService:
                 return Error(Conflict(message=f"User with email '{email}' already exists"))
 
             result_dict = user.model_dump()
-            sync_data = {"email": user.email, "status": user.status.value}
+            sync_data = {
+                "email": user.email,
+                "status": user.status.value,
+                "user_name": user.user_name,
+                "given_name": user.given_name,
+                "family_name": user.family_name,
+                CREATED_IN_TENANT: str(tenant_id),
+            }
             user_id = user.id
             try:
                 await self._repository.commit()
