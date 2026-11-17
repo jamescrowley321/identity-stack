@@ -16,7 +16,8 @@ exists that differs from the one it writes or is inactive, when ``acme`` or
 ``globex`` is already linked to another organization or another tenant holds
 its organization (``external_org_id`` is shared with the other providers), or
 when a user with the test user's email exists without a link to its Zitadel
-user. An ``acme`` or ``globex`` tenant with no organization is linked. After
+user, or when ``acme`` or ``globex`` is suspended or the linked user is not
+active. An active ``acme`` or ``globex`` tenant with no organization is linked. After
 ``make zitadel-reset`` and a new ``terraform apply`` the ids are new, so the
 seed needs a database it has not seeded. The ``globex`` test user is left for
 first login to provision, and the third organization gets no tenant.
@@ -176,6 +177,9 @@ async def _ensure_tenants(session: AsyncSession, seed: SeedInput, changes: list[
             raise SeedConflictError(
                 f"tenant {name!r} is already linked to organization {tenant.external_org_id}, not {org_id}"
             )
+        if tenant.status != TenantStatus.active:
+            # A suspended tenant, like an inactive provider, is someone else's decision.
+            raise SeedConflictError(f"tenant {name!r} is {tenant.status.value}, not {TenantStatus.active.value}")
         tenants[name] = tenant
     await session.flush()
     return tenants
@@ -200,7 +204,11 @@ async def _ensure_user(session: AsyncSession, seed: SeedInput, provider: Provide
     link_query = select(IdPLink).where(IdPLink.provider_id == provider.id, IdPLink.external_sub == wanted.external_sub)
     link = (await session.execute(link_query)).scalars().first()
     if link is not None:
-        return (await session.execute(select(User).where(User.id == link.user_id))).scalars().one()
+        user = (await session.execute(select(User).where(User.id == link.user_id))).scalars().one()
+        if user.status != UserStatus.active:
+            # The seed neither reactivates the user nor grants roles to one it cannot log in as.
+            raise SeedConflictError(f"user {wanted.email!r} is {user.status.value}, not {UserStatus.active.value}")
+        return user
 
     # An email match proves nothing about who holds the row: linking it would hand
     # its account, and the grants below, to the Zitadel user.
