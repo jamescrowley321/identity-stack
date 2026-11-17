@@ -63,11 +63,12 @@ locals {
 
   case_users = { for name, roles in local.case_client_roles : local.fixture.cases[name] => roles }
 
-  # The organization-bound type client a canonical role makes its holder hold
-  # in an organization. A role not listed here (a portable type's) needs no
-  # record in the organization.
+  # Each organization-bound type client, to the canonical roles that make
+  # their holder hold it in an organization: every role whose client roles
+  # (local.role_client_roles) include that type's. A role not listed here (a
+  # portable type's) needs no record in the organization.
   organization_bound_roles = {
-    admin = "tenant-admin"
+    "tenant-admin" = ["owner", "admin"]
   }
 
   # Fixture users. Keycloak picks their ids: the provider cannot set one, so
@@ -93,9 +94,11 @@ locals {
       domain  = tenant.domain
       members = sort([for username, user in local.fixture.users : username if contains(keys(user.roles), alias)])
       type_holders = {
-        for role, type_client in local.organization_bound_roles : type_client => sort([
-          for username, user in local.fixture.users : username if lookup(user.roles, alias, null) == role
-        ])
+        for type_client, roles in local.organization_bound_roles : type_client => sort(flatten([
+          for role in roles : [
+            for username, user in local.fixture.users : username if lookup(user.roles, alias, null) == role
+          ]
+        ]))
       }
     }
   }

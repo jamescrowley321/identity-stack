@@ -2,8 +2,9 @@
 
 The provider Terraform roots build their tenants, users and memberships from the
 fixture. The Keycloak realm import is a file of its own, so this pins it to the
-fixture: the same users, organizations and members, and the admin record
-(``type:tenant-admin``) on exactly the fixture's admins.
+fixture: the same users, organizations and members, and the record of each
+organization-bound type (``type:tenant-admin``) on exactly the fixture users
+whose role there binds them to it (owners and admins).
 """
 
 import copy
@@ -21,8 +22,9 @@ from tests.helpers.keycloak_target import REALM_IMPORT_PATH, import_users
 
 RAW = json.loads(FIXTURE_PATH.read_text())
 REALM = json.loads(REALM_IMPORT_PATH.read_text())
-# The organization-bound type the Keycloak realm records an admin under (infra/keycloak main.tf).
-ADMIN_TYPE_ATTRIBUTE = "type:tenant-admin"
+# Each organization-bound type's attribute, to the canonical roles the Keycloak realm records
+# under it (infra/keycloak main.tf local.organization_bound_roles).
+ORGANIZATION_BOUND_ROLES = {"type:tenant-admin": frozenset({"owner", "admin"})}
 
 
 def _members(tenant: str) -> set[str]:
@@ -109,15 +111,23 @@ def test_the_realm_import_organizations_have_the_fixture_members():
     assert imported == {tenant: _members(tenant) for tenant in IDENTITIES.tenants}
 
 
-def test_the_realm_import_records_the_fixture_admins_of_each_organization():
+def test_the_realm_import_records_the_holders_of_every_organization_bound_type():
     ids = {username: user.id for username, user in import_users(REALM).items()}
     imported = {
-        organization["alias"]: set(organization.get("attributes", {}).get(ADMIN_TYPE_ATTRIBUTE, []))
+        organization["alias"]: {
+            attribute: set(holders)
+            for attribute, holders in organization.get("attributes", {}).items()
+            if attribute.startswith("type:")
+        }
         for organization in REALM["organizations"]
     }
 
     assert imported == {
-        tenant: {ids[key] for key, user in IDENTITIES.users.items() if user.roles.get(tenant) == "admin"}
+        tenant: {
+            attribute: {ids[key] for key, user in IDENTITIES.users.items() if user.roles.get(tenant) in roles}
+            for attribute, roles in ORGANIZATION_BOUND_ROLES.items()
+            if any(user.roles.get(tenant) in roles for user in IDENTITIES.users.values())
+        }
         for tenant in IDENTITIES.tenants
     }
 
@@ -137,6 +147,8 @@ def test_the_fixture_file_loads():
         (("users", "alice", "roles"), {"acme": "member", "initech": None}, "'initech', which is no fixture tenant"),
         (("users", "alice", "roles", "acme"), "superuser", "'superuser', not a canonical role"),
         (("cases", "member"), "zed", r"cases \['member'\] name no fixture user"),
+        (("cases", "member"), ["alice"], r"cases \['member'\] name no fixture user"),
+        (("tenants", "platform"), {"name": "P", "domain": "p.test", "canonical": False}, "'platform' is reserved"),
         (("tenants", "acme"), {"name": "Acme"}, "not the expected shape"),
         (("tenants", "unlinked", "canonical"), "false", "tenant unlinked's canonical is 'false', not a boolean"),
         (("tenants", "acme", "canonical"), 1, "tenant acme's canonical is 1, not a boolean"),

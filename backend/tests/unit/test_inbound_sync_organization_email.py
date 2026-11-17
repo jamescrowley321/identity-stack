@@ -18,8 +18,10 @@ from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
 from app.repositories.user import UserRepository
 from app.services.inbound_sync import InboundSyncService
+from tests.helpers.identity_fixture import IDENTITIES
 
-EMAIL = "globex-user@globex.test"
+# A user a globex organization's first login created: no fixture user.
+EMAIL = f"newcomer@{IDENTITIES.tenants['globex'].domain}"
 
 
 @pytest.mark.anyio
