@@ -125,7 +125,9 @@ It copies only the root's `.tf` files git does not ignore into its working direc
 
 It needs Docker, `terraform`, `curl`, `jq`, `flock` and the backend virtual environment
 (`cd backend && uv sync --locked --extra dev`), and checks for each before it starts anything.
-Two runs never overlap: each waits for its own lock file,
-`~/.cache/identity-stack-keycloak-terraform-check.lock`, since both would build the same realm
-in the same container. On a Docker host shared with other sessions, hold the compose lock as
-well: `flock ~/.cache/identity-stack-compose.lock make keycloak-terraform-check`.
+It holds the shared compose lock, `~/.cache/identity-stack-compose.lock`, for its whole run.
+Nothing else that takes that lock (a test run, another session, a second run of this check) can
+start or start using keycloak-test between the run deciding whether it started the container
+and the cleanup that stops it, and two runs never build the same realm at once. A caller that
+already holds the lock (`flock ~/.cache/identity-stack-compose.lock make keycloak-terraform-check`)
+does not deadlock it: the script locks the descriptor it inherits from that caller.
