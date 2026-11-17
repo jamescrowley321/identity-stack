@@ -1,16 +1,11 @@
-variable "zitadel_url" {
-  description = "Base URL of the Zitadel instance, which is also its issuer. The compose `zitadel` profile is http://zitadel.localhost:8480."
+variable "issuer_url" {
+  description = "Base URL of the Zitadel instance, which is also its issuer. The compose `zitadel` profile is http://zitadel.localhost:8480. http:// only for a loopback or *.localhost host (infra/modules/provider-urls)."
   type        = string
   default     = "http://zitadel.localhost:8480"
 
   validation {
-    condition     = can(regex("^https?://[A-Za-z0-9.-]+(:[0-9]+)?$", var.zitadel_url))
-    error_message = "zitadel_url must be a bare origin, scheme://host[:port], with no path or trailing slash: it is the issuer."
-  }
-
-  validation {
-    condition     = startswith(var.zitadel_url, "https://") || can(regex(local.loopback_url, var.zitadel_url))
-    error_message = "zitadel_url may use http:// only for a loopback or *.localhost host; any other Zitadel needs https://."
+    condition     = can(regex("^https?://[A-Za-z0-9.-]+(:[0-9]+)?$", var.issuer_url))
+    error_message = "issuer_url must be a bare origin, scheme://host[:port], with no path or trailing slash: a Zitadel instance's issuer is its base URL."
   }
 }
 
@@ -27,19 +22,9 @@ variable "zitadel_access_token" {
 }
 
 variable "frontend_url" {
-  description = "Origin of the SPA: the applications' redirect URI. The post-logout redirect is <frontend_url>/login."
+  description = "Origin of the SPA: the applications' redirect URI. The post-logout redirect is <frontend_url>/login. http:// only for a loopback or *.localhost host (infra/modules/provider-urls)."
   type        = string
   default     = "http://localhost:3000"
-
-  validation {
-    condition     = can(regex("^https?://([A-Za-z0-9.-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]+)?$", var.frontend_url))
-    error_message = "frontend_url must be a bare origin, scheme://host[:port] with no path, query or trailing slash."
-  }
-
-  validation {
-    condition     = startswith(var.frontend_url, "https://") || can(regex(local.loopback_url, var.frontend_url))
-    error_message = "frontend_url may use http:// only for a loopback or *.localhost host; any other origin needs https://."
-  }
 }
 
 variable "access_token_lifetime" {
@@ -57,13 +42,20 @@ variable "access_token_lifetime" {
   }
 }
 
-locals {
-  # An http(s) URL whose host is loopback (localhost, 127.0.0.1, [::1]) or a
-  # *.localhost name, with an optional port. The only hosts where the root
-  # accepts plain http.
-  loopback_url = "^https?://(localhost|127\\.0\\.0\\.1|\\[::1\\]|[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*\\.localhost)(:[0-9]+)?$"
+# The plain-HTTP rule shared by every local provider root. Everything below
+# reads the URLs from here.
+module "urls" {
+  source = "../modules/provider-urls"
 
-  zitadel_insecure = startswith(var.zitadel_url, "http://")
-  zitadel_host     = regex("^https?://([^:/]+)", var.zitadel_url)[0]
-  zitadel_port     = try(regex(":([0-9]+)$", var.zitadel_url)[0], local.zitadel_insecure ? "80" : "443")
+  issuer_url   = var.issuer_url
+  frontend_url = var.frontend_url
+}
+
+locals {
+  issuer_url   = module.urls.issuer_url
+  frontend_url = module.urls.frontend_url
+
+  zitadel_insecure = startswith(local.issuer_url, "http://")
+  zitadel_host     = regex("^https?://([^:/]+)", local.issuer_url)[0]
+  zitadel_port     = try(regex(":([0-9]+)$", local.issuer_url)[0], local.zitadel_insecure ? "80" : "443")
 }

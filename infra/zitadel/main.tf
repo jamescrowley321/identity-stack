@@ -76,8 +76,8 @@ locals {
     multi_factors                 = ["MULTI_FACTOR_TYPE_U2F_WITH_VERIFICATION"]
   }
 
-  redirect_uris             = [var.frontend_url]
-  post_logout_redirect_uris = ["${var.frontend_url}/login"]
+  redirect_uris             = [local.frontend_url]
+  post_logout_redirect_uris = ["${local.frontend_url}/login"]
 }
 
 # --- Instance settings --------------------------------------------------------
@@ -221,7 +221,7 @@ resource "zitadel_application_oidc" "spa" {
   redirect_uris               = local.redirect_uris
   post_logout_redirect_uris   = local.post_logout_redirect_uris
   # Plain-http redirect URIs need development mode.
-  dev_mode = startswith(var.frontend_url, "http://")
+  dev_mode = startswith(local.frontend_url, "http://")
 }
 
 # A second application in the same project, for negative tests. A human's
@@ -243,7 +243,7 @@ resource "zitadel_application_oidc" "other" {
   id_token_userinfo_assertion = false
   redirect_uris               = local.redirect_uris
   post_logout_redirect_uris   = local.post_logout_redirect_uris
-  dev_mode                    = startswith(var.frontend_url, "http://")
+  dev_mode                    = startswith(local.frontend_url, "http://")
 }
 
 # --- Users --------------------------------------------------------------------

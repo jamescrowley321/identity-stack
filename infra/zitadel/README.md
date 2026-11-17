@@ -38,9 +38,8 @@ cd infra/zitadel
 export TF_VAR_zitadel_access_token="$(make -s -C ../.. zitadel-admin-pat)"
 terraform init
 terraform apply -var-file=environments/dev.tfvars
-terraform output backend_environment
-terraform output frontend_environment
-terraform output -json test_user_passwords
+cd ../.. && make -s zitadel-env    # backend/.env and frontend/.env lines
+terraform -chdir=infra/zitadel output -json test_credentials
 ```
 
 The provider calls the instance as the bootstrap admin machine user (`terraform-admin`,
@@ -48,11 +47,12 @@ The provider calls the instance as the bootstrap admin machine user (`terraform-
 a tfvars file. It is minted per instance, so after `make zitadel-reset` export it again, delete
 `terraform.tfstate` (it describes the old instance) and apply again.
 
-Variables:
+Variables. `issuer_url` and `frontend_url` are the variables every local provider root shares
+([`../PROVIDERS.md`](../PROVIDERS.md#common-variables-and-outputs-of-the-local-provider-roots)):
 
 | Variable | Default | What |
 |---|---|---|
-| `zitadel_url` | `http://zitadel.localhost:8480` | The instance's base URL, which is its issuer. `http://` only for a loopback or `*.localhost` host (validated). |
+| `issuer_url` | `http://zitadel.localhost:8480` | The instance's base URL, which is its issuer: a bare origin. `http://` only for a loopback or `*.localhost` host (validated). |
 | `zitadel_access_token` | none, sensitive | An `IAM_OWNER` personal access token: `TF_VAR_zitadel_access_token`. |
 | `frontend_url` | `http://localhost:3000` | SPA origin: redirect URI, post-logout `<frontend_url>/login`. A bare origin; `http://` only for a loopback or `*.localhost` host (validated). |
 | `access_token_lifetime` | `15m0s` | Instance access-token lifetime, written the way Zitadel answers it (`15m0s`, `1h0m0s`), so the next plan stays empty. |
@@ -66,12 +66,10 @@ Variables:
 | `spa_client_id`, `other_client_id` | Client ids of the two applications. |
 | `organization_ids` | `platform` and each fixture tenant (`acme`, `globex`, `unlinked`). |
 | `test_user_ids`, `test_user_login_names` | Each fixture user's id (token `sub`) and login name, keyed by fixture user. |
-| `test_user_passwords` (sensitive) | Each fixture user's password, keyed by fixture user. |
-| `machine_user` | The machine user's id and client id. |
-| `machine_user_client_secret` (sensitive) | Its client secret. |
-| `sync_admin_token` (sensitive) | The sync adapter's personal access token: the backend's `ZITADEL_ADMIN_TOKEN`. |
+| `machine_user` | The test machine user's id and client id. |
+| `test_credentials` (sensitive) | `users`: each fixture user's password, keyed by fixture user. `clients`: the test machine user's client secret, keyed by its client id. |
 | `frontend_environment` | Frontend `VITE_OIDC_AUTHORITY`, `VITE_OIDC_CLIENT_ID`, `VITE_OIDC_REDIRECT_URI`, `VITE_OIDC_SCOPE`. The scope asks for `offline_access` (a refresh token) and `urn:zitadel:iam:user:resourceowner`, which puts the user's organization in the access token. |
-| `backend_environment` | Backend `ZITADEL_ISSUER_URL`, `ZITADEL_AUDIENCE` (the project id), `ZITADEL_CLIENT_ID` (the SPA) and `ZITADEL_REQUIRE_HTTPS`. |
+| `backend_environment` (sensitive) | Backend `ZITADEL_ISSUER_URL`, `ZITADEL_AUDIENCE` (the project id), `ZITADEL_CLIENT_ID` (the SPA), `ZITADEL_REQUIRE_HTTPS` and `ZITADEL_ADMIN_TOKEN` (the sync adapter's personal access token, the reason it is sensitive). |
 | `canonical_seed` | What the seed reads. |
 
 The provider marks client ids sensitive; the root outputs them as plain values, because a
@@ -127,9 +125,10 @@ container, and fails when the instance does not answer. It:
    organization's own policy; the Login V2 register page of every organization shows no form,
    only "registration is disabled" (self-service registration only: see the API note below); the project's checks, roles and grants; no user role grant
    in any organization; both applications' settings; the users' organizations, verified emails
-   and the machine user's token type; that `sync_admin_token` is `identity-stack-sync`'s and that
-   user holds the instance role `IAM_ORG_MANAGER` and no other; and that no non-sensitive output
-   contains the value of a sensitive output or the admin token.
+   and the machine user's token type; that `ZITADEL_ADMIN_TOKEN` is `identity-stack-sync`'s and that
+   user holds the instance role `IAM_ORG_MANAGER` and no other; that the sensitive outputs are
+   `backend_environment` and `test_credentials`, and that no other output contains one of their
+   secrets or the admin token.
 
 `make zitadel-terraform-integration` runs the same check with `--integration-tests`: after the
 read-back it runs the backend's live Zitadel suite

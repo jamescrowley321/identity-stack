@@ -5,8 +5,9 @@
 #
 # With --integration-tests it also runs the backend's Keycloak integration tests
 # (backend/tests/integration/test_keycloak_*.py) against the Terraform-built
-# realm before the destroy, with the generated user ids, passwords and directory
-# secret (backend/tests/helpers/keycloak_target.py). Those tests also need the
+# realm before the destroy, with the generated user ids and passwords and the
+# service accounts' secrets from the outputs test_credentials,
+# backend_environment and user_ids (backend/tests/helpers/keycloak_target.py). Those tests also need the
 # rest of the test stack (TEST_DATABASE_URL) and, for one of them, a Descope
 # client (DESCOPE_PROJECT_ID, DESCOPE_CLIENT_ID, DESCOPE_CLIENT_SECRET).
 #
@@ -50,7 +51,7 @@ terraform_realm="identity-stack-terraform"
 
 # The compose bootstrap admin (a local fixture login, see docker-compose.test.yml).
 export KEYCLOAK_USER=admin KEYCLOAK_PASSWORD=admin
-vars=(-var "keycloak_url=$base_url" -var "realm=$terraform_realm")
+vars=(-var "issuer_url=$base_url/realms/$terraform_realm")
 work=""
 applied=0
 
@@ -99,12 +100,15 @@ delete_leftover_realm() {
 # root's .tf files git does not ignore are copied, so a local override.tf or
 # *_override.tf (git-ignored) never changes what the check applies. The copy
 # keeps the repo's layout, so the root finds the shared fixture at
-# ../fixtures/test-identities.json as it does in infra/.
+# ../fixtures/test-identities.json and the shared URL module at
+# ../modules/provider-urls as it does in infra/.
 work="$(mktemp -d "$runs/run.XXXXXX")"
 tfdir="$work/keycloak"
 mkdir -p "$tfdir" "$work/fixtures"
 git -C "$repo" ls-files -z --cached --others --exclude-standard -- ':(glob)infra/keycloak/*.tf' |
   (cd "$repo" && while IFS= read -r -d '' file; do [ -e "$file" ] || continue; cp "$file" "$tfdir/"; done)
+git -C "$repo/infra" ls-files -z --cached --others --exclude-standard -- ':(glob)modules/*/*.tf' |
+  (cd "$repo/infra" && while IFS= read -r -d '' file; do [ -e "$file" ] || continue; cp --parents "$file" "$work/"; done)
 cp "$root/.terraform.lock.hcl" "$tfdir/"
 cp "$repo/infra/fixtures/test-identities.json" "$work/fixtures/"
 
@@ -141,9 +145,9 @@ if [ "$integration_tests" = 1 ]; then
     cd "$repo/backend"
     KEYCLOAK_TEST_REALM="$terraform_realm" \
       KEYCLOAK_TEST_USER_IDS="$(jq -c .user_ids.value "$work/outputs.json")" \
-      KEYCLOAK_TEST_USER_PASSWORDS="$(jq -c .user_passwords.value "$work/outputs.json")" \
-      KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET="$(jq -er .keycloak_directory_client_secret.value "$work/outputs.json")" \
-      KEYCLOAK_TEST_ADMIN_CLIENT_SECRET="$(jq -er .keycloak_admin_client_secret.value "$work/outputs.json")" \
+      KEYCLOAK_TEST_USER_PASSWORDS="$(jq -c .test_credentials.value.users "$work/outputs.json")" \
+      KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET="$(jq -er .backend_environment.value.KEYCLOAK_DIRECTORY_CLIENT_SECRET "$work/outputs.json")" \
+      KEYCLOAK_TEST_ADMIN_CLIENT_SECRET="$(jq -er .backend_environment.value.KEYCLOAK_ADMIN_CLIENT_SECRET "$work/outputs.json")" \
       "$python" -m pytest tests/integration/test_keycloak_*.py -v
   )
 fi

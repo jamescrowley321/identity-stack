@@ -13,8 +13,9 @@
 #
 # With --integration-tests it then runs the backend's live Zitadel suite
 # (backend/tests/integration_zitadel/) against the applied root, with its issuer,
-# project id, sync_admin_token, SPA client id and the test machine user's
-# client id and secret. That suite also needs the test Postgres
+# project id, sync adapter token and SPA client id (output backend_environment)
+# and the test machine user's client id and secret (machine_user,
+# test_credentials). That suite also needs the test Postgres
 # (`make test-up`, TEST_DATABASE_URL).
 set -euo pipefail
 
@@ -45,9 +46,9 @@ if [ -z "${TF_VAR_zitadel_access_token:-}" ]; then
 fi
 
 # The instance the root targets, from the one place it is set.
-issuer="$(sed -n 's/^zitadel_url *= *"\(.*\)"$/\1/p' "$root/environments/dev.tfvars")"
+issuer="$(sed -n 's/^issuer_url *= *"\(.*\)"$/\1/p' "$root/environments/dev.tfvars")"
 if [ -z "$issuer" ]; then
-  echo "environments/dev.tfvars sets no zitadel_url" >&2
+  echo "environments/dev.tfvars sets no issuer_url" >&2
   exit 1
 fi
 lifetime="$(sed -n 's/^access_token_lifetime *= *"\(.*\)"$/\1/p' "$root/environments/dev.tfvars")"
@@ -69,11 +70,14 @@ trap 'rm -rf "$work"' EXIT
 # Only the files git tracks, so an untracked or ignored override.tf or state never
 # changes what is applied. A new .tf file is applied once it is staged (`git add`).
 # The copy keeps the repo's layout, so the root finds the shared fixture at
-# ../fixtures/test-identities.json as it does in infra/.
+# ../fixtures/test-identities.json and the shared URL module at
+# ../modules/provider-urls as it does in infra/.
 tfdir="$work/zitadel"
 mkdir -p "$tfdir" "$work/fixtures"
 git -C "$root" ls-files -z --cached -- ':(glob)*.tf' .terraform.lock.hcl environments |
   (cd "$root" && while IFS= read -r -d '' file; do [ -e "$file" ] || continue; cp --parents "$file" "$tfdir/"; done)
+git -C "$repo/infra" ls-files -z --cached -- ':(glob)modules/*/*.tf' |
+  (cd "$repo/infra" && while IFS= read -r -d '' file; do [ -e "$file" ] || continue; cp --parents "$file" "$work/"; done)
 cp "$repo/infra/fixtures/test-identities.json" "$work/fixtures/"
 
 tf() { terraform -chdir="$tfdir" "$@"; }
@@ -103,15 +107,19 @@ if [ "$integration_tests" = 1 ]; then
   echo "--- the backend's live Zitadel suite against the applied root"
   (
     cd "$repo/backend"
+    # output NAME [KEY...]: the output's value, or the value under KEY in it.
     output() {
-      "$python" -c 'import json, sys; value = json.load(open(sys.argv[1]))[sys.argv[2]]["value"]; print(value[sys.argv[3]] if len(sys.argv) > 3 else value)' "$work/outputs.json" "$@"
+      "$python" -c 'import json, sys; value = json.load(open(sys.argv[1]))[sys.argv[2]]["value"]
+for key in sys.argv[3:]: value = value[key]
+print(value)' "$work/outputs.json" "$@"
     }
-    ZITADEL_TEST_ISSUER="$(output issuer_url)" \
-      ZITADEL_TEST_PROJECT_ID="$(output project_id)" \
-      ZITADEL_TEST_SYNC_TOKEN="$(output sync_admin_token)" \
-      ZITADEL_TEST_SPA_CLIENT_ID="$(output spa_client_id)" \
-      ZITADEL_TEST_MACHINE_CLIENT_ID="$(output machine_user client_id)" \
-      ZITADEL_TEST_MACHINE_CLIENT_SECRET="$(output machine_user_client_secret)" \
+    machine_client_id="$(output machine_user client_id)"
+    ZITADEL_TEST_ISSUER="$(output backend_environment ZITADEL_ISSUER_URL)" \
+      ZITADEL_TEST_PROJECT_ID="$(output backend_environment ZITADEL_AUDIENCE)" \
+      ZITADEL_TEST_SYNC_TOKEN="$(output backend_environment ZITADEL_ADMIN_TOKEN)" \
+      ZITADEL_TEST_SPA_CLIENT_ID="$(output backend_environment ZITADEL_CLIENT_ID)" \
+      ZITADEL_TEST_MACHINE_CLIENT_ID="$machine_client_id" \
+      ZITADEL_TEST_MACHINE_CLIENT_SECRET="$(output test_credentials clients "$machine_client_id")" \
       "$python" -m pytest tests/integration_zitadel/ -v
   )
 fi

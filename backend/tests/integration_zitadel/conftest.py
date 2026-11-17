@@ -5,9 +5,11 @@ It needs, all running and none of them optional:
 - the compose Zitadel (``make zitadel-up``) with ``infra/zitadel`` applied to it;
 - the test Postgres (``make test-up``, ``TEST_DATABASE_URL``);
 - the applied root's values in ``ZITADEL_TEST_ISSUER``, ``ZITADEL_TEST_PROJECT_ID`` and
-  ``ZITADEL_TEST_SYNC_TOKEN`` (the ``sync_admin_token`` output), and for the machine
-  token test ``ZITADEL_TEST_SPA_CLIENT_ID``, ``ZITADEL_TEST_MACHINE_CLIENT_ID`` and
-  ``ZITADEL_TEST_MACHINE_CLIENT_SECRET``.
+  ``ZITADEL_TEST_SYNC_TOKEN`` (``ZITADEL_ISSUER_URL``, ``ZITADEL_AUDIENCE`` and
+  ``ZITADEL_ADMIN_TOKEN`` of the ``backend_environment`` output), and for the machine
+  token test ``ZITADEL_TEST_SPA_CLIENT_ID`` (``ZITADEL_CLIENT_ID``),
+  ``ZITADEL_TEST_MACHINE_CLIENT_ID`` (output ``machine_user``) and
+  ``ZITADEL_TEST_MACHINE_CLIENT_SECRET`` (output ``test_credentials``, under ``clients``).
 
 ``infra/zitadel/scripts/check-against-compose.sh --integration-tests``
 (``make zitadel-terraform-integration``) sets them and runs this suite. A missing value
