@@ -32,7 +32,7 @@ make test-all            # lint + unit + frontend + integration
 make test-down           # tear the test stack down
 ```
 
-The test targets load `backend/.env` when it exists. `test-up`, `test-up-keycloak`, `test-down`, `test-unit` and `test-integration` hold a lock shared by every run on the machine (`~/.cache/identity-stack-compose.lock`, through `scripts/with-compose-lock.sh`, which needs `flock`), so one run cannot tear the test stack down under another; a target waits while another holds it. Deployment-mode-specific integration suites manage their own Compose lifecycle:
+The test targets load `backend/.env` when it exists. Deployment-mode-specific integration suites manage their own Compose lifecycle:
 
 ```bash
 make test-integration-standalone   # standalone profile
