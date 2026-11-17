@@ -159,6 +159,19 @@ async def _ensure_provider(session: AsyncSession, seed: SeedInput, changes: list
     return provider
 
 
+def _refuse_domains(tenant: Tenant) -> None:
+    """Refuse to link a tenant that has domains: they would admit its organization's first logins.
+
+    Domains written before the link (a Descope reconciliation run, ``POST /api/tenants``) were chosen
+    for another purpose; the seed neither adopts nor clears them.
+    """
+    if tenant.domains:
+        raise SeedConflictError(
+            f"tenant {tenant.name!r} has domains, which would admit its organization's first logins; "
+            "clear tenants.domains or seed another tenant"
+        )
+
+
 async def _ensure_tenants(
     session: AsyncSession, seed: SeedInput, provider: Provider, changes: list[str]
 ) -> dict[str, Tenant]:
@@ -177,6 +190,7 @@ async def _ensure_tenants(
             session.add(tenant)
             changes.append(f"created tenant {name!r} (organization {org_id})")
         elif tenant.external_org_id is None:
+            _refuse_domains(tenant)
             tenant.external_org_id = org_id
             tenant.external_org_provider_id = provider.id
             changes.append(f"linked tenant {name!r} to organization {org_id}")
@@ -188,6 +202,7 @@ async def _ensure_tenants(
             )
         elif tenant.external_org_provider_id is None:
             # The seed's own link from before migration 007 named no provider.
+            _refuse_domains(tenant)
             tenant.external_org_provider_id = provider.id
             changes.append(f"linked tenant {name!r} to organization {org_id} of provider {PROVIDER_NAME!r}")
         elif tenant.external_org_provider_id != provider.id:

@@ -58,10 +58,12 @@ def _normalised_domain(domain: str) -> str:
 def _domain_admitted(email: str, domains: frozenset[str]) -> bool:
     """Whether ``email`` has one ``@`` and its domain, whole and compared without case, is one of ``domains``.
 
-    The email's domain is read without a trailing ``.``; nothing else in it is changed.
+    The email's domain is read as it is: one ending in ``.`` names the same host
+    but is another email to the exact lookup by email, so it is admitted by no
+    domain. An empty domain is admitted by none either.
     """
     local, at, domain = email.partition("@")
-    return bool(local and at and "@" not in domain and domain.removesuffix(".").lower() in domains)
+    return bool(local and at and domain and "@" not in domain and domain.lower() in domains)
 
 
 class IdentityProvisioningService:
@@ -126,8 +128,10 @@ class IdentityProvisioningService:
         user with any email and mark it verified, so on this path a verified
         email is not proof the login is that user's. Such a login creates a user
         only for an email with one ``@`` whose domain is one of that tenant's
-        ``domains`` (whole, compared without case or a trailing dot, a domain
-        read without spaces or a leading ``@``; a tenant with none admits no
+        ``domains`` (whole and compared without case; an email whose domain ends
+        in ``.`` is refused; a tenant domain is read without spaces, a leading
+        ``@`` or a trailing dot, and one that reads as empty is dropped; a
+        tenant with none, or with ``domains`` that are not a list, admits no
         first login), and is never linked to an existing canonical user by
         email.
         Either refusal is ``Forbidden`` too, the answer an unlinked organization
@@ -281,7 +285,13 @@ class IdentityProvisioningService:
         tenants = await self._tenant_repository.list_by_external_org_id(provider_id, organization_id)
         if len(tenants) != 1 or tenants[0].status != TenantStatus.active:
             return Error(Forbidden("The organization is not linked to exactly one active tenant"))
-        domains = frozenset(_normalised_domain(domain) for domain in tenants[0].domains if isinstance(domain, str))
+        written = tenants[0].domains
+        if not isinstance(written, list):
+            # A JSON null, string or object: read as no domains, not letter by letter.
+            logger.warning("tenant %s has domains that are not a list: it admits no first login", tenants[0].id)
+            written = []
+        normalised = (_normalised_domain(domain) for domain in written if isinstance(domain, str))
+        domains = frozenset(domain for domain in normalised if domain)
         return Ok(_OrganizationTenant(id=tenants[0].id, domains=domains))
 
     async def _assign_organization_member(self, user_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
