@@ -26,8 +26,9 @@ import {
  *   the current tenant is shown and no switch is offered. The UI never shows
  *   one tenant while the API acts in another.
  *
- * A tenant sign-in whose token does not name the tenant asked for is reported,
- * and the tenant asked for is not shown as current. A sign-in request that
+ * A tenant sign-in whose token does not name the tenant asked for is reported
+ * beside the current tenant and the switch (alone when there is no current
+ * tenant), and the tenant asked for is not shown as current. A sign-in request that
  * fails before leaving the page is reported beside the switch, which keeps
  * showing the current tenant and can be used again.
  */
@@ -48,21 +49,6 @@ export default function TenantSwitcher() {
     signInAgain().catch((error: unknown) => console.error("Sign-in request failed", error))
   }
 
-  if (tenantSwitchFailure) {
-    return (
-      <div role="alert" className="flex items-center gap-2 text-sm text-destructive">
-        <span>Could not switch to {tenantSwitchFailure.requestedTenantId}</span>
-        <Button variant="outline" size="sm" className="h-7" onClick={requestSignInAgain}>
-          Sign in again
-        </Button>
-      </div>
-    )
-  }
-
-  if (tenants.length === 0) {
-    return <span className="text-sm text-muted-foreground">No tenants</span>
-  }
-
   const handleSwitch = (tenantId: string) => {
     if (tenantId === currentTenantId) return
     if (tenantSwitch === "sign-in") {
@@ -78,38 +64,60 @@ export default function TenantSwitcher() {
     setCurrentTenantId(tenantId)
   }
 
-  if (tenantSwitch === "none") {
-    const current = tenants.find((t) => t.id === currentTenantId)
-    return <Badge variant="secondary">{current ? displayName(current) : currentTenantId}</Badge>
+  const renderCurrent = () => {
+    if (tenants.length === 0) {
+      return <span className="text-sm text-muted-foreground">No tenants</span>
+    }
+
+    if (tenantSwitch === "none") {
+      const shown = tenants.find((t) => t.id === currentTenantId)
+      return <Badge variant="secondary">{shown ? displayName(shown) : currentTenantId}</Badge>
+    }
+
+    if (tenants.length === 1) {
+      return <Badge variant="secondary">{displayName(tenants[0])}</Badge>
+    }
+
+    return (
+      <Select value={currentTenantId ?? ""} onValueChange={handleSwitch}>
+        <SelectTrigger className="h-7 w-auto gap-1 text-xs">
+          <SelectValue placeholder="Select tenant..." />
+        </SelectTrigger>
+        <SelectContent>
+          {tenants.map((t: TenantInfo) => (
+            <SelectItem key={t.id} value={t.id}>
+              {displayName(t)}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    )
   }
 
-  if (tenants.length === 1) {
-    return <Badge variant="secondary">{displayName(tenants[0])}</Badge>
-  }
-
-  const switcher = (
-    <Select value={currentTenantId ?? ""} onValueChange={handleSwitch}>
-      <SelectTrigger className="h-7 w-auto gap-1 text-xs">
-        <SelectValue placeholder="Select tenant..." />
-      </SelectTrigger>
-      <SelectContent>
-        {tenants.map((t: TenantInfo) => (
-          <SelectItem key={t.id} value={t.id}>
-            {displayName(t)}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+  const switchFailureAlert = tenantSwitchFailure && (
+    <div role="alert" className="flex items-center gap-2 text-sm text-destructive">
+      <span>Could not switch to {tenantSwitchFailure.requestedTenantId}</span>
+      <Button variant="outline" size="sm" className="h-7" onClick={requestSignInAgain}>
+        Sign in again
+      </Button>
+    </div>
   )
 
-  if (requestFailedFor === null) return switcher
+  // With no current tenant there is nothing to show beside the report.
+  if (switchFailureAlert && currentTenantId === null) return switchFailureAlert
+
+  const current = renderCurrent()
+  if (!switchFailureAlert && requestFailedFor === null) return current
 
   return (
     <div className="flex items-center gap-2">
-      {switcher}
-      <span role="alert" className="text-sm text-destructive">
-        Could not switch to {requestFailedFor}
-      </span>
+      {current}
+      {switchFailureAlert}
+      {requestFailedFor !== null && (
+        <span role="alert" className="text-sm text-destructive">
+          Could not switch to {requestFailedFor}
+        </span>
+      )}
     </div>
   )
 }

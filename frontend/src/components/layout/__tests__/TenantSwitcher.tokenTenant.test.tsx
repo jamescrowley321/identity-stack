@@ -91,8 +91,43 @@ describe("TenantSwitcher for a tenant that comes from the token", () => {
     render(<TenantSwitcher />);
 
     expect(screen.getByRole("alert")).toHaveTextContent("Could not switch to acme");
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(screen.queryByText("No tenants")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Sign in again" }));
     expect(ctx.signInAgain).toHaveBeenCalledWith();
+  });
+
+  it("keeps the current tenant and the switch beside a failed switch report", () => {
+    const ctx = context({
+      tenantSwitch: "sign-in",
+      tenantSwitchFailure: { requestedTenantId: "acme" },
+    });
+    mockContext.mockReturnValue(ctx);
+    mockUseTenants.mockReturnValue(TWO_TENANTS);
+
+    render(<TenantSwitcher />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not switch to acme");
+    expect(screen.getByRole("combobox")).toHaveTextContent("Globex");
+    fireEvent.click(screen.getByRole("button", { name: "Sign in again" }));
+    expect(ctx.signInAgain).toHaveBeenCalledWith();
+
+    fireEvent.click(screen.getByRole("combobox"));
+    fireEvent.click(screen.getByText("Acme"));
+    expect(ctx.signInToTenant).toHaveBeenCalledWith("acme");
+  });
+
+  it("keeps the current tenant beside a failed switch report when no switch is offered", () => {
+    mockContext.mockReturnValue(
+      context({ tenantSwitch: "none", tenantSwitchFailure: { requestedTenantId: "acme" } }),
+    );
+    mockUseTenants.mockReturnValue(TWO_TENANTS);
+
+    render(<TenantSwitcher />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not switch to acme");
+    expect(screen.getByText("Globex")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
   });
 
   it("reports a failed sign-in request instead of switching", async () => {
