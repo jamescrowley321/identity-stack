@@ -107,26 +107,40 @@ def _failed(what: str, exc: BaseException) -> str:
 _ORGANIZATION_LOCK_NAMESPACE = "keycloak-organization:"
 
 
-def organization_lock_timeout() -> float:
-    """``KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS`` as seconds: how long a push waits for an organization's lock.
+# Postgres reads lock_timeout as whole milliseconds: 0 is no limit, and above
+# INT_MAX set_config refuses the value.
+_LOCK_TIMEOUT_MS_BOUNDS = (1, 2_147_483_647)
 
-    Raises ``ProviderConfigurationError`` for a value that is not a positive,
-    finite number: a limit that cannot be read is not replaced by a guess.
+
+def organization_lock_timeout() -> int:
+    """``KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS`` in whole milliseconds: a push's wait for an organization's lock.
+
+    The default, 20 s, outlasts a holder's worst case (three Keycloak admin
+    calls of at most ``keycloak_admin.ADMIN_TIMEOUT_SECONDS`` each) and ends
+    before SQLAlchemy's 30 s pool checkout timeout.
+
+    Raises ``ProviderConfigurationError`` for a value that is not a number of
+    seconds Postgres takes as a limit, 0.001 to 2147483.647 once rounded to the
+    millisecond: a limit that cannot be read is not replaced by a guess.
     """
-    raw = knob("KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS", "10")
+    raw = knob("KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS", "20")
     try:
         seconds = float(raw)
     except ValueError:
         seconds = math.nan
-    if not (math.isfinite(seconds) and seconds > 0):
+    lowest, highest = _LOCK_TIMEOUT_MS_BOUNDS
+    milliseconds = round(seconds * 1000) if math.isfinite(seconds) else None
+    if milliseconds is None or not lowest <= milliseconds <= highest:
         raise ProviderConfigurationError(
-            f"KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS must be a positive number of seconds, not {raw!r}"
+            "KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS must be a number of seconds"
+            f" from 0.001 to 2147483.647, not {raw!r}"
         )
-    return seconds
+    return milliseconds
 
 
-# Fixed when this module is imported, so a value that is no limit stops startup.
-ORGANIZATION_LOCK_TIMEOUT_SECONDS = organization_lock_timeout()
+# Fixed when this module is imported, whatever SYNC_PROVIDER is, so a value
+# that is no limit stops startup.
+ORGANIZATION_LOCK_TIMEOUT_MS = organization_lock_timeout()
 
 
 def keycloak_organization_lock(session: AsyncSession) -> OrganizationLock:
@@ -140,7 +154,7 @@ def keycloak_organization_lock(session: AsyncSession) -> OrganizationLock:
     expires no row the request loaded (the savepoint changed none). The adapter
     runs after the service committed, so the savepoint holds only the lock.
 
-    A push waits at most ``ORGANIZATION_LOCK_TIMEOUT_SECONDS`` for the lock
+    A push waits at most ``ORGANIZATION_LOCK_TIMEOUT_MS`` for the lock
     (``lock_timeout``, local to the savepoint): requests waiting behind a slow
     holder each hold their session's connection, and the limit lets them go
     before they hold the pool long enough to stall other routes. A wait that
@@ -160,7 +174,7 @@ def keycloak_organization_lock(session: AsyncSession) -> OrganizationLock:
         try:
             await session.execute(
                 text("SELECT set_config('lock_timeout', :timeout, true)"),
-                {"timeout": f"{round(ORGANIZATION_LOCK_TIMEOUT_SECONDS * 1000)}ms"},
+                {"timeout": f"{ORGANIZATION_LOCK_TIMEOUT_MS}ms"},
             )
             await session.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
