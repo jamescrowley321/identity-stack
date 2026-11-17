@@ -305,7 +305,7 @@ class UserService:
             self._log_sync_failure(
                 await self._adapter.sync_user(
                     user_id=user_id,
-                    data={"email": user.email, "status": user.status.value},
+                    data={"email": user.email, "status": user.status.value, "left_tenant_id": str(tenant_id)},
                 ),
                 user_id,
                 "remove_user_from_tenant",

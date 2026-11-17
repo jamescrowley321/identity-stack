@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from scalar_fastapi import get_scalar_api_reference
 from slowapi.errors import RateLimitExceeded
 
+from app.dependencies import identity as identity_dependencies
 from app.errors.identity import IdentityErrorRaised
 from app.errors.problem_detail import identity_error_raised_handler
 from app.knobs import knob, required_knob
@@ -14,7 +15,7 @@ from app.logging_config import setup_logging
 from app.middleware.factory import configure_middleware
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.models.database import get_engine
-from app.outbound import outbound_client
+from app.outbound import OutboundClient, outbound_client
 from app.routers import (
     access_checks,
     accesskeys,
@@ -37,6 +38,14 @@ from app.routers import (
 )
 from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.descope import DescopeManagementClient
+from app.services.keycloak_admin import (
+    ADMIN_CLIENT_ID_VARIABLE,
+    ADMIN_CREDENTIAL_VARIABLE,
+    ADMIN_TIMEOUT_SECONDS,
+    KeycloakAdminError,
+    KeycloakAdminNotConfigured,
+    connect_keycloak_admin,
+)
 from app.telemetry import init_telemetry, shutdown_telemetry
 
 logger = logbook(__name__)
@@ -50,6 +59,39 @@ def _warn_missing_secrets() -> None:
         logger.warning("DESCOPE_FLOW_SYNC_SECRET not set — flow sync endpoint will reject all requests")
     if not knob("INTERNAL_IDENTITY_KEY"):
         logger.warning("INTERNAL_IDENTITY_KEY not set — identity resolution endpoint will reject all requests")
+
+
+KEYCLOAK_ADMIN_TIMEOUT_SECONDS = ADMIN_TIMEOUT_SECONDS
+
+
+async def _start_sync_provider(app: FastAPI) -> OutboundClient | None:
+    """Open what the configured sync adapter needs, or stop startup.
+
+    ``SYNC_PROVIDER=keycloak`` builds the Keycloak admin client's one HTTP client
+    and checks its credential against the realm before any request is served.
+    Returns that HTTP client for the lifespan to close, or ``None``.
+    """
+    provider = identity_dependencies.SYNC_PROVIDER
+    known = sorted(identity_dependencies.SYNC_ADAPTERS)
+    if provider not in known:
+        raise RuntimeError(f"SYNC_PROVIDER {provider!r} is not one of {known}")
+    app.state.keycloak_admin = None
+    if provider != "keycloak":
+        return None
+    http = outbound_client(timeout=KEYCLOAK_ADMIN_TIMEOUT_SECONDS)
+    try:
+        app.state.keycloak_admin = await connect_keycloak_admin(http)
+    except KeycloakAdminNotConfigured as exc:
+        await http.aclose()
+        raise RuntimeError(f"SYNC_PROVIDER is keycloak but {exc}") from exc
+    except KeycloakAdminError as exc:
+        await http.aclose()
+        raise RuntimeError(
+            f"Keycloak refused the admin client's credential (status {exc.status}): "
+            f"check {ADMIN_CLIENT_ID_VARIABLE} and {ADMIN_CREDENTIAL_VARIABLE}"
+        ) from exc
+    logger.info("Keycloak admin client connected: canonical tenants and users sync to Keycloak")
+    return http
 
 
 @asynccontextmanager
@@ -79,6 +121,11 @@ async def lifespan(app: FastAPI):
     http_client = outbound_client(timeout=30.0)
     base_url = knob("DESCOPE_BASE_URL", "https://api.descope.com")
     app.state.descope_client = DescopeManagementClient(project_id, management_key, base_url, http_client=http_client)
+    try:
+        sync_http_client = await _start_sync_provider(app)
+    except Exception:
+        await http_client.aclose()
+        raise
 
     # Redis for cache invalidation pub/sub — optional, degrades gracefully
     redis_client = None
@@ -150,6 +197,9 @@ async def lifespan(app: FastAPI):
                 finally:
                     try:
                         await http_client.aclose()
+                        app.state.keycloak_admin = None
+                        if sync_http_client is not None:
+                            await sync_http_client.aclose()
                     except Exception:
                         logger.warning("HTTP client close failed", exc_info=True)
                     finally:
