@@ -96,6 +96,20 @@ resource "keycloak_realm" "this" {
   # verified email (docs/security.md), so the realm verifies emails.
   verify_email          = true
   organizations_enabled = true
+
+  # Brute-force detection on, with temporary lockouts (Keycloak's own numbers),
+  # as the import sets it: a guessed password locks the user out for a while.
+  security_defenses {
+    brute_force_detection {
+      permanent_lockout                = false
+      max_login_failures               = 30
+      wait_increment_seconds           = 60
+      quick_login_check_milli_seconds  = 1000
+      minimum_quick_login_wait_seconds = 60
+      max_failure_wait_seconds         = 900
+      failure_reset_time_seconds       = 43200
+    }
+  }
 }
 
 # --- Type clients and their client roles -------------------------------------

@@ -110,7 +110,11 @@ git -C "$repo" ls-files -z --cached --others --exclude-standard -- ':(glob)infra
   (cd "$repo" && while IFS= read -r -d '' file; do cp "$file" "$work/"; done)
 cp "$root/.terraform.lock.hcl" "$work/"
 
-if [ -z "$("${compose[@]}" ps --status running --quiet keycloak-test)" ]; then
+# On its own line so a failing `docker compose ps` stops the script (set -e
+# does not see a failure inside `[ -z "$(...)" ]`), instead of reading as "not
+# running" and letting cleanup take down another session's keycloak-test.
+running="$("${compose[@]}" ps --status running --quiet keycloak-test)"
+if [ -z "$running" ]; then
   started=1
 fi
 "${compose[@]}" up -d --wait keycloak-test
