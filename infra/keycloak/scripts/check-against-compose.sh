@@ -8,10 +8,10 @@
 # Run from anywhere in the repo, with Docker, terraform, curl, jq, flock and the
 # backend venv (cd backend && uv sync --locked --extra dev). The script holds
 # the shared compose lock (~/.cache/identity-stack-compose.lock) for its whole
-# run, so no other user of the lock (a test run, another session, another run of
-# this check) can start using keycloak-test between the moment this run decides
-# whether it started the container and the cleanup that stops it. Run it under
-# that lock too if you like: it reuses a lock its caller already holds.
+# run, so no other user of the lock (the Makefile test targets, another session,
+# another run of this check) can start using keycloak-test between the moment
+# this run decides whether it started the container and the cleanup that stops
+# it. It reuses a lock its caller already holds (scripts/with-compose-lock.sh).
 set -euo pipefail
 
 repo="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
@@ -40,28 +40,12 @@ touch "$compose_lock"
 # Hold the compose lock for the whole run: whether this run started
 # keycloak-test (and so may `down -v` it in cleanup) stays true only while no
 # one else can bring the container up or start using it. The lock also keeps
-# two runs of this check from building the same realm at once.
-#
-# A caller may already hold it (`flock <compose lock> make
-# keycloak-terraform-check`). flock(1) passes its open descriptor to the
-# command, and a new open of the same file would wait on that caller forever,
-# so lock the inherited descriptor instead: flock on the open file that holds
-# the lock returns at once.
-hold_compose_lock() {
-  local lock_path fd_path fd
-  lock_path="$(readlink -f "$compose_lock")"
-  for fd_path in /dev/fd/*; do
-    fd="${fd_path##*/}"
-    [ "$(readlink -f "$fd_path" 2>/dev/null)" = "$lock_path" ] || continue
-    flock "$fd"
-    echo "--- compose lock: held through descriptor $fd from the caller"
-    return 0
-  done
-  exec 9>>"$compose_lock"
-  flock 9
-  echo "--- compose lock: held"
-}
-hold_compose_lock
+# two runs of this check from building the same realm at once. The helper is
+# re-entrant: under `make keycloak-terraform-check`, or any caller that already
+# holds the lock, it runs this script at once (see scripts/with-compose-lock.sh).
+if [ "${IDENTITY_STACK_COMPOSE_LOCK:-}" != "$compose_lock" ]; then
+  exec "$repo/scripts/with-compose-lock.sh" "$0" "$@"
+fi
 base_url="http://keycloak-test.localhost:18180"
 import_realm="identity-stack"
 terraform_realm="identity-stack-terraform"

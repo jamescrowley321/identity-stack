@@ -5,6 +5,9 @@
 COMPOSE_TEST := docker compose -f docker-compose.test.yml
 TEST_DATABASE_URL := postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
 TEST_REDIS_URL := redis://localhost:16379/0
+# Runs a command holding the shared compose lock (re-entrant): every target
+# that starts, uses or stops the test stack goes through it.
+COMPOSE_LOCKED := scripts/with-compose-lock.sh
 
 # The base compose file refuses to parse without these three variables. The
 # Zitadel targets never start the services that read them, so placeholders keep
@@ -26,25 +29,35 @@ lint: ## run linters
 	cd backend && ruff check . && ruff format --check . && lint-imports
 
 test-up: ## bring up postgres+redis for tests (idempotent; leave running between test runs)
-	$(COMPOSE_TEST) up -d --wait
+	$(COMPOSE_LOCKED) $(COMPOSE_TEST) up -d --wait
 
 .PHONY: test-up-keycloak
 test-up-keycloak: ## bring up the test stack plus keycloak-test (http://keycloak-test.localhost:18180)
-	$(COMPOSE_TEST) --profile keycloak up -d --wait
+	$(COMPOSE_LOCKED) $(COMPOSE_TEST) --profile keycloak up -d --wait
 
 test-down: ## tear down the test stack, keycloak-test included
-	$(COMPOSE_TEST) --profile keycloak down -v
+	$(COMPOSE_LOCKED) $(COMPOSE_TEST) --profile keycloak down -v
 
 .PHONY: keycloak-terraform-check
 keycloak-terraform-check: ## apply infra/keycloak to a fresh realm in keycloak-test, check plan is empty and the realm matches the import
 	infra/keycloak/scripts/check-against-compose.sh
 
-test-unit: test-up ## run backend unit tests (auto-brings-up test stack)
+# The test targets hold the compose lock from bringing the stack up until the
+# last test ends: the nested make runs the stack target and the suite under one
+# lock, so no test-down or check cleanup can stop the stack in between.
+.PHONY: locked-test-unit locked-test-integration
+test-unit: ## run backend unit tests (auto-brings-up test stack)
+	$(COMPOSE_LOCKED) $(MAKE) --no-print-directory locked-test-unit
+
+locked-test-unit: test-up
 	set -a; [ -f backend/.env ] && . backend/.env; set +a; \
 	cd backend && TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TEST_REDIS_URL='$(TEST_REDIS_URL)' \
 	python -m pytest tests/unit/ -v
 
-test-integration: test-up-keycloak ## run backend integration tests (auto-brings-up test stack, with keycloak-test)
+test-integration: ## run backend integration tests (auto-brings-up test stack, with keycloak-test)
+	$(COMPOSE_LOCKED) $(MAKE) --no-print-directory locked-test-integration
+
+locked-test-integration: test-up-keycloak
 	set -a; [ -f backend/.env ] && . backend/.env; set +a; \
 	cd backend && TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TEST_REDIS_URL='$(TEST_REDIS_URL)' \
 	python -m pytest tests/integration/ -v
