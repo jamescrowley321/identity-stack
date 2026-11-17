@@ -7,14 +7,19 @@ settings that go with them, as ``keycloak_config`` arguments, as
 ``build_provider_configs`` arguments or as environment variables.
 """
 
+import os
+
+from tests.helpers.keycloak_target import keycloak_test_target
+
 MEMBER_TYPE_CLIENT = "member"
 TENANT_ADMIN_TYPE_CLIENT = "tenant-admin"
 MEMBER_APP_CLIENT = "member-app"
 TENANT_ADMIN_APP_CLIENT = "tenant-admin-app"
 DOCUMENTS_READ = "documents:read"
-# The realm's read-only organization lookup client. Local fixture values.
+# The realm's read-only organization lookup client. The secret is the import's local
+# fixture value unless the KEYCLOAK_TEST_* variables name the Terraform realm.
 DIRECTORY_CLIENT_ID = "identity-stack-directory"
-DIRECTORY_CLIENT_SECRET = "local-only-directory-client"
+DIRECTORY_CLIENT_SECRET = keycloak_test_target(os.environ).directory_client_secret
 
 _APP_CLIENTS = {MEMBER_TYPE_CLIENT: MEMBER_APP_CLIENT, TENANT_ADMIN_TYPE_CLIENT: TENANT_ADMIN_APP_CLIENT}
 _PORTABLE_PERMISSIONS = {MEMBER_TYPE_CLIENT: frozenset({DOCUMENTS_READ})}
