@@ -133,6 +133,20 @@
       "fullScopeAllowed": false,
       "defaultClientScopes": ["kc-admin-api"],
       "optionalClientScopes": []
+    },
+    {
+      "clientId": "identity-stack-admin",
+      "name": "Backend service account: pushes canonical tenants and users",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "local-only-admin-client",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": ["kc-admin-api"],
+      "optionalClientScopes": []
     }
   ],
   "clientScopeMappings": {
@@ -146,7 +160,8 @@
       }
     ],
     "realm-management": [
-      { "client": "identity-stack-directory", "roles": ["view-users", "view-organizations"] }
+      { "client": "identity-stack-directory", "roles": ["view-users", "view-organizations"] },
+      { "client": "identity-stack-admin", "roles": ["manage-users", "manage-organizations"] }
     ]
   },
   "users": [
@@ -230,6 +245,14 @@
       "serviceAccountClientId": "identity-stack-directory",
       "clientRoles": {
         "realm-management": ["view-users", "view-organizations"]
+      }
+    },
+    {
+      "username": "service-account-identity-stack-admin",
+      "enabled": true,
+      "serviceAccountClientId": "identity-stack-admin",
+      "clientRoles": {
+        "realm-management": ["manage-users", "manage-organizations"]
       }
     }
   ]

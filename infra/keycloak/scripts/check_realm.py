@@ -24,7 +24,8 @@ It checks, against the admin API and against real tokens from both realms:
    ``frontend_environment`` gives the SPA (``VITE_OIDC_SCOPE``) carries the
    user's organization;
 5. the directory client reads a user's organizations through the Admin API
-   with the secret Terraform output.
+   with the secret Terraform output, and the admin client reaches the Admin API
+   with its own.
 
 Exits non-zero with every difference listed.
 """
@@ -289,6 +290,24 @@ def directory_reads_organizations(realm: Realm, secret: str, user_id: str) -> li
     return sorted(organization["alias"] for organization in response.json())
 
 
+def admin_client_reaches_admin_api(realm: Realm, secret: str) -> int:
+    """The status of the read the backend makes at startup with the admin client's credential."""
+    response = httpx.post(
+        f"{realm.source.issuer}/protocol/openid-connect/token",
+        data={"grant_type": "client_credentials"},
+        auth=(ADMIN_CLIENT, secret),
+        timeout=20,
+    )
+    response.raise_for_status()
+    response = httpx.get(
+        f"{realm.source.base_url}/admin/realms/{realm.source.realm}/organizations",
+        params={"first": 0, "max": 1},
+        headers={"Authorization": f"Bearer {response.json()['access_token']}"},
+        timeout=20,
+    )
+    return response.status_code
+
+
 def frontend_logins(realm: Realm, frontend_environment: dict) -> list[str]:
     """Log in through each app client with the scope output ``frontend_environment`` gives the SPA.
 
@@ -329,6 +348,7 @@ BUILT_IN_CLIENTS = frozenset(
     {"account", "account-console", "admin-cli", "broker", "realm-management", "security-admin-console"}
 )
 DIRECTORY_CLIENT = "identity-stack-directory"
+ADMIN_CLIENT = "identity-stack-admin"
 
 
 def main() -> int:
@@ -378,6 +398,10 @@ def compare(imported: Realm, built: Realm, outputs: dict, failures: list[str]) -
     )
     if organizations != ["acme", "globex"]:
         failures.append(f"directory client read bob's organizations as {organizations!r}")
+
+    status = admin_client_reaches_admin_api(built, outputs["keycloak_admin_client_secret"])
+    if status != 200:
+        failures.append(f"admin client's Admin API read answered {status}")
 
 
 if __name__ == "__main__":

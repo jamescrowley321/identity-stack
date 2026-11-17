@@ -3,7 +3,7 @@ locals {
 }
 
 output "backend_environment" {
-  description = "Backend KEYCLOAK_* settings for this realm (docs/environment-variables.md), except the directory client secret: see `keycloak_directory_client_secret`."
+  description = "Backend KEYCLOAK_* settings for this realm (docs/environment-variables.md), except the client secrets: see `keycloak_directory_client_secret` and `keycloak_admin_client_secret`."
   value = {
     KEYCLOAK_ISSUER_URL               = local.issuer_url
     KEYCLOAK_AUDIENCES                = join(",", sort(keys(local.type_clients)))
@@ -16,12 +16,19 @@ output "backend_environment" {
     KEYCLOAK_REQUIRE_HTTPS            = startswith(var.keycloak_url, "https://") ? "true" : "false"
     KEYCLOAK_POST_LOGOUT_REDIRECT_URI = "${var.frontend_url}/login"
     KEYCLOAK_DIRECTORY_CLIENT_ID      = keycloak_openid_client.directory.client_id
+    KEYCLOAK_ADMIN_CLIENT_ID          = keycloak_openid_client.admin.client_id
   }
 }
 
 output "keycloak_directory_client_secret" {
   description = "Backend KEYCLOAK_DIRECTORY_CLIENT_SECRET: the secret Keycloak generated for the directory client."
   value       = keycloak_openid_client.directory.client_secret
+  sensitive   = true
+}
+
+output "keycloak_admin_client_secret" {
+  description = "Backend KEYCLOAK_ADMIN_CLIENT_SECRET: the secret Keycloak generated for the admin client (SYNC_PROVIDER=keycloak)."
+  value       = keycloak_openid_client.admin.client_secret
   sensitive   = true
 }
 
