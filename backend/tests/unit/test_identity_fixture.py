@@ -138,6 +138,12 @@ def test_the_fixture_file_loads():
         (("users", "alice", "roles", "acme"), "superuser", "'superuser', not a canonical role"),
         (("cases", "member"), "zed", r"cases \['member'\] name no fixture user"),
         (("tenants", "acme"), {"name": "Acme"}, "not the expected shape"),
+        (("tenants", "unlinked", "canonical"), "false", "tenant unlinked's canonical is 'false', not a boolean"),
+        (("tenants", "acme", "canonical"), 1, "tenant acme's canonical is 1, not a boolean"),
+        (("tenants", "acme", "name"), 7, "tenant acme's name is 7, not a string"),
+        (("tenants", "acme", "domain"), None, "tenant acme's domain is None, not a string"),
+        (("users", "alice", "first_name"), ["Alice"], r"user alice's first_name is \['Alice'\], not a string"),
+        (("users", "alice", "last_name"), 0, "user alice's last_name is 0, not a string"),
     ],
 )
 def test_a_contradictory_fixture_is_refused(path, value, message):
