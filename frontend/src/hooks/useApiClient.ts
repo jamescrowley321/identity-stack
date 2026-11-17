@@ -33,10 +33,10 @@ export function apiUrl(path: string): string {
  *
  * - Attaches the current access token as a Bearer header.
  * - Names the active tenant in the `X-Tenant-ID` header when there is one
- *   (`TenantSelectorContext`, supplied by `IdentityProvider`). It replaces a
- *   value the caller set, so a call never acts in a tenant the UI does not
- *   show. `apiFetch` changes when the tenant does, so a page that loads with
- *   it loads again in the new tenant.
+ *   (`TenantSelectorContext`, supplied by `IdentityProvider`). A value the
+ *   caller set is always dropped, with or without an active tenant, so a call
+ *   never acts in a tenant the UI does not show. `apiFetch` changes when the
+ *   tenant does, so a page that loads with it loads again in the new tenant.
  * - Prepends API_BASE_URL to the request path so the same call site
  *   works in both standalone (relative URL → nginx proxy) and gateway
  *   (absolute URL → Tyk) modes.
@@ -72,7 +72,7 @@ export function useApiClient() {
       // Headers) and matches names without regard to case, so deleting from it
       // drops a tenant or authorization header the caller gave in any case.
       const callerHeaders = new Headers(options.headers);
-      if (tenantId !== null) callerHeaders.delete(TENANT_SELECTOR_HEADER);
+      callerHeaders.delete(TENANT_SELECTOR_HEADER);
       callerHeaders.delete("Authorization");
       const tenantHeader: Record<string, string> =
         tenantId === null ? {} : { [TENANT_SELECTOR_HEADER]: tenantId };
