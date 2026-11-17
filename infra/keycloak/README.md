@@ -125,9 +125,17 @@ It copies only the root's `.tf` files git does not ignore into its working direc
 
 It needs Docker, `terraform`, `curl`, `jq`, `flock` and the backend virtual environment
 (`cd backend && uv sync --locked --extra dev`), and checks for each before it starts anything.
-It holds the shared compose lock, `~/.cache/identity-stack-compose.lock`, for its whole run.
-Nothing else that takes that lock (a test run, another session, a second run of this check) can
-start or start using keycloak-test between the run deciding whether it started the container
-and the cleanup that stops it, and two runs never build the same realm at once. A caller that
-already holds the lock (`flock ~/.cache/identity-stack-compose.lock make keycloak-terraform-check`)
-does not deadlock it: the script locks the descriptor it inherits from that caller.
+It holds the shared compose lock, `~/.cache/identity-stack-compose.lock`, for its whole run,
+through `scripts/with-compose-lock.sh`. The Makefile targets that start, use or stop the test
+stack (`test-up`, `test-up-keycloak`, `test-down`, `test-unit`, `test-integration`) take the
+same lock, `test-unit` and `test-integration` from bringing the stack up until their last test.
+So nothing else (a test run, another session, a second run of this check) can start or start
+using keycloak-test between the run deciding whether it started the container and the cleanup
+that stops it, and two runs never build the same realm at once.
+
+The lock is re-entrant. A caller that already holds it does not deadlock the check:
+`scripts/with-compose-lock.sh make keycloak-terraform-check` works everywhere (the helper marks
+the lock as held in `IDENTITY_STACK_COMPOSE_LOCK`), and on Linux so does
+`flock ~/.cache/identity-stack-compose.lock make keycloak-terraform-check` (the helper finds the
+descriptor flock passes down in `/dev/fd`). Other systems cannot see that descriptor, so there
+wrap with the helper, not with a bare `flock`; the helper prints a warning while it waits.
