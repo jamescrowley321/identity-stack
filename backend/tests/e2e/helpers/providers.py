@@ -49,12 +49,43 @@ _PROBE_TIMEOUT_SECONDS = 10
 _IDENTITY = "/api/identity"
 
 
+class EarlierSignInFailed(RuntimeError):
+    """A principal's sign-in failed earlier in this run, so the run does not try it again."""
+
+
+class FailedSignIns:
+    """Each principal signs in until its first failure; later attempts fail at once.
+
+    The token fixtures are per test, so without this a failing sign-in would be
+    retried by every test: for Descope's admin that is a new owner+admin access
+    key on the shared project per test, each able to wait out a timeout. A pytest
+    skip or fail raised by ``sign_in`` is an outcome, not a failure, and passes
+    through unrecorded.
+    """
+
+    def __init__(self) -> None:
+        self._failures: dict[str, Exception] = {}
+
+    def attempt(self, principal: str, sign_in: Callable[[], str]) -> str:
+        failure = self._failures.get(principal)
+        if failure is not None:
+            raise EarlierSignInFailed(
+                f"signing in as the {principal} principal failed earlier in this run: {failure!r}"
+            ) from failure
+        try:
+            return sign_in()
+        except Exception as exc:
+            self._failures[principal] = exc
+            raise
+
+
 class SignedInTokens:
     """Each principal's access token, signed in again once it is about to expire.
 
     Keycloak (300 s) and Zitadel (15 min) tokens expire within a slow run, so the
     suite asks for a principal's token per test and gets the one it already has
-    while ``exp`` is more than ``MARGIN_SECONDS`` away.
+    while ``exp`` is more than ``MARGIN_SECONDS`` away. A sign-in that fails is
+    not tried again (``FailedSignIns``).
     """
 
     MARGIN_SECONDS = 60
@@ -62,12 +93,13 @@ class SignedInTokens:
     def __init__(self, clock: Callable[[], float] = time.time) -> None:
         self._clock = clock
         self._tokens: dict[str, tuple[str, float]] = {}
+        self._failed = FailedSignIns()
 
     def get(self, principal: str, sign_in: Callable[[], str]) -> str:
         held = self._tokens.get(principal)
         if held is not None and held[1] - self._clock() > self.MARGIN_SECONDS:
             return held[0]
-        token = sign_in()
+        token = self._failed.attempt(principal, sign_in)
         self._tokens[principal] = (token, _expiry(token))
         return token
 
@@ -195,6 +227,7 @@ class DescopeProvider(E2EProvider):
     def __init__(self, backend_url: str, frontend_url: str) -> None:
         super().__init__(backend_url, frontend_url)
         self._tokens: dict[str, str] = {}
+        self._failed = FailedSignIns()
 
     @property
     def _has_mgmt_key(self) -> bool:
@@ -242,9 +275,13 @@ class DescopeProvider(E2EProvider):
         return ensure_test_user()
 
     def access_token(self, principal: str, request: pytest.FixtureRequest) -> str:
-        """One token per principal for the whole run, as the suite always had."""
+        """One token per principal for the whole run, as the suite always had.
+
+        A failed sign-in is tried once per run too, as when the token fixtures
+        were session-scoped; a skip (credential not set) still skips each test.
+        """
         if principal not in self._tokens:
-            self._tokens[principal] = self._new_token(principal)
+            self._tokens[principal] = self._failed.attempt(principal, lambda: self._new_token(principal))
         return self._tokens[principal]
 
     def _new_token(self, principal: str) -> str:
