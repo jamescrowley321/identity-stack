@@ -239,12 +239,27 @@ class KeycloakTokenSource:
         """Add ``user`` to ``organization``; remove them again afterwards."""
         with self._admin() as http:
             target = self._organization_id(http, organization)
-            http.post(f"/organizations/{target}/members", json=user.id).raise_for_status()
+            added = http.post(f"/organizations/{target}/members", json=user.id)
+            if added.status_code == httpx.codes.CONFLICT:
+                raise KeycloakFlowError(
+                    f"{user.username} is already a member of {organization!r}, left there by an earlier run: "
+                    "recreate keycloak-test (make test-down && make test-up-keycloak)"
+                )
+            added.raise_for_status()
         try:
             yield
-        finally:
-            with self._admin() as http:
-                http.delete(f"/organizations/{target}/members/{user.id}").raise_for_status()
+        except BaseException as failure:
+            # A failed removal must not replace the test's own failure: it rides along as a note.
+            try:
+                self._remove_member(target, user)
+            except Exception as removal:
+                failure.add_note(f"removing {user.username} from {organization!r} afterwards also failed: {removal}")
+            raise
+        self._remove_member(target, user)
+
+    def _remove_member(self, organization_id: str, user: KeycloakUser) -> None:
+        with self._admin() as http:
+            http.delete(f"/organizations/{organization_id}/members/{user.id}").raise_for_status()
 
     def session_ids(self, user: KeycloakUser) -> set[str]:
         """The ids of the user's live sessions in the realm: a token's ``sid`` is one of them."""
