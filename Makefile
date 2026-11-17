@@ -65,13 +65,16 @@ test-e2e: ## run e2e tests (requires running frontend + backend)
 # base URL and name from KEYCLOAK_ISSUER_URL, the users' ids and passwords and
 # the service accounts' secrets from the outputs (tests/helpers/keycloak_target.py).
 # PYTEST_ARGS passes extra pytest options (CI's screenshots and traces).
-KEYCLOAK_TEST_TARGET_JQ := (.backend_environment.value // error("no backend_environment output: apply infra/keycloak first")) as $$backend \
-	| ($$backend.KEYCLOAK_ISSUER_URL | capture("^(?<base>.+)/realms/(?<realm>[^/]+)$$")) as $$issuer \
+KEYCLOAK_TEST_TARGET_JQ := def setting(name): .[name] // error("backend_environment has no \(name): apply infra/keycloak again"); \
+	(.backend_environment.value // error("no backend_environment output: apply infra/keycloak first")) as $$backend \
+	| ($$backend | setting("KEYCLOAK_ISSUER_URL") \
+		| capture("^(?<base>.*[^/])/realms/(?<realm>[^/]+)$$") \
+		// error("KEYCLOAK_ISSUER_URL is not <base URL>/realms/<realm>")) as $$issuer \
 	| { KEYCLOAK_TEST_BASE_URL: $$issuer.base, KEYCLOAK_TEST_REALM: $$issuer.realm, \
-		KEYCLOAK_TEST_USER_IDS: (.user_ids.value | tojson), \
-		KEYCLOAK_TEST_USER_PASSWORDS: (.test_credentials.value.users | tojson), \
-		KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET: $$backend.KEYCLOAK_DIRECTORY_CLIENT_SECRET, \
-		KEYCLOAK_TEST_ADMIN_CLIENT_SECRET: $$backend.KEYCLOAK_ADMIN_CLIENT_SECRET } \
+		KEYCLOAK_TEST_USER_IDS: (.user_ids.value // error("no user_ids output: apply infra/keycloak first") | tojson), \
+		KEYCLOAK_TEST_USER_PASSWORDS: (.test_credentials.value.users // error("no test_credentials users output: apply infra/keycloak first") | tojson), \
+		KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET: ($$backend | setting("KEYCLOAK_DIRECTORY_CLIENT_SECRET")), \
+		KEYCLOAK_TEST_ADMIN_CLIENT_SECRET: ($$backend | setting("KEYCLOAK_ADMIN_CLIENT_SECRET")) } \
 	| to_entries[] | "export \(.key)=\(.value | @sh)"
 
 .PHONY: test-e2e-keycloak

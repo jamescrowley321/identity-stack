@@ -5,7 +5,7 @@ variable "issuer_url" {
 
   validation {
     condition     = can(regex(local.realm_issuer, var.issuer_url))
-    error_message = "issuer_url must be <Keycloak base URL>/realms/<realm>, with no trailing slash: it is the realm's issuer."
+    error_message = "issuer_url must be <Keycloak base URL>/realms/<realm>, with no trailing slash and no slash before /realms/: it is the realm's issuer, compared with the token's iss as written."
   }
 }
 
@@ -37,8 +37,9 @@ module "urls" {
 }
 
 locals {
-  # A Keycloak issuer: the base URL, then /realms/ and the realm name.
-  realm_issuer = "^(.+)/realms/([A-Za-z0-9._-]+)$"
+  # A Keycloak issuer: the base URL (not ending in /, so never //realms/), then
+  # /realms/ and the realm name.
+  realm_issuer = "^(.*[^/])/realms/([A-Za-z0-9._-]+)$"
 
   issuer_url   = module.urls.issuer_url
   frontend_url = module.urls.frontend_url
