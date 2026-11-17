@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors.identity import Conflict, EmailLinkRefused, Forbidden, IdentityError, NotFound, ValidationError
+from app.logbook import logbook
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.role import Role
 from app.models.identity.tenant import Tenant, TenantStatus
@@ -34,6 +35,7 @@ from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 
 tracer = trace.get_tracer(__name__)
+logger = logbook(__name__)
 
 DEFAULT_TENANT_NAME = "default"
 DEFAULT_ROLE_NAME = "member"
@@ -93,8 +95,9 @@ class IdentityProvisioningService:
 
         With ``organization_id`` (Zitadel's organization claim) the user joins,
         as the global ``member`` role, the one active tenant whose
-        ``external_org_id`` is that organization, in place of the default
-        tenant. No such tenant, or more than one, is ``Forbidden`` and nothing
+        ``external_org_id`` is that organization of this provider
+        (``external_org_provider_id``), in place of the default tenant. No
+        such tenant, or more than one, is ``Forbidden`` and nothing
         is written: an organization grants a membership only where a canonical
         tenant already names it. Nor is such a login ever linked to an existing
         canonical user by email: that is ``EmailLinkRefused``, and nothing is
@@ -110,6 +113,8 @@ class IdentityProvisioningService:
         that person's own first login elsewhere would join the
         administrator's account. A login that finds, by email, the user a
         concurrent login for its own subject just created gets that user.
+        Each ``EmailLinkRefused`` is logged at warning with the id of the user
+        holding the email, never the email, so an operator can find it.
         """
         with tracer.start_as_current_span(
             "IdentityProvisioningService.provision",
@@ -129,7 +134,7 @@ class IdentityProvisioningService:
 
             organization_tenant_id: uuid.UUID | None = None
             if organization_id is not None:
-                linked = await self.organization_tenant_id(organization_id)
+                linked = await self._organization_tenant_id(provider_id, organization_id)
                 if linked.is_error():
                     return Error(linked.error)
                 organization_tenant_id = linked.ok
@@ -153,6 +158,15 @@ class IdentityProvisioningService:
                         existing = await self._idp_link_repository.get_by_provider_and_sub(provider_id, sub)
                         if existing is not None:
                             return Ok(existing.user_id)
+                        logger.warning(
+                            "first login refused: provider %s subject %s has the email of canonical user %s "
+                            "(organization login: %s, email from an organization: %s)",
+                            provider_name,
+                            sub,
+                            user.id,
+                            organization_tenant_id is not None,
+                            user.email_from_organization,
+                        )
                         return Error(EmailLinkRefused("The email is held by a canonical user this login may not link"))
                     if user is None:
                         user = User(
@@ -193,19 +207,34 @@ class IdentityProvisioningService:
                     # Otherwise a bootstrap race on the default tenant/role — retry.
             return Error(Conflict("Could not provision identity after retry; please retry"))
 
-    async def organization_tenant_id(self, organization_id: str) -> Result[uuid.UUID, IdentityError]:
-        """The id of the one active tenant linked to ``organization_id``; ``Forbidden`` when there is none.
+    async def organization_tenant_id(
+        self, provider_name: str, organization_id: str
+    ) -> Result[uuid.UUID, IdentityError]:
+        """The id of the one active tenant linked to ``organization_id`` of ``provider_name``.
 
-        Read-only. ``GET /api/identity`` asks it before fetching UserInfo, so a
-        token of an unlinked organization costs the provider nothing;
-        ``provision`` asks again before it writes.
-        Returned as a plain id: a rollback in the retry loop expires loaded rows.
+        ``NotFound`` when the provider has no row, as ``provision`` answers it;
+        ``Forbidden`` when no single active tenant is linked to that
+        organization for that provider. Read-only. ``GET /api/identity`` asks
+        it before fetching UserInfo, so a misconfigured provider or a token of
+        an unlinked organization costs the provider nothing and gets one
+        answer; ``provision`` asks again before it writes.
         """
-        with tracer.start_as_current_span("IdentityProvisioningService.organization_tenant_id"):
-            tenants = await self._tenant_repository.list_by_external_org_id(organization_id)
-            if len(tenants) != 1 or tenants[0].status != TenantStatus.active:
-                return Error(Forbidden("The organization is not linked to exactly one active tenant"))
-            return Ok(tenants[0].id)
+        with tracer.start_as_current_span(
+            "IdentityProvisioningService.organization_tenant_id", attributes={"identity.provider": provider_name}
+        ):
+            provider = await self._provider_repository.get_by_name(provider_name)
+            if provider is None:
+                return Error(NotFound(f"Provider '{provider_name}' not found"))
+            return await self._organization_tenant_id(provider.id, organization_id)
+
+    async def _organization_tenant_id(
+        self, provider_id: uuid.UUID, organization_id: str
+    ) -> Result[uuid.UUID, IdentityError]:
+        """Returned as a plain id: a rollback in ``provision``'s retry loop expires loaded rows."""
+        tenants = await self._tenant_repository.list_by_external_org_id(provider_id, organization_id)
+        if len(tenants) != 1 or tenants[0].status != TenantStatus.active:
+            return Error(Forbidden("The organization is not linked to exactly one active tenant"))
+        return Ok(tenants[0].id)
 
     async def _assign_organization_member(self, user_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
         """Give the user the global default role in the organization's tenant.

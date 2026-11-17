@@ -2,16 +2,18 @@
 
 The tenants and the user come from the ``canonical_seed`` output recorded from a
 real ``terraform apply`` (``tests/fixtures/zitadel/canonical-seed.json``): ``acme``
-and ``globex`` are linked to their organizations through ``external_org_id``.
+and ``globex`` are linked to their organizations through ``external_org_id``, for
+the ``zitadel`` provider (``external_org_provider_id``).
 """
 
 import json
+import logging
 import uuid
 from pathlib import Path
 
 from sqlmodel import func, select
 
-from app.errors.identity import EmailLinkRefused, Forbidden, ValidationError
+from app.errors.identity import EmailLinkRefused, Forbidden, NotFound, ValidationError
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.role import Role
@@ -48,14 +50,25 @@ def _service(session) -> IdentityProvisioningService:
     )
 
 
-async def _seeded(session, *, globex_status: TenantStatus = TenantStatus.active) -> None:
-    """The provider row and the two linked tenants, as ``scripts/seed_zitadel.py`` writes them."""
-    session.add(
-        Provider(name=PROVIDER, type=ProviderType.oidc, issuer_url=ISSUER, base_url=ISSUER, capabilities=["sso"])
-    )
-    session.add(Tenant(name="acme", external_org_id=ACME_ORG))
-    session.add(Tenant(name="globex", external_org_id=GLOBEX_ORG, status=globex_status))
+async def _seeded(session, *, globex_status: TenantStatus = TenantStatus.active) -> uuid.UUID:
+    """The provider row and the two linked tenants, as ``scripts/seed_zitadel.py`` writes them. The provider's id."""
+    provider = Provider(name=PROVIDER, type=ProviderType.oidc, issuer_url=ISSUER, base_url=ISSUER, capabilities=["sso"])
+    session.add(provider)
     await session.flush()
+    provider_id = provider.id
+    session.add(Tenant(name="acme", external_org_id=ACME_ORG, external_org_provider_id=provider_id))
+    session.add(
+        Tenant(name="globex", external_org_id=GLOBEX_ORG, external_org_provider_id=provider_id, status=globex_status)
+    )
+    await session.flush()
+    return provider_id
+
+
+async def _other_provider(session, name: str = "ory") -> uuid.UUID:
+    provider = Provider(name=name, type=ProviderType.ory)
+    session.add(provider)
+    await session.flush()
+    return provider.id
 
 
 async def _provision(session, organization_id: str | None, **changes):
@@ -128,6 +141,41 @@ async def test_an_existing_global_member_role_is_reused(db_session):
     assert await _memberships(db_session, result.ok) == {("acme", MEMBER, True)}
 
 
+async def test_another_providers_tenant_with_the_same_organization_id_is_not_counted(db_session):
+    await _seeded(db_session)
+    ory_id = await _other_provider(db_session)
+    db_session.add(Tenant(name="ory-tenant", external_org_id=GLOBEX_ORG, external_org_provider_id=ory_id))
+    await db_session.flush()
+
+    result = await _provision(db_session, GLOBEX_ORG)
+
+    assert result.is_ok(), result
+    assert await _memberships(db_session, result.ok) == {("globex", MEMBER, True)}
+
+
+class TestTheOrganizationsTenant:
+    """``organization_tenant_id``, asked before UserInfo is fetched, scopes the link to the provider."""
+
+    async def test_is_the_tenant_linked_for_that_provider(self, db_session):
+        await _seeded(db_session)
+        ory_id = await _other_provider(db_session)
+        db_session.add(Tenant(name="ory-tenant", external_org_id=GLOBEX_ORG, external_org_provider_id=ory_id))
+        await db_session.flush()
+        globex = await TenantRepository(db_session).get_by_name("globex")
+
+        result = await _service(db_session).organization_tenant_id(PROVIDER, GLOBEX_ORG)
+
+        assert result.is_ok() and result.ok == globex.id, result
+
+    async def test_without_the_provider_row_is_not_found(self, db_session):
+        db_session.add(Tenant(name="globex", external_org_id=GLOBEX_ORG))
+        await db_session.flush()
+
+        result = await _service(db_session).organization_tenant_id(PROVIDER, GLOBEX_ORG)
+
+        assert type(result.error) is NotFound
+
+
 async def test_a_second_login_changes_nothing(db_session):
     await _seeded(db_session)
     first = await _provision(db_session, GLOBEX_ORG)
@@ -155,11 +203,33 @@ class TestARefusedFirstLoginWritesNothing:
         await self._refused(db_session, UNMAPPED_ORG, Forbidden)
 
     async def test_an_organization_two_tenants_name(self, db_session):
-        await _seeded(db_session)
-        db_session.add(Tenant(name="globex-copy", external_org_id=GLOBEX_ORG))
+        provider_id = await _seeded(db_session)
+        db_session.add(Tenant(name="globex-copy", external_org_id=GLOBEX_ORG, external_org_provider_id=provider_id))
         await db_session.flush()
 
         await self._refused(db_session, GLOBEX_ORG, Forbidden)
+
+    async def test_an_organization_id_linked_only_for_another_provider(self, db_session):
+        """``external_org_id`` is shared by the providers: the same string from another one is not Zitadel's."""
+        await _seeded(db_session)
+        ory_id = await _other_provider(db_session)
+        db_session.add(Tenant(name="ory-tenant", external_org_id=UNMAPPED_ORG, external_org_provider_id=ory_id))
+        await db_session.flush()
+
+        await self._refused(db_session, UNMAPPED_ORG, Forbidden)
+
+    async def test_an_organization_id_linked_for_no_provider(self, db_session):
+        await _seeded(db_session)
+        db_session.add(Tenant(name="unowned", external_org_id=UNMAPPED_ORG))
+        await db_session.flush()
+
+        await self._refused(db_session, UNMAPPED_ORG, Forbidden)
+
+    async def test_without_the_provider_row(self, db_session):
+        db_session.add(Tenant(name="globex", external_org_id=GLOBEX_ORG))
+        await db_session.flush()
+
+        await self._refused(db_session, GLOBEX_ORG, NotFound)
 
     async def test_the_organization_of_a_suspended_tenant(self, db_session):
         await _seeded(db_session, globex_status=TenantStatus.suspended)
@@ -214,6 +284,18 @@ class TestAnEmailAlreadyHeldIsNeverLinked:
 
         assert await _memberships(db_session, admin_id) == {("acme", "admin", True)}
 
+    async def test_the_refusal_logs_the_holders_id_not_the_email(self, db_session, caplog):
+        await _seeded(db_session)
+        admin_id = await self._acme_admin(db_session)
+
+        with caplog.at_level(logging.WARNING, logger="app.services.identity_provisioning"):
+            await self._refused(db_session, GLOBEX_ORG)
+
+        refusals = [r.getMessage() for r in caplog.records if r.name == "app.services.identity_provisioning"]
+        assert len(refusals) == 1, refusals
+        assert str(admin_id) in refusals[0] and PROVIDER in refusals[0]
+        assert EMAIL not in refusals[0]
+
     async def test_a_login_in_the_users_own_organization_is_refused_too(self, db_session):
         await _seeded(db_session)
         await self._acme_admin(db_session)
@@ -236,8 +318,7 @@ class TestAnOrganizationsEmailIsNeverLinkedFromAnotherProvider:
 
     async def _zitadel_user(self, session) -> uuid.UUID:
         await _seeded(session)
-        session.add(Provider(name="ory", type=ProviderType.ory))
-        await session.flush()
+        await _other_provider(session)
         created = await _provision(session, GLOBEX_ORG)
         assert created.is_ok(), created
         return created.ok
@@ -262,6 +343,19 @@ class TestAnOrganizationsEmailIsNeverLinkedFromAnotherProvider:
         assert await _written(db_session) == before
         assert await IdPLinkRepository(db_session).get_by_provider_name_and_sub("ory", "ory-victim") is None
         assert await _memberships(db_session, user_id) == {("globex", MEMBER, True)}
+
+    async def test_that_refusal_logs_the_holders_id_not_the_email(self, db_session, caplog):
+        user_id = await self._zitadel_user(db_session)
+
+        with caplog.at_level(logging.WARNING, logger="app.services.identity_provisioning"):
+            await _service(db_session).provision(
+                provider_name="ory", sub="ory-victim", email=EMAIL, email_verified=True
+            )
+
+        refusals = [r.getMessage() for r in caplog.records if r.name == "app.services.identity_provisioning"]
+        assert len(refusals) == 1, refusals
+        assert str(user_id) in refusals[0] and "ory" in refusals[0]
+        assert EMAIL not in refusals[0]
 
     async def test_an_ory_first_login_still_links_a_user_whose_email_no_organization_chose(self, db_session):
         await self._zitadel_user(db_session)

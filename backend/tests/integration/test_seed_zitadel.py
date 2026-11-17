@@ -42,7 +42,9 @@ async def _state(session) -> dict:
         (await session.execute(select(UserTenantRole).where(UserTenantRole.user_id == user.id))).scalars().all()
     )
     return {
-        "tenants": {tenant.name: tenant.external_org_id for tenant in tenants},
+        "tenants": {
+            tenant.name: (tenant.external_org_id, tenant.external_org_provider_id == provider.id) for tenant in tenants
+        },
         "provider": (provider.type, provider.issuer_url, provider.base_url, provider.capabilities),
         "user": (user.user_name, user.given_name, user.family_name),
         "links": {(link.provider_id == provider.id, link.external_sub, link.external_email) for link in links},
@@ -51,7 +53,7 @@ async def _state(session) -> dict:
 
 
 EXPECTED = {
-    "tenants": {"acme": "399943487992119299", "globex": "399943487958564867"},
+    "tenants": {"acme": ("399943487992119299", True), "globex": ("399943487958564867", True)},
     "provider": (ProviderType.oidc, ISSUER, ISSUER, ["sso"]),
     "user": ("acme-user", "Acme", "User"),
     "links": {(True, "399943491398025219", "acme-user@acme.test")},
@@ -122,6 +124,33 @@ async def test_a_tenant_with_no_organization_is_linked_to_its_organization(db_se
     await apply_seed(db_session, SEED)
 
     assert await _state(db_session) == EXPECTED
+
+
+async def test_a_tenant_linked_to_its_organization_for_no_provider_is_linked_for_zitadel(db_session):
+    """A tenant the seed linked before the link named its provider (migration 007) is the seed's own."""
+    db_session.add(Tenant(name="acme", external_org_id=SEED.tenants["acme"]))
+    await db_session.commit()
+
+    await apply_seed(db_session, SEED)
+
+    assert await _state(db_session) == EXPECTED
+
+
+async def test_a_tenant_linked_to_its_organization_id_for_another_provider_is_refused(db_session):
+    other = Provider(name="ory-local", type=ProviderType.ory)
+    db_session.add(other)
+    await db_session.flush()
+    other_id = other.id
+    db_session.add(Tenant(name="acme", external_org_id=SEED.tenants["acme"], external_org_provider_id=other_id))
+    await db_session.commit()
+
+    refusal = await _refused(db_session, SEED)
+
+    assert "acme" in str(refusal)
+    db_session.expire_all()
+    acme = (await db_session.execute(select(Tenant).where(Tenant.name == "acme"))).scalars().one()
+    assert (acme.external_org_id, acme.external_org_provider_id) == (SEED.tenants["acme"], other_id)
+    assert await _provider_count(db_session) == 0
 
 
 async def test_a_user_linked_by_another_provider_is_refused_not_linked_or_granted(db_session):

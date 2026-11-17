@@ -165,6 +165,15 @@ class InboundSyncService:
             if existing_user is not None and existing_user.email_from_organization:
                 # An organization's administrators chose that email; it does not
                 # show this Descope identity is that user (IdentityProvisioningService).
+                # The response is generic (result_to_response): the holder's id,
+                # never the email, is logged so an operator can find it.
+                logger.warning(
+                    "flow sync refused: provider %s subject %s has the email of canonical user %s, "
+                    "whose email an organization chose",
+                    provider.name,
+                    user_id,
+                    existing_user.id,
+                )
                 return Error(EmailLinkRefused(message="The email is held by a canonical user this login may not link"))
 
             if existing_user is None:

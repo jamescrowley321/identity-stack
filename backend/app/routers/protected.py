@@ -17,7 +17,7 @@ from app.dependencies.identity import (
     get_identity_resolution_service,
 )
 from app.dependencies.rbac import TokenTenant, token_tenant
-from app.errors.identity import EmailLinkRefused, Forbidden, NotFound, ValidationError
+from app.errors.identity import Forbidden, NotFound, ValidationError
 from app.knobs import knob, knob_set
 from app.logbook import logbook
 from app.middleware.providers import ZITADEL_PROVIDER_NAME, ProviderTokenConfig, descope_config
@@ -155,10 +155,12 @@ async def _first_login_profile(
 ) -> dict:
     """The profile and organization ``provision`` is called with for a first-login subject.
 
-    For a provider with a ``first_login_organization`` (Zitadel), a token that
-    names no organization, or names one no single active tenant is linked to,
-    is refused (403) before UserInfo is fetched, and the organization is passed
-    on: provisioning checks the link again before it writes. For a provider
+    For a provider with a ``first_login_organization`` (Zitadel), a provider
+    with no canonical ``providers`` row is refused (500), and a token that
+    names no organization, or names one no single active tenant is linked to
+    for that provider, is refused (403), all before UserInfo is fetched. The
+    organization is passed on: provisioning checks the link again before it
+    writes. For a provider
     with ``profile_from_userinfo``, the email and names come from UserInfo,
     never from the token: a UserInfo answer for another subject is refused
     (403) and one that cannot be had is 503, as every provider fault here is.
@@ -170,7 +172,11 @@ async def _first_login_profile(
         if organization is None:
             logger.warning("first login refused: provider %s token names no organization", config.name)
             raise HTTPException(status_code=403, detail=ORGANIZATION_NOT_LINKED)
-        if (await provisioner.organization_tenant_id(organization)).is_error():
+        linked = await provisioner.organization_tenant_id(config.name.lower(), organization)
+        if linked.is_error() and isinstance(linked.error, NotFound):
+            logger.error("first login refused: provider %s has no canonical provider row", config.name)
+            raise HTTPException(status_code=500, detail=PROVIDER_NOT_CONFIGURED)
+        if linked.is_error():
             logger.warning("first login refused: provider %s organization is linked to no single tenant", config.name)
             raise HTTPException(status_code=403, detail=ORGANIZATION_NOT_LINKED)
     if config is not None and config.profile_from_userinfo:
@@ -250,11 +256,10 @@ async def canonical_identity(
             if isinstance(err, NotFound):
                 # The provider isn't registered server-side — misconfiguration.
                 raise HTTPException(status_code=500, detail=PROVIDER_NOT_CONFIGURED)
-            if isinstance(err, EmailLinkRefused):
-                # Logged, not said: the answer does not tell whether the email is held.
-                logger.warning(
-                    "first login refused: provider %s email is held by another canonical user", provider_name
-                )
+            # EmailLinkRefused (logged by provisioning with the holder's id) and
+            # every other conflict get the same body. The body names no cause, but
+            # a 409 where a new email gets 200 still tells the caller the email is
+            # held: an organization administrator who chose it learns that much.
             raise HTTPException(status_code=409, detail=PROVISIONING_FAILED)
         result = await resolver.resolve(provider=provider_name, sub=sub)
 
