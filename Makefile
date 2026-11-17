@@ -36,7 +36,7 @@ test-down: ## tear down the test stack, keycloak-test included
 	$(COMPOSE_TEST) --profile keycloak down -v
 
 .PHONY: keycloak-terraform-check
-keycloak-terraform-check: test-up-keycloak ## apply infra/keycloak to a fresh realm in keycloak-test, check plan is empty and the realm matches the import
+keycloak-terraform-check: ## apply infra/keycloak to a fresh realm in a running keycloak-test (make test-up-keycloak), check plan is empty and the realm matches the import
 	infra/keycloak/scripts/check-against-compose.sh
 
 test-unit: test-up ## run backend unit tests (auto-brings-up test stack)
