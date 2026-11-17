@@ -14,6 +14,7 @@ import httpx
 import pytest
 from expression import Ok
 
+from app.services.adapters.base import LAST_ROLE_IN_TENANT as LAST_ROLE
 from app.services.adapters.base import SyncError
 from app.services.adapters.keycloak import KeycloakSyncAdapter
 from tests.helpers.keycloak_admin_recorded import (
@@ -47,6 +48,8 @@ FIND_ORGANIZATION = {"q": f"alias:{TENANT_ID}", "exact": "true"}
 FIND_USER = {"username": USER_ID, "exact": "true"}
 # A 404 Keycloak answers for a realm-wide fault, not for an absent object (probed on 26.8.2).
 LEFT = {"email": "renamed@recorded.test", "status": "active"}
+# The email the recorded user holds (responses.json "user_find").
+RECORDED_EMAIL = RECORDED["user_find"]["body"][0]["email"]
 
 
 def organizations_disabled() -> httpx.Response:
@@ -93,7 +96,7 @@ class TestSyncTenant:
         assert api.sent == [
             token_request(),
             find_organization(),
-            Sent("POST", ORGANIZATIONS, {}, {"name": "Recorded Co", "alias": TENANT_ID}, BEARER),
+            Sent("POST", ORGANIZATIONS, {}, {"name": "Recorded Co", "alias": TENANT_ID, "domains": []}, BEARER),
         ]
 
     async def test_updates_the_organization_it_finds(self):
@@ -119,6 +122,28 @@ class TestSyncTenant:
         await adapter(api).sync_tenant(tenant_id=TENANT, data={"name": "Recorded Co Renamed"})
 
         assert api.sent[2].body == {"name": "Recorded Co Renamed", "alias": TENANT_ID}
+
+    async def test_an_empty_domain_list_clears_the_organizations_domains(self):
+        """``[]`` is "no self-provisioning domains", not "leave them": Keycloak drops the old ones."""
+        api = RecordedAdminApi(["token", "organization_find", "organization_update"])
+
+        result = await adapter(api).sync_tenant(
+            tenant_id=TENANT, data={"name": "Recorded Co Renamed", "self_provisioning_domains": []}
+        )
+
+        assert result == Ok(None)
+        assert api.sent[2].body == {"name": "Recorded Co Renamed", "alias": TENANT_ID, "domains": []}
+
+    @pytest.mark.parametrize("domains", ["acme.test", None, ["acme.test", 7], [""], {"acme.test": True}])
+    async def test_domains_that_are_not_a_list_of_names_are_an_error_without_a_call(self, domains):
+        api = RecordedAdminApi([])
+
+        result = await adapter(api).sync_tenant(
+            tenant_id=TENANT, data={"name": "Recorded Co", "self_provisioning_domains": domains}
+        )
+
+        refused(result, "sync_tenant", None)
+        assert api.sent == []
 
     async def test_a_domain_another_organization_holds_is_an_error(self):
         api = RecordedAdminApi(["token", "organization_find", "organization_update_domain_taken"])
@@ -189,10 +214,29 @@ class TestSyncUser:
     async def test_updates_email_and_enabled_of_the_user_it_finds(self, status, enabled):
         api = RecordedAdminApi(["token", "user_find", "user_update"])
 
-        result = await adapter(api).sync_user(user_id=USER, data={"email": "renamed@recorded.test", "status": status})
+        result = await adapter(api).sync_user(user_id=USER, data={"email": RECORDED_EMAIL, "status": status})
 
         assert result == Ok(None)
-        assert api.sent[2] == Sent("PUT", USER_PATH, {}, {"email": "renamed@recorded.test", "enabled": enabled}, BEARER)
+        assert api.sent[2] == Sent("PUT", USER_PATH, {}, {"email": RECORDED_EMAIL, "enabled": enabled}, BEARER)
+
+    async def test_a_changed_email_is_no_longer_verified(self):
+        """The realm's verified email links identities across providers (#559): a new address starts unverified."""
+        api = RecordedAdminApi(["token", "user_find", "user_update"])
+
+        result = await adapter(api).sync_user(user_id=USER, data={"email": "renamed@recorded.test", "status": "active"})
+
+        assert result == Ok(None)
+        assert api.sent[2] == Sent(
+            "PUT", USER_PATH, {}, {"email": "renamed@recorded.test", "emailVerified": False, "enabled": True}, BEARER
+        )
+
+    async def test_the_same_email_in_other_letter_case_keeps_its_verification(self):
+        """Keycloak stores emails in lower case, so this is the address it holds."""
+        api = RecordedAdminApi(["token", "user_find", "user_update"])
+
+        await adapter(api).sync_user(user_id=USER, data={"email": RECORDED_EMAIL.upper(), "status": "active"})
+
+        assert api.sent[2].body == {"email": RECORDED_EMAIL.upper(), "enabled": True}
 
     async def test_an_email_another_keycloak_user_holds_is_an_error(self):
         """A user who signed up in Keycloak is not taken over by email."""
@@ -284,21 +328,31 @@ class TestMembers:
         )
 
     async def test_leaving_a_tenant_removes_the_user_from_its_organization(self):
-        api = RecordedAdminApi(["token", "user_find", "user_update", "organization_find", "member_remove"])
+        api = RecordedAdminApi(["token", "user_find", "organization_find", "member_remove", "user_update"])
 
         result = await adapter(api).sync_user(user_id=USER, data={**LEFT, "left_tenant_id": TENANT_ID})
 
         assert result == Ok(None)
-        assert api.calls()[1:] == [("GET", USERS), ("PUT", USER_PATH), ("GET", ORGANIZATIONS), ("DELETE", MEMBER)]
-        assert api.sent[3] == find_organization()
+        assert api.calls()[1:] == [("GET", USERS), ("GET", ORGANIZATIONS), ("DELETE", MEMBER), ("PUT", USER_PATH)]
+        assert api.sent[2] == find_organization()
+
+    async def test_a_refused_profile_update_still_ends_the_membership(self):
+        """The membership is what authorizes the user for the tenant: it ends before the profile is pushed."""
+        email_taken = httpx.Response(409, json={"errorMessage": "User exists with same email"})
+        api = RecordedAdminApi(["token", "user_find", "organization_find", "member_remove", email_taken])
+
+        result = await adapter(api).sync_user(user_id=USER, data={**LEFT, "left_tenant_id": TENANT_ID})
+
+        refused(result, "sync_user", 409)
+        assert api.calls()[1:] == [("GET", USERS), ("GET", ORGANIZATIONS), ("DELETE", MEMBER), ("PUT", USER_PATH)]
 
     async def test_leaving_a_tenant_the_user_is_not_a_member_of_in_keycloak_is_done(self):
-        api = RecordedAdminApi(["token", "user_find", "user_update", "organization_find", "member_remove_again"])
+        api = RecordedAdminApi(["token", "user_find", "organization_find", "member_remove_again", "user_update"])
 
         assert await adapter(api).sync_user(user_id=USER, data={**LEFT, "left_tenant_id": TENANT_ID}) == Ok(None)
 
     async def test_leaving_a_tenant_not_pushed_is_done(self):
-        api = RecordedAdminApi(["token", "user_find", "user_update", "organization_find_none"])
+        api = RecordedAdminApi(["token", "user_find", "organization_find_none", "user_update"])
 
         assert await adapter(api).sync_user(user_id=USER, data={**LEFT, "left_tenant_id": TENANT_ID}) == Ok(None)
         assert api.script == []
@@ -310,7 +364,7 @@ class TestMembers:
         assert api.script == []
 
     async def test_a_realm_wide_404_on_leaving_is_an_error(self):
-        api = RecordedAdminApi(["token", "user_find", "user_update", "organization_find", organizations_disabled()])
+        api = RecordedAdminApi(["token", "user_find", "organization_find", organizations_disabled()])
 
         result = await adapter(api).sync_user(user_id=USER, data={**LEFT, "left_tenant_id": TENANT_ID})
 
@@ -324,14 +378,54 @@ class TestMembers:
         refused(result, "sync_user", None)
         assert api.sent == []
 
-    async def test_removing_a_role_assignment_calls_nothing(self):
-        """Another role may still hold the membership: leaving a tenant goes through sync_user."""
+    @pytest.mark.parametrize("data", [None, {"role_name": "member"}, {"role_name": "member", LAST_ROLE: False}])
+    async def test_removing_a_role_the_user_holds_others_beside_calls_nothing(self, data):
+        """Another role in the tenant still holds the membership."""
         api = RecordedAdminApi([])
 
-        result = await adapter(api).delete_role_assignment(user_id=USER, tenant_id=TENANT, role_id=ROLE)
+        result = await adapter(api).delete_role_assignment(user_id=USER, tenant_id=TENANT, role_id=ROLE, data=data)
 
         assert result == Ok(None)
         assert api.sent == []
+
+    async def test_removing_the_last_role_in_the_tenant_ends_the_membership(self):
+        api = RecordedAdminApi(["token", "organization_find", "user_find", "member_remove"])
+
+        result = await adapter(api).delete_role_assignment(
+            user_id=USER, tenant_id=TENANT, role_id=ROLE, data={"role_name": "member", LAST_ROLE: True}
+        )
+
+        assert result == Ok(None)
+        assert api.sent[1:] == [find_organization(), find_user(), Sent("DELETE", MEMBER, {}, None, BEARER)]
+
+    @pytest.mark.parametrize(
+        "script",
+        [
+            ["token", "organization_find_none"],
+            ["token", "organization_find", "user_find_none"],
+            ["token", "organization_find", "user_find", "member_remove_again"],
+        ],
+        ids=["tenant-not-pushed", "user-not-pushed", "not-a-member"],
+    )
+    async def test_removing_the_last_role_where_there_is_no_membership_is_done(self, script):
+        api = RecordedAdminApi(list(script))
+
+        result = await adapter(api).delete_role_assignment(
+            user_id=USER, tenant_id=TENANT, role_id=ROLE, data={LAST_ROLE: True}
+        )
+
+        assert result == Ok(None)
+        assert api.script == []
+
+    async def test_a_realm_wide_404_on_removing_the_last_role_is_an_error(self):
+        api = RecordedAdminApi(["token", "organization_find", "user_find", organizations_disabled()])
+
+        result = await adapter(api).delete_role_assignment(
+            user_id=USER, tenant_id=TENANT, role_id=ROLE, data={LAST_ROLE: True}
+        )
+
+        error = refused(result, "delete_role_assignment", 404)
+        assert error.context == {"tenant_id": TENANT_ID, "user_id": USER_ID, "status": 404}
 
 
 class TestCanonicalOnly:

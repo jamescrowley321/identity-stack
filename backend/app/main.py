@@ -42,6 +42,7 @@ from app.services.keycloak_admin import (
     ADMIN_CLIENT_ID_VARIABLE,
     ADMIN_CREDENTIAL_VARIABLE,
     ADMIN_TIMEOUT_SECONDS,
+    ISSUER_VARIABLE,
     KeycloakAdminError,
     KeycloakAdminNotConfigured,
     connect_keycloak_admin,
@@ -62,6 +63,24 @@ def _warn_missing_secrets() -> None:
 
 
 KEYCLOAK_ADMIN_TIMEOUT_SECONDS = ADMIN_TIMEOUT_SECONDS
+
+
+def _admin_check_failure(status: int | None) -> str:
+    """Why startup stopped, by what Keycloak answered the admin client's credential check."""
+    if status is None:
+        return (
+            f"Keycloak gave the admin client's credential check no readable answer: "
+            f"check {ISSUER_VARIABLE} and that Keycloak is up"
+        )
+    if status in (400, 401, 403):
+        return (
+            f"Keycloak refused the admin client's credential (status {status}): "
+            f"check {ADMIN_CLIENT_ID_VARIABLE} and {ADMIN_CREDENTIAL_VARIABLE}"
+        )
+    return (
+        f"Keycloak answered the admin client's credential check with status {status}: "
+        f"check {ISSUER_VARIABLE} names a realm with organizations enabled"
+    )
 
 
 async def _start_sync_provider(app: FastAPI) -> OutboundClient | None:
@@ -86,10 +105,7 @@ async def _start_sync_provider(app: FastAPI) -> OutboundClient | None:
         raise RuntimeError(f"SYNC_PROVIDER is keycloak but {exc}") from exc
     except KeycloakAdminError as exc:
         await http.aclose()
-        raise RuntimeError(
-            f"Keycloak refused the admin client's credential (status {exc.status}): "
-            f"check {ADMIN_CLIENT_ID_VARIABLE} and {ADMIN_CREDENTIAL_VARIABLE}"
-        ) from exc
+        raise RuntimeError(_admin_check_failure(exc.status)) from exc
     logger.info("Keycloak admin client connected: canonical tenants and users sync to Keycloak")
     return http
 
@@ -197,11 +213,14 @@ async def lifespan(app: FastAPI):
                 finally:
                     try:
                         await http_client.aclose()
+                    except Exception:
+                        logger.warning("HTTP client close failed", exc_info=True)
+                    try:
                         app.state.keycloak_admin = None
                         if sync_http_client is not None:
                             await sync_http_client.aclose()
                     except Exception:
-                        logger.warning("HTTP client close failed", exc_info=True)
+                        logger.warning("Sync provider HTTP client close failed", exc_info=True)
                     finally:
                         await engine.dispose()
 

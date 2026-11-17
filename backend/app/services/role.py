@@ -22,7 +22,7 @@ from app.repositories.assignment import UserTenantRoleRepository, assignment_fro
 from app.repositories.base import RepositoryConflictError
 from app.repositories.permission import PermissionRepository, permission_from_row
 from app.repositories.role import RoleRepository, apply_role, role_from_row, role_to_row
-from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.adapters.base import LAST_ROLE_IN_TENANT, IdentityProviderAdapter, SyncError
 from app.services.cache_invalidation import CacheInvalidationPublisher
 
 logger = logbook(__name__)
@@ -415,6 +415,12 @@ class RoleService:
                 return Error(identity_error(decision.error))
             unassigned = decision.ok
 
+            # No role left in the tenant: the user no longer belongs to it, and an
+            # adapter that keeps a membership (Keycloak organizations) ends it.
+            sync_data: dict = {"role_name": role_name}
+            if not await self._assignment_repository.list_by_user_tenant(user_id, tenant_id):
+                sync_data[LAST_ROLE_IN_TENANT] = True
+
             await self._assignment_repository.commit()
 
             await self._invalidate(unassigned, role_id, tenant_id)
@@ -424,7 +430,7 @@ class RoleService:
                     user_id=user_id,
                     tenant_id=tenant_id,
                     role_id=role_id,
-                    data={"role_name": role_name},
+                    data=sync_data,
                 ),
                 role_id,
                 "unassign_role_from_user",

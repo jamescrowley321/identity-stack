@@ -11,6 +11,10 @@ from dataclasses import dataclass, field
 
 from expression import Result
 
+# ``delete_role_assignment`` data key: ``True`` when the removed assignment was the
+# user's last role in the tenant, so they no longer belong to it (RoleService).
+LAST_ROLE_IN_TENANT = "last_role_in_tenant"
+
 
 @dataclass(frozen=True)
 class SyncError:
