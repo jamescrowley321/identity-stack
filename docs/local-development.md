@@ -27,9 +27,9 @@ make test-up             # bring up the test stack (idempotent; leave it running
 make test-unit           # backend unit tests (auto-brings-up the test stack, so it needs Docker)
 make test-integration    # backend integration tests (auto-brings-up the test stack)
 make test-frontend       # frontend unit tests (vitest)
-make test-e2e            # end-to-end tests (needs frontend + backend running, Playwright and Descope credentials)
-make test-e2e-keycloak   # Keycloak end-to-end suite, no credential (needs keycloak-test, the backend and the Keycloak-built SPA; see keycloak.md)
-make test-e2e-zitadel    # Zitadel end-to-end suite, no credential (needs the applied and seeded local Zitadel, the backend and the Zitadel-built SPA; see zitadel.md)
+make test-e2e            # the shared end-to-end suite against Descope (needs frontend + backend running, Playwright and Descope credentials)
+make test-e2e-keycloak   # the shared suite and the Keycloak suite against Keycloak, no credential (needs keycloak-test, the backend and the Keycloak-built SPA; see keycloak.md)
+make test-e2e-zitadel    # the shared suite and the Zitadel suite against Zitadel, no credential (needs the applied and seeded local Zitadel, the backend and the Zitadel-built SPA; see zitadel.md)
 make test-all            # lint + unit + frontend + integration
 make test-down           # tear the test stack down
 ```
@@ -41,6 +41,35 @@ make test-integration-standalone   # standalone profile
 make test-integration-gateway      # gateway profile (requires gateway env vars)
 make test-gateway-proxy            # verify gateway proxying + header forwarding
 ```
+
+### End-to-end suites
+
+`backend/tests/e2e/` is the shared UI (Playwright, Chromium) and API suite: login, session,
+identity, tenant switch, RBAC, documents and logout. It runs against the provider
+`E2E_PROVIDER` names: `descope` (the default, what `make test-e2e` and CI's `E2E Tests` job
+run), `keycloak` or `zitadel`. Everything that differs between providers sits behind one
+interface in `backend/tests/e2e/helpers/providers.py`: the member and admin principals' API
+tokens, a browser signed in to the SPA as either, and the tenant they act in. Keycloak and
+Zitadel sign in through the SPA and the provider's own forms with the test users of
+`infra/fixtures/test-identities.json`; they need no credential beyond what the applied
+Terraform root outputs.
+
+A test that cannot apply to a provider is listed in one table,
+`backend/tests/e2e/not_applicable.py`, with the reason: the run deselects it and lists it
+with its reason at the end. Nothing is skipped by environment, and a Keycloak or Zitadel run
+fails, never skips, when the instance, the backend or the SPA does not answer.
+
+`make test-e2e-keycloak` and `make test-e2e-zitadel` run the shared suite with
+`E2E_PROVIDER` set, then the provider's own suite (`backend/tests/e2e_keycloak/`,
+`backend/tests/e2e_zitadel/`), in one pytest run. They do not start anything: bring up the
+instance, apply its Terraform root and start the backend and the SPA first, as
+[keycloak.md](keycloak.md#running-the-end-to-end-suite-locally) and [zitadel.md](zitadel.md#end-to-end) list. From a
+clean checkout that is Docker, Terraform, Node and the backend's Python environment only.
+CI runs both on every pull request (`E2E Tests (Keycloak)`, `E2E Tests (Zitadel)`).
+
+The internal-endpoint tests compute their headers and HMACs from `INTERNAL_IDENTITY_KEY`,
+`DESCOPE_WEBHOOK_SECRET` and `DESCOPE_FLOW_SYNC_SECRET`. Give the backend and the suite the
+same throwaway values (CI generates them per run, e.g. `openssl rand -hex 32`).
 
 ## Lint & security
 

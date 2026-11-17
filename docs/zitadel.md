@@ -106,7 +106,7 @@ VITE_OIDC_SCOPE=openid profile email offline_access urn:zitadel:iam:user:resourc
 
 ## End-to-end
 
-[`backend/tests/e2e_zitadel/`](../backend/tests/e2e_zitadel/) drives the shipped SPA and backend against this instance from Chromium, through Login V2's own forms. It needs no credential: CI's `E2E Tests (Zitadel)` job runs it on every pull request. [`backend/tests/integration_zitadel/test_zitadel_machine_token.py`](../backend/tests/integration_zitadel/test_zitadel_machine_token.py) covers the machine user's token in `make zitadel-terraform-integration` (CI's `Zitadel Terraform Check`).
+[`backend/tests/e2e_zitadel/`](../backend/tests/e2e_zitadel/) drives the shipped SPA and backend against this instance from Chromium, through Login V2's own forms. It needs no credential: CI's `E2E Tests (Zitadel)` job runs it on every pull request. `make test-e2e-zitadel` runs the shared UI and API suite first, `backend/tests/e2e/` with `E2E_PROVIDER=zitadel` ([local-development.md](local-development.md#end-to-end-suites)), as the seeded two-tenant user `bob`: admin in `acme`, viewer in `globex`, each naming its tenant in `X-Tenant-ID`. It leaves `alice` alone for the first-login case. The tests that do not apply to Zitadel are listed with the reason in `backend/tests/e2e/not_applicable.py`. [`backend/tests/integration_zitadel/test_zitadel_machine_token.py`](../backend/tests/integration_zitadel/test_zitadel_machine_token.py) covers the machine user's token in `make zitadel-terraform-integration` (CI's `Zitadel Terraform Check`).
 
 | Case | Proved |
 |------|--------|
@@ -130,6 +130,8 @@ export DATABASE_URL=postgresql+asyncpg://identity_test:identity_test@localhost:1
 # the backend on :8000: the backend lines of `make zitadel-env`, CANONICAL_RBAC_PROVIDERS=zitadel,
 #   JIT_ENABLED_PROVIDERS=zitadel, FRONTEND_URL=http://localhost:3000, DESCOPE_PROJECT_ID= and
 #   RATE_LIMIT_DEFAULT=2000/minute RATE_LIMIT_AUTH=1000/minute
+#   and INTERNAL_IDENTITY_KEY, DESCOPE_WEBHOOK_SECRET and DESCOPE_FLOW_SYNC_SECRET set to throwaway
+#   values, exported the same in the shell that runs the suite
 make test-e2e-zitadel
 ```
 
