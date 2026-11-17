@@ -133,7 +133,9 @@ container, and fails when the instance does not answer. It:
 `make zitadel-terraform-integration` runs the same check with `--integration-tests`: after the
 read-back it runs the backend's live Zitadel suite
 ([`backend/tests/integration_zitadel/`](../../backend/tests/integration_zitadel/)) as the sync
-adapter's machine user, against the applied root. It also needs the test Postgres (`make
+adapter's machine user, against the applied root, and checks a live token of the test machine
+user (`identity-stack-tests`): valid by discovery, keys, signature, issuer and audience, refused
+by the backend's client binding. It also needs the test Postgres (`make
 test-up`). CI's Zitadel job runs this target.
 
 The temporary directory holds generated secrets and is deleted when the check ends. It needs

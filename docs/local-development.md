@@ -29,6 +29,7 @@ make test-integration    # backend integration tests (auto-brings-up the test st
 make test-frontend       # frontend unit tests (vitest)
 make test-e2e            # end-to-end tests (needs frontend + backend running, Playwright and Descope credentials)
 make test-e2e-keycloak   # Keycloak end-to-end suite, no credential (needs keycloak-test, the backend and the Keycloak-built SPA; see keycloak.md)
+make test-e2e-zitadel    # Zitadel end-to-end suite, no credential (needs the applied and seeded local Zitadel, the backend and the Zitadel-built SPA; see zitadel.md)
 make test-all            # lint + unit + frontend + integration
 make test-down           # tear the test stack down
 ```
