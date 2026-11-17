@@ -150,7 +150,8 @@ request's database session already holds, in a savepoint of its transaction, and
 that savepoint back (the push runs after the service committed, so the savepoint holds only the lock
 and the rows the request loaded stay loaded), so a request never waits for a second pooled
 connection. A push waits for the lock at most `KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS` (default
-10): requests queued behind a slow holder each hold their connection while they wait, and the limit
+20, longer than a holder's three admin calls of at most 5 s each and shorter than the pool's 30 s
+checkout timeout): requests queued behind a slow holder each hold their connection while they wait, and the limit
 lets them go before they stall other routes waiting for the pool. A push that gives up is a failed
 push, logged and told as below (a membership ending is an `IdP revocation failed`); making it again
 ends the membership. A realm admin's edit in Keycloak takes no

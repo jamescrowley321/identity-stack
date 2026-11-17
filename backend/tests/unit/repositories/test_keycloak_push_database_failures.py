@@ -127,7 +127,7 @@ async def test_a_lock_not_taken_in_time_is_a_sync_error_and_leaves_the_requests_
 ):
     """Another request holds the organization's lock past the wait limit; the rows read before stay readable."""
     _tenant, _role, users = members
-    monkeypatch.setattr("app.dependencies.identity.ORGANIZATION_LOCK_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr("app.dependencies.identity.ORGANIZATION_LOCK_TIMEOUT_MS", 200)
     tenant_id = uuid.uuid4()
     factory = sessions(async_engine)
 

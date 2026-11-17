@@ -11,6 +11,7 @@ from expression import Error, Ok
 from fastapi import FastAPI
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
+from sqlalchemy.pool import QueuePool
 
 from app import main
 from app.dependencies import identity
@@ -32,6 +33,7 @@ from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.permission import PermissionRepository
 from app.repositories.role import RoleRepository
 from app.repositories.user import UserRepository
+from app.services import keycloak_admin
 from app.services.adapters.base import (
     CHANGED_IN_TENANT,
     LAST_ROLE_IN_TENANT,
@@ -238,28 +240,43 @@ class TestSelection:
 
 
 class TestOrganizationLockTimeout:
-    """KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS: how long a push waits for an organization's lock."""
+    """KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS: a push's wait for an organization's lock, in whole ms."""
 
-    def test_the_default_is_ten_seconds(self, monkeypatch):
+    REFUSED = (
+        "KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS must be a number of seconds from 0.001 to 2147483.647, not {raw!r}"
+    )
+
+    def test_the_default_is_twenty_seconds(self, monkeypatch):
         monkeypatch.delenv("KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS", raising=False)
 
-        assert identity.organization_lock_timeout() == 10.0
+        assert identity.organization_lock_timeout() == 20_000
 
-    def test_a_positive_number_is_read(self, monkeypatch):
-        monkeypatch.setenv("KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS", "2.5")
+    def test_the_default_outlasts_a_holder_and_ends_before_the_pool_checkout(self, monkeypatch):
+        """A holder makes three admin calls under the lock; a waiter gives up before SQLAlchemy's 30 s pool timeout."""
+        monkeypatch.delenv("KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS", raising=False)
+        holder_worst_case_ms = 3 * keycloak_admin.ADMIN_TIMEOUT_SECONDS * 1000
+        pool_checkout_ms = QueuePool(lambda: None).timeout() * 1000
 
-        assert identity.organization_lock_timeout() == 2.5
+        assert holder_worst_case_ms < identity.organization_lock_timeout() < pool_checkout_ms
 
-    @pytest.mark.parametrize("raw", ["0", "-1", "nan", "inf", "ten", ""])
-    def test_a_value_that_is_no_limit_stops_startup(self, monkeypatch, raw):
+    @pytest.mark.parametrize(
+        ("raw", "milliseconds"),
+        [("2.5", 2500), ("0.001", 1), ("2147483.647", 2_147_483_647)],
+    )
+    def test_seconds_are_read_as_whole_milliseconds(self, monkeypatch, raw, milliseconds):
+        monkeypatch.setenv("KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS", raw)
+
+        assert identity.organization_lock_timeout() == milliseconds
+
+    @pytest.mark.parametrize("raw", ["0", "-1", "nan", "inf", "ten", "", "0.0001", "0.0004", "2147483.648", "1e7"])
+    def test_a_value_postgres_reads_as_no_limit_or_refuses_stops_startup(self, monkeypatch, raw):
+        """0 ms is no lock_timeout at all; above 2147483647 ms Postgres refuses set_config on every push."""
         monkeypatch.setenv("KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS", raw)
 
         with pytest.raises(ProviderConfigurationError) as refused:
             identity.organization_lock_timeout()
 
-        assert str(refused.value) == (
-            f"KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS must be a positive number of seconds, not {raw!r}"
-        )
+        assert str(refused.value) == self.REFUSED.format(raw=raw)
 
 
 class _Savepoint:

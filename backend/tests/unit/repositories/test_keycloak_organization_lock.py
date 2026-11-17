@@ -132,7 +132,7 @@ async def test_requests_behind_a_holder_slower_than_the_pool_timeout_give_up_and
     postgres_url, _run_migrations, monkeypatch
 ):
     """The holder keeps the lock until another route has answered: without a wait limit that never happens."""
-    monkeypatch.setattr("app.dependencies.identity.ORGANIZATION_LOCK_TIMEOUT_SECONDS", LOCK_WAIT_SECONDS)
+    monkeypatch.setattr("app.dependencies.identity.ORGANIZATION_LOCK_TIMEOUT_MS", round(LOCK_WAIT_SECONDS * 1000))
     engine = create_async_engine(postgres_url, pool_size=POOL_SIZE, max_overflow=0, pool_timeout=POOL_TIMEOUT_SECONDS)
     factory = sessions(engine)
     organization = f"organization-{uuid.uuid4()}"
@@ -178,7 +178,7 @@ async def test_requests_behind_a_holder_slower_than_the_pool_timeout_give_up_and
 
 async def test_the_wait_limit_ends_with_the_lock(async_engine, monkeypatch):
     """The limit is local to the lock: the request's later statements wait as they did."""
-    monkeypatch.setattr("app.dependencies.identity.ORGANIZATION_LOCK_TIMEOUT_SECONDS", 2.5)
+    monkeypatch.setattr("app.dependencies.identity.ORGANIZATION_LOCK_TIMEOUT_MS", 2500)
     factory = sessions(async_engine)
 
     async with factory() as session:
