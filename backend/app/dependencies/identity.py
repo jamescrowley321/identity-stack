@@ -4,7 +4,7 @@ AC-2.1.7: get_user_service() wires AsyncSession -> UserRepository -> UserService
 AC-2.2.6: get_role_service(), get_permission_service(), get_tenant_service()
 with the sync adapter of the configured provider (get_sync_adapter): DescopeSyncAdapter
 wrapping the singleton DescopeManagementClient by default, KeycloakSyncAdapter with
-SYNC_PROVIDER=keycloak.
+SYNC_PROVIDER=keycloak, ZitadelSyncAdapter with SYNC_PROVIDER=zitadel.
 AC-3.1.1: get_inbound_sync_service() wires repositories for inbound sync.
 AC-3.2.1: get_reconciliation_service() wires repositories + Descope client for reconciliation.
 AC-4.1.3: get_idp_link_service(), get_provider_service() for IdP link/provider domain services.
@@ -22,6 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from starlette.datastructures import State
 
+from app.dependencies.zitadel_sync import build_zitadel_sync_adapter
 from app.errors.identity import Conflict, IdentityErrorRaised
 from app.knobs import knob
 from app.models.database import get_async_session, get_engine
@@ -54,7 +55,8 @@ _RECONCILIATION_LOCK_ID = 73_82_69_67  # "RECON" in digits
 
 # The provider the canonical services push tenants, users and assignments to.
 # Fixed for the process; main.lifespan refuses a value not in SYNC_ADAPTERS and
-# opens what the chosen adapter needs (app.state.keycloak_admin for keycloak).
+# opens what the chosen adapter needs (app.state.keycloak_admin for keycloak,
+# app.state.zitadel_admin for zitadel).
 SYNC_PROVIDER = knob("SYNC_PROVIDER", "descope").strip().lower()
 
 
@@ -101,6 +103,7 @@ SYNC_ADAPTERS: dict[str, Callable[[State, AsyncSession], IdentityProviderAdapter
         linked_subject=keycloak_linked_subject(session),
         organization_lock=keycloak_organization_lock(),
     ),
+    "zitadel": lambda state, session: build_zitadel_sync_adapter(state.zitadel_admin, session),
 }
 
 

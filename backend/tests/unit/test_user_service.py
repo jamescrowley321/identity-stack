@@ -19,7 +19,7 @@ from app.models.identity.user import User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.base import RepositoryConflictError
 from app.repositories.user import UserRepository
-from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.adapters.base import CREATED_IN_TENANT, IdentityProviderAdapter, SyncError
 from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.user import UserService
 
@@ -81,6 +81,51 @@ class TestCreateUser:
         repo.create.assert_awaited_once()
         repo.commit.assert_awaited_once()
         adapter.sync_user.assert_awaited_once()
+
+    async def test_create_user_tells_the_adapter_the_tenant_and_the_profile(self):
+        """An adapter that keeps users in the tenant's organization (Zitadel) creates the user there."""
+        service, repo, adapter, _assign_repo = _build_service()
+        repo.get_by_email.return_value = None
+        user = _make_user()
+        repo.create.return_value = user
+        adapter.sync_user.return_value = Ok(None)
+
+        await service.create_user(
+            tenant_id=TENANT_ID,
+            email=user.email,
+            user_name=user.user_name,
+            given_name=user.given_name,
+            family_name=user.family_name,
+        )
+
+        adapter.sync_user.assert_awaited_once_with(
+            user_id=user.id,
+            data={
+                "email": "alice@example.com",
+                "status": "active",
+                "user_name": "alice",
+                "given_name": "Alice",
+                "family_name": "Smith",
+                CREATED_IN_TENANT: str(TENANT_ID),
+            },
+        )
+
+    async def test_only_create_user_names_a_tenant_the_user_was_created_in(self):
+        service, repo, adapter, _assign_repo = _build_service()
+        user = _make_user()
+        repo.get.return_value = user
+        repo.update.return_value = user
+        adapter.sync_user.return_value = Ok(None)
+
+        await service.update_user(tenant_id=TENANT_ID, user_id=user.id, given_name="Alicia")
+        await service.deactivate_user(tenant_id=TENANT_ID, user_id=user.id)
+        await service.activate_user(tenant_id=TENANT_ID, user_id=user.id)
+
+        assert [CREATED_IN_TENANT in call.kwargs["data"] for call in adapter.sync_user.await_args_list] == [
+            False,
+            False,
+            False,
+        ]
 
     async def test_create_user_commit_before_sync(self):
         """Commit must happen before sync to prevent ghost state in IdP."""
