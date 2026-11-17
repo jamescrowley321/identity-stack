@@ -19,7 +19,7 @@ from fastapi import FastAPI
 from app import main
 from app.dependencies import identity
 from app.services.adapters.base import LAST_ROLE_IN_TENANT
-from app.services.adapters.keycloak import KeycloakSyncAdapter
+from app.services.adapters.keycloak import USER_NOT_IN_KEYCLOAK, KeycloakSyncAdapter
 from app.services.keycloak_admin import (
     ADMIN_CLIENT_ID_VARIABLE,
     ADMIN_CREDENTIAL_VARIABLE,
@@ -290,6 +290,24 @@ class TestMembers:
         assert result.error.context["status"] == 409
         assert members(realm, organization) == []
         assert find_user(realm, user_id)["email"] == email_of(user_id)
+
+    async def test_ending_a_membership_of_a_user_keycloak_lacks_is_an_error_and_creates_no_user(
+        self, sync, realm, tenant_id, user_id
+    ):
+        await sync.sync_tenant(tenant_id=tenant_id, data={"name": f"Sync {tenant_id}"})
+        last = {"role_name": "member", LAST_ROLE_IN_TENANT: True}
+        left = {"email": email_of(user_id), "status": "active", "left_tenant_id": str(tenant_id)}
+
+        removed = await sync.delete_role_assignment(
+            user_id=user_id, tenant_id=tenant_id, role_id=uuid.uuid4(), data=last
+        )
+        leaving = await sync.sync_user(user_id=user_id, data=left)
+
+        assert [(result.error.operation, result.error.message) for result in (removed, leaving)] == [
+            ("delete_role_assignment", USER_NOT_IN_KEYCLOAK),
+            ("sync_user", USER_NOT_IN_KEYCLOAK),
+        ]
+        assert find_user(realm, user_id) is None
 
     async def test_adding_to_a_tenant_not_pushed_is_an_error(self, sync, tenant_id, user_id):
         await sync.sync_user(user_id=user_id, data={"email": email_of(user_id), "status": "active"})

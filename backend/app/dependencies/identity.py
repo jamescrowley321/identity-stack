@@ -20,6 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import State
 
+from app.errors.identity import Conflict, IdentityErrorRaised
 from app.knobs import knob
 from app.models.database import get_async_session
 from app.repositories.assignment import UserTenantRoleRepository
@@ -58,6 +59,11 @@ SYNC_ADAPTERS: dict[str, Callable[[State], IdentityProviderAdapter]] = {
     "descope": lambda state: DescopeSyncAdapter(client=state.descope_client),
     "keycloak": lambda state: KeycloakSyncAdapter(state.keycloak_admin),
 }
+
+
+# Reconciliation reads Descope and writes what it finds into the canonical model,
+# so it is refused where the canonical model is pushed to another provider.
+RECONCILIATION_NEEDS_DESCOPE = "Reconciliation compares the canonical model with Descope; SYNC_PROVIDER is not descope"
 
 
 def get_sync_adapter(request: Request) -> IdentityProviderAdapter:
@@ -180,7 +186,10 @@ async def get_reconciliation_service(
     AC-3.2.1: Wiring: AsyncSession -> all identity repositories + DescopeManagementClient
                -> ReconciliationService(session, acquire_lock, descope_client, repositories...)
     Advisory lock callable injected here to keep SA imports out of the domain service.
+    Refused (409) unless ``SYNC_PROVIDER`` is ``descope``.
     """
+    if SYNC_PROVIDER != "descope":
+        raise IdentityErrorRaised(Conflict(message=RECONCILIATION_NEEDS_DESCOPE))
     user_repository = UserRepository(session)
     role_repository = RoleRepository(session)
     permission_repository = PermissionRepository(session)

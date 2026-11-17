@@ -111,7 +111,8 @@ async def _start_sync_provider(app: FastAPI) -> OutboundClient | None:
         await http.aclose()
         raise RuntimeError(
             f"The Keycloak admin client's service account lacks {REALM_MANAGEMENT_CLIENT} roles "
-            f"{sorted(exc.missing)}: grant it {sorted(REQUIRED_ROLES)} or name another client "
+            f"{sorted(exc.missing)}: grant it {sorted(REQUIRED_ROLES)} directly (roles reached through a group "
+            f"or a composite realm role are not read) or name another client "
             f"in {ADMIN_CLIENT_ID_VARIABLE}"
         ) from exc
     except KeycloakAdminError as exc:

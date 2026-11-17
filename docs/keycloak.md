@@ -90,8 +90,12 @@ on one HTTP client with a 5-second timeout. Startup takes a token, makes one Adm
 it and reads the service account's own `realm-management` roles (composites expanded); a missing
 setting, a credential Keycloak refuses, or a service account without `manage-users` and
 `manage-organizations` (such as the read-only `identity-stack-directory`) stops the backend before
-it serves a request ([environment-variables.md](environment-variables.md)). No route changes: the services
-that synced to Descope sync to Keycloak instead.
+it serves a request ([environment-variables.md](environment-variables.md)). Map the two roles to the
+service account directly: startup reads its direct `realm-management` mappings, so roles it reaches
+only through a group or a composite realm role are not seen and stop startup too (reading them needs
+`view-clients`, which the admin client does not hold). No route changes: the services that synced to
+Descope sync to Keycloak instead. Reconciliation (`POST /api/internal/reconciliation/run`) compares
+the canonical model with Descope, so with `SYNC_PROVIDER=keycloak` it is refused (409).
 
 | Canonical change | What the adapter does in Keycloak |
 |---|---|
@@ -101,8 +105,8 @@ that synced to Descope sync to Keycloak instead.
 | A user is deactivated or activated | Disables (`inactive`) or enables (`active`, `provisioned`) that user. This overwrites a disable or enable a realm admin made in Keycloak. |
 | A user is deleted (`delete_user`) | Deletes that user. One that is not there counts as deleted. |
 | A role is assigned in a tenant (`sync_role_assignment`) | Adds the user to the tenant's organization: holding a role in a tenant is being its member. Already a member counts as added. |
-| A user is removed from a tenant (`remove_user_from_tenant`) | Ends the user's membership of that tenant's organization, before the profile update, so a refused update still ends it. Not a member, or no organization, counts as removed. Then pushes only a changed email: leaving a tenant does not send `enabled`, so it does not undo a realm admin's disable. |
-| A user's last role in a tenant is unassigned (`delete_role_assignment`) | Ends the user's membership of that tenant's organization. `RoleService` marks the unassignment that leaves no role in the tenant, counting the roles left after its commit, so two concurrent unassigns of a user's last two roles cannot each see the other's role. Not a member, or no organization or user in Keycloak, counts as removed. |
+| A user is removed from a tenant (`remove_user_from_tenant`) | Ends the user's membership of that tenant's organization, before the profile update, so a refused update still ends it. Not a member, or no organization, counts as removed. No Keycloak user under the canonical id is an error, and no user is created: leaving a tenant never provisions an account. Then pushes only a changed email: leaving a tenant does not send `enabled`, so it does not undo a realm admin's disable. |
+| A user's last role in a tenant is unassigned (`delete_role_assignment`) | Ends the user's membership of that tenant's organization. `RoleService` marks the unassignment that leaves no role in the tenant, counting the roles left after its commit, so two concurrent unassigns of a user's last two roles cannot each see the other's role. Not a member, or no organization, counts as removed; no Keycloak user under the canonical id is an error. |
 | A role or permission is defined, changed or deleted; one role of several is unassigned | Nothing. Roles and permissions stay canonical, as with Ory; a user keeps the membership while another role in the tenant remains. |
 
 Every failure comes back to the service as an error, with the HTTP status, and is logged; the
@@ -113,15 +117,15 @@ What Keycloak does not do, or the adapter does not take on:
 
 | Limit | What happens |
 |---|---|
-| The adapter manages only the users it created (username = canonical user id). A Keycloak user who signed up through the login page, such as the realm's fixture users, has another username and is not taken over by email. | Keycloak refuses to create a second user with the same email (409); the adapter returns that error. A membership change for a user the adapter did not create returns an error too. |
-| The adapter treats any Keycloak user whose username equals a canonical user id as its own. | A realm must not let users choose their username where it can hold a canonical id: keep self-registration and brokered first login from setting usernames (the compose realm has registration off and no identity providers). |
+| The adapter manages only the users it created (username = canonical user id). A Keycloak user who signed up through the login page, such as the realm's fixture users, has another username and is not taken over by email. | Keycloak refuses to create a second user with the same email (409); the adapter returns that error. A membership change for a user the adapter did not create returns an error too, and is logged: ending one (last role unassigned, user removed from a tenant) cannot find the membership such a user holds under another username, so it stays until a realm admin ends it. |
+| The adapter treats any Keycloak user whose username equals a canonical user id as its own. | A realm must not let users choose their username where it can hold a canonical id: keep self-registration and brokered first login from setting usernames, and keep users from editing theirs (`editUsernameAllowed` off, and no user-profile permission letting the user edit `username`). The compose realm has registration off, no identity providers and `editUsernameAllowed` at Keycloak's default, off. |
 | The admin client's `manage-organizations` can write organization attributes, the `type:<type client>` grant markers the directory lookup trusts. | The adapter never sends attributes, but its secret grants as much as a realm admin's over organizations: keep it like one. |
 | A tenant admin can assign a role to a user who is not a member of the tenant (`POST /api/roles/assign` does not check the target's membership, [identity-stack#592](https://github.com/jamescrowley321/identity-stack/issues/592)). | With this adapter that adds the user to the tenant's organization. An organization-bound user who is a member of two organizations is refused in both, so another tenant's admin can lock such a user out until #592 is fixed. |
 | A push that fails leaves Keycloak behind the canonical model; nothing retries it. | A failed membership removal keeps the user in the organization. A role assigned while the last role is being unassigned can interleave so that the membership ends while a role remains, or stays while none does. Retrying or reconciling them is [identity-stack#612](https://github.com/jamescrowley321/identity-stack/issues/612). |
 | An organization's alias cannot change in Keycloak. | The alias is the canonical tenant id, which does not change either. |
 | An organization's domains must be valid domain names, each held by one organization in the realm. Keycloak's domains route a login to an organization's identity provider; they do not add users to it the way Descope's self-provisioning domains do. | A domain Keycloak refuses (400) is an error, and the organization keeps its name and domains. |
 | An organization's name must be unique in the realm. | A second tenant with a name another organization holds is refused (409). |
-| A role assignment is not mirrored to client roles. Client roles are realm-wide and say nothing of an organization (decision 10); the realm admin grants them and the `type:` markers. | The membership is pushed; the grant is not. |
+| A role assignment is not mirrored to client roles. Client roles are realm-wide and say nothing of an organization (decision 10); the realm admin grants them and the `type:` markers. | The membership is pushed; the grant is not. Ending a membership leaves the user's id in the organization's `type:<type client>` attributes and the user's client roles: the realm admin owns both and removes them. The directory lookup counts a `type:` entry only for a member, so the entry grants nothing once the membership has ended. |
 | A membership can be pushed only once the tenant and the user are both in Keycloak. | Assigning a role in a tenant that was never pushed returns an error. |
 | Deleting a role removes its assignments in the database without telling the adapter which users lost their last role in a tenant. | A user whose only role in a tenant was the deleted role keeps the organization membership until it is ended another way: [identity-stack#610](https://github.com/jamescrowley321/identity-stack/issues/610). |
 
