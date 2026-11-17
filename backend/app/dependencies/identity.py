@@ -19,13 +19,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, Request
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import State
 
 from app.dependencies.zitadel_sync import build_zitadel_sync_adapter
 from app.errors.identity import Conflict, IdentityErrorRaised
 from app.knobs import knob
-from app.models.database import get_async_session, get_engine
+from app.models.database import get_async_session
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.permission import PermissionRepository
@@ -37,7 +38,12 @@ from app.repositories.user import UserRepository
 from app.services.adapters.base import IdentityProviderAdapter
 from app.services.adapters.descope import DescopeSyncAdapter
 from app.services.adapters.keycloak import PROVIDER_NAME as KEYCLOAK_PROVIDER_NAME
-from app.services.adapters.keycloak import KeycloakSyncAdapter, LinkedSubject, OrganizationLock
+from app.services.adapters.keycloak import (
+    KeycloakSyncAdapter,
+    LinkedSubject,
+    LocalDatabaseError,
+    OrganizationLock,
+)
 from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
 from app.services.idp_link import IdPLinkService
@@ -61,35 +67,71 @@ SYNC_PROVIDER = knob("SYNC_PROVIDER", "descope").strip().lower()
 
 
 def keycloak_linked_subject(session: AsyncSession) -> LinkedSubject:
-    """The Keycloak account id a canonical user's ``keycloak`` IdP link names, read in the request's session."""
+    """The Keycloak account id a canonical user's ``keycloak`` IdP link names, read in the request's session.
+
+    A database failure is ``LocalDatabaseError``, after the session is rolled back
+    so the request can still use it.
+    """
     links = IdPLinkRepository(session)
 
     async def linked_subject(user_id: uuid.UUID) -> str | None:
-        return await links.signed_in_sub_of(user_id, KEYCLOAK_PROVIDER_NAME)
+        try:
+            return await links.signed_in_sub_of(user_id, KEYCLOAK_PROVIDER_NAME)
+        except _DATABASE_FAILURES as exc:
+            await session.rollback()
+            raise LocalDatabaseError(_failed("the IdP link read", exc)) from exc
 
     return linked_subject
+
+
+# What a database call raises when the database or the pool fails: SQLAlchemy's
+# errors (the driver's wrapped, a pool checkout timeout) and a refused connection.
+_DATABASE_FAILURES = (SQLAlchemyError, OSError)
+
+
+def _failed(what: str, exc: BaseException) -> str:
+    """A LocalDatabaseError's message: the exception's type only, never the statement or its parameters."""
+    return f"{what} failed in the service's database: {type(exc).__name__}"
 
 
 # Namespaces the advisory-lock key of a Keycloak organization (hashed with its alias).
 _ORGANIZATION_LOCK_NAMESPACE = "keycloak-organization:"
 
 
-def keycloak_organization_lock(engine: Callable[[], AsyncEngine] = get_engine) -> OrganizationLock:
+def keycloak_organization_lock(session: AsyncSession) -> OrganizationLock:
     """A Postgres advisory lock per Keycloak organization alias, held across workers.
 
-    Taken on a connection of its own, not the request's session: the adapter runs
-    after the service committed, and the lock's transaction ends (commits nothing)
-    when the adapter's write does.
+    Taken on the request's session connection, which the request already holds
+    (the IdP link read), so taking it never waits for a second pooled connection:
+    requests beyond the pool's size cannot hold one each and wait for another.
+    It is a transaction lock, released when the lock is left by committing the
+    session's transaction. The adapter runs after the service committed, so that
+    transaction holds only reads and the commit writes nothing; a commit, not a
+    rollback, keeps the rows the request loaded (a rollback expires them).
+
+    A database failure taking or releasing it is ``LocalDatabaseError``, after the
+    session is rolled back (which also releases the lock) so the request can still
+    use it.
     """
 
     @asynccontextmanager
     async def organization_lock(alias: str) -> AsyncIterator[None]:
-        async with engine().begin() as connection:
-            await connection.execute(
+        try:
+            await session.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
                 {"key": _ORGANIZATION_LOCK_NAMESPACE + alias},
             )
+        except _DATABASE_FAILURES as exc:
+            await session.rollback()
+            raise LocalDatabaseError(_failed("the organization lock", exc)) from exc
+        try:
             yield
+        finally:
+            try:
+                await session.commit()
+            except _DATABASE_FAILURES as exc:
+                await session.rollback()
+                raise LocalDatabaseError(_failed("the organization lock", exc)) from exc
 
     return organization_lock
 
@@ -101,7 +143,7 @@ SYNC_ADAPTERS: dict[str, Callable[[State, AsyncSession], IdentityProviderAdapter
     "keycloak": lambda state, session: KeycloakSyncAdapter(
         state.keycloak_admin,
         linked_subject=keycloak_linked_subject(session),
-        organization_lock=keycloak_organization_lock(),
+        organization_lock=keycloak_organization_lock(session),
     ),
     "zitadel": lambda state, session: build_zitadel_sync_adapter(state.zitadel_admin, session),
 }
