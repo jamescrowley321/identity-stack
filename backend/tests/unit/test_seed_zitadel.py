@@ -1,6 +1,8 @@
 """Reading the Terraform output the Zitadel seed runs from (`canonical_seed` in infra/zitadel)."""
 
 import copy
+import json
+from pathlib import Path
 
 import pytest
 
@@ -47,6 +49,10 @@ def _output_with(path: tuple[str, ...], value: object) -> dict:
 
 _DELETE = object()
 
+# `terraform output -json canonical_seed` from an apply of infra/zitadel to the compose
+# Zitadel. Re-record it when outputs.tf changes the output's shape.
+RECORDED_OUTPUT = Path(__file__).resolve().parents[1] / "fixtures" / "zitadel" / "canonical-seed.json"
+
 
 def test_the_terraform_output_reads_as_the_seed_input():
     assert parse_seed_input(OUTPUT) == SeedInput(
@@ -54,6 +60,23 @@ def test_the_terraform_output_reads_as_the_seed_input():
         tenants={"acme": ACME_ORG, "globex": GLOBEX_ORG},
         linked_user=LinkedUser(
             external_sub=ACME_USER,
+            email="acme-user@acme.test",
+            user_name="acme-user",
+            given_name="Acme",
+            family_name="User",
+            roles={"acme": "admin", "globex": "viewer"},
+        ),
+    )
+
+
+def test_the_output_a_real_apply_writes_reads_as_the_seed_input():
+    recorded = json.loads(RECORDED_OUTPUT.read_text())
+
+    assert parse_seed_input(recorded) == SeedInput(
+        issuer_url=ISSUER,
+        tenants={"acme": "399948686462824451", "globex": "399948686446047235"},
+        linked_user=LinkedUser(
+            external_sub="399948689885442051",
             email="acme-user@acme.test",
             user_name="acme-user",
             given_name="Acme",
