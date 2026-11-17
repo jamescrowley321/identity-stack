@@ -41,9 +41,9 @@ fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-# Only the files git does not ignore, so a local override.tf or state never changes
-# what is applied.
-git -C "$root" ls-files -z --cached --others --exclude-standard -- ':(glob)*.tf' .terraform.lock.hcl environments |
+# Only the files git tracks, so an untracked or ignored override.tf or state never
+# changes what is applied. A new .tf file is applied once it is staged (`git add`).
+git -C "$root" ls-files -z --cached -- ':(glob)*.tf' .terraform.lock.hcl environments |
   (cd "$root" && while IFS= read -r -d '' file; do [ -e "$file" ] || continue; cp --parents "$file" "$work/"; done)
 
 tf() { terraform -chdir="$work" "$@"; }
