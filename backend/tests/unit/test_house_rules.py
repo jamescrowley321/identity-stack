@@ -270,7 +270,9 @@ def test_queries_live_in_repositories():
 # (module, function) -> why it reads request.state itself.
 REQUEST_STATE_READERS = {
     ("routers/auth.py", "logout"): "needs the principal or None, to fall back to the first configured provider",
-    ("routers/protected.py", "canonical_identity"): "checks principal, identity and claims together for one 401",
+    ("routers/protected.py", "canonical_identity"): (
+        "checks principal, identity and claims together for one 401, and hands the provider to first-login provisioning"
+    ),
     ("routers/idp_links.py", "_require_user_in_tenant"): "a raising guard; answers 404, not 401/403, by design",
 }
 

@@ -17,11 +17,12 @@ from app.dependencies.identity import (
     get_identity_resolution_service,
 )
 from app.dependencies.rbac import TokenTenant, token_tenant
-from app.errors.identity import NotFound, ValidationError
+from app.errors.identity import Forbidden, NotFound, ValidationError
 from app.knobs import knob, knob_set
 from app.logbook import logbook
-from app.middleware.providers import descope_config
+from app.middleware.providers import ProviderTokenConfig, descope_config
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
+from app.services.first_login_profile import userinfo_profile
 from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
 
@@ -41,6 +42,9 @@ DESCOPE = descope_config(DESCOPE_PROJECT_ID)
 PROVIDER_FAULTS = (NetworkException, DiscoveryValidationError, JwksValidationError, ConfigurationException)
 REFUSED_DETAIL = "Invalid or expired token"
 UNAVAILABLE_DETAIL = "Identity provider unavailable"
+# First-login refusals of a provider whose organization picks the user's tenant (Zitadel).
+ORGANIZATION_NOT_LINKED = "Your organization is not linked to a tenant"
+USERINFO_SUBJECT_MISMATCH = "The identity provider's UserInfo does not match the token"
 
 # Providers eligible for just-in-time provisioning on first login. Ory is
 # greenfield (every user is JIT-provisioned); Descope users are pre-provisioned
@@ -48,6 +52,8 @@ UNAVAILABLE_DETAIL = "Identity provider unavailable"
 # opt-in: provisioning links a new identity to the canonical user with the same
 # verified email, which makes the realm's ``email_verified`` a linking trust
 # root (docs/security.md), so an operator names ``keycloak`` here to accept it.
+# Zitadel is opt-in too (``ory,zitadel``): its first-login users join the tenant
+# their organization is linked to, and take their email from UserInfo.
 JIT_ENABLED_PROVIDERS = knob_set("JIT_ENABLED_PROVIDERS", "ory")
 
 
@@ -119,6 +125,46 @@ def _as_token_tenant_identity(identity: dict, tenant: TokenTenant) -> dict:
     }
 
 
+async def _first_login_profile(provider: object, claims: dict, access_token: str, sub: str) -> dict:
+    """The profile and organization ``provision`` is called with for a first-login subject.
+
+    For a provider with a ``first_login_organization`` (Zitadel), a token that
+    names no organization is refused (403) before anything is fetched, and the
+    organization is passed on: provisioning refuses one no tenant is linked
+    to. For a provider with ``profile_from_userinfo``, the email and names come
+    from UserInfo, never from the token: a UserInfo answer for another subject
+    is refused (403) and one that cannot be had is 502. Every other provider
+    gets its profile from the token's claims, as before.
+    """
+    config = provider if isinstance(provider, ProviderTokenConfig) else None
+    organization: str | None = None
+    if config is not None and config.first_login_organization is not None:
+        organization = config.first_login_organization(claims)
+        if organization is None:
+            logger.warning("first login refused: provider %s token names no organization", config.name)
+            raise HTTPException(status_code=403, detail=ORGANIZATION_NOT_LINKED)
+    if config is not None and config.profile_from_userinfo:
+        fetched = await userinfo_profile(config, access_token, sub)
+        if fetched.is_error():
+            if isinstance(fetched.error, Forbidden):
+                raise HTTPException(status_code=403, detail=USERINFO_SUBJECT_MISMATCH)
+            raise HTTPException(status_code=502, detail=UNAVAILABLE_DETAIL)
+        profile = {
+            "email": fetched.ok.email,
+            "email_verified": fetched.ok.email_verified,
+            "given_name": fetched.ok.given_name,
+            "family_name": fetched.ok.family_name,
+        }
+    else:
+        profile = {
+            "email": claims.get("email", ""),
+            "email_verified": bool(claims.get("email_verified", False)),
+            "given_name": claims.get("given_name", ""),
+            "family_name": claims.get("family_name", ""),
+        }
+    return profile if organization is None else {**profile, "organization_id": organization}
+
+
 @router.get("/identity")
 async def canonical_identity(
     request: Request,
@@ -132,7 +178,9 @@ async def canonical_identity(
     whose tenant and grants come from its token alone (Keycloak), where they
     come from the token and the provider's directory (``token_tenant``). For
     JIT-enabled providers (``JIT_ENABLED_PROVIDERS``), a first-login subject that
-    resolves to no canonical user is provisioned on the fly, then resolved.
+    resolves to no canonical user is provisioned on the fly, then resolved: for
+    Zitadel into the tenant linked to the token's organization, with the profile
+    from UserInfo (``_first_login_profile``).
     """
     principal = getattr(request.state, "principal", None)
     claims = getattr(request.state, "claims", None)
@@ -146,19 +194,25 @@ async def canonical_identity(
 
     result = await resolver.resolve(provider=provider_name, sub=sub)
     if result.is_error() and provider_name in JIT_ENABLED_PROVIDERS:
+        first_login = await _first_login_profile(
+            getattr(request.state, "provider", None),
+            claims,
+            request.headers.get("Authorization", "").removeprefix("Bearer "),
+            sub,
+        )
         provisioned = await provisioner.provision(
             provider_name=provider_name,
             sub=sub,
-            email=claims.get("email", ""),
-            email_verified=bool(claims.get("email_verified", False)),
-            given_name=claims.get("given_name", ""),
-            family_name=claims.get("family_name", ""),
+            **first_login,
             # ``tenant`` is set exactly for a provider whose grants come from
             # its token alone (Keycloak): none are written for it.
             assign_default_role=tenant is None,
         )
         if provisioned.is_error():
             err = provisioned.error
+            if isinstance(err, Forbidden):
+                # The organization is linked to no single active tenant.
+                raise HTTPException(status_code=403, detail=ORGANIZATION_NOT_LINKED)
             if isinstance(err, ValidationError):
                 # Missing/unverified email in the token — a client-side problem.
                 raise HTTPException(status_code=400, detail="A verified email is required to provision an identity")

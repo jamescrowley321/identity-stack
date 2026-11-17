@@ -216,7 +216,10 @@ RFC 9457 problem-detail bodies (`application/problem+json`) **MUST** be built on
 
 - Exception: `GET /api/identity` (`routers/protected.py::canonical_identity`). Its
   400/404/409/500 answers predate the canonical service layer and are part of the
-  endpoint's published contract.
+  endpoint's published contract. The first-login refusals of a provider whose
+  organization picks the tenant (Zitadel) answer in the same `{"detail": ...}` style:
+  403 for no organization, an organization linked to no single active tenant, or a
+  UserInfo `sub` that differs, and 502 when UserInfo cannot be read.
 - Exception: the handlers in `routers/users.py` and `routers/attributes.py`, and
   `routers/accesskeys.py::_verify_key_tenant`. They answer an `Error` from
   `DescopeManagementAdapter` with the `{"detail": ...}` 400/403/502 bodies those routes had
@@ -278,7 +281,8 @@ handler **MUST NOT** read the `dct` claim to find its tenant. It takes the tenan
 - Exception: `routers/auth.py::logout`, which needs the principal or `None` so it can fall
   back to the first configured provider.
 - Exception: `routers/protected.py::canonical_identity`, which checks principal, identity
-  and claims together for one 401.
+  and claims together for one 401, and hands the request's provider to first-login
+  provisioning.
 - Exception: `routers/idp_links.py::_require_user_in_tenant`, a raising guard that answers
   404 rather than 401/403 so it does not reveal whether a user exists.
 
@@ -696,6 +700,17 @@ permissions, and `KEYCLOAK_REQUIRE_HTTPS` is on or the issuer host is loopback o
 resolves to. The middleware factory therefore **MUST** log a warning at startup for every
 provider whose `require_https` is off. See [ADR-0010](adr/0010-keycloak-token-model.md).
 
+The Zitadel registration **MUST** refuse to start with `ZITADEL_ISSUER_URL` set unless
+`ZITADEL_AUDIENCE` names the project id and `ZITADEL_CLIENT_ID` the SPA application, and
+**MUST** refuse an `http` issuer while `ZITADEL_REQUIRE_HTTPS` is on, loopback included.
+Its binding (`app/middleware/zitadel.py`) is the SPA's `client_id` and none of `azp`,
+`at_hash`, `auth_time`, `sid` or `nonce`, because audience cannot tell the SPA's access
+token from another application's or from an ID token. It has no claims extractor: its
+principals are decided from the canonical model. Its organization claim is read by
+`zitadel.organization_id` alone, and only first-login provisioning calls it, through
+`ProviderTokenConfig.first_login_organization`. A provider with `profile_from_userinfo`
+takes a first-login user's email and names from UserInfo, never from its token.
+
 Both token middlewares **MUST** build the principal and read the tenant with the
 provider's extractor inside the code path that answers a failure with the uniform 401, so
 that a principal that cannot be built or an extractor that raises is the same 401 in
@@ -712,5 +727,7 @@ standalone and in gateway mode, with the cause logged and not returned.
 
 *Enforcement:* tests (`test_provider_registration.py` registers a second provider from the
 test alone and drives it through the factory, both middlewares and logout;
-`test_keycloak_startup.py` starts the factory on each incomplete Keycloak configuration),
-plus review.
+`test_keycloak_startup.py` starts the factory on each incomplete Keycloak configuration,
+`test_zitadel_startup.py` on each incomplete Zitadel one, `test_zitadel_token_binding.py`
+runs the recorded Zitadel tokens through the binding and `test_zitadel_first_login.py`
+checks that the organization claim has one reader), plus review.

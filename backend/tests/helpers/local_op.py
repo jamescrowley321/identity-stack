@@ -1,7 +1,9 @@
 """A loopback OIDC provider for unit tests that run the real library.
 
 Serves a discovery document and one JWKS holding an RS256, an ES256 and a PS256
-key, and signs tokens with any of them. The middleware under test fetches both
+key, and signs tokens with any of them. Serves UserInfo once a test hands it the
+claims to answer with (``serve_userinfo``), and keeps the ``Authorization``
+header of every UserInfo request. The middleware under test fetches both
 documents over HTTP and verifies the signature itself: nothing is patched.
 """
 
@@ -30,6 +32,7 @@ _RSA_KEY_BITS = 2048
 _RSA_PUBLIC_EXPONENT = 65537
 _WELL_KNOWN = "/.well-known/openid-configuration"
 _JWKS = "/jwks"
+_USERINFO = "/userinfo"
 
 
 def _segment(value: dict) -> str:
@@ -60,6 +63,8 @@ class LocalProvider:
             ]
         }
         self._failing: dict[str, int] = {}
+        self._userinfo: dict | None = None
+        self.userinfo_authorizations: list[str | None] = []
         self._rs256_public_pem = rsa_key.public_key().public_bytes(
             serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
         )
@@ -76,9 +81,22 @@ class LocalProvider:
     def discovery_path(self) -> str:
         return _WELL_KNOWN
 
+    @property
+    def userinfo_path(self) -> str:
+        return _USERINFO
+
+    def serve_userinfo(self, claims: dict | None) -> None:
+        """Answer UserInfo with ``claims`` from now on; ``None`` stops serving it (404)."""
+        self._userinfo = claims
+        self.userinfo_authorizations.clear()
+
     def fail(self, path: str, status: int) -> None:
         """Answer ``path`` with ``status`` and an error body from now on."""
         self._failing[path] = status
+
+    def restore(self, path: str) -> None:
+        """Answer ``path`` normally again after ``fail``."""
+        self._failing.pop(path, None)
 
     def publish(self, *, issuer: str | None = None, keys: list[dict] | None = None) -> None:
         """Replace the issuer the discovery document names, or the keys the JWKS holds."""
@@ -95,6 +113,7 @@ class LocalProvider:
             return {
                 "issuer": self._published_issuer,
                 "jwks_uri": f"{self.issuer}{_JWKS}",
+                "userinfo_endpoint": f"{self.issuer}{_USERINFO}",
                 "authorization_endpoint": f"{self.issuer}/authorize",
                 "token_endpoint": f"{self.issuer}/token",
                 "response_types_supported": ["code"],
@@ -103,6 +122,8 @@ class LocalProvider:
             }
         if path == _JWKS:
             return self._jwks
+        if path == _USERINFO:
+            return self._userinfo
         return None
 
     def token(self, alg: str, claims: dict) -> str:
@@ -135,6 +156,8 @@ def local_provider() -> Iterator[LocalProvider]:
 
     class _Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
+            if self.path == _USERINFO:
+                provider.userinfo_authorizations.append(self.headers.get("Authorization"))
             failure = provider.failure(self.path)
             document = None if failure is not None else provider.document(self.path)
             body = json.dumps(document if document is not None else {"error": "not_served"}).encode()
