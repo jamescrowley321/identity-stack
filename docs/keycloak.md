@@ -61,7 +61,9 @@ export KEYCLOAK_ISSUER_URL=http://keycloak-test.localhost:18180/realms/identity-
 python -m alembic upgrade head
 python -m scripts.seed_keycloak
 # then start the backend on :8000 with the KEYCLOAK_* settings of local-development.md
-# (issuer above), DESCOPE_PROJECT_ID= DESCOPE_MANAGEMENT_KEY= and JIT_ENABLED_PROVIDERS=keycloak
+# (issuer above), DESCOPE_PROJECT_ID= DESCOPE_MANAGEMENT_KEY= and JIT_ENABLED_PROVIDERS=keycloak,
+# plus RATE_LIMIT_DEFAULT=2000/minute RATE_LIMIT_AUTH=1000/minute: the suite's refused requests
+# share one client address, and the 60/minute default would answer some of them 429
 
 cd ../frontend
 VITE_OIDC_AUTHORITY=$KEYCLOAK_ISSUER_URL VITE_OIDC_CLIENT_ID=member-app \
