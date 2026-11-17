@@ -100,10 +100,19 @@ class ZitadelAdminApi:
         """Create an organization with that id."""
         await self._call("POST", "/v2/organizations", body={"organizationId": org_id, "name": name})
 
-    async def has_organization(self, org_id: str) -> bool:
-        """Whether Zitadel has an organization with that id."""
+    async def organization_name(self, org_id: str) -> str | None:
+        """The name of the organization with that id; None if Zitadel has no such organization."""
         answer = await self._call("POST", "/v2/organizations/_search", body={"queries": [{"idQuery": {"id": org_id}}]})
-        return any(org.get("id") == org_id for org in answer.get("result", []))
+        return next((org.get("name") for org in answer.get("result", []) if org.get("id") == org_id), None)
+
+    async def organization_has_users(self, org_id: str) -> bool:
+        """Whether the organization owns any user (human or machine)."""
+        answer = await self._call(
+            "POST",
+            "/v2/users",
+            body={"query": {"limit": 1}, "queries": [{"organizationIdQuery": {"organizationId": org_id}}]},
+        )
+        return bool(answer.get("result"))
 
     async def effective_login_policy(self, org_id: str) -> dict:
         """The login policy the organization has: its own, or the instance default it inherits."""
@@ -120,21 +129,27 @@ class ZitadelAdminApi:
         return sorted(role["key"] for role in answer.get("projectRoles", []))
 
     async def grant_project(self, project_id: str, org_id: str, role_keys: list[str]) -> None:
-        """Grant the project, with those roles, to the organization. A grant it already has counts as made."""
+        """Grant the project, with exactly those roles, to the organization.
+
+        A grant the organization already has (an earlier try made it) is updated to those
+        roles: it may carry others. Zitadel's UpdateProjectGrant answers 200 when nothing changes.
+        """
+        grant = {"projectId": project_id, "grantedOrganizationId": org_id, "roleKeys": role_keys}
         try:
-            await self._call(
-                "POST",
-                f"{_PROJECT_SERVICE}/CreateProjectGrant",
-                body={"projectId": project_id, "grantedOrganizationId": org_id, "roleKeys": role_keys},
-            )
+            await self._call("POST", f"{_PROJECT_SERVICE}/CreateProjectGrant", body=grant)
         except UpstreamStatusError as exc:
             if exc.response.status_code != _ALREADY_EXISTS:
                 raise
+            await self._call("POST", f"{_PROJECT_SERVICE}/UpdateProjectGrant", body=grant)
 
     async def add_human_user(
         self, *, user_id: str, org_id: str, username: str, given_name: str, family_name: str, email: str
     ) -> None:
-        """Create a human user with that id in the organization, its email marked verified."""
+        """Create a human user with that id in the organization.
+
+        The email is left unverified: a tenant admin typed it in, and nobody has shown they
+        hold it. Zitadel sends the user a code to verify it.
+        """
         await self._call(
             "POST",
             "/v2/users/human",
@@ -143,7 +158,7 @@ class ZitadelAdminApi:
                 "organization": {"orgId": org_id},
                 "username": username,
                 "profile": {"givenName": given_name, "familyName": family_name},
-                "email": {"email": email, "isVerified": True},
+                "email": {"email": email},
             },
         )
 

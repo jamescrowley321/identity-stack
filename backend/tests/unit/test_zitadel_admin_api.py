@@ -62,13 +62,36 @@ async def test_add_organization_posts_its_id_and_name():
     assert _body(request) == {"organizationId": ORG_ID, "name": "Initech"}
 
 
-@pytest.mark.parametrize(("result", "expected"), [([{"id": ORG_ID, "name": "Initech"}], True), ([], False)])
-async def test_has_organization_searches_by_id(result, expected):
+@pytest.mark.parametrize(
+    ("result", "expected"), [([{"id": ORG_ID, "name": "Initech"}], "Initech"), ([], None)], ids=["found", "absent"]
+)
+async def test_organization_name_searches_by_id(result, expected):
     answer = {"details": {"totalResult": str(len(result))}} | ({"result": result} if result else {})
     recorder = Recorder({("POST", "/v2/organizations/_search"): httpx.Response(200, json=answer)})
 
-    assert await _api(recorder).has_organization(ORG_ID) is expected
+    assert await _api(recorder).organization_name(ORG_ID) == expected
     assert _body(recorder.only()) == {"queries": [{"idQuery": {"id": ORG_ID}}]}
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        (
+            {"details": {"totalResult": "1"}, "result": [{"userId": USER_ID, "details": {"resourceOwner": ORG_ID}}]},
+            True,
+        ),
+        ({"details": {"timestamp": "2026-11-17T09:13:38.515499Z"}}, False),
+    ],
+    ids=["a-user", "none"],
+)
+async def test_organization_has_users_lists_at_most_one_user_of_the_organization(answer, expected):
+    recorder = Recorder({("POST", "/v2/users"): httpx.Response(200, json=answer)})
+
+    assert await _api(recorder).organization_has_users(ORG_ID) is expected
+    assert _body(recorder.only()) == {
+        "query": {"limit": 1},
+        "queries": [{"organizationIdQuery": {"organizationId": ORG_ID}}],
+    }
 
 
 async def test_effective_login_policy_reads_it_in_the_organization():
@@ -152,16 +175,38 @@ async def test_grant_project_grants_it_to_the_organization_with_the_roles():
     }
 
 
-async def test_grant_project_that_the_organization_already_has_counts_as_granted():
+async def test_grant_project_that_the_organization_already_has_is_updated_to_the_roles():
+    """A grant an earlier try made may carry other roles: Zitadel's UpdateProjectGrant sets them, and is idempotent."""
     recorder = Recorder(
         {
             ("POST", "/zitadel.project.v2.ProjectService/CreateProjectGrant"): httpx.Response(
                 409, json={"code": "already_exists", "message": "Project Grant already exists (V3-DKcYh)"}
-            )
+            ),
+            ("POST", "/zitadel.project.v2.ProjectService/UpdateProjectGrant"): httpx.Response(
+                200, json={"changeDate": "2026-11-17T09:13:38.479290Z"}
+            ),
         }
     )
 
     await _api(recorder).grant_project(PROJECT_ID, ORG_ID, ["admin", "member"])
+
+    expected = {"projectId": PROJECT_ID, "grantedOrganizationId": ORG_ID, "roleKeys": ["admin", "member"]}
+    assert [(request.url.path, _body(request)) for request in recorder.requests] == [
+        ("/zitadel.project.v2.ProjectService/CreateProjectGrant", expected),
+        ("/zitadel.project.v2.ProjectService/UpdateProjectGrant", expected),
+    ]
+
+
+async def test_grant_project_whose_update_is_refused_raises():
+    recorder = Recorder(
+        {
+            ("POST", "/zitadel.project.v2.ProjectService/CreateProjectGrant"): httpx.Response(409, json={}),
+            ("POST", "/zitadel.project.v2.ProjectService/UpdateProjectGrant"): httpx.Response(403, json={}),
+        }
+    )
+
+    with pytest.raises(UpstreamStatusError):
+        await _api(recorder).grant_project(PROJECT_ID, ORG_ID, ["admin", "member"])
 
 
 async def test_grant_project_refused_otherwise_raises():
@@ -173,7 +218,8 @@ async def test_grant_project_refused_otherwise_raises():
         await _api(recorder).grant_project(PROJECT_ID, ORG_ID, ["admin", "member"])
 
 
-async def test_add_human_user_creates_it_in_the_organization_with_its_own_id():
+async def test_add_human_user_creates_it_in_the_organization_with_its_own_id_and_an_unverified_email():
+    """The email is the one a tenant admin typed in: Zitadel verifies it, with a code it sends the user."""
     recorder = Recorder({("POST", "/v2/users/human"): httpx.Response(200, json={"userId": USER_ID})})
 
     await _api(recorder).add_human_user(
@@ -190,7 +236,7 @@ async def test_add_human_user_creates_it_in_the_organization_with_its_own_id():
         "organization": {"orgId": ORG_ID},
         "username": "ada@initech.test",
         "profile": {"givenName": "Ada", "familyName": "Lovelace"},
-        "email": {"email": "ada@initech.test", "isVerified": True},
+        "email": {"email": "ada@initech.test"},
     }
 
 
