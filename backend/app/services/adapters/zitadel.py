@@ -8,7 +8,11 @@ Outbound only, with a machine user's token (``ZitadelAdminApi``):
   ``external_org_provider_id``, the ``zitadel`` provider row). The link is written last:
   an organization that failed part way is named by no tenant, and a first login into it
   provisions nobody. A second sync of that tenant finishes it: the organization is
-  found by its id, and a policy or grant already made is kept.
+  found by its id (and must have the tenant's name), a policy already made is kept and a
+  grant already made is set to the project's roles. An organization that already has
+  users is not linked: the adapter creates users only after the link, so those got in
+  some other way. A tenant linked to another provider's organization is refused before
+  Zitadel is called.
 - ``sync_user`` creates a human user in the tenant's organization when the user was just
   created there (``CREATED_IN_TENANT``) and has no link yet, with the canonical user's id
   as its Zitadel id, and records it as the user's ``zitadel`` IdP link, so that user's
@@ -28,9 +32,9 @@ one an admin typed in; a user whose Zitadel link is of another origin is refused
 Zitadel is called. A user with no link is looked up by its canonical id, the id the
 adapter gives the users it creates: a create whose answer was lost, or whose link write
 failed, is found and linked by the next call instead of being made again. Zitadel lets
-any user manager choose a new user's id, so the user found by id is acted on, and
-linked, only when it is in the organization of one of the user's tenants (on create,
-the tenant it was created in).
+any user manager choose a new user's id, so the user found by id is acted on only when
+it is in the organization of one of the user's tenants, and linked only by the create
+path, in the organization of the tenant the user was created in.
 
 Every method returns ``Error(SyncError)`` for any failure, Zitadel unreachable included,
 and raises nothing; ``context[UNANSWERED]`` is set when Zitadel gave no readable answer
@@ -84,6 +88,10 @@ class ZitadelLinks(Protocol):
 
     async def organization_of(self, tenant_id: uuid.UUID, provider_id: uuid.UUID) -> str | None: ...
 
+    async def linked_elsewhere(self, tenant_id: uuid.UUID, provider_id: uuid.UUID) -> bool:
+        """Whether the tenant is linked to an organization that is not one of this provider."""
+        ...
+
     async def link_organization(self, tenant_id: uuid.UUID, provider_id: uuid.UUID, org_id: str) -> None: ...
 
     async def subject_of(self, user_id: uuid.UUID, provider_id: uuid.UUID) -> str | None:
@@ -134,15 +142,38 @@ def _sync_error(operation: str, exc: Exception, context: dict) -> SyncError:
 # A create Zitadel refused or did not answer: it may still have made what was asked
 # (an earlier try made it, or the answer was lost), which a lookup by id settles.
 _CREATE_FAILURES = (UpstreamStatusError, UpstreamTransportError, json.JSONDecodeError)
+# Zitadel's answer to a create whose unique name (an organization's, a user's) is taken.
+_TAKEN = 409
+
+
+def _is_taken(exc: Exception) -> bool:
+    return isinstance(exc, UpstreamStatusError) and exc.response.status_code == _TAKEN
 
 
 async def _ensure_organization(api: ZitadelAdminApi, org_id: str, name: str) -> None:
-    """Create the organization with that id, unless Zitadel already has it."""
+    """Create the organization with that id, unless Zitadel already has the one an earlier try made.
+
+    That one has the tenant's name too: an organization with the tenant's id and another
+    name is not the adapter's, and is refused. A 409 with no organization of that id is a
+    name another organization holds (names are unique in the instance).
+    """
     try:
         await api.add_organization(org_id, name)
-    except _CREATE_FAILURES:
-        if not await api.has_organization(org_id):
+    except _CREATE_FAILURES as exc:
+        found = await api.organization_name(org_id)
+        if found is None:
+            if _is_taken(exc):
+                raise _Refused(
+                    f"Zitadel already has an organization named {name!r}: rename the tenant, or that organization",
+                    {"status": _TAKEN},
+                ) from exc
             raise
+        if found != name:
+            raise _Refused(
+                f"Zitadel has an organization with the tenant's id named {found!r}, not {name!r}: "
+                "the adapter did not make it",
+                {},
+            ) from exc
 
 
 async def _close_registration(api: ZitadelAdminApi, org_id: str) -> None:
@@ -167,12 +198,21 @@ async def _close_registration(api: ZitadelAdminApi, org_id: str) -> None:
 
 
 async def _create_user(api: ZitadelAdminApi, new_user: dict) -> ZitadelUser | None:
-    """Create the human user; what Zitadel then has with its id, None if nothing."""
+    """Create the human user; what Zitadel then has with its id, None if nothing.
+
+    A 409 with no user of that id is a user name another user holds (user names are
+    unique in the instance; the adapter's is the email).
+    """
     try:
         await api.add_human_user(**new_user)
-    except _CREATE_FAILURES:
+    except _CREATE_FAILURES as exc:
         found = await api.find_user(new_user["user_id"])
         if found is None:
+            if _is_taken(exc):
+                raise _Refused(
+                    f"Zitadel already has a user named {new_user['username']!r}, the user's email",
+                    {"status": _TAKEN},
+                ) from exc
             raise
         return found
     return await api.find_user(new_user["user_id"])
@@ -246,6 +286,8 @@ class ZitadelSyncAdapter(IdentityProviderAdapter):
                 provider_id = await self._provider_id()
                 if await self._links.organization_of(tenant_id, provider_id) is not None:
                     return Ok(None)
+                if await self._links.linked_elsewhere(tenant_id, provider_id):
+                    raise _Refused("The tenant is already linked to an organization of another provider", {})
                 org_id = str(tenant_id)
                 context["organization_id"] = org_id
                 async with self._open_api() as api:
@@ -253,6 +295,11 @@ class ZitadelSyncAdapter(IdentityProviderAdapter):
                     await _close_registration(api, org_id)
                     role_keys = await api.project_role_keys(self._project_id)
                     await api.grant_project(self._project_id, org_id, role_keys)
+                    if await api.organization_has_users(org_id):
+                        # The adapter creates users only after the link: these got in some other
+                        # way, perhaps by self-registration before the policy was closed, and
+                        # the link would make each a tenant member at its first login.
+                        raise _Refused("The organization already has users the adapter did not create", {})
                 await self._links.link_organization(tenant_id, provider_id, org_id)
                 span.set_attribute("zitadel.organization_id", org_id)
                 return Ok(None)
@@ -268,8 +315,9 @@ class ZitadelSyncAdapter(IdentityProviderAdapter):
         refuses an empty one. Any other change reaches nothing.
 
         A user with no followed link is looked up by its canonical id, the id this adapter
-        gives the users it creates: one an earlier create made but did not link (its answer
-        was lost, or the link write failed) is linked now instead of being made again.
+        gives the users it creates. On create, one an earlier try made but did not link (its
+        answer was lost, or the link write failed) is linked instead of being made again. On
+        a status change it gets the status and is not linked: only the create path links.
         """
         with tracer.start_as_current_span("zitadel.sync_user") as span:
             span.set_attribute("user.id", str(user_id))
@@ -303,12 +351,14 @@ class ZitadelSyncAdapter(IdentityProviderAdapter):
                             raise _Refused("Zitadel has no user with this user's id after creating it", {})
                         _check_organization(found, frozenset({new_user["org_id"]}))
                         await _bring_to(api, str(user_id), found.state, wanted)
-                else:
-                    organizations = await self._links.organizations_of_user(user_id, provider_id)
-                    async with self._open_api() as api:
-                        found = await _same_id_user(api, user_id, organizations)
-                        await _bring_to(api, str(user_id), found.state, wanted)
-                await self._links.link_subject(user_id, provider_id, str(user_id), data.get("email") or "")
+                    await self._links.link_subject(user_id, provider_id, str(user_id), data.get("email") or "")
+                    return Ok(None)
+                # A status change with no followed link reaches the user with the canonical id
+                # but never links it: any user manager of the organization can choose that id.
+                organizations = await self._links.organizations_of_user(user_id, provider_id)
+                async with self._open_api() as api:
+                    found = await _same_id_user(api, user_id, organizations)
+                    await _bring_to(api, str(user_id), found.state, wanted)
                 return Ok(None)
             except Exception as exc:
                 return Error(_sync_error("sync_user", exc, context))

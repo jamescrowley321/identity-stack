@@ -123,7 +123,9 @@ async def test_a_user_created_in_the_tenant_is_a_human_user_in_its_organization_
     zitadel_user = _user_state(zitadel, user_id)
     assert zitadel_user["details"]["resourceOwner"] == org_id
     assert zitadel_user["state"] == ACTIVE
-    assert zitadel_user["human"]["email"] == {"email": email, "isVerified": True}
+    # Unverified: a tenant admin typed the email in, and Zitadel has the user prove it.
+    assert zitadel_user["human"]["email"]["email"] == email
+    assert zitadel_user["human"]["email"].get("isVerified", False) is False
     assert (zitadel_user["human"]["profile"]["givenName"], zitadel_user["human"]["profile"]["familyName"]) == (
         "Gavin",
         "gavin",
@@ -165,9 +167,11 @@ async def test_with_zitadel_unreachable_every_call_answers_a_sync_error(db_sessi
             user_id=uuid.uuid4(),
             data={"email": "r@raviga.test", "status": "active", "user_name": "r", CREATED_IN_TENANT: str(tenant_id)},
         ),
+        "delete_user": await adapter.delete_user(user_id=uuid.uuid4()),
     }
 
     assert {operation: type(result.error) for operation, result in results.items() if result.is_error()} == {
         "sync_tenant": SyncError,
         "sync_user": SyncError,
+        "delete_user": SyncError,
     }

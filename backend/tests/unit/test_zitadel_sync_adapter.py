@@ -58,8 +58,9 @@ def _lost() -> UpstreamTransportError:
 class FakeApi:
     """Records each call as (method, arguments); ``failing`` names a method that raises.
 
-    ``users`` maps a Zitadel user id to its ZitadelUser, ``organizations`` holds the
-    organization ids Zitadel has, and ``policy`` is the login policy an organization has.
+    ``users`` maps a Zitadel user id to its ZitadelUser, ``organizations`` maps the
+    organization ids Zitadel has to their names, and ``policy`` is the login policy an
+    organization has. An organization has users when ``users`` holds one it owns.
     A failing create still creates when ``created_anyway`` (its answer was lost).
     """
 
@@ -67,14 +68,14 @@ class FakeApi:
         self,
         *,
         users: dict[str, ZitadelUser] | None = None,
-        organizations: set[str] | None = None,
+        organizations: dict[str, str] | None = None,
         policy: dict | None = None,
         failing: dict[str, Exception] | None = None,
         created_anyway: bool = False,
     ) -> None:
         self.calls: list[tuple[str, dict]] = []
         self.users = users or {}
-        self.organizations = organizations or set()
+        self.organizations = organizations or {}
         self.policy = dict(DEFAULT_POLICY) if policy is None else policy
         self.failing = failing or {}
         self.created_anyway = created_anyway
@@ -86,13 +87,17 @@ class FakeApi:
 
     async def add_organization(self, org_id: str, name: str) -> None:
         if self.created_anyway:
-            self.organizations.add(org_id)
+            self.organizations[org_id] = name
         self._record("add_organization", org_id=org_id, name=name)
-        self.organizations.add(org_id)
+        self.organizations[org_id] = name
 
-    async def has_organization(self, org_id: str) -> bool:
-        self._record("has_organization", org_id=org_id)
-        return org_id in self.organizations
+    async def organization_name(self, org_id: str) -> str | None:
+        self._record("organization_name", org_id=org_id)
+        return self.organizations.get(org_id)
+
+    async def organization_has_users(self, org_id: str) -> bool:
+        self._record("organization_has_users", org_id=org_id)
+        return any(user.organization_id == org_id for user in self.users.values())
 
     async def effective_login_policy(self, org_id: str) -> dict:
         self._record("effective_login_policy", org_id=org_id)
@@ -145,6 +150,7 @@ class FakeLinks:
         subjects: dict[uuid.UUID, str] | None = None,
         unfollowed: set[uuid.UUID] | None = None,
         memberships: dict[uuid.UUID, set[uuid.UUID]] | None = None,
+        elsewhere: set[uuid.UUID] | None = None,
     ) -> None:
         self._provider_id = provider_id
         self.organizations = organizations or {}
@@ -153,6 +159,8 @@ class FakeLinks:
         self.unfollowed = unfollowed or set()
         # user id -> the tenants it holds a role in.
         self.memberships = memberships or {}
+        # Tenants linked to an organization of another provider (or of none).
+        self.elsewhere = elsewhere or set()
         self.writes: list[tuple] = []
 
     async def provider_id(self) -> uuid.UUID | None:
@@ -161,6 +169,10 @@ class FakeLinks:
     async def organization_of(self, tenant_id: uuid.UUID, provider_id: uuid.UUID) -> str | None:
         assert provider_id == self._provider_id
         return self.organizations.get(tenant_id)
+
+    async def linked_elsewhere(self, tenant_id: uuid.UUID, provider_id: uuid.UUID) -> bool:
+        assert provider_id == self._provider_id
+        return tenant_id in self.elsewhere
 
     async def link_organization(self, tenant_id: uuid.UUID, provider_id: uuid.UUID, org_id: str) -> None:
         self.writes.append(("organization", tenant_id, provider_id, org_id))
@@ -244,6 +256,7 @@ class TestSyncTenant:
             ("add_login_policy", {"org_id": ORG_ID, "policy": OWN_POLICY | {"allowRegister": False}}),
             ("project_role_keys", {"project_id": PROJECT_ID}),
             ("grant_project", {"project_id": PROJECT_ID, "org_id": ORG_ID, "role_keys": ["admin", "member"]}),
+            ("organization_has_users", {"org_id": ORG_ID}),
         ]
         assert links.writes == [("organization", TENANT_ID, PROVIDER_ID, ORG_ID)]
 
@@ -266,6 +279,17 @@ class TestSyncTenant:
         assert opener.opened == 0
         assert links.writes == []
 
+    async def test_a_tenant_linked_to_an_organization_of_another_provider_is_refused_before_any_call(self):
+        adapter, opener, links = _adapter(links=FakeLinks(elsewhere={TENANT_ID}))
+
+        result = await adapter.sync_tenant(tenant_id=TENANT_ID, data={"name": "Initech"})
+
+        assert result.is_error()
+        assert "another provider" in result.error.message
+        assert result.error.context == {"tenant_id": str(TENANT_ID)}
+        assert opener.opened == 0
+        assert links.writes == []
+
     async def test_a_tenant_with_no_name_is_refused_before_any_call(self):
         adapter, opener, _ = _adapter()
 
@@ -274,17 +298,59 @@ class TestSyncTenant:
         assert result.is_error()
         assert opener.opened == 0
 
-    @pytest.mark.parametrize("failure", [_refusal(409), _lost()], ids=["refused", "unanswered"])
+    @pytest.mark.parametrize("failure", [_refusal(503), _lost()], ids=["refused", "unanswered"])
     async def test_an_organization_zitadel_does_not_have_after_a_failed_create_links_nothing(self, failure):
-        """A name another organization holds is a 409, and the tenant's id is not in Zitadel."""
         api = FakeApi(failing={"add_organization": failure})
-        api.organizations.discard(ORG_ID)
         adapter, _, links = _adapter(api)
 
         result = await adapter.sync_tenant(tenant_id=TENANT_ID, data={"name": "Initech"})
 
         assert result.is_error()
-        assert [method for method, _ in api.calls] == ["add_organization", "has_organization"]
+        assert [method for method, _ in api.calls] == ["add_organization", "organization_name"]
+        assert links.writes == []
+
+    async def test_a_name_another_organization_holds_is_refused_naming_the_conflict(self):
+        """Organization names are unique in the instance: Zitadel answers 409 and has no organization with this id."""
+        api = FakeApi(failing={"add_organization": _refusal(409)}, organizations={OTHER_ORG_ID: "Initech"})
+        adapter, _, links = _adapter(api)
+
+        result = await adapter.sync_tenant(tenant_id=TENANT_ID, data={"name": "Initech"})
+
+        assert result.is_error()
+        assert result.error.message == (
+            "Zitadel already has an organization named 'Initech': rename the tenant, or that organization"
+        )
+        assert result.error.context == {"tenant_id": str(TENANT_ID), "organization_id": ORG_ID, "status": 409}
+        assert links.writes == []
+
+    async def test_an_organization_with_the_tenant_id_and_another_name_is_not_taken_over(self):
+        """The adapter names the organization it creates after the tenant; another name is not one it made."""
+        api = FakeApi(failing={"add_organization": _refusal(409)}, organizations={ORG_ID: "Umbrella"})
+        adapter, _, links = _adapter(api)
+
+        result = await adapter.sync_tenant(tenant_id=TENANT_ID, data={"name": "Initech"})
+
+        assert result.is_error()
+        assert "'Umbrella'" in result.error.message
+        assert [method for method, _ in api.calls] == ["add_organization", "organization_name"]
+        assert links.writes == []
+
+    async def test_an_organization_that_already_holds_users_is_not_linked(self):
+        """Users the adapter creates come after the link: any user before it got in some other way.
+
+        A sync that stopped before the policy was closed leaves the organization on the
+        default policy, which may allow self-registration; linking it would make each
+        such user a tenant member at first login.
+        """
+        api = FakeApi(users={SUB: _user(org_id=ORG_ID)})
+        adapter, _, links = _adapter(api)
+
+        result = await adapter.sync_tenant(tenant_id=TENANT_ID, data={"name": "Initech"})
+
+        assert result.is_error()
+        assert "already has users" in result.error.message
+        assert result.error.context == {"tenant_id": str(TENANT_ID), "organization_id": ORG_ID}
+        assert api.calls[-1] == ("organization_has_users", {"org_id": ORG_ID})
         assert links.writes == []
 
     @pytest.mark.parametrize(
@@ -316,10 +382,11 @@ class TestSyncTenant:
         assert result.is_ok(), result
         assert api.calls == [
             ("add_organization", {"org_id": ORG_ID, "name": "Initech"}),
-            ("has_organization", {"org_id": ORG_ID}),
+            ("organization_name", {"org_id": ORG_ID}),
             ("effective_login_policy", {"org_id": ORG_ID}),
             ("project_role_keys", {"project_id": PROJECT_ID}),
             ("grant_project", {"project_id": PROJECT_ID, "org_id": ORG_ID, "role_keys": ["admin", "member"]}),
+            ("organization_has_users", {"org_id": ORG_ID}),
         ]
         assert links.writes == [("organization", TENANT_ID, PROVIDER_ID, ORG_ID)]
 
@@ -428,6 +495,18 @@ class TestSyncUserCreate:
         assert result.error.context == {"user_id": str(USER_ID), "status": 400}
         assert links.writes == []
 
+    async def test_a_user_name_another_user_holds_is_refused_naming_the_conflict(self):
+        """User names are unique in the instance: Zitadel answers 409 and has no user with this id."""
+        api = FakeApi(failing={"add_human_user": _refusal(409)})
+        adapter, _, links = _adapter(api, FakeLinks(organizations={TENANT_ID: ORG_ID}))
+
+        result = await adapter.sync_user(user_id=USER_ID, data=_created())
+
+        assert result.is_error()
+        assert result.error.message == "Zitadel already has a user named 'ada@initech.test', the user's email"
+        assert result.error.context == {"user_id": str(USER_ID), "status": 409}
+        assert links.writes == []
+
     @pytest.mark.parametrize("failure", [_refusal(400), _lost()], ids=["already-existing", "answer-lost"])
     async def test_a_create_that_failed_but_made_the_user_still_links_it(self, failure):
         """Zitadel made the user (answer lost, or it was made by an earlier try): the link is written anyway."""
@@ -534,19 +613,25 @@ class TestSyncUserStatus:
         assert api.calls == [("find_user", {"user_id": str(USER_ID)})]
         assert links.writes == []
 
-    async def test_an_unlinked_user_the_adapter_created_gets_the_status_and_the_link(self):
-        """A create whose link write failed: the Zitadel user has the canonical id, so it is found and linked."""
-        api = FakeApi(users={str(USER_ID): _user(ACTIVE)})
+    @pytest.mark.parametrize(
+        ("status", "state", "change"),
+        [("inactive", ACTIVE, "deactivate_user"), ("active", INACTIVE, "reactivate_user")],
+    )
+    async def test_an_unlinked_user_with_the_canonical_id_gets_the_status_and_no_link(self, status, state, change):
+        """Only the create path links: any user manager of the tenant's organization can choose a new user's id.
+
+        A user planted there with the canonical id would, once linked, sign in as the
+        canonical user in every tenant. The status still reaches it, so a deactivation
+        is not lost when the adapter's own create was not linked.
+        """
+        api = FakeApi(users={str(USER_ID): _user(state)})
         adapter, _, links = _adapter(api, _member_links())
 
-        result = await adapter.sync_user(user_id=USER_ID, data=_status_change("inactive"))
+        result = await adapter.sync_user(user_id=USER_ID, data=_status_change(status))
 
         assert result.is_ok(), result
-        assert api.calls == [
-            ("find_user", {"user_id": str(USER_ID)}),
-            ("deactivate_user", {"user_id": str(USER_ID)}),
-        ]
-        assert links.writes == [("subject", USER_ID, PROVIDER_ID, str(USER_ID), "ada@initech.test")]
+        assert api.calls == [("find_user", {"user_id": str(USER_ID)}), (change, {"user_id": str(USER_ID)})]
+        assert links.writes == []
 
     @pytest.mark.parametrize("status", ["inactive", "active"])
     @pytest.mark.parametrize(
