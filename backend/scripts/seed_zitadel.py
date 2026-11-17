@@ -239,6 +239,12 @@ async def _ensure_user(session: AsyncSession, seed: SeedInput, provider: Provide
         if user.status != UserStatus.active:
             # The seed neither reactivates the user nor grants roles to one it cannot log in as.
             raise SeedConflictError(f"user {wanted.email!r} is {user.status.value}, not {UserStatus.active.value}")
+        metadata = link.metadata_ if isinstance(link.metadata_, dict) else {}
+        if LINK_ORIGIN not in metadata:
+            # A link seeded before link origins were recorded: the sync adapter follows it only once marked.
+            link.metadata_ = metadata | {LINK_ORIGIN: LINKED_BY_BACKEND}
+            await session.flush()
+            changes.append(f"marked the link of user {wanted.email!r} as the backend's")
         return user
 
     # An email match proves nothing about who holds the row: linking it would hand
