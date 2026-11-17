@@ -26,6 +26,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from functools import cached_property
+from typing import TypeVar
 
 import httpx
 import pytest
@@ -48,9 +49,15 @@ PRINCIPALS = (MEMBER, ADMIN)
 _PROBE_TIMEOUT_SECONDS = 10
 _IDENTITY = "/api/identity"
 
+_Signed = TypeVar("_Signed")
+
 
 class EarlierSignInFailed(RuntimeError):
     """A principal's sign-in failed earlier in this run, so the run does not try it again."""
+
+
+class UnreadableAccessToken(ValueError):
+    """The provider issued an access token the suite cannot read an ``exp`` claim from."""
 
 
 class FailedSignIns:
@@ -66,7 +73,7 @@ class FailedSignIns:
     def __init__(self) -> None:
         self._failures: dict[str, Exception] = {}
 
-    def attempt(self, principal: str, sign_in: Callable[[], str]) -> str:
+    def attempt(self, principal: str, sign_in: Callable[[], _Signed]) -> _Signed:
         failure = self._failures.get(principal)
         if failure is not None:
             raise EarlierSignInFailed(
@@ -84,8 +91,8 @@ class SignedInTokens:
 
     Keycloak (300 s) and Zitadel (15 min) tokens expire within a slow run, so the
     suite asks for a principal's token per test and gets the one it already has
-    while ``exp`` is more than ``MARGIN_SECONDS`` away. A sign-in that fails is
-    not tried again (``FailedSignIns``).
+    while ``exp`` is more than ``MARGIN_SECONDS`` away. A sign-in that fails, or
+    issues a token with no readable ``exp``, is not tried again (``FailedSignIns``).
     """
 
     MARGIN_SECONDS = 60
@@ -99,18 +106,31 @@ class SignedInTokens:
         held = self._tokens.get(principal)
         if held is not None and held[1] - self._clock() > self.MARGIN_SECONDS:
             return held[0]
-        token = self._failed.attempt(principal, sign_in)
-        self._tokens[principal] = (token, _expiry(token))
+        token, expiry = self._failed.attempt(principal, lambda: _with_expiry(sign_in()))
+        self._tokens[principal] = (token, expiry)
         return token
+
+
+def _with_expiry(token: str) -> tuple[str, float]:
+    return token, _expiry(token)
 
 
 def _expiry(token: str) -> float:
     """The ``exp`` claim of a JWT the provider just issued, read without verifying it."""
-    payload = token.split(".")[1]
-    claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-    if not isinstance(claims.get("exp"), int | float):
-        pytest.fail("the provider issued an access token with no exp claim")
-    return float(claims["exp"])
+    segments = token.split(".")
+    if len(segments) != 3:
+        raise UnreadableAccessToken("the provider issued an access token that is not a JWT")
+    payload = segments[1]
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except ValueError as exc:
+        raise UnreadableAccessToken("the provider issued an access token that is not a JWT") from exc
+    if not isinstance(claims, dict):
+        raise UnreadableAccessToken("the provider issued an access token that is not a JWT")
+    exp = claims.get("exp")
+    if isinstance(exp, bool) or not isinstance(exp, int | float):
+        raise UnreadableAccessToken("the provider issued an access token with no exp claim")
+    return float(exp)
 
 
 class E2EProvider(ABC):

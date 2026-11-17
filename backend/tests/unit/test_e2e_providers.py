@@ -182,8 +182,33 @@ class TestSignedInTokens:
         def sign_in() -> str:
             return _jwt({"sub": "someone"})
 
-        with pytest.raises(pytest.fail.Exception, match="no exp claim"):
+        with pytest.raises(providers.UnreadableAccessToken, match="no exp claim"):
             tokens.get(providers.MEMBER, sign_in)
+
+    @pytest.mark.parametrize(
+        ("token", "cause"),
+        [
+            ("opaque-access-token", "not a JWT"),
+            ("header.!!!.signature", "not a JWT"),
+            (f"header.{base64.urlsafe_b64encode(b'[1, 2]').decode()}.signature", "not a JWT"),
+            (_jwt({"exp": "soon"}), "no exp claim"),
+        ],
+        ids=["opaque", "undecodable-payload", "payload-not-an-object", "exp-not-a-number"],
+    )
+    def test_an_unreadable_token_signs_in_once_across_two_calls(self, tokens, token, cause):
+        calls: list[str] = []
+
+        def sign_in() -> str:
+            calls.append("sign_in")
+            return token
+
+        with pytest.raises(providers.UnreadableAccessToken, match=cause) as first:
+            tokens.get(providers.MEMBER, sign_in)
+        with pytest.raises(providers.EarlierSignInFailed, match="member principal failed earlier") as second:
+            tokens.get(providers.MEMBER, sign_in)
+
+        assert calls == ["sign_in"]
+        assert second.value.__cause__ is first.value
 
 
 class TestAFailedSignInIsNotRetried:

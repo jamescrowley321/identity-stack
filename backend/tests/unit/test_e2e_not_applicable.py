@@ -49,6 +49,14 @@ class TestSelectedProvider:
         with pytest.raises(na.UnknownE2EProvider, match=f"E2E_PROVIDER='{name}'"):
             na.selected_provider({"E2E_PROVIDER": name})
 
+    def test_the_suite_refuses_an_unknown_provider_once_at_configure(self, monkeypatch):
+        from tests.e2e import conftest as e2e_conftest
+
+        monkeypatch.setenv("E2E_PROVIDER", "auth0")
+
+        with pytest.raises(pytest.UsageError, match="E2E_PROVIDER='auth0'"):
+            e2e_conftest.pytest_configure(None)
+
 
 class TestTheTable:
     def test_every_key_names_a_test_of_the_suite(self):
