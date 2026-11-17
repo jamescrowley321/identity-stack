@@ -9,7 +9,8 @@ redirect lands on finds no sign-in of its own for the ``state`` and exchanges
 nothing.
 
 Login V2 asks for the login name on one page and the password on the next. A
-live Zitadel session in the browser context may skip either or both.
+live Zitadel session in the browser context may skip either or both, so each
+step first waits for a form or for the browser to be back on the SPA's origin.
 """
 
 import base64
@@ -21,6 +22,7 @@ from dataclasses import dataclass
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from playwright.sync_api import BrowserContext, Page, Request
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 # A form step that does not leave the page within this long has failed.
 _STEP_TIMEOUT_MS = 20_000
@@ -78,12 +80,11 @@ def sign_in(page: Page, user: ZitadelUser, frontend_url: str) -> None:
     def _on_a_form_or_back(url: str) -> bool:
         return url.startswith(frontend_url) and "/login" not in url or bool(_LOGIN_FORM_PAGE.search(url))
 
-    page.wait_for_url(_LOGIN_FORM_PAGE, timeout=_STEP_TIMEOUT_MS)
     for _ in range(_MAX_FORM_STEPS):
-        fill_login_form(page, user)
         page.wait_for_url(_on_a_form_or_back, timeout=_STEP_TIMEOUT_MS)
         if page.url.startswith(frontend_url):
             break
+        fill_login_form(page, user)
     page.wait_for_url(f"{frontend_url}/", timeout=_STEP_TIMEOUT_MS)
 
 
@@ -131,11 +132,17 @@ class BrowserLogin:
         )
         callbacks: list[str] = []
 
+        def _is_this_callback(request: Request) -> bool:
+            return request.is_navigation_request() and is_callback(request.url, self.redirect_uri, state)
+
         def _record(request: Request) -> None:
             # Zitadel reaches the SPA's origin by a redirect, which Playwright
             # does not route, so it is read from the request events.
-            if request.is_navigation_request() and is_callback(request.url, self.redirect_uri, state):
+            if _is_this_callback(request):
                 callbacks.append(request.url)
+
+        def _on_a_form_or_back(url: str) -> bool:
+            return url.startswith(self.redirect_uri) or bool(_LOGIN_FORM_PAGE.search(url))
 
         page = context.new_page()
         page.on("request", _record)
@@ -143,11 +150,17 @@ class BrowserLogin:
         try:
             page.goto(f"{self.issuer}/oauth/v2/authorize?{query}")
             for _ in range(_MAX_FORM_STEPS):
-                if callbacks:
+                page.wait_for_url(_on_a_form_or_back, timeout=_STEP_TIMEOUT_MS)
+                if callbacks or page.url.startswith(self.redirect_uri):
                     break
                 forms.append(fill_login_form(page, user))
             if not callbacks:
-                raise ZitadelBrowserFlowError(f"no redirect back after {forms}; the page is at {page.url}")
+                # The last submit's navigation can resolve on a Login V2 redirect
+                # before the browser asks for the callback.
+                try:
+                    page.wait_for_event("request", _is_this_callback, timeout=_STEP_TIMEOUT_MS)
+                except PlaywrightTimeoutError as exc:
+                    raise ZitadelBrowserFlowError(f"no redirect back after {forms}; the page is at {page.url}") from exc
         finally:
             page.close()
 

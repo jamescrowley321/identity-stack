@@ -13,7 +13,8 @@ It needs, all running and none of them optional:
 - the SPA built with the root's ``frontend_environment`` on ``E2E_FRONTEND_URL``
   (default ``http://localhost:3000``): the origin the applications redirect to.
 
-When any of them does not answer, every test fails: the suite never skips.
+When the outputs, the backend or the SPA are missing, every test fails; when the
+database does not answer, every test that reads it fails. The suite never skips.
 
 It lives apart from ``tests/e2e/`` because that suite's conftest fails a run
 without the Descope secrets, and this one needs no secret at all.
