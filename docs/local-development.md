@@ -69,7 +69,8 @@ CI runs both on every pull request (`E2E Tests (Keycloak)`, `E2E Tests (Zitadel)
 
 The internal-endpoint tests compute their headers and HMACs from `INTERNAL_IDENTITY_KEY`,
 `DESCOPE_WEBHOOK_SECRET` and `DESCOPE_FLOW_SYNC_SECRET`. Give the backend and the suite the
-same throwaway values (CI generates them per run, e.g. `openssl rand -hex 32`).
+same throwaway values (CI generates them per run, e.g. `openssl rand -hex 32`). A Keycloak or
+Zitadel run fails at the start when one of the three is unset; a Descope run skips those tests.
 
 ## Lint & security
 
