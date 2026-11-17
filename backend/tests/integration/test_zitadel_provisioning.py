@@ -293,7 +293,7 @@ class TestAnEmailAlreadyHeldIsNeverLinked:
 
         refusals = [r.getMessage() for r in caplog.records if r.name == "app.services.identity_provisioning"]
         assert len(refusals) == 1, refusals
-        assert str(admin_id) in refusals[0] and PROVIDER in refusals[0]
+        assert str(admin_id) in refusals[0] and PROVIDER in refusals[0] and SUB in refusals[0]
         assert EMAIL not in refusals[0]
 
     async def test_a_login_in_the_users_own_organization_is_refused_too(self, db_session):
@@ -354,7 +354,7 @@ class TestAnOrganizationsEmailIsNeverLinkedFromAnotherProvider:
 
         refusals = [r.getMessage() for r in caplog.records if r.name == "app.services.identity_provisioning"]
         assert len(refusals) == 1, refusals
-        assert str(user_id) in refusals[0] and "ory" in refusals[0]
+        assert str(user_id) in refusals[0] and "ory" in refusals[0] and "ory-victim" in refusals[0]
         assert EMAIL not in refusals[0]
 
     async def test_an_ory_first_login_still_links_a_user_whose_email_no_organization_chose(self, db_session):

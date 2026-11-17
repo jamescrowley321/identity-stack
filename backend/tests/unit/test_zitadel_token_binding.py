@@ -167,6 +167,7 @@ class TestEveryOtherTokenIsRefused:
         _assert_refused(_get(op, op.token(RS256, _restamped(op, "machine-access-token-project.json"))))
 
     def test_an_opaque_token(self, op):
+        """Not a recorded token: a non-JWT string of the recorded opaque token's length."""
         length = _recorded("defaults.json")["oidc_application_human_token"]["length"]
 
         _assert_refused(_get(op, "o" * length))
