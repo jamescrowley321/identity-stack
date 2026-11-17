@@ -194,7 +194,9 @@ async def _first_login_profile(
     else:
         profile = {
             "email": claims.get("email", ""),
-            "email_verified": bool(claims.get("email_verified", False)),
+            # Only the JSON boolean verifies an email: a string such as "false"
+            # is truthy, and this flag is the email-linking guard's input.
+            "email_verified": claims.get("email_verified") is True,
             "given_name": claims.get("given_name", ""),
             "family_name": claims.get("family_name", ""),
         }

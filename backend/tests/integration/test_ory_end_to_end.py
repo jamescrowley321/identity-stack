@@ -254,6 +254,21 @@ async def test_ory_token_with_an_unverified_email_cannot_provision(db_session, o
 
 
 @pytest.mark.asyncio
+async def test_ory_token_with_a_string_email_verified_cannot_provision(db_session, ory_token_source):
+    """``email_verified: "false"`` is a truthy string, not ``true``: only the boolean verifies an email."""
+    await _seed_ory_provider(db_session, ory_token_source.issuer)
+    sub = _unique_subject("ory-string-email-verified")
+    token = ory_token_source.mint(sub=sub, email=f"{sub}@example.com", email_verified="false")
+    app = _build_app(db_session, issuer=ory_token_source.issuer, audience=ory_token_source.audience)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/identity", headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 400
+    assert await IdPLinkRepository(db_session).get_by_provider_name_and_sub("ory", sub) is None
+
+
+@pytest.mark.asyncio
 async def test_ory_token_for_a_different_audience_is_rejected(db_session, ory_token_source):
     """A token the same Ory project signed, for a different API, must not authenticate.
 

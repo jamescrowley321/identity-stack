@@ -228,6 +228,13 @@ class TestAKeycloakPrincipalsIdentity:
             assign_default_role=False,
         )
 
+    @pytest.mark.parametrize("claimed", ["false", "true", 1, None])
+    def test_only_a_boolean_true_email_verified_is_passed_as_verified(self, monkeypatch, claimed):
+        monkeypatch.setattr(protected, "JIT_ENABLED_PROVIDERS", {"ory", "keycloak"})
+        _, services = _first_login(email_verified=claimed)
+
+        assert services.provisioner.provision.await_args.kwargs["email_verified"] is False
+
 
 class TestKeycloakProvisioningIsOptIn:
     """Keycloak is not provisioned just in time unless the operator names it (Decision 6)."""
@@ -250,7 +257,7 @@ class TestKeycloakProvisioningIsOptIn:
         services.provisioner.provision.assert_not_awaited()
 
 
-def _first_login():
+def _first_login(**claims):
     """``GET /api/identity`` for a Keycloak subject with no canonical identity yet."""
     api = AdminApi([organization(ACME)])
     limiter.reset()
@@ -261,7 +268,7 @@ def _first_login():
     ]
     services.provisioner.provision.return_value = Ok("8f0c6d4e-0000-4000-8000-00000000c0de")
     client = TestClient(_app([descope_config(DESCOPE_PROJECT), _keycloak(api)], services))
-    return client.get(IDENTITY, headers=_bearer(_member())), services
+    return client.get(IDENTITY, headers=_bearer(_member(**claims))), services
 
 
 class TestTheDirectoryIsBelievedOverTheToken:
