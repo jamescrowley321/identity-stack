@@ -27,9 +27,13 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 from tests.helpers.keycloak_model import DIRECTORY_CLIENT_ID, DIRECTORY_CLIENT_SECRET
+from tests.helpers.keycloak_target import KeycloakUser, keycloak_test_target
+
+# The imported realm unless the KEYCLOAK_TEST_* variables name the Terraform one (keycloak_target.py).
+TARGET = keycloak_test_target(os.environ)
 
 KEYCLOAK_BASE_URL = os.environ.get("KEYCLOAK_TEST_BASE_URL", "http://keycloak-test.localhost:18180")
-KEYCLOAK_REALM = "identity-stack"
+KEYCLOAK_REALM = TARGET.realm
 KEYCLOAK_ADMIN_REALM = "master"
 KEYCLOAK_ADMIN_CLIENT_ID = "admin-cli"
 KEYCLOAK_ADMIN_USERNAME = "admin"
@@ -62,24 +66,16 @@ class KeycloakFlowError(Exception):
     """The login flow did not go the way the realm fixture says it should."""
 
 
-@dataclass(frozen=True)
-class KeycloakUser:
-    username: str
-    password: str
-    # Fixed in the realm import, so it is the ``sub`` of every token on every instance.
-    id: str
-
-
-ALICE = KeycloakUser("alice", "local-only-alice", "a11ce000-0000-4000-8000-000000000001")
-BOB = KeycloakUser("bob", "local-only-bob", "b0b00000-0000-4000-8000-000000000002")
+ALICE = TARGET.users["alice"]
+BOB = TARGET.users["bob"]
 # In ``acme`` with no client role: her access token carries no ``aud``.
-CAROL = KeycloakUser("carol", "local-only-carol", "ca401000-0000-4000-8000-000000000003")
+CAROL = TARGET.users["carol"]
 # A tenant admin in ``acme`` only.
-DAVE = KeycloakUser("dave", "local-only-dave", "da4e0000-0000-4000-8000-000000000004")
+DAVE = TARGET.users["dave"]
 # A ``member`` user in ``acme`` whose one client role is ``documents:write``.
-ERIN = KeycloakUser("erin", "local-only-erin", "e4140000-0000-4000-8000-000000000005")
+ERIN = TARGET.users["erin"]
 # A tenant admin in ``acme`` only, whom tests move between organizations.
-FRANK = KeycloakUser("frank", "local-only-frank", "f4a4c000-0000-4000-8000-000000000006")
+FRANK = TARGET.users["frank"]
 
 
 @dataclass(frozen=True)
@@ -237,6 +233,25 @@ class KeycloakTokenSource:
                     http.post(f"/organizations/{source}/members", json=user.id).raise_for_status()
             finally:
                 http.delete(f"/organizations/{target}/members/{user.id}").raise_for_status()
+
+    @contextmanager
+    def joined(self, user: KeycloakUser, organization: str) -> Iterator[None]:
+        """Add ``user`` to ``organization``; remove them again afterwards."""
+        with self._admin() as http:
+            target = self._organization_id(http, organization)
+            http.post(f"/organizations/{target}/members", json=user.id).raise_for_status()
+        try:
+            yield
+        finally:
+            with self._admin() as http:
+                http.delete(f"/organizations/{target}/members/{user.id}").raise_for_status()
+
+    def session_ids(self, user: KeycloakUser) -> set[str]:
+        """The ids of the user's live sessions in the realm: a token's ``sid`` is one of them."""
+        with self._admin() as http:
+            response = http.get(f"/users/{user.id}/sessions")
+            response.raise_for_status()
+            return {session["id"] for session in response.json()}
 
     @contextmanager
     def directory_without(self, role: str) -> Iterator[None]:

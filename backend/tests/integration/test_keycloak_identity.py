@@ -43,6 +43,7 @@ from scripts.seed_keycloak import keycloak_provider
 from tests.helpers.keycloak import (
     ALICE,
     BOB,
+    CAROL,
     DAVE,
     FRANK,
     GLOBEX_SCOPE,
@@ -335,7 +336,6 @@ def test_the_service_account_is_refused_every_write(keycloak, method, path, body
     )
     (globex,) = [o for o in admin.get("/organizations").json() if o["alias"] == GLOBEX]
     (member,) = admin.get("/clients", params={"clientId": MEMBER_TYPE_CLIENT}).json()
-    carol = "ca401000-0000-4000-8000-000000000003"
     if path.endswith("{member}"):
         (role,) = [r for r in admin.get(f"/clients/{member['id']}/roles").json() if r["name"] == DOCUMENTS_READ]
         body = [role]
@@ -344,7 +344,7 @@ def test_the_service_account_is_refused_every_write(keycloak, method, path, body
     )
 
     response = service_account.request(
-        method, path.format(globex=globex["id"], carol=carol, member=member["id"]), json=body
+        method, path.format(globex=globex["id"], carol=CAROL.id, member=member["id"]), json=body
     )
 
     assert response.status_code == 403, response.text
