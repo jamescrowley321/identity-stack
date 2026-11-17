@@ -6,6 +6,8 @@ rests on a provider's documentation alone. "Not built" and "Planned" name the is
 that tracks the gap. A cited file must exist, and a cited ``path::A::b`` must name a
 class or function ``A`` defined at the top of that file and ``b`` defined in ``A``.
 A cited path must stay inside the repository, and only a Python file can define a name.
+Every table of an area has one column per provider, and a row where Keycloak and
+Zitadel differ is explained in the gaps section by its issue or its label in bold or code.
 
 What this checks is that a citation exists, not that it shows what the cell says: a
 cell citing a whole file passes whatever it claims. Whether the cited test, fixture
@@ -48,7 +50,9 @@ CODE_SPAN = re.compile(r"`([^`]+)`")
 ISSUE = re.compile(r"#\d+")
 # A repository path, optionally followed by ``::Name`` parts: no scheme, no
 # leading slash, no placeholder, at least one directory or a file extension.
-PATH = re.compile(r"^(?P<path>[\w.-]+(?:/[\w.-]+)*\.[\w]+|[\w.-]+(?:/[\w.-]+)+/?)(?P<names>(?:::\w+)*)$")
+PATH = re.compile(r"^(?P<path>[\w.-]+(?:/[\w.-]+)*\.[A-Za-z]\w*|[\w.-]+(?:/[\w.-]+)+/?)(?P<names>(?:::\w+)*)$")
+# Where the gaps section names a row on purpose: a code span or a bold run.
+DELIBERATE = re.compile(r"`([^`]+)`|\*\*(.+?)\*\*")
 
 
 @dataclass(frozen=True)
@@ -82,18 +86,32 @@ def _sections(text: str) -> dict[str, list[str]]:
     return sections
 
 
-def _matrix_tables(lines: list[str]) -> list[list[list[str]]]:
-    """The tables of ``lines`` whose header names the providers, as rows of cells, body only."""
-    tables: list[list[list[str]]] = []
+def _tables(lines: list[str]) -> list[list[str]]:
+    """The tables of ``lines``, each as its lines, header first."""
+    tables: list[list[str]] = []
     block: list[str] = []
     for line in [*lines, ""]:
         if line.startswith("|"):
             block.append(line)
             continue
-        if len(block) > 2 and tuple(_cells_of(block[0])[1:]) == PROVIDERS:
-            tables.append([_cells_of(row) for row in block[2:]])
+        if block:
+            tables.append(block)
         block = []
     return tables
+
+
+def _names_the_providers(table: list[str]) -> bool:
+    return tuple(_cells_of(table[0])[1:]) == PROVIDERS
+
+
+def _matrix_tables(lines: list[str]) -> list[list[list[str]]]:
+    """The tables of ``lines`` whose header names the providers, as rows of cells, body only."""
+    return [[_cells_of(row) for row in table[2:]] for table in _tables(lines) if _names_the_providers(table)]
+
+
+def _misheaded_tables(lines: list[str]) -> list[str]:
+    """The headers of tables in ``lines`` that do not name the providers, which the matrix would not read."""
+    return [table[0].strip() for table in _tables(lines) if not _names_the_providers(table)]
 
 
 def _matrix() -> dict[str, list[Cell]]:
@@ -161,6 +179,11 @@ def test_every_area_of_the_scope_has_a_table_with_one_column_per_provider(sectio
     assert _matrix().get(section), f"## {section} has no table with the columns {PROVIDERS}"
 
 
+@pytest.mark.parametrize("section", SECTIONS)
+def test_every_table_of_an_area_names_the_providers(section):
+    assert _misheaded_tables(_sections(MATRIX.read_text(encoding="utf-8")).get(section, [])) == []
+
+
 def test_every_row_has_one_cell_per_provider():
     assert [cell.where for cell in _all_cells() if cell.provider == "(column count)"] == []
 
@@ -217,8 +240,13 @@ def _explanations(gaps: list[str]) -> str:
 
 
 def _names(label: str, text: str) -> bool:
-    """Whether ``text`` names the row ``label`` as whole words, ignoring case and code spans."""
-    return re.search(rf"\b{re.escape(label.replace('`', ''))}\b", text.replace("`", ""), re.IGNORECASE) is not None
+    """Whether a code span or bold run of ``text`` names the row ``label`` as whole words, ignoring case.
+
+    A label in running prose does not count: a row called "Adapter" is not explained by
+    "which the Keycloak adapter pushes".
+    """
+    pattern = re.compile(rf"(?<!\w){re.escape(label.replace('`', ''))}(?!\w)", re.IGNORECASE)
+    return any(pattern.search(code or bold) for code, bold in DELIBERATE.findall(text))
 
 
 def _unexplained_differences(cells: list[Cell], explanations: str) -> list[str]:
@@ -342,23 +370,48 @@ class TestTheChecksThemselves:
         assert _unexplained_differences(cells, _explanations(gaps)) == ["S / Client credentials"]
 
     def test_a_label_inside_a_longer_word_does_not_name_the_row(self):
-        assert not _names("PAR", "compare the two")
+        assert not _names("PAR", "**compare** the two")
         assert _names("PAR", "DPoP and `par` are advertised")
-        assert _names("`require_role`", "Keycloak has no require_role.")
+        assert _names("`require_role`", "Keycloak has no `require_role`.")
+
+    def test_only_a_code_span_or_a_bold_run_names_a_row(self):
+        assert not _names("Adapter", "email change, which the Keycloak adapter pushes")
+        assert _names("Adapter", "Zitadel has no **adapter**")
+        assert not _names("Tenant membership", "Zitadel pushes no tenant membership")
+        assert _names("Tenant membership", "Zitadel pushes no **tenant membership**")
+
+    def test_a_label_ending_in_punctuation_can_name_its_row(self):
+        assert _names("Logout (RP-initiated)", "both: **logout (RP-initiated)**.")
+        assert _names("Refresh?", "`refresh?`")
+        assert not _names("PAR", "`PARx`")
 
     def test_a_status_must_open_the_cell(self):
         assert Cell("s", "r", "p", "Not built (#1)").status == NOT_BUILT
         assert Cell("s", "r", "p", "Not supported: x").status == NOT_SUPPORTED
         assert Cell("s", "r", "p", "Works: `x`").status is None
 
-    def test_only_a_table_naming_the_providers_is_read(self):
+    def test_a_table_naming_the_providers_is_read(self):
+        lines = [
+            "| Row | " + " | ".join(PROVIDERS) + " |",
+            "|---|---|---|---|---|---|",
+            "| a | 1 | 2 | 3 | 4 | 5 |",
+        ]
+        assert _matrix_tables(lines) == [[["a", "1", "2", "3", "4", "5"]]]
+        assert _misheaded_tables(lines) == []
+
+    def test_a_table_with_other_columns_is_reported_not_dropped(self):
         lines = [
             "| Row | " + " | ".join(PROVIDERS) + " |",
             "|---|---|---|---|---|---|",
             "| a | 1 | 2 | 3 | 4 | 5 |",
             "",
-            "| Other | x |",
-            "|---|---|",
-            "| b | y |",
+            "| Row | Descope | Ory | Keycloak |",
+            "|---|---|---|---|",
+            "| b | 1 | 2 | 3 |",
         ]
         assert _matrix_tables(lines) == [[["a", "1", "2", "3", "4", "5"]]]
+        assert _misheaded_tables(lines) == ["| Row | Descope | Ory | Keycloak |"]
+
+    @pytest.mark.parametrize("span", ["v2.2.0", "26.8.2", "1.2"])
+    def test_a_version_is_not_a_path(self, span):
+        assert _paths(f"`{span}`") == []
