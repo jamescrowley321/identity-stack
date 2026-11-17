@@ -50,10 +50,18 @@ class _OrganizationTenant:
     domains: frozenset[str]
 
 
+def _normalised_domain(domain: str) -> str:
+    """``domain`` lower-cased, without surrounding spaces, a leading ``@`` or a trailing ``.``."""
+    return domain.strip().removeprefix("@").removesuffix(".").lower()
+
+
 def _domain_admitted(email: str, domains: frozenset[str]) -> bool:
-    """Whether ``email``'s domain, whole and compared without case, is one of ``domains``."""
-    local, at, domain = email.rpartition("@")
-    return bool(local and at and domain.lower() in domains)
+    """Whether ``email`` has one ``@`` and its domain, whole and compared without case, is one of ``domains``.
+
+    The email's domain is read without a trailing ``.``; nothing else in it is changed.
+    """
+    local, at, domain = email.partition("@")
+    return bool(local and at and "@" not in domain and domain.removesuffix(".").lower() in domains)
 
 
 class IdentityProvisioningService:
@@ -117,16 +125,19 @@ class IdentityProvisioningService:
         tenant already names it. An organization's administrators can create a
         user with any email and mark it verified, so on this path a verified
         email is not proof the login is that user's. Such a login creates a user
-        only for an email whose domain is one of that tenant's ``domains``
-        (whole, compared without case; a tenant with none admits no first
-        login), and is never linked to an existing canonical user by email.
+        only for an email with one ``@`` whose domain is one of that tenant's
+        ``domains`` (whole, compared without case or a trailing dot, a domain
+        read without spaces or a leading ``@``; a tenant with none admits no
+        first login), and is never linked to an existing canonical user by
+        email.
         Either refusal is ``Forbidden`` too, the answer an unlinked organization
         gets, and nothing is written. The one answer hides which refusal fired
         and anything about emails outside the tenant's domains; within them, a
         refusal where a free email is admitted still tells the organization's
-        administrators who chose the email that a canonical user holds it. An administrator links such a user beforehand
-        (``scripts/seed_zitadel.py`` writes the ``idp_links`` row): an existing
-        link is found before any email is read.
+        administrators who chose the email that a canonical user holds it. An
+        administrator links such a user beforehand (``scripts/seed_zitadel.py``
+        writes the ``idp_links`` row): an existing link is found before any
+        email is read.
 
         The user such a login creates is marked ``email_from_organization``,
         and no later first login, of any provider, links to it by email either:
@@ -270,7 +281,7 @@ class IdentityProvisioningService:
         tenants = await self._tenant_repository.list_by_external_org_id(provider_id, organization_id)
         if len(tenants) != 1 or tenants[0].status != TenantStatus.active:
             return Error(Forbidden("The organization is not linked to exactly one active tenant"))
-        domains = frozenset(domain.lower() for domain in tenants[0].domains if isinstance(domain, str))
+        domains = frozenset(_normalised_domain(domain) for domain in tenants[0].domains if isinstance(domain, str))
         return Ok(_OrganizationTenant(id=tenants[0].id, domains=domains))
 
     async def _assign_organization_member(self, user_id: uuid.UUID, tenant_id: uuid.UUID) -> None:

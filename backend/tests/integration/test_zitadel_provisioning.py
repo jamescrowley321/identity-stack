@@ -273,9 +273,9 @@ class TestAnEmailAlreadyHeldIsNeverLinked:
     not learn that the email is held.
     """
 
-    async def _acme_admin(self, session) -> uuid.UUID:
-        """An acme admin holding ``EMAIL``; its id, read before anything expires the row."""
-        user = User(email=EMAIL, user_name=EMAIL)
+    async def _acme_admin(self, session, email: str = EMAIL) -> uuid.UUID:
+        """An acme admin holding ``email``; its id, read before anything expires the row."""
+        user = User(email=email, user_name=email)
         role = Role(name="admin")
         session.add_all([user, role])
         await session.flush()
@@ -315,10 +315,16 @@ class TestAnEmailAlreadyHeldIsNeverLinked:
         assert EMAIL not in refusals[0]
 
     async def test_a_login_in_the_users_own_organization_is_refused_too(self, db_session):
-        await _seeded(db_session, domains={**DOMAINS, "acme": ["globex.test"]})
-        await self._acme_admin(db_session)
+        await _seeded(db_session)
+        await self._acme_admin(db_session, email="admin@acme.test")
 
-        await self._refused(db_session, ACME_ORG)
+        before = await _written(db_session)
+        result = await _provision(db_session, ACME_ORG, email="admin@acme.test")
+
+        assert result.is_error()
+        assert type(result.error) is Forbidden
+        assert await _written(db_session) == before
+        assert await IdPLinkRepository(db_session).get_by_provider_name_and_sub(PROVIDER, SUB) is None
 
     async def test_a_user_with_no_membership_is_not_linked_either(self, db_session):
         await _seeded(db_session)
@@ -371,7 +377,15 @@ class TestAnOrganizationLoginOutsideItsTenantsDomains:
 
     @pytest.mark.parametrize(
         "email",
-        ["user@sub.globex.test", "user@evilglobex.test", "user@globex.test.evil.test", "globex.test", "@globex.test"],
+        [
+            "user@sub.globex.test",
+            "user@evilglobex.test",
+            "user@globex.test.evil.test",
+            "globex.test",
+            "@globex.test",
+            "user@acme.test@globex.test",
+            "user@globex.test ",
+        ],
     )
     async def test_a_domain_is_matched_whole(self, db_session, email):
         await _seeded(db_session)
@@ -387,6 +401,25 @@ class TestAnOrganizationLoginOutsideItsTenantsDomains:
         await _seeded(db_session, domains={**DOMAINS, "globex": ["Globex.TEST"]})
 
         result = await _provision(db_session, GLOBEX_ORG, email="Globex-User@GLOBEX.test")
+
+        assert result.is_ok(), result
+        assert await _memberships(db_session, result.ok) == {("globex", MEMBER, True)}
+
+    @pytest.mark.parametrize(
+        "domain", [" globex.test", "globex.test.", "@globex.test", "Globex.TEST", " @GLOBEX.test. "]
+    )
+    async def test_a_tenant_domain_is_read_without_spaces_at_sign_or_trailing_dot(self, db_session, domain):
+        await _seeded(db_session, domains={**DOMAINS, "globex": [domain]})
+
+        result = await _provision(db_session, GLOBEX_ORG)
+
+        assert result.is_ok(), result
+        assert await _memberships(db_session, result.ok) == {("globex", MEMBER, True)}
+
+    async def test_the_emails_domain_is_read_without_a_trailing_dot(self, db_session):
+        await _seeded(db_session)
+
+        result = await _provision(db_session, GLOBEX_ORG, email="globex-user@globex.test.")
 
         assert result.is_ok(), result
         assert await _memberships(db_session, result.ok) == {("globex", MEMBER, True)}

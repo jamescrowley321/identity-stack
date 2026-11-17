@@ -318,6 +318,29 @@ class TestReconcileTenants:
         assert existing.domains == ["new.com"]
         mocks["tenant_repo"].update.assert_awaited_once()
 
+    async def test_a_tenant_linked_to_another_providers_organization_keeps_its_domains(self):
+        """Its domains are that organization's admission allow-list, written by its operator, not Descope's."""
+        service, mocks = _build_service()
+        _empty_descope_state(mocks)
+        _empty_canonical_state(mocks)
+        linked = _make_tenant(
+            name="Acme", domains=["acme.test"], external_org_id="org-acme", external_org_provider_id=uuid.uuid4()
+        )
+        unlinked = _make_tenant(name="Globex", domains=["old.com"])
+        mocks["descope"].list_tenants.return_value = [
+            {"name": "Acme", "selfProvisioningDomains": ["globex.test"]},
+            {"name": "Globex", "selfProvisioningDomains": ["new.com"]},
+        ]
+        mocks["tenant_repo"].list_all.return_value = [linked, unlinked]
+
+        result = await service.run()
+
+        assert result.is_ok()
+        assert result.ok["stats"]["tenants_updated"] == 1
+        assert linked.domains == ["acme.test"]
+        assert unlinked.domains == ["new.com"]
+        mocks["tenant_repo"].update.assert_awaited_once_with(unlinked)
+
     async def test_no_change_tenant_not_updated(self):
         service, mocks = _build_service()
         _empty_descope_state(mocks)
