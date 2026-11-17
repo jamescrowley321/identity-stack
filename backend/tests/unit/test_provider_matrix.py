@@ -3,10 +3,11 @@
 A cell opens with its status. "Supported" and "Not supported" name a file of this
 repository that shows it (a test, a recorded fixture, a Terraform root), so no cell
 rests on a provider's documentation alone. "Not built" and "Planned" name the issue
-that tracks the gap. A cited file must exist, and a cited ``path::name`` must name a
-class or function defined in that file.
+that tracks the gap. A cited file must exist, and a cited ``path::A::b`` must name a
+class or function ``A`` defined at the top of that file and ``b`` defined in ``A``.
 """
 
+import ast
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[3]
 MATRIX = REPO / "docs" / "providers.md"
 
+GAPS_SECTION = "Gaps between Keycloak and Zitadel"
 PROVIDERS = ("Descope", "Ory", "Keycloak", "Zitadel", "Cloudflare Access")
 PLANNED_PROVIDER = "Cloudflare Access"
 SECTIONS = (
@@ -118,18 +120,27 @@ def _paths(text: str) -> list[tuple[str, list[str]]]:
     return found
 
 
+DEFINITIONS = (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+
+
 def _missing(path: str, names: list[str]) -> list[str]:
+    """What of ``path::names[0]::names[1]...`` is not there, each name looked up inside the one before."""
     target = REPO / path
     if not target.exists():
         return [f"{path} does not exist"]
     if not names:
         return []
-    source = target.read_text(encoding="utf-8")
-    return [
-        f"{path}::{name} is not defined there"
-        for name in names
-        if not re.search(rf"^\s*(?:async\s+)?(?:def|class)\s+{name}\b", source, re.MULTILINE)
-    ]
+    if not target.is_file():
+        return [f"{path} is not a file, so it defines no {'::'.join(names)}"]
+    body: list[ast.stmt] = ast.parse(target.read_text(encoding="utf-8")).body
+    found = path
+    for name in names:
+        definition = next((node for node in body if isinstance(node, DEFINITIONS) and node.name == name), None)
+        if definition is None:
+            return [f"{found}::{name} is not defined there"]
+        found = f"{found}::{name}"
+        body = definition.body
+    return []
 
 
 def test_the_document_exists():
@@ -147,6 +158,14 @@ def test_every_row_has_one_cell_per_provider():
 
 def test_every_cell_opens_with_its_status():
     assert [f"{cell.where}: {cell.text!r}" for cell in _all_cells() if cell.status is None] == []
+
+
+def _gives_no_reason(cell: Cell) -> bool:
+    return cell.status == NOT_APPLICABLE and not cell.text.removeprefix(NOT_APPLICABLE).lstrip(":").strip()
+
+
+def test_a_not_applicable_cell_gives_its_reason():
+    assert [cell.where for cell in _all_cells() if _gives_no_reason(cell)] == []
 
 
 def test_a_supported_or_not_supported_cell_names_a_file_of_this_repository():
@@ -173,17 +192,27 @@ def test_the_planned_provider_is_planned_in_every_cell():
     assert [cell.where for cell in _all_cells() if cell.provider == PLANNED_PROVIDER and cell.status != PLANNED] == []
 
 
-def test_a_gap_between_keycloak_and_zitadel_has_an_issue():
+def _unexplained_differences(cells: list[Cell], gaps: str) -> list[str]:
+    """Rows where Keycloak and Zitadel differ in status that ``gaps`` names neither by issue nor by row label."""
     rows: dict[tuple[str, str], dict[str, Cell]] = {}
-    for cell in _all_cells():
+    for cell in cells:
         rows.setdefault((cell.section, cell.row), {})[cell.provider] = cell
-    gaps = [
-        f"{section} / {row}"
-        for (section, row), by_provider in rows.items()
-        if {by_provider["Keycloak"].status, by_provider["Zitadel"].status} == {SUPPORTED, NOT_BUILT}
-        and not any(ISSUE.search(by_provider[name].text) for name in ("Keycloak", "Zitadel"))
-    ]
-    assert gaps == []
+    mentioned = set(ISSUE.findall(gaps))
+    unexplained = []
+    for (section, row), by_provider in rows.items():
+        keycloak, zitadel = by_provider.get("Keycloak"), by_provider.get("Zitadel")
+        if keycloak is None or zitadel is None or keycloak.status == zitadel.status:
+            continue
+        issues = set(ISSUE.findall(keycloak.text)) | set(ISSUE.findall(zitadel.text))
+        if not issues & mentioned and row.replace("`", "").lower() not in gaps.replace("`", "").lower():
+            unexplained.append(f"{section} / {row}")
+    return unexplained
+
+
+def test_every_difference_between_keycloak_and_zitadel_is_explained():
+    gaps = "\n".join(_sections(MATRIX.read_text(encoding="utf-8")).get(GAPS_SECTION, []))
+    assert gaps, f"## {GAPS_SECTION} is missing"
+    assert _unexplained_differences(_all_cells(), gaps) == []
 
 
 @pytest.mark.parametrize("index", ["README.md", "docs/README.md"])
@@ -215,7 +244,49 @@ class TestTheChecksThemselves:
         ]
 
     def test_a_defined_name_is_found(self):
-        assert _missing("backend/tests/unit/test_provider_matrix.py", ["TestTheChecksThemselves", "_missing"]) == []
+        assert _missing("backend/tests/unit/test_provider_matrix.py", ["_missing"]) == []
+        assert (
+            _missing(
+                "backend/tests/unit/test_provider_matrix.py",
+                ["TestTheChecksThemselves", "test_a_defined_name_is_found"],
+            )
+            == []
+        )
+
+    def test_a_name_is_looked_up_inside_the_one_before_it(self):
+        assert _missing("backend/tests/unit/test_provider_matrix.py", ["TestTheChecksThemselves", "_missing"]) == [
+            "backend/tests/unit/test_provider_matrix.py::TestTheChecksThemselves::_missing is not defined there"
+        ]
+        assert _missing("backend/tests/unit/test_provider_matrix.py", ["test_a_defined_name_is_found"]) == [
+            "backend/tests/unit/test_provider_matrix.py::test_a_defined_name_is_found is not defined there"
+        ]
+
+    def test_a_directory_defines_no_name(self):
+        assert _missing("backend/tests/unit", ["Anything"]) == [
+            "backend/tests/unit is not a file, so it defines no Anything"
+        ]
+
+    def test_a_not_applicable_cell_without_a_reason_is_found(self):
+        assert _gives_no_reason(Cell("s", "r", "p", "Not applicable"))
+        assert _gives_no_reason(Cell("s", "r", "p", "Not applicable: "))
+        assert not _gives_no_reason(Cell("s", "r", "p", "Not applicable: hosted only"))
+
+    def test_a_difference_is_explained_by_its_issue_or_its_row_label(self):
+        def row(label: str, keycloak: str, zitadel: str) -> list[Cell]:
+            return [Cell("S", label, "Keycloak", keycloak), Cell("S", label, "Zitadel", zitadel)]
+
+        cells = [
+            *row("Same", "Supported (`a`)", "Supported (`b`)"),
+            *row("By issue", "Supported (`a`)", "Not built (#1)"),
+            *row("`By name`", "Supported (`a`)", "Not applicable: by design"),
+            *row("Unexplained", "Supported (`a`)", "Not built (#2)"),
+            *row("Also unexplained", "Supported (`a`)", "Not applicable: by design"),
+            Cell("S", "Short row", "Keycloak", "Supported (`a`)"),
+        ]
+        assert _unexplained_differences(cells, "Built for one only (#1). By design: `by name`.") == [
+            "S / Unexplained",
+            "S / Also unexplained",
+        ]
 
     def test_a_status_must_open_the_cell(self):
         assert Cell("s", "r", "p", "Not built (#1)").status == NOT_BUILT

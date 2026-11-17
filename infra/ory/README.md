@@ -131,7 +131,7 @@ The backend's Ory end-to-end suite
 (`backend/tests/integration/test_ory_end_to_end.py`) does **not** use this
 project by default. It mints real tokens from the `hydra-test` container in
 `docker-compose.test.yml`, so it runs on a laptop and on every CI PR without a
-credential. Ory Network's OAuth2 surface is Ory Hydra, so the middleware,
+credential. The `oryd/hydra` image is Apache-2.0 and runs unmodified. Ory Network's OAuth2 surface is Ory Hydra, so the middleware,
 discovery, JWKS verification, issuer allow-list and audience checks under test
 are the same code either way.
 
