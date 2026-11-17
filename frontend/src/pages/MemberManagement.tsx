@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { toast } from "sonner";
 import { useApiClient } from "@/hooks/useApiClient";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -25,13 +25,19 @@ export default function MemberManagement() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState("member");
 
+  // The list reloads when the tenant changes (apiFetch does). Only the latest
+  // load fills it, so an earlier tenant's answer arriving late is dropped, and a
+  // failed load empties it rather than leaving the previous tenant's rows.
+  const latestLoad = useRef(0);
   const loadMembers = useCallback(() => {
+    const load = ++latestLoad.current;
+    const show = (rows: Member[]) => {
+      if (load === latestLoad.current) setMembers(rows);
+    };
     apiFetch("/api/members")
       .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data?.members) setMembers(data.members);
-      })
-      .catch(() => {});
+      .then((data) => show(Array.isArray(data?.members) ? data.members : []))
+      .catch(() => show([]));
   }, [apiFetch]);
 
   useEffect(() => {
