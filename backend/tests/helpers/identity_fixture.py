@@ -76,10 +76,7 @@ def load_identity_fixture(raw: object) -> IdentityFixture:
     if not isinstance(raw, dict):
         raise IdentityFixtureInvalid("the fixture must be a JSON object")
     try:
-        tenants = {
-            key: FixtureTenant(key, spec["name"], spec["domain"], spec["canonical"])
-            for key, spec in raw["tenants"].items()
-        }
+        tenants = {key: _tenant(key, spec) for key, spec in raw["tenants"].items()}
         users = {key: _user(key, spec, tenants) for key, spec in raw["users"].items()}
         named = raw["cases"]
     except (KeyError, TypeError, AttributeError) as exc:
@@ -94,7 +91,31 @@ def load_identity_fixture(raw: object) -> IdentityFixture:
     return IdentityFixture(tenants, users, FixtureCases(**{case: users[user] for case, user in named.items()}))
 
 
+def _typed(owner: str, spec: dict, field: str, kind: type) -> object:
+    # Terraform and Python read a mistyped value differently ("false" is false to one, true
+    # to the other), so the tests would check a different set than the roots build.
+    value = spec[field]
+    if not isinstance(value, kind):
+        raise IdentityFixtureInvalid(f"{owner}'s {field} is {value!r}, not a {_KIND_NAMES[kind]}")
+    return value
+
+
+_KIND_NAMES = {bool: "boolean", str: "string"}
+
+
+def _tenant(key: str, spec: dict) -> FixtureTenant:
+    owner = f"tenant {key}"
+    return FixtureTenant(
+        key,
+        _typed(owner, spec, "name", str),
+        _typed(owner, spec, "domain", str),
+        _typed(owner, spec, "canonical", bool),
+    )
+
+
 def _user(key: str, spec: dict, tenants: Mapping[str, FixtureTenant]) -> FixtureUser:
+    owner = f"user {key}"
+    first_name, last_name = _typed(owner, spec, "first_name", str), _typed(owner, spec, "last_name", str)
     home, roles = spec["home"], spec["roles"]
     if home not in tenants:
         raise IdentityFixtureInvalid(f"user {key}'s home {home!r} is no fixture tenant")
@@ -107,8 +128,8 @@ def _user(key: str, spec: dict, tenants: Mapping[str, FixtureTenant]) -> Fixture
             raise IdentityFixtureInvalid(f"user {key}'s role in {tenant!r} is {role!r}, not a canonical role")
     return FixtureUser(
         key=key,
-        first_name=spec["first_name"],
-        last_name=spec["last_name"],
+        first_name=first_name,
+        last_name=last_name,
         home=home,
         email=f"{key}@{tenants[home].domain}",
         roles=dict(roles),

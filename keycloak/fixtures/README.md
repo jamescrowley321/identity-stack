@@ -70,7 +70,7 @@ tenant names.
 
 The users, the organizations and who belongs where are the shared test fixture
 [`infra/fixtures/test-identities.json`](../../infra/fixtures/test-identities.json), which every
-provider's Terraform root builds from; the unit test `tests/unit/test_test_identities.py` fails
+provider's Terraform root builds from; the unit test `backend/tests/unit/test_identity_fixture.py` fails
 when this import disagrees with it. The ids, passwords and client roles are Keycloak's own.
 
 Organization `acme` carries the attribute `type:tenant-admin` listing `bob`, `dave` and `frank`:
