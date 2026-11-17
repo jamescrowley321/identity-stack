@@ -121,8 +121,10 @@ class IdentityProvisioningService:
         (whole, compared without case; a tenant with none admits no first
         login), and is never linked to an existing canonical user by email.
         Either refusal is ``Forbidden`` too, the answer an unlinked organization
-        gets, so the login learns nothing about who holds the email, and
-        nothing is written. An administrator links such a user beforehand
+        gets, and nothing is written. The one answer hides which refusal fired
+        and anything about emails outside the tenant's domains; within them, a
+        refusal where a free email is admitted still tells the organization's
+        administrators who chose the email that a canonical user holds it. An administrator links such a user beforehand
         (``scripts/seed_zitadel.py`` writes the ``idp_links`` row): an existing
         link is found before any email is read.
 

@@ -714,10 +714,12 @@ principals are decided from the canonical model. Its organization claim is read 
 takes a first-login user's email and names from UserInfo, never from its token.
 A first login whose organization picks its tenant **MUST NOT** be linked to an existing
 canonical user by email, verified or not: an organization's administrators can set any
-email on their users. Nor **MUST** it create a user for an email whose domain, whole and
+email on their users. It **MUST NOT** create a user for an email whose domain, whole and
 compared without case, is not one of that tenant's `domains`. Either refusal is `Forbidden`,
-the answer an unlinked organization gets, so the login cannot tell a held email from a free
-one, and nothing is written.
+the answer an unlinked organization gets, and nothing is written. The one answer hides which
+refusal fired and anything about emails outside the tenant's domains; within those domains a
+403 where a free email gets 200 still tells the organization's administrators who chose the
+email that a canonical user holds it.
 The user such a login creates is marked `users.email_from_organization`, and no first
 login of any provider (just-in-time provisioning, the Descope flow sync) **MUST** link to
 that user by email either: it is `EmailLinkRefused` too. A Descope reconciliation run
