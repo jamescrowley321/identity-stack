@@ -17,6 +17,7 @@ context runs on the live session.
 import base64
 import hashlib
 import secrets
+from collections.abc import Sequence
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -49,8 +50,30 @@ class Authorization:
     forms_shown: tuple[str, ...]
 
 
-def _is_redirect_back(url: str) -> bool:
-    return url == KEYCLOAK_REDIRECT_URI or url.startswith((f"{KEYCLOAK_REDIRECT_URI}/", f"{KEYCLOAK_REDIRECT_URI}?"))
+def is_callback(url: str, state: str) -> bool:
+    """Whether ``url`` is the authorization callback for the request with ``state``.
+
+    The SPA's origin sees other navigations too (the SPA's own routes), so only a
+    navigation carrying this request's ``state`` and a ``code`` or ``error`` counts.
+    """
+    if not (url == KEYCLOAK_REDIRECT_URI or url.startswith((f"{KEYCLOAK_REDIRECT_URI}/", f"{KEYCLOAK_REDIRECT_URI}?"))):
+        return False
+    params = parse_qs(urlparse(url).query)
+    return params.get("state") == [state] and ("code" in params or "error" in params)
+
+
+def authorization_code(callbacks: Sequence[str], state: str) -> str:
+    """The ``code`` of the one callback for ``state``; anything else is a failed flow."""
+    if len(callbacks) != 1:
+        raise KeycloakBrowserFlowError(
+            f"expected one callback for this request, saw {len(callbacks)}: {list(callbacks)}"
+        )
+    (callback,) = callbacks
+    params = parse_qs(urlparse(callback).query)
+    if not is_callback(callback, state) or "code" not in params:
+        raise KeycloakBrowserFlowError(f"callback without this request's code: {params.get('error', sorted(params))}")
+    (code,) = params["code"]
+    return code
 
 
 class BrowserLogin:
@@ -87,7 +110,7 @@ class BrowserLogin:
         def _record(request: Request) -> None:
             # Keycloak reaches the SPA's origin by a 302, and Playwright does not
             # route a request a redirect made, so it is read from the request events.
-            if request.is_navigation_request() and _is_redirect_back(request.url):
+            if request.is_navigation_request() and is_callback(request.url, state):
                 redirects.append(request.url)
 
         page = context.new_page()
@@ -108,12 +131,7 @@ class BrowserLogin:
         finally:
             page.close()
 
-        (redirect,) = redirects
-        params = parse_qs(urlparse(redirect).query)
-        if params.get("state") != [state] or "code" not in params:
-            raise KeycloakBrowserFlowError(f"redirect back without this request's code: {sorted(params)}")
-        (code,) = params["code"]
-        return Authorization(code=code, forms_shown=tuple(forms))
+        return Authorization(code=authorization_code(redirects, state), forms_shown=tuple(forms))
 
     def exchange(self, context: BrowserContext, code: str, *, client_id: str, verifier: str) -> BrowserTokens:
         response = context.request.post(
