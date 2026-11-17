@@ -123,9 +123,17 @@ cp "$root/.terraform.lock.hcl" "$work/"
 # running" and letting cleanup take down another session's keycloak-test.
 running="$("${compose[@]}" ps --status running --quiet keycloak-test)"
 if [ -z "$running" ]; then
+  # A stopped keycloak-test keeps the realm it imported when it was created
+  # (--import-realm skips a realm that exists), which may predate this
+  # checkout's import file. Starting it, recreate it so the comparison reads
+  # the current import.
   started=1
+  "${compose[@]}" up -d --wait --force-recreate --renew-anon-volumes keycloak-test
+else
+  # Running for another test run or session: left as it is, so its realm is
+  # whatever was imported when it was created (hint below if the check fails).
+  "${compose[@]}" up -d --wait keycloak-test
 fi
-"${compose[@]}" up -d --wait keycloak-test
 delete_leftover_realm
 
 terraform -chdir="$work" init -input=false >/dev/null
@@ -147,4 +155,10 @@ PYTHONPATH="$repo/backend" "$python" "$root/scripts/check_realm.py" \
   --base-url "$base_url" \
   --import-realm "$import_realm" \
   --terraform-realm "$terraform_realm" \
-  --terraform-outputs "$work/outputs.json"
+  --terraform-outputs "$work/outputs.json" || {
+  compare_status=$?
+  if [ "$started" = 0 ]; then
+    echo "keycloak-test was already running, so realm $import_realm is the import from when that container was created; if keycloak/realm/identity-stack-realm.json changed since, 'make test-down' (once no other run uses it) and run the check again" >&2
+  fi
+  exit "$compare_status"
+}
