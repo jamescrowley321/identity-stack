@@ -2,28 +2,37 @@
 
 Outbound only, with a machine user's token (``ZitadelAdminApi``):
 
-- ``sync_tenant`` creates the tenant's organization, gives it a login policy with
-  self-registration off, grants it the project with every project role, and then links
-  the tenant to it (``tenants.external_org_id`` and ``external_org_provider_id``, the
-  ``zitadel`` provider row). The link is written last: an organization that failed part
-  way is named by no tenant, and a first login into it provisions nobody.
+- ``sync_tenant`` creates the tenant's organization, with the tenant's id as its id,
+  gives it a login policy with self-registration off, grants it the project with every
+  project role, and then links the tenant to it (``tenants.external_org_id`` and
+  ``external_org_provider_id``, the ``zitadel`` provider row). The link is written last:
+  an organization that failed part way is named by no tenant, and a first login into it
+  provisions nobody. A second sync of that tenant finishes it: the organization is
+  found by its id, and a policy or grant already made is kept.
 - ``sync_user`` creates a human user in the tenant's organization when the user was just
   created there (``CREATED_IN_TENANT``) and has no link yet, with the canonical user's id
   as its Zitadel id, and records it as the user's ``zitadel`` IdP link, so that user's
   first login finds them; the new user is brought to the canonical status. Otherwise it
   pushes only a status change (``STATUS_CHANGED``, from activate and deactivate):
-  deactivated when inactive, reactivated when active or provisioned. A profile update or
-  a tenant left sends no status change and reaches nothing, so it does not undo an enable
-  or disable made in Zitadel, and memberships stay canonical.
+  deactivated unless already inactive, reactivated when inactive and wanted active or
+  provisioned. A profile update or a tenant left sends no status change and reaches
+  nothing, so it does not undo an enable or disable made in Zitadel, and memberships
+  stay canonical.
 - ``delete_user`` removes the linked Zitadel user.
 - Roles, permissions and role assignments stay canonical: those methods, and
   ``delete_tenant``, return ``Ok`` and call nothing, as in ``OrySyncAdapter``.
 
+Which Zitadel user: the adapter's token may change users of every organization, so it
+follows only a link a sign-in or the backend made (``ZitadelLinks.subject_of``), never
+one an admin typed in. A user with no such link is looked up by its canonical id, the
+id the adapter gives the users it creates: a create whose answer was lost, or whose link
+write failed, is found and linked by the next call instead of being made again.
+
 Every method returns ``Error(SyncError)`` for any failure, Zitadel unreachable included,
 and raises nothing; ``context[UNANSWERED]`` is set when Zitadel gave no readable answer
-(no response, a timeout, a body that is not JSON). A user that was never in Zitadel
-through this adapter or a first login has no link, so a status change or delete for it
-is an error, not a silent pass. The adapter keeps no membership beside the canonical role
+(no response, a timeout, a body that is not JSON). A user Zitadel has neither through a
+followed link nor under its canonical id gets an error for a status change or delete,
+not a silent pass. The adapter keeps no membership beside the canonical role
 assignments (``ends_memberships`` is false): a user stays in the organization it was
 created in, and the canonical model decides what it is granted.
 """
@@ -48,7 +57,7 @@ from app.services.adapters.base import (
     IdentityProviderAdapter,
     SyncError,
 )
-from app.services.adapters.zitadel_api import ZitadelAdminApi, login_policy_without_registration
+from app.services.adapters.zitadel_api import ZitadelAdminApi, ZitadelUser, login_policy_without_registration
 
 logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
@@ -73,7 +82,9 @@ class ZitadelLinks(Protocol):
 
     async def link_organization(self, tenant_id: uuid.UUID, provider_id: uuid.UUID, org_id: str) -> None: ...
 
-    async def subject_of(self, user_id: uuid.UUID, provider_id: uuid.UUID) -> str | None: ...
+    async def subject_of(self, user_id: uuid.UUID, provider_id: uuid.UUID) -> str | None:
+        """The Zitadel subject of the user's link, if a sign-in or the backend made it; never an admin-made one."""
+        ...
 
     async def link_subject(self, user_id: uuid.UUID, provider_id: uuid.UUID, sub: str, email: str) -> None: ...
 
@@ -108,6 +119,73 @@ def _sync_error(operation: str, exc: Exception, context: dict) -> SyncError:
     return SyncError(message=f"Zitadel {operation} failed: {type(exc).__name__}", operation=operation, context=context)
 
 
+# A create Zitadel refused or did not answer: it may still have made what was asked
+# (an earlier try made it, or the answer was lost), which a lookup by id settles.
+_CREATE_FAILURES = (UpstreamStatusError, UpstreamTransportError, json.JSONDecodeError)
+
+
+async def _ensure_organization(api: ZitadelAdminApi, org_id: str, name: str) -> None:
+    """Create the organization with that id, unless Zitadel already has it."""
+    try:
+        await api.add_organization(org_id, name)
+    except _CREATE_FAILURES:
+        if not await api.has_organization(org_id):
+            raise
+
+
+async def _close_registration(api: ZitadelAdminApi, org_id: str) -> None:
+    """Give the organization its own login policy with self-registration off, if it has none yet.
+
+    The policy copies the default's other values. A default that links identity providers
+    is refused: those links are not part of the copy, so login through them would stop.
+    An own policy already there (an earlier try made it) is kept when it is closed to
+    registration, and refused when it is not.
+    """
+    policy = await api.effective_login_policy(org_id)
+    if policy.get("isDefault") is not True:
+        if policy.get("allowRegister") is True:
+            raise _Refused("The organization has a login policy of its own that allows self-registration", {})
+        return
+    if policy.get("idps"):
+        raise _Refused(
+            "The default login policy links identity providers, which the organization's own policy would drop",
+            {},
+        )
+    await api.add_login_policy(org_id, login_policy_without_registration(policy))
+
+
+async def _create_user(api: ZitadelAdminApi, new_user: dict) -> ZitadelUser | None:
+    """Create the human user; what Zitadel then has with its id, None if nothing."""
+    try:
+        await api.add_human_user(**new_user)
+    except _CREATE_FAILURES:
+        found = await api.find_user(new_user["user_id"])
+        if found is None:
+            raise
+        return found
+    return await api.find_user(new_user["user_id"])
+
+
+async def _bring_to(api: ZitadelAdminApi, sub: str, state: str, wanted: str) -> None:
+    """Bring the Zitadel user from ``state`` to the ``wanted`` one.
+
+    Deactivated from any state but inactive (locked and initial included), so a canonical
+    deactivation never passes over a user Zitadel still lets sign in. Reactivated only
+    from inactive: a locked or initial user stays as Zitadel has it.
+    """
+    if wanted == INACTIVE and state != INACTIVE:
+        try:
+            await api.deactivate_user(sub)
+        except UpstreamStatusError as exc:
+            status = exc.response.status_code
+            raise _Refused(
+                f"Zitadel answered {status} to deactivating a user in state {state}: {exc.response.text[:_BODY_LIMIT]}",
+                {"status": status, "state": state},
+            ) from exc
+    elif wanted == ACTIVE and state == INACTIVE:
+        await api.reactivate_user(sub)
+
+
 class ZitadelSyncAdapter(IdentityProviderAdapter):
     """Syncs canonical tenants and users to Zitadel. Roles and permissions stay canonical."""
 
@@ -123,7 +201,12 @@ class ZitadelSyncAdapter(IdentityProviderAdapter):
         return provider_id
 
     async def sync_tenant(self, *, tenant_id: uuid.UUID, data: dict) -> Result[None, SyncError]:
-        """Create the tenant's organization, closed to self-registration and granted the project."""
+        """Create the tenant's organization, closed to self-registration and granted the project.
+
+        The organization's id is the tenant's, so a sync that stopped part way is finished by
+        the next one: an organization, a policy of its own or a grant Zitadel already has is
+        kept, not made again.
+        """
         with tracer.start_as_current_span("zitadel.sync_tenant") as span:
             span.set_attribute("tenant.id", str(tenant_id))
             context: dict = {"tenant_id": str(tenant_id)}
@@ -134,11 +217,11 @@ class ZitadelSyncAdapter(IdentityProviderAdapter):
                 provider_id = await self._provider_id()
                 if await self._links.organization_of(tenant_id, provider_id) is not None:
                     return Ok(None)
+                org_id = str(tenant_id)
+                context["organization_id"] = org_id
                 async with self._open_api() as api:
-                    org_id = await api.add_organization(name)
-                    context["organization_id"] = org_id
-                    policy = await api.effective_login_policy(org_id)
-                    await api.add_login_policy(org_id, login_policy_without_registration(policy))
+                    await _ensure_organization(api, org_id, name)
+                    await _close_registration(api, org_id)
                     role_keys = await api.project_role_keys(self._project_id)
                     await api.grant_project(self._project_id, org_id, role_keys)
                 await self._links.link_organization(tenant_id, provider_id, org_id)
@@ -154,6 +237,10 @@ class ZitadelSyncAdapter(IdentityProviderAdapter):
         user_name, given_name and family_name; ``STATUS_CHANGED: True`` on activate and
         deactivate. An empty given or family name is sent as the user name: Zitadel
         refuses an empty one. Any other change reaches nothing.
+
+        A user with no followed link is looked up by its canonical id, the id this adapter
+        gives the users it creates: one an earlier create made but did not link (its answer
+        was lost, or the link write failed) is linked now instead of being made again.
         """
         with tracer.start_as_current_span("zitadel.sync_user") as span:
             span.set_attribute("user.id", str(user_id))
@@ -168,26 +255,32 @@ class ZitadelSyncAdapter(IdentityProviderAdapter):
                     raise _Refused(f"Unknown status: expected one of {sorted(_STATE_OF_STATUS)}", {})
                 provider_id = await self._provider_id()
                 sub = await self._links.subject_of(user_id, provider_id)
-                new_user: dict | None = None
-                if sub is None:
-                    if created_in is None:
-                        raise _Refused("No Zitadel user is linked to this user", {})
-                    new_user = await self._new_user(user_id, provider_id, uuid.UUID(str(created_in)), data)
-                elif not status_changed:
+                if sub is not None and not status_changed:
                     # Already in Zitadel (linked before this call): nothing was created, no status changed.
                     return Ok(None)
+                new_user = None
+                if sub is None and created_in is not None:
+                    new_user = await self._new_user(user_id, provider_id, uuid.UUID(str(created_in)), data)
                 async with self._open_api() as api:
-                    if new_user is not None:
-                        await api.add_human_user(**new_user)
-                        sub = new_user["user_id"]
-                        await self._links.link_subject(user_id, provider_id, sub, new_user["email"])
-                    state = await api.user_state(sub)
-                    if state is None:
-                        raise _Refused("The linked Zitadel user does not exist", {})
-                    if wanted == INACTIVE and state == ACTIVE:
-                        await api.deactivate_user(sub)
-                    elif wanted == ACTIVE and state == INACTIVE:
-                        await api.reactivate_user(sub)
+                    if sub is not None:
+                        found = await api.find_user(sub)
+                        if found is None:
+                            raise _Refused("The linked Zitadel user does not exist", {})
+                        await _bring_to(api, sub, found.state, wanted)
+                        return Ok(None)
+                    sub = str(user_id)
+                    found = await api.find_user(sub)
+                    if found is None and new_user is not None:
+                        found = await _create_user(api, new_user)
+                    if found is None:
+                        raise _Refused("No Zitadel user is linked to this user", {})
+                    if new_user is not None and found.organization_id != new_user["org_id"]:
+                        raise _Refused(
+                            "A Zitadel user with this user's id is in another organization",
+                            {"organization_id": found.organization_id},
+                        )
+                    await _bring_to(api, sub, found.state, wanted)
+                await self._links.link_subject(user_id, provider_id, sub, data.get("email") or "")
                 return Ok(None)
             except Exception as exc:
                 return Error(_sync_error("sync_user", exc, context))
@@ -214,17 +307,21 @@ class ZitadelSyncAdapter(IdentityProviderAdapter):
         }
 
     async def delete_user(self, *, user_id: uuid.UUID) -> Result[None, SyncError]:
-        """Remove the linked Zitadel user. One Zitadel no longer has counts as removed."""
+        """Remove the linked Zitadel user, or the one this adapter created with the canonical id.
+
+        A linked user Zitadel no longer has counts as removed.
+        """
         with tracer.start_as_current_span("zitadel.delete_user") as span:
             span.set_attribute("user.id", str(user_id))
             context: dict = {"user_id": str(user_id)}
             try:
                 provider_id = await self._provider_id()
                 sub = await self._links.subject_of(user_id, provider_id)
-                if sub is None:
-                    raise _Refused("No Zitadel user is linked to this user", {})
                 async with self._open_api() as api:
-                    if not await api.delete_user(sub):
+                    if sub is None:
+                        if not await api.delete_user(str(user_id)):
+                            raise _Refused("No Zitadel user is linked to this user", {})
+                    elif not await api.delete_user(sub):
                         logger.info("Zitadel had no user %s to delete for canonical user %s", sub, user_id)
                 return Ok(None)
             except Exception as exc:

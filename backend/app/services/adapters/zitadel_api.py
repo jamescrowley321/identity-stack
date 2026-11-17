@@ -15,19 +15,21 @@ A non-2xx answer raises ``UpstreamStatusError`` and no answer ``UpstreamTranspor
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from urllib.parse import quote
 
-from app.outbound import OutboundClient, OutboundResponse
+from app.outbound import OutboundClient, OutboundResponse, UpstreamStatusError
 
 _PROJECT_SERVICE = "/zitadel.project.v2.ProjectService"
 _LOGIN_POLICY = "/management/v1/policies/login"
 _NOT_FOUND = 404
+_ALREADY_EXISTS = 409
 
 # The fields of an organization's login policy (management v1 AddCustomLoginPolicy),
 # as Zitadel answers them in the policy an organization has. Zitadel zeroes every field
 # a new policy leaves out, so a policy that named only allowRegister would also turn
-# off password login. The policy's linked identity providers (``idps``) are not
-# copied: their shape differs between the answer and the request.
+# off password login. The policy's linked identity providers (``idps``) are not a
+# field of that request: the adapter refuses a default policy that has any.
 LOGIN_POLICY_FIELDS = frozenset(
     {
         "allowUsernamePassword",
@@ -60,6 +62,14 @@ def login_policy_without_registration(effective: dict) -> dict:
     return policy
 
 
+@dataclass(frozen=True)
+class ZitadelUser:
+    """What the adapter reads of a Zitadel user: its state and the organization that owns it."""
+
+    state: str
+    organization_id: str
+
+
 def _segment(value: str) -> str:
     """An id as one path segment: nothing in it can name another endpoint."""
     return quote(value, safe="")
@@ -86,10 +96,14 @@ class ZitadelAdminApi:
         response.raise_for_status()
         return response.json()
 
-    async def add_organization(self, name: str) -> str:
-        """Create an organization; its id."""
-        answer = await self._call("POST", "/v2/organizations", body={"name": name})
-        return answer["organizationId"]
+    async def add_organization(self, org_id: str, name: str) -> None:
+        """Create an organization with that id."""
+        await self._call("POST", "/v2/organizations", body={"organizationId": org_id, "name": name})
+
+    async def has_organization(self, org_id: str) -> bool:
+        """Whether Zitadel has an organization with that id."""
+        answer = await self._call("POST", "/v2/organizations/_search", body={"queries": [{"idQuery": {"id": org_id}}]})
+        return any(org.get("id") == org_id for org in answer.get("result", []))
 
     async def effective_login_policy(self, org_id: str) -> dict:
         """The login policy the organization has: its own, or the instance default it inherits."""
@@ -106,12 +120,16 @@ class ZitadelAdminApi:
         return sorted(role["key"] for role in answer.get("projectRoles", []))
 
     async def grant_project(self, project_id: str, org_id: str, role_keys: list[str]) -> None:
-        """Grant the project, with those roles, to the organization."""
-        await self._call(
-            "POST",
-            f"{_PROJECT_SERVICE}/CreateProjectGrant",
-            body={"projectId": project_id, "grantedOrganizationId": org_id, "roleKeys": role_keys},
-        )
+        """Grant the project, with those roles, to the organization. A grant it already has counts as made."""
+        try:
+            await self._call(
+                "POST",
+                f"{_PROJECT_SERVICE}/CreateProjectGrant",
+                body={"projectId": project_id, "grantedOrganizationId": org_id, "roleKeys": role_keys},
+            )
+        except UpstreamStatusError as exc:
+            if exc.response.status_code != _ALREADY_EXISTS:
+                raise
 
     async def add_human_user(
         self, *, user_id: str, org_id: str, username: str, given_name: str, family_name: str, email: str
@@ -129,13 +147,14 @@ class ZitadelAdminApi:
             },
         )
 
-    async def user_state(self, user_id: str) -> str | None:
-        """The user's state (``USER_STATE_ACTIVE``, ``USER_STATE_INACTIVE``, ...), None if Zitadel has no such user."""
+    async def find_user(self, user_id: str) -> ZitadelUser | None:
+        """The user's state (``USER_STATE_ACTIVE``, ...) and organization; None if Zitadel has no such user."""
         response = await self._send("GET", f"/v2/users/{_segment(user_id)}")
         if response.status_code == _NOT_FOUND:
             return None
         response.raise_for_status()
-        return response.json()["user"]["state"]
+        user = response.json()["user"]
+        return ZitadelUser(state=user["state"], organization_id=user["details"]["resourceOwner"])
 
     async def deactivate_user(self, user_id: str) -> None:
         await self._call("POST", f"/v2/users/{_segment(user_id)}/deactivate", body={})

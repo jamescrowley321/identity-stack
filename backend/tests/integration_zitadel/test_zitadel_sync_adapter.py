@@ -72,6 +72,8 @@ async def test_a_created_tenant_gets_an_organization_closed_to_registration_and_
     tenant = await TenantRepository(db_session).get(tenant_id)
     assert tenant.external_org_provider_id == provider_id
     org_id = tenant.external_org_id
+    # The organization's id is the tenant's, so a second sync of the tenant finds it.
+    assert org_id == str(tenant_id)
     found = zitadel.post("/v2/organizations/_search", json={"queries": [{"idQuery": {"id": org_id}}]}).json()
     assert [(org["id"], org["name"]) for org in found["result"]] == [(org_id, name)]
 
