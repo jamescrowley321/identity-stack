@@ -78,7 +78,7 @@ class OryTokenSource:
         *,
         sub: str,
         email: str | None = None,
-        email_verified: bool = False,
+        email_verified: bool | str = False,
         given_name: str = "",
         family_name: str = "",
         audience: str | None = None,
@@ -88,7 +88,8 @@ class OryTokenSource:
         """Run a full authorization-code exchange and return the access token.
 
         ``email`` is omitted from the token entirely when None — that is how the
-        suite reproduces a principal the JIT provisioner must refuse.
+        suite reproduces a principal the JIT provisioner must refuse. A string
+        ``email_verified`` is put in the token as given, for the non-boolean case.
         """
         audience = audience or self.audience
         client_id = client_id or self.client_id
