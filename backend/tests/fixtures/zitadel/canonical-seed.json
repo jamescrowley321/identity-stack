@@ -1,18 +1,18 @@
 {
   "issuer_url": "http://zitadel.localhost:8480",
   "linked_user": {
-    "email": "acme-user@acme.test",
-    "external_sub": "399948689885442051",
-    "family_name": "User",
-    "given_name": "Acme",
+    "email": "bob@globex.test",
+    "external_sub": "400004363667390467",
+    "family_name": "Two-Orgs",
+    "given_name": "Bob",
     "roles": {
       "acme": "admin",
       "globex": "viewer"
     },
-    "user_name": "acme-user"
+    "user_name": "bob"
   },
   "tenants": {
-    "acme": "399948686462824451",
-    "globex": "399948686446047235"
+    "acme": "400004360244969475",
+    "globex": "400004360211283971"
   }
 }

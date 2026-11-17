@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+from tests.helpers.identity_fixture import IDENTITIES
 from tests.helpers.keycloak_target import (
     IMPORT_ADMIN_CLIENT_SECRET,
     IMPORT_DIRECTORY_CLIENT_SECRET,
@@ -20,7 +21,7 @@ from tests.helpers.keycloak_target import (
     keycloak_test_target,
 )
 
-USERNAMES = ("alice", "bob", "carol", "dave", "erin", "frank")
+USERNAMES = tuple(IDENTITIES.users)
 TERRAFORM_IDS = {name: f"{index:08d}-tf00-4000-8000-000000000000" for index, name in enumerate(USERNAMES)}
 TERRAFORM_PASSWORDS = {name: f"generated-{name}" for name in USERNAMES}
 

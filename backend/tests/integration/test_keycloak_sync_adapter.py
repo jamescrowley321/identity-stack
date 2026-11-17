@@ -39,6 +39,7 @@ from app.services.keycloak_admin import (
     connect_keycloak_admin,
 )
 from app.services.role import RoleService
+from tests.helpers.identity_fixture import IDENTITIES
 from tests.helpers.keycloak import KeycloakTokenSource
 from tests.helpers.keycloak_model import (
     ADMIN_CLIENT_ID,
@@ -48,7 +49,7 @@ from tests.helpers.keycloak_model import (
 )
 
 # A fixture user's email: she signed up in Keycloak, the adapter did not create her.
-FIXTURE_EMAIL = "alice@acme.test"
+FIXTURE_EMAIL = IDENTITIES.cases.member.email
 
 
 @pytest.fixture

@@ -16,11 +16,12 @@ Checks:
   no registration form, only "registration is disabled". This is the self-service
   register flow only; the user API is not refused (see README.md).
 - The project checks no roles and asserts none, has the four role definitions, and
-  is granted to the two tenant organizations only.
+  is granted to the tenant organizations (the fixture's canonical tenants) only.
 - Nobody holds a role grant, in any organization.
 - The SPA and the second application are the public, PKCE, JWT applications the
   root declares, without a roles claim.
-- Each human test user is in its organization with a verified email; the machine
+- Each fixture user (infra/fixtures/test-identities.json) is in the organization of
+  their home tenant with a verified email; the machine
   user issues JWT access tokens.
 - The sync adapter's token (sync_admin_token) is the identity-stack-sync machine
   user's, and that user holds the instance role IAM_ORG_MANAGER and no other.
@@ -30,14 +31,17 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 
 import httpx
 
 # A Go duration in hours, minutes and seconds, the form variables.tf accepts.
 GO_DURATION = re.compile(r"^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")
 PROJECT_ROLES = {"owner", "admin", "member", "viewer"}
-TENANT_ORGANIZATIONS = {"acme", "globex"}
-USER_ORGANIZATIONS = TENANT_ORGANIZATIONS | {"unlinked"}
+# The test tenants and users the root builds.
+FIXTURE = json.loads((Path(__file__).resolve().parents[2] / "fixtures" / "test-identities.json").read_text())
+TENANT_ORGANIZATIONS = {key for key, tenant in FIXTURE["tenants"].items() if tenant["canonical"]}
+HOME_ORGANIZATIONS = {key: user["home"] for key, user in FIXTURE["users"].items()}
 SENSITIVE_OUTPUTS = {"test_user_passwords", "machine_user_client_secret", "sync_admin_token"}
 # The sync adapter's machine user and the one instance role it holds.
 SYNC_USER_NAME = "identity-stack-sync"
@@ -181,10 +185,12 @@ def check_project(instance: Instance, outputs: dict, org_ids: dict[str, str]) ->
 
 def check_users(instance: Instance, outputs: dict, org_ids: dict[str, str]) -> None:
     user_ids = outputs["test_user_ids"]["value"]
-    check(set(user_ids) == USER_ORGANIZATIONS, f"test users are in {sorted(user_ids)}, expected {sorted(USER_ORGANIZATIONS)}")
+    expected = sorted(HOME_ORGANIZATIONS)
+    check(sorted(user_ids) == expected, f"test users are {sorted(user_ids)}, expected {expected}")
     for key, user_id in sorted(user_ids.items()):
         user = instance.get(f"/v2/users/{user_id}")["user"]
-        check(user["details"]["resourceOwner"] == org_ids[key], f"test user {key} is not in organization {key}")
+        home = HOME_ORGANIZATIONS.get(key)
+        check(user["details"]["resourceOwner"] == org_ids.get(home), f"test user {key} is not in organization {home}")
         check(user.get("human", {}).get("email", {}).get("isVerified", False) is True, f"test user {key}'s email is not verified")
 
     machine = instance.get(f"/v2/users/{outputs['machine_user']['value']['id']}")["user"]

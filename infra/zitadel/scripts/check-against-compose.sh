@@ -68,10 +68,15 @@ trap 'rm -rf "$work"' EXIT
 
 # Only the files git tracks, so an untracked or ignored override.tf or state never
 # changes what is applied. A new .tf file is applied once it is staged (`git add`).
+# The copy keeps the repo's layout, so the root finds the shared fixture at
+# ../fixtures/test-identities.json as it does in infra/.
+tfdir="$work/zitadel"
+mkdir -p "$tfdir" "$work/fixtures"
 git -C "$root" ls-files -z --cached -- ':(glob)*.tf' .terraform.lock.hcl environments |
-  (cd "$root" && while IFS= read -r -d '' file; do [ -e "$file" ] || continue; cp --parents "$file" "$work/"; done)
+  (cd "$root" && while IFS= read -r -d '' file; do [ -e "$file" ] || continue; cp --parents "$file" "$tfdir/"; done)
+cp "$repo/infra/fixtures/test-identities.json" "$work/fixtures/"
 
-tf() { terraform -chdir="$work" "$@"; }
+tf() { terraform -chdir="$tfdir" "$@"; }
 tf init -input=false >/dev/null
 if ! tf apply -auto-approve -input=false -var-file=environments/dev.tfvars >"$work/apply.log" 2>&1; then
   cat "$work/apply.log" >&2

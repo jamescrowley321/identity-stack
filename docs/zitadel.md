@@ -110,9 +110,9 @@ VITE_OIDC_SCOPE=openid profile email offline_access urn:zitadel:iam:user:resourc
 
 | Case | Proved |
 |------|--------|
-| First login | The `globex` user signs in through the SPA; `GET /api/identity` returns a new canonical user, a `member` of `globex` and of nothing else, linked to its Zitadel id |
-| Roles and tenant switch | The seeded `acme` user is `admin` in `acme` (`GET /api/access-checks/admin-role` 200). After the SPA's switcher picks `globex`, the SPA's calls name it in `X-Tenant-ID`, the same route answers 403 and `GET /api/access-checks/viewer-role` 200 |
-| Unmapped organization | The `unlinked` user signs in; `GET /api/identity` answers 403 `Your organization is not linked to a tenant`, no canonical user is created, the SPA shows "No tenants" and a gated page Access Denied |
+| First login | The fixture's one-tenant member (`alice`, in `Acme`) signs in through the SPA; `GET /api/identity` returns a new canonical user, a `member` of `acme` and of nothing else, linked to its Zitadel id |
+| Roles and tenant switch | The seeded two-tenant user (`bob`) is `admin` in `acme` (`GET /api/access-checks/admin-role` 200). After the SPA's switcher picks `globex`, the SPA's calls name it in `X-Tenant-ID`, the same route answers 403 and `GET /api/access-checks/viewer-role` 200 |
+| Unmapped organization | The fixture's user in `Unlinked` (`grace`) signs in; `GET /api/identity` answers 403 `Your organization is not linked to a tenant`, no canonical user is created, the SPA shows "No tenants" and a gated page Access Denied |
 | Self-registration | Login V2's register page refuses in `acme` and `globex`: "The registration is disabled", no form |
 | Token binding | A live SPA ID token and a live access token of the project's second application each get the uniform 401. A machine user's token passes discovery, the JWKS, the signature, the issuer and the audience (the project id) and still gets 401 from the client binding |
 | Logout | The SPA holds no tokens, and the next sign-in from a protected page asks for credentials. The suite records, without asserting, whether the old refresh token and access token are still accepted |
@@ -133,7 +133,7 @@ export DATABASE_URL=postgresql+asyncpg://identity_test:identity_test@localhost:1
 make test-e2e-zitadel
 ```
 
-The target hands the suite the applied root's outputs (`terraform -chdir=infra/zitadel output -json`) in `ZITADEL_TERRAFORM_OUTPUTS`. A missing output, an instance, database, backend or SPA that does not answer, or a tenant that is not linked fails every test; nothing skips. The first-login case needs a database where the `globex` user has not signed in yet: after a run, start again from `make zitadel-reset`. `E2E_BACKEND_URL` and `E2E_FRONTEND_URL` point the suite at other addresses; the SPA's origin must be the root's `frontend_url`. The CI job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs these steps.
+The target hands the suite the applied root's outputs (`terraform -chdir=infra/zitadel output -json`) in `ZITADEL_TERRAFORM_OUTPUTS`. A missing output, an instance, database, backend or SPA that does not answer, or a tenant that is not linked fails every test; nothing skips. The first-login case needs a database where `alice` has not signed in yet: after a run, start again from `make zitadel-reset`. `E2E_BACKEND_URL` and `E2E_FRONTEND_URL` point the suite at other addresses; the SPA's origin must be the root's `frontend_url`. The CI job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs these steps.
 
 ### Limits found
 
@@ -142,7 +142,7 @@ Measured on v4.20.3 by the suite.
 - **An unexpired access token outlives logout.** The backend validates a JWT access token locally, against the instance's keys, so the access token the SPA held before logout is still accepted (`GET /api/identity` 200 after logout) until it expires, 15 minutes after issue on this instance. Nothing revokes it before then until identity-stack#542 (revocation before expiry) exists.
 - **The refresh token outlives logout.** Logout ends the Zitadel session (`end_session` with `id_token_hint`), but the refresh token issued for `offline_access` is not revoked with it: the token endpoint still exchanges it after logout (200). Anyone holding a copy can mint new access tokens until it expires (`refresh_token_idle_expiration` 30 days, `refresh_token_expiration` 90 days). The SPA keeps its tokens in `sessionStorage` and drops them at logout; revoking the refresh token at logout waits for identity-stack#542.
 - **Login V2 remembers who signed in.** After logout the next sign-in opens Login V2's account list ("Select the account you want to use") with the user's login name, from Login V2's own cookie. Choosing it asks for the password: the session is gone, the login name is not.
-- **The tenants' email domains are written by hand.** `make zitadel-seed` gives the tenants no `domains`, and a first login is admitted only for an email in its tenant's domains. The suite writes `globex.test` into the `globex` tenant's `domains` itself, as an operator would, and puts the tenant's own domains back when it ends, until identity-stack#621 gives operators a way to set them.
+- **The tenants' email domains are written by hand.** `make zitadel-seed` gives the tenants no `domains`, and a first login is admitted only for an email in its tenant's domains. The suite writes `acme.test` into the `acme` tenant's `domains` itself, as an operator would, and puts the tenant's own domains back when it ends, until identity-stack#621 gives operators a way to set them.
 - **Few routes serve a Zitadel principal.** Routes that call Descope refuse every other provider's principal, and the IdP-link routes read Descope's `dct` claim for their tenant (identity-stack#590), so the role-gated routes a Zitadel admin can reach today are the access checks.
 
 ## Bootstrap

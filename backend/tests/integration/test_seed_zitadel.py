@@ -1,6 +1,8 @@
 """The Zitadel canonical seed against the test database: what it writes, and that a rerun writes nothing."""
 
 import dataclasses
+import json
+from pathlib import Path
 
 import pytest
 from sqlmodel import select
@@ -10,28 +12,19 @@ from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.role import Role
 from app.models.identity.tenant import Tenant, TenantStatus
 from app.models.identity.user import LINK_ORIGIN, LINKED_BY_BACKEND, IdPLink, User, UserStatus
-from scripts.seed_zitadel import PROVIDER_NAME, LinkedUser, SeedConflictError, SeedInput, apply_seed
+from scripts.seed_zitadel import PROVIDER_NAME, SeedConflictError, SeedInput, apply_seed, parse_seed_input
 
-ISSUER = "http://zitadel.localhost:8480"
-
-SEED = SeedInput(
-    issuer_url=ISSUER,
-    tenants={"acme": "399943487992119299", "globex": "399943487958564867"},
-    linked_user=LinkedUser(
-        external_sub="399943491398025219",
-        email="acme-user@acme.test",
-        user_name="acme-user",
-        given_name="Acme",
-        family_name="User",
-        roles={"acme": "admin", "globex": "viewer"},
-    ),
-)
+# The `canonical_seed` output recorded from an apply of infra/zitadel: the shared
+# fixture's tenants and its two-tenant user (infra/fixtures/test-identities.json).
+RECORDED_OUTPUT = Path(__file__).resolve().parents[1] / "fixtures" / "zitadel" / "canonical-seed.json"
+SEED = parse_seed_input(json.loads(RECORDED_OUTPUT.read_text()))
+ISSUER = SEED.issuer_url
 
 
 async def _state(session) -> dict:
     """Everything the seed writes, keyed by name, with no generated ids."""
     session.expire_all()
-    tenants = (await session.execute(select(Tenant).where(Tenant.name.in_(["acme", "globex"])))).scalars().all()
+    tenants = (await session.execute(select(Tenant).where(Tenant.name.in_(list(SEED.tenants))))).scalars().all()
     tenant_names = {tenant.id: tenant.name for tenant in tenants}
     provider = (await session.execute(select(Provider).where(Provider.name == PROVIDER_NAME))).scalars().one()
     user = (await session.execute(select(User).where(User.email == SEED.linked_user.email))).scalars().one()
@@ -61,11 +54,11 @@ async def _state(session) -> dict:
 
 
 EXPECTED = {
-    "tenants": {"acme": ("399943487992119299", True), "globex": ("399943487958564867", True)},
+    "tenants": {name: (org_id, True) for name, org_id in SEED.tenants.items()},
     "provider": (ProviderType.oidc, ISSUER, ISSUER, ["sso"]),
-    "user": ("acme-user", "Acme", "User"),
-    "links": {(True, "399943491398025219", "acme-user@acme.test", LINKED_BY_BACKEND)},
-    "assignments": {("acme", "admin"), ("globex", "viewer")},
+    "user": (SEED.linked_user.user_name, SEED.linked_user.given_name, SEED.linked_user.family_name),
+    "links": {(True, SEED.linked_user.external_sub, SEED.linked_user.email, LINKED_BY_BACKEND)},
+    "assignments": set(SEED.linked_user.roles.items()),
 }
 
 
@@ -256,7 +249,7 @@ async def test_a_zitadel_provider_the_seed_did_not_write_is_refused_and_left_as_
 
     assert PROVIDER_NAME in str(refusal)
     assert await _provider_row(db_session) == before
-    tenants = (await db_session.execute(select(Tenant).where(Tenant.name.in_(["acme", "globex"])))).scalars()
+    tenants = (await db_session.execute(select(Tenant).where(Tenant.name.in_(list(SEED.tenants))))).scalars()
     assert tenants.all() == []
 
 

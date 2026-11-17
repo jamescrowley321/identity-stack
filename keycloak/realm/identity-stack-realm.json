@@ -42,6 +42,13 @@
       "enabled": true,
       "domains": [{ "name": "globex.test", "verified": false }],
       "members": [{ "username": "bob", "membershipType": "UNMANAGED" }]
+    },
+    {
+      "name": "Unlinked",
+      "alias": "unlinked",
+      "enabled": true,
+      "domains": [{ "name": "unlinked.test", "verified": false }],
+      "members": [{ "username": "grace", "membershipType": "UNMANAGED" }]
     }
   ],
   "roles": {
@@ -237,6 +244,19 @@
       "credentials": [{ "type": "password", "value": "local-only-frank", "temporary": false }],
       "clientRoles": {
         "tenant-admin": ["members:invite", "members:remove", "settings:manage"]
+      }
+    },
+    {
+      "id": "64ace000-0000-4000-8000-000000000007",
+      "username": "grace",
+      "enabled": true,
+      "email": "grace@unlinked.test",
+      "emailVerified": true,
+      "firstName": "Grace",
+      "lastName": "Unlinked-Org",
+      "credentials": [{ "type": "password", "value": "local-only-grace", "temporary": false }],
+      "clientRoles": {
+        "member": ["documents:read", "documents:write"]
       }
     },
     {

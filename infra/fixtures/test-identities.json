@@ -1,0 +1,31 @@
+{
+  "$comment": [
+    "The test tenants and users every provider Terraform root that seeds a provider builds (infra/keycloak, infra/zitadel), and the tests read. See infra/fixtures/README.md.",
+    "tenants: canonical is true when a canonical tenant names the tenant; descope is the Descope tenant (infra/tenants.tf) it maps to, ory is null because the Ory project has no organizations (infra/ory/main.tf).",
+    "users: a user's email is <key>@<domain of home>; home is the tenant the user lives in (a Zitadel user's organization). roles maps each tenant the user is a member of to the user's canonical role there, or null for a member with no grant.",
+    "cases: the user each case of the suites stands on."
+  ],
+  "tenants": {
+    "acme": { "name": "Acme", "domain": "acme.test", "canonical": true, "descope": "Acme Corp", "ory": null },
+    "globex": { "name": "Globex", "domain": "globex.test", "canonical": true, "descope": "Globex Inc", "ory": null },
+    "unlinked": { "name": "Unlinked", "domain": "unlinked.test", "canonical": false, "descope": null, "ory": null }
+  },
+  "users": {
+    "alice": { "first_name": "Alice", "last_name": "Single-Org", "home": "acme", "roles": { "acme": "member" } },
+    "bob": { "first_name": "Bob", "last_name": "Two-Orgs", "home": "globex", "roles": { "acme": "admin", "globex": "viewer" } },
+    "carol": { "first_name": "Carol", "last_name": "No-Role", "home": "acme", "roles": { "acme": null } },
+    "dave": { "first_name": "Dave", "last_name": "One-Org-Admin", "home": "acme", "roles": { "acme": "admin" } },
+    "erin": { "first_name": "Erin", "last_name": "Write-Only", "home": "acme", "roles": { "acme": "member" } },
+    "frank": { "first_name": "Frank", "last_name": "Moving-Admin", "home": "acme", "roles": { "acme": "admin" } },
+    "grace": { "first_name": "Grace", "last_name": "Unlinked-Org", "home": "unlinked", "roles": { "unlinked": "member" } }
+  },
+  "cases": {
+    "member": "alice",
+    "two_tenants": "bob",
+    "no_grant": "carol",
+    "tenant_admin": "dave",
+    "write_only": "erin",
+    "moving_admin": "frank",
+    "unlinked_tenant": "grace"
+  }
+}
