@@ -143,3 +143,24 @@ zitadel-frontend: ## build the frontend image against the applied infra/zitadel 
 	exports="$$(printf '%s' "$$env_json" | jq -er 'to_entries[] | if (.key | test("^VITE_OIDC_[A-Z_]+$$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')" || exit 1; \
 	eval "$$exports"; \
 	VITE_OIDC_TENANT_SCOPE_TEMPLATE= $(COMPOSE_ZITADEL) build frontend
+
+# The two environment maps every local provider root outputs, in .env form:
+# backend_environment (sensitive: it holds the service accounts' secrets) for
+# backend/.env, frontend_environment for frontend/.env. Values are single-quoted,
+# so the output can also be sourced by a shell. A missing output or an entry
+# that is not a variable name with a string value fails the target.
+PROVIDER_ENV_JQ := def env(name): (.[name].value // error("no \(name) output: apply infra/\($$root) first")) \
+	| to_entries[] \
+	| if (.key | test("^[A-Z][A-Z0-9_]*$$")) and (.value | type == "string") \
+	then "\(.key)=\(.value | @sh)" else error("\(name) has an unexpected entry \(.key)") end; \
+	["\# backend/.env", env("backend_environment"), "", "\# frontend/.env", env("frontend_environment")] | .[]
+
+.PHONY: keycloak-env zitadel-env
+keycloak-env: ## print the applied infra/keycloak root's backend and frontend environment in .env form
+zitadel-env: ## print the applied infra/zitadel root's backend and frontend environment in .env form
+keycloak-env zitadel-env: %-env:
+	@outputs="$$(terraform -chdir=infra/$* output -json)" || { \
+		echo "$*-env: no outputs; apply infra/$* first." >&2; \
+		exit 1; \
+	}; \
+	printf '%s' "$$outputs" | jq -r --arg root '$*' '$(PROVIDER_ENV_JQ)'

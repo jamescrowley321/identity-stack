@@ -1,9 +1,13 @@
 locals {
-  issuer_url = "${var.keycloak_url}/realms/${keycloak_realm.this.realm}"
+  # The type client whose app client the SPA logs in through: the portable
+  # member type, as in the compose e2e build. The other app clients take the
+  # same settings with their own VITE_OIDC_CLIENT_ID.
+  spa_type_client = "member"
 }
 
 output "backend_environment" {
-  description = "Backend KEYCLOAK_* settings for this realm (docs/environment-variables.md), except the client secrets: see `keycloak_directory_client_secret` and `keycloak_admin_client_secret`."
+  description = "Every backend KEYCLOAK_* setting for this realm (docs/environment-variables.md), the service accounts' secrets included. `make keycloak-env` prints it in .env form."
+  sensitive   = true
   value = {
     KEYCLOAK_ISSUER_URL               = local.issuer_url
     KEYCLOAK_AUDIENCES                = join(",", sort(keys(local.type_clients)))
@@ -13,48 +17,39 @@ output "backend_environment" {
     KEYCLOAK_PORTABLE_PERMISSIONS = join(",", sort(flatten([
       for type_client, spec in local.type_clients : [for permission in spec.portable_permissions : "${type_client}=${permission}"]
     ])))
-    KEYCLOAK_REQUIRE_HTTPS            = startswith(var.keycloak_url, "https://") ? "true" : "false"
-    KEYCLOAK_POST_LOGOUT_REDIRECT_URI = "${var.frontend_url}/login"
+    KEYCLOAK_REQUIRE_HTTPS            = module.urls.require_https
+    KEYCLOAK_POST_LOGOUT_REDIRECT_URI = "${local.frontend_url}/login"
     KEYCLOAK_DIRECTORY_CLIENT_ID      = keycloak_openid_client.directory.client_id
+    KEYCLOAK_DIRECTORY_CLIENT_SECRET  = keycloak_openid_client.directory.client_secret
     KEYCLOAK_ADMIN_CLIENT_ID          = keycloak_openid_client.admin.client_id
+    KEYCLOAK_ADMIN_CLIENT_SECRET      = keycloak_openid_client.admin.client_secret
   }
 }
 
-output "keycloak_directory_client_secret" {
-  description = "Backend KEYCLOAK_DIRECTORY_CLIENT_SECRET: the secret Keycloak generated for the directory client."
-  value       = keycloak_openid_client.directory.client_secret
-  sensitive   = true
-}
-
-output "keycloak_admin_client_secret" {
-  description = "Backend KEYCLOAK_ADMIN_CLIENT_SECRET: the secret Keycloak generated for the admin client (SYNC_PROVIDER=keycloak)."
-  value       = keycloak_openid_client.admin.client_secret
-  sensitive   = true
-}
-
 output "frontend_environment" {
-  description = "Frontend VITE_OIDC_* settings, one map per app client (the SPA logs in through one at a time). VITE_OIDC_SCOPE asks for the organization scope."
+  description = "Frontend VITE_OIDC_* settings for the SPA's app client (the member type's). `make keycloak-env` prints it in .env form."
   value = {
-    for type_client in sort(keys(local.type_clients)) : keycloak_openid_client.app[type_client].client_id => {
-      VITE_OIDC_AUTHORITY    = local.issuer_url
-      VITE_OIDC_CLIENT_ID    = keycloak_openid_client.app[type_client].client_id
-      VITE_OIDC_REDIRECT_URI = var.frontend_url
-      # `organization` is an optional scope on the app clients: without it the
-      # token has no organization claim and an organization-bound type is
-      # refused. Asked bare, Keycloak puts the user's organization in the
-      # token, and asks a member of several which one.
-      VITE_OIDC_SCOPE = "openid profile email organization"
-    }
+    VITE_OIDC_AUTHORITY    = local.issuer_url
+    VITE_OIDC_CLIENT_ID    = keycloak_openid_client.app[local.spa_type_client].client_id
+    VITE_OIDC_REDIRECT_URI = local.frontend_url
+    # `organization` is an optional scope on the app clients: without it the
+    # token has no organization claim and an organization-bound type is
+    # refused. Asked bare, Keycloak puts the user's organization in the
+    # token, and asks a member of several which one.
+    VITE_OIDC_SCOPE = "openid profile email organization"
+  }
+}
+
+output "test_credentials" {
+  description = "What tests log in with: each fixture user's password (generated at apply), keyed by user. No client here is for tests only, so `clients` is empty: the service accounts' secrets are backend settings (backend_environment)."
+  sensitive   = true
+  value = {
+    users   = { for username, password in random_password.user : username => password.result }
+    clients = {}
   }
 }
 
 output "user_ids" {
   description = "Keycloak-generated id (token sub) of each fixture user."
   value       = { for username, user in keycloak_user.this : username => user.id }
-}
-
-output "user_passwords" {
-  description = "Login password of each fixture user, generated at apply."
-  value       = { for username, password in random_password.user : username => password.result }
-  sensitive   = true
 }

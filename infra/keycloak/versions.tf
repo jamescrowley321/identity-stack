@@ -20,7 +20,7 @@ terraform {
 # username and password come from the environment (KEYCLOAK_USER,
 # KEYCLOAK_PASSWORD), never from a tfvars file: see README.md.
 provider "keycloak" {
-  url       = var.keycloak_url
+  url       = local.keycloak_url
   realm     = "master"
   client_id = "admin-cli"
 }

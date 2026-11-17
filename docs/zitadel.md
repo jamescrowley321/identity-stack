@@ -34,7 +34,7 @@ Two limits, both observed:
 
 ## The backend against this instance
 
-The backend accepts Zitadel access tokens when `ZITADEL_ISSUER_URL` is set ([environment variables](environment-variables.md)). `terraform -chdir=infra/zitadel output backend_environment` prints the four `ZITADEL_*` values for the applied instance; add the two provider lists:
+The backend accepts Zitadel access tokens when `ZITADEL_ISSUER_URL` is set ([environment variables](environment-variables.md)). `make zitadel-env` prints the applied instance's `ZITADEL_*` values (the root's `backend_environment` output, with the sync adapter's token `ZITADEL_ADMIN_TOKEN`, used only with `SYNC_PROVIDER=zitadel`); add the two provider lists:
 
 ```bash
 ZITADEL_ISSUER_URL=http://zitadel.localhost:8480
@@ -63,11 +63,11 @@ The other direction holds too. A user a Zitadel first login creates is marked `e
 
 ## Admin adapter
 
-With `SYNC_PROVIDER=zitadel`, a tenant or user created through the API is pushed to Zitadel by `ZitadelSyncAdapter` (`backend/app/services/adapters/zitadel.py`), so nobody runs Terraform for it. The default, `descope`, keeps `DescopeSyncAdapter`. The adapter calls the instance as a machine user with the instance role `IAM_ORG_MANAGER`; `infra/zitadel` creates one (`identity-stack-sync`) and prints its token:
+With `SYNC_PROVIDER=zitadel`, a tenant or user created through the API is pushed to Zitadel by `ZitadelSyncAdapter` (`backend/app/services/adapters/zitadel.py`), so nobody runs Terraform for it. The default, `descope`, keeps `DescopeSyncAdapter`. The adapter calls the instance as a machine user with the instance role `IAM_ORG_MANAGER`; `infra/zitadel` creates one (`identity-stack-sync`), and `make zitadel-env` prints its token with the other settings:
 
 ```bash
 SYNC_PROVIDER=zitadel
-ZITADEL_ADMIN_TOKEN=$(terraform -chdir=infra/zitadel output -raw sync_admin_token)
+ZITADEL_ADMIN_TOKEN=<from make zitadel-env>
 # ZITADEL_ISSUER_URL and ZITADEL_AUDIENCE (the project id) as above
 ```
 
@@ -87,7 +87,7 @@ The adapter's token may change users in every organization, so it follows only a
 
 ## The SPA against this instance
 
-The SPA has no Zitadel code path: it is pointed at Zitadel by its `VITE_OIDC_*` variables alone ([environment variables](environment-variables.md#frontend-vite--inlined-at-build-time)). `terraform -chdir=infra/zitadel output frontend_environment` prints them for the applied instance:
+The SPA has no Zitadel code path: it is pointed at Zitadel by its `VITE_OIDC_*` variables alone ([environment variables](environment-variables.md#frontend-vite--inlined-at-build-time)). `make zitadel-env` prints them for the applied instance (the root's `frontend_environment` output):
 
 ```bash
 VITE_OIDC_AUTHORITY=http://zitadel.localhost:8480
@@ -125,9 +125,9 @@ cd infra/zitadel && export TF_VAR_zitadel_access_token="$(make -s -C ../.. zitad
   && terraform init && terraform apply -var-file=environments/dev.tfvars && cd ../..
 export DATABASE_URL=postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
 (cd backend && python -m alembic upgrade head) && make zitadel-seed
-# the SPA: npm run build with `terraform -chdir=infra/zitadel output frontend_environment`
+# the SPA: npm run build with the frontend lines of `make zitadel-env`
 #   and VITE_OIDC_TENANT_SCOPE_TEMPLATE empty, then `npx vite preview --port 3000 --strictPort`
-# the backend on :8000: `output backend_environment`, CANONICAL_RBAC_PROVIDERS=zitadel,
+# the backend on :8000: the backend lines of `make zitadel-env`, CANONICAL_RBAC_PROVIDERS=zitadel,
 #   JIT_ENABLED_PROVIDERS=zitadel, FRONTEND_URL=http://localhost:3000, DESCOPE_PROJECT_ID= and
 #   RATE_LIMIT_DEFAULT=2000/minute RATE_LIMIT_AUTH=1000/minute
 make test-e2e-zitadel

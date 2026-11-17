@@ -117,7 +117,7 @@ locals {
 }
 
 resource "keycloak_realm" "this" {
-  realm                    = var.realm
+  realm                    = local.realm
   enabled                  = true
   ssl_required             = var.ssl_required
   registration_allowed     = false
@@ -185,9 +185,9 @@ resource "keycloak_openid_client" "app" {
   service_accounts_enabled        = false
   full_scope_allowed              = false
   pkce_code_challenge_method      = "S256"
-  valid_redirect_uris             = [var.frontend_url]
-  web_origins                     = [var.frontend_url]
-  valid_post_logout_redirect_uris = ["${var.frontend_url}/login"]
+  valid_redirect_uris             = [local.frontend_url]
+  web_origins                     = [local.frontend_url]
+  valid_post_logout_redirect_uris = ["${local.frontend_url}/login"]
 }
 
 resource "keycloak_openid_client_default_scopes" "app" {
@@ -219,7 +219,7 @@ resource "keycloak_generic_role_mapper" "app" {
 # --- Users -----------------------------------------------------------------------
 
 # Login passwords for the fixture users, generated per apply and kept in local
-# state only (output `user_passwords`). None is committed.
+# state only (output `test_credentials`). None is committed.
 resource "random_password" "user" {
   for_each = local.users
 

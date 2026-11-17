@@ -46,7 +46,14 @@ _PROBE_TIMEOUT_SECONDS = 10
 # whose first login the organization claim decides.
 NEWCOMER = IDENTITIES.cases.member
 # The outputs the suite reads as objects keyed by name.
-_MAP_OUTPUTS = ("organization_ids", "test_user_ids", "test_user_login_names", "test_user_passwords")
+_MAP_OUTPUTS = (
+    "backend_environment",
+    "frontend_environment",
+    "test_credentials",
+    "organization_ids",
+    "test_user_ids",
+    "test_user_login_names",
+)
 
 
 @dataclass(frozen=True)
@@ -75,10 +82,10 @@ def _read_outputs() -> Instance:
         for name in _MAP_OUTPUTS:
             if not isinstance(outputs[name], dict):
                 raise TypeError(f"output {name} is a {type(outputs[name]).__name__}, not an object")
-        passwords = outputs["test_user_passwords"]
+        passwords = outputs["test_credentials"]["users"]
         return Instance(
-            issuer=outputs["issuer_url"],
-            spa_client_id=outputs["spa_client_id"],
+            issuer=outputs["backend_environment"]["ZITADEL_ISSUER_URL"],
+            spa_client_id=outputs["frontend_environment"]["VITE_OIDC_CLIENT_ID"],
             other_client_id=outputs["other_client_id"],
             organization_ids=outputs["organization_ids"],
             user_ids=outputs["test_user_ids"],

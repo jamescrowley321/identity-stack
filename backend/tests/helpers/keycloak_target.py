@@ -13,9 +13,12 @@ sets them from the run's Terraform outputs:
 
 - ``KEYCLOAK_TEST_REALM``: the realm name.
 - ``KEYCLOAK_TEST_USER_IDS``: JSON map of username to id (``terraform output -json user_ids``).
-- ``KEYCLOAK_TEST_USER_PASSWORDS``: JSON map of username to password (output ``user_passwords``).
-- ``KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET``: output ``keycloak_directory_client_secret``.
-- ``KEYCLOAK_TEST_ADMIN_CLIENT_SECRET``: output ``keycloak_admin_client_secret``.
+- ``KEYCLOAK_TEST_USER_PASSWORDS``: JSON map of username to password (output
+  ``test_credentials``, under ``users``).
+- ``KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET``: ``KEYCLOAK_DIRECTORY_CLIENT_SECRET`` of output
+  ``backend_environment``.
+- ``KEYCLOAK_TEST_ADMIN_CLIENT_SECRET``: ``KEYCLOAK_ADMIN_CLIENT_SECRET`` of output
+  ``backend_environment``.
 
 A partial or malformed set raises ``KeycloakTestTargetMisconfigured`` when the
 tests are collected, so a run never mixes the two realms.

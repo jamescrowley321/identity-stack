@@ -20,12 +20,13 @@ It checks, against the admin API and against real tokens from both realms:
 3. no protocol mapper in the Terraform realm writes a user attribute or user
    property to ``aud``, ``azp``, ``organization``, ``resource_access``, ``dct``
    or ``tenants``;
-4. a login through each app client with the scope output
-   ``frontend_environment`` gives the SPA (``VITE_OIDC_SCOPE``) carries the
+4. output ``frontend_environment`` builds the SPA for the member app client
+   with the realm's issuer, and a login through each app client in
+   ``KEYCLOAK_APP_CLIENTS`` with its scope (``VITE_OIDC_SCOPE``) carries the
    user's organization;
 5. the directory client reads a user's organizations through the Admin API
-   with the secret Terraform output, and the admin client reaches the Admin API
-   with its own.
+   with the secret in output ``backend_environment``, and the admin client
+   reaches the Admin API with its own.
 
 Exits non-zero with every difference listed.
 """
@@ -308,27 +309,40 @@ def admin_client_reaches_admin_api(realm: Realm, secret: str) -> int:
     return response.status_code
 
 
-def frontend_logins(realm: Realm, frontend_environment: dict) -> list[str]:
+def app_clients(backend_environment: dict) -> list[str]:
+    """The app clients output ``KEYCLOAK_APP_CLIENTS`` names, from its ``<type client>=<app client>`` pairs."""
+    return sorted(pair.split("=", 1)[1] for pair in backend_environment["KEYCLOAK_APP_CLIENTS"].split(","))
+
+
+def frontend_logins(realm: Realm, frontend_environment: dict, clients: list[str]) -> list[str]:
     """Log in through each app client with the scope output ``frontend_environment`` gives the SPA.
 
-    The user is a member of one organization, so the token must name it: an
-    organization-bound type is refused without an ``organization`` claim.
+    The SPA is built for one app client (``VITE_OIDC_CLIENT_ID``, the member
+    type's); the others take the same scope. The user is a member of one
+    organization, so the token must name it: an organization-bound type is
+    refused without an ``organization`` claim.
     """
     found = []
-    for client_id, environment in sorted(frontend_environment.items()):
+    scope = frontend_environment["VITE_OIDC_SCOPE"]
+    if frontend_environment["VITE_OIDC_CLIENT_ID"] != MEMBER_APP_CLIENT:
+        found.append(
+            f"output frontend_environment builds the SPA for {frontend_environment['VITE_OIDC_CLIENT_ID']!r}, "
+            f"expected {MEMBER_APP_CLIENT!r}"
+        )
+    for client_id in clients:
         user = FRONTEND_LOGIN_USERS.get(client_id)
         if user is None:
             found.append(
-                f"app client {client_id} in output frontend_environment has no login user: "
+                f"app client {client_id} in output KEYCLOAK_APP_CLIENTS has no login user: "
                 "add one of its type, member of acme only, to FRONTEND_LOGIN_USERS"
             )
             continue
         login_as = KeycloakUser(user.username, realm.passwords[user.username], user.id)
-        tokens = realm.source.login(login_as, client_id=client_id, scope=environment["VITE_OIDC_SCOPE"])
+        tokens = realm.source.login(login_as, client_id=client_id, scope=scope)
         _header, claims = decode_unverified(tokens.access_token)
         if claims.get("organization") != ["acme"]:
             found.append(
-                f"{user.username} via {client_id} with output VITE_OIDC_SCOPE {environment['VITE_OIDC_SCOPE']!r}: "
+                f"{user.username} via {client_id} with output VITE_OIDC_SCOPE {scope!r}: "
                 f"organization {claims.get('organization', ABSENT)!r}, expected ['acme']"
             )
     return found
@@ -364,7 +378,9 @@ def main() -> int:
         KeycloakTokenSource(base_url=args.base_url, realm=args.import_realm),
         {user.username: user.password for user in (ALICE, BOB, CAROL, DAVE, ERIN, FRANK)},
     )
-    built = Realm(KeycloakTokenSource(base_url=args.base_url, realm=args.terraform_realm), outputs["user_passwords"])
+    built = Realm(
+        KeycloakTokenSource(base_url=args.base_url, realm=args.terraform_realm), outputs["test_credentials"]["users"]
+    )
 
     failures: list[str] = []
     try:
@@ -387,19 +403,25 @@ def compare(imported: Realm, built: Realm, outputs: dict, failures: list[str]) -
     _header, claims = decode_unverified(built.source.login(bob, client_id=MEMBER_APP_CLIENT).access_token)
     if sorted(claims) != fixture_claims:
         failures.append(f"fixture claim names {fixture_claims!r}, terraform token {sorted(claims)!r}")
-    if claims["iss"] != outputs["backend_environment"]["KEYCLOAK_ISSUER_URL"]:
+    backend = outputs["backend_environment"]
+    frontend = outputs["frontend_environment"]
+    if claims["iss"] != backend["KEYCLOAK_ISSUER_URL"]:
         failures.append(f"token iss {claims['iss']!r} is not output KEYCLOAK_ISSUER_URL")
+    if frontend["VITE_OIDC_AUTHORITY"] != backend["KEYCLOAK_ISSUER_URL"]:
+        failures.append(f"output VITE_OIDC_AUTHORITY {frontend['VITE_OIDC_AUTHORITY']!r} is not KEYCLOAK_ISSUER_URL")
 
     failures += guarded_mappers(built)
-    failures += frontend_logins(built, outputs["frontend_environment"])
+    failures += frontend_logins(built, frontend, app_clients(backend))
+    if outputs["test_credentials"]["clients"] != {}:
+        failures.append(f"output test_credentials lists clients {sorted(outputs['test_credentials']['clients'])}")
 
     organizations = directory_reads_organizations(
-        built, outputs["keycloak_directory_client_secret"], outputs["user_ids"][BOB.username]
+        built, backend["KEYCLOAK_DIRECTORY_CLIENT_SECRET"], outputs["user_ids"][BOB.username]
     )
     if organizations != ["acme", "globex"]:
         failures.append(f"directory client read bob's organizations as {organizations!r}")
 
-    status = admin_client_reaches_admin_api(built, outputs["keycloak_admin_client_secret"])
+    status = admin_client_reaches_admin_api(built, backend["KEYCLOAK_ADMIN_CLIENT_SECRET"])
     if status != 200:
         failures.append(f"admin client's Admin API read answered {status}")
 

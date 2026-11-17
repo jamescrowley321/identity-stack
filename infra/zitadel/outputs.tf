@@ -1,6 +1,4 @@
 locals {
-  issuer_url = var.zitadel_url
-
   # The provider marks every client id sensitive, though a client id is public:
   # the SPA sends it in every authorization request.
   spa_client_id   = nonsensitive(zitadel_application_oidc.spa.client_id)
@@ -45,12 +43,6 @@ output "test_user_login_names" {
   value       = { for key, user in zitadel_human_user.this : key => user.preferred_login_name }
 }
 
-output "test_user_passwords" {
-  description = "Login password of each fixture user, keyed by user, generated at apply."
-  value       = { for key, password in random_password.user : key => password.result }
-  sensitive   = true
-}
-
 output "machine_user" {
   description = "The machine user for tests: its id (token `sub`) and client id (its user name)."
   value = {
@@ -59,24 +51,12 @@ output "machine_user" {
   }
 }
 
-output "machine_user_client_secret" {
-  description = "Client secret of the machine user for tests (client credentials grant)."
-  value       = zitadel_machine_user.tests.client_secret
-  sensitive   = true
-}
-
-output "sync_admin_token" {
-  description = "Personal access token of the sync adapter's machine user (identity-stack-sync, IAM_ORG_MANAGER): the backend's ZITADEL_ADMIN_TOKEN."
-  value       = zitadel_personal_access_token.sync.token
-  sensitive   = true
-}
-
 output "frontend_environment" {
-  description = "Frontend VITE_OIDC_* settings for the SPA application."
+  description = "Frontend VITE_OIDC_* settings for the SPA application. `make zitadel-env` prints it in .env form."
   value = {
     VITE_OIDC_AUTHORITY    = local.issuer_url
     VITE_OIDC_CLIENT_ID    = local.spa_client_id
-    VITE_OIDC_REDIRECT_URI = var.frontend_url
+    VITE_OIDC_REDIRECT_URI = local.frontend_url
     # offline_access for a refresh token; the resourceowner scope puts the
     # user's organization in the access token, which decides their tenant.
     VITE_OIDC_SCOPE = "openid profile email offline_access urn:zitadel:iam:user:resourceowner"
@@ -84,12 +64,25 @@ output "frontend_environment" {
 }
 
 output "backend_environment" {
-  description = "Backend ZITADEL_* settings for this instance. The audience is the project id: a human's access token lists every application of the project in `aud`, so the SPA is told apart by `client_id`."
+  description = "Every backend ZITADEL_* setting for this instance, the sync adapter's token included. The audience is the project id: a human's access token lists every application of the project in `aud`, so the SPA is told apart by `client_id`. `make zitadel-env` prints it in .env form."
+  sensitive   = true
   value = {
     ZITADEL_ISSUER_URL    = local.issuer_url
     ZITADEL_AUDIENCE      = zitadel_project.this.id
     ZITADEL_CLIENT_ID     = local.spa_client_id
-    ZITADEL_REQUIRE_HTTPS = startswith(var.zitadel_url, "https://") ? "true" : "false"
+    ZITADEL_REQUIRE_HTTPS = module.urls.require_https
+    # Personal access token of the sync adapter's machine user
+    # (identity-stack-sync, IAM_ORG_MANAGER).
+    ZITADEL_ADMIN_TOKEN = zitadel_personal_access_token.sync.token
+  }
+}
+
+output "test_credentials" {
+  description = "What tests log in with: each fixture user's password (generated at apply), keyed by user, and the test machine user's client secret (client credentials grant), keyed by its client id."
+  sensitive   = true
+  value = {
+    users   = { for key, password in random_password.user : key => password.result }
+    clients = { (nonsensitive(zitadel_machine_user.tests.client_id)) = zitadel_machine_user.tests.client_secret }
   }
 }
 

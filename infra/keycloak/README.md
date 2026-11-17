@@ -50,8 +50,9 @@ file. `admin`/`admin` is the compose container's local fixture login.
 
 The realm must not exist before the apply. The compose `keycloak` service already imports a realm
 named `identity-stack`, so the root's default realm is `identity-stack-terraform`, which sits
-beside it. Against a Keycloak that did not import the realm, `-var realm=identity-stack` builds it
-under the import's name.
+beside it. Against a Keycloak that did not import the realm,
+`-var issuer_url=http://keycloak.localhost:8180/realms/identity-stack` builds it under the
+import's name.
 
 ```bash
 docker compose --profile keycloak up -d --wait keycloak
@@ -59,31 +60,28 @@ cd infra/keycloak
 export KEYCLOAK_USER=admin KEYCLOAK_PASSWORD=admin
 terraform init
 terraform apply
-terraform output backend_environment
-terraform output -raw keycloak_directory_client_secret
-terraform output -raw keycloak_admin_client_secret
-terraform output -json user_passwords
+cd ../.. && make -s keycloak-env    # backend/.env and frontend/.env lines
+terraform -chdir=infra/keycloak output -json test_credentials
 ```
 
-Variables (all have defaults for the compose `keycloak` service):
+Variables (all have defaults for the compose `keycloak` service). `issuer_url` and
+`frontend_url` are the variables every local provider root shares
+([`../PROVIDERS.md`](../PROVIDERS.md#common-variables-and-outputs-of-the-local-provider-roots)):
 
 | Variable | Default | What |
 |---|---|---|
-| `keycloak_url` | `http://keycloak.localhost:8180` | The Keycloak's `KC_HOSTNAME`. The issuer is `<keycloak_url>/realms/<realm>`. `http://` only for a loopback or `*.localhost` host (validated). |
-| `realm` | `identity-stack-terraform` | Realm to create; it must not exist yet. Not `identity-stack` beside the compose import, which already has that name. |
+| `issuer_url` | `http://keycloak.localhost:8180/realms/identity-stack-terraform` | The realm's issuer, `<KC_HOSTNAME>/realms/<realm>`: the provider logs in to `<KC_HOSTNAME>` and creates `<realm>`, which must not exist yet. Not `identity-stack` beside the compose import, which already has that name. `http://` only for a loopback or `*.localhost` host (validated). |
 | `frontend_url` | `http://localhost:3000` | SPA origin: redirect URI, web origin, post-logout `<frontend_url>/login`. A bare origin, `scheme://host[:port]`: no path, query or trailing slash; `http://` only for a loopback or `*.localhost` host (both validated). |
-| `ssl_required` | `none` | Realm SSL mode. `none` only when `keycloak_url` is a loopback or `*.localhost` host (validated); set `external` or `all` for any other Keycloak. |
+| `ssl_required` | `none` | Realm SSL mode. `none` only when `issuer_url` is a loopback or `*.localhost` host (validated); set `external` or `all` for any other Keycloak. |
 
 ## Outputs
 
 | Output | Feeds |
 |---|---|
-| `backend_environment` | Backend `KEYCLOAK_ISSUER_URL`, `KEYCLOAK_AUDIENCES`, `KEYCLOAK_APP_CLIENTS`, `KEYCLOAK_PORTABLE_TYPES`, `KEYCLOAK_ORGANIZATION_BOUND_TYPES`, `KEYCLOAK_PORTABLE_PERMISSIONS`, `KEYCLOAK_REQUIRE_HTTPS`, `KEYCLOAK_POST_LOGOUT_REDIRECT_URI`, `KEYCLOAK_DIRECTORY_CLIENT_ID`, `KEYCLOAK_ADMIN_CLIENT_ID` ([`docs/environment-variables.md`](../../docs/environment-variables.md)). |
-| `keycloak_directory_client_secret` (sensitive) | Backend `KEYCLOAK_DIRECTORY_CLIENT_SECRET`. |
-| `keycloak_admin_client_secret` (sensitive) | Backend `KEYCLOAK_ADMIN_CLIENT_SECRET`. |
-| `frontend_environment` | Frontend `VITE_OIDC_AUTHORITY`, `VITE_OIDC_CLIENT_ID`, `VITE_OIDC_REDIRECT_URI`, `VITE_OIDC_SCOPE`, one map per app client. The scope is `openid profile email organization`: `organization` is optional on the app clients, and without it the token carries no `organization` claim, so an organization-bound type (`tenant-admin`) is refused. Keycloak asks a member of several organizations which one to use. |
+| `backend_environment` (sensitive) | Every backend Keycloak setting: `KEYCLOAK_ISSUER_URL`, `KEYCLOAK_AUDIENCES`, `KEYCLOAK_APP_CLIENTS`, `KEYCLOAK_PORTABLE_TYPES`, `KEYCLOAK_ORGANIZATION_BOUND_TYPES`, `KEYCLOAK_PORTABLE_PERMISSIONS`, `KEYCLOAK_REQUIRE_HTTPS`, `KEYCLOAK_POST_LOGOUT_REDIRECT_URI`, `KEYCLOAK_DIRECTORY_CLIENT_ID`, `KEYCLOAK_DIRECTORY_CLIENT_SECRET`, `KEYCLOAK_ADMIN_CLIENT_ID`, `KEYCLOAK_ADMIN_CLIENT_SECRET` ([`docs/environment-variables.md`](../../docs/environment-variables.md)). Sensitive for the two secrets. |
+| `frontend_environment` | Frontend `VITE_OIDC_AUTHORITY`, `VITE_OIDC_CLIENT_ID`, `VITE_OIDC_REDIRECT_URI`, `VITE_OIDC_SCOPE` for the SPA's app client, `member-app` (the portable `member` type). The other app clients take the same settings with their own client id (`KEYCLOAK_APP_CLIENTS`). The scope is `openid profile email organization`: `organization` is optional on the app clients, and without it the token carries no `organization` claim, so an organization-bound type (`tenant-admin`) is refused. Keycloak asks a member of several organizations which one to use. |
+| `test_credentials` (sensitive) | `users`: each fixture user's login password. `clients`: empty, no client is for tests only. |
 | `user_ids` | Each user's id (token `sub`). |
-| `user_passwords` (sensitive) | Each user's login password. |
 
 ## Members added by hand are removed
 

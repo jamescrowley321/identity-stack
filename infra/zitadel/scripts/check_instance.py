@@ -8,7 +8,10 @@ TF_VAR_zitadel_access_token, the variable the root itself reads. Needs httpx (th
 backend venv). Exits 1 with every failed check listed.
 
 Checks:
-- No non-sensitive output contains a sensitive output's value or the admin token.
+- The sensitive outputs are backend_environment and test_credentials, and no
+  other output contains a secret from them (the sync adapter's token, a password,
+  the machine user's secret) or the admin token. test_credentials lists the test
+  machine user as its one client.
 - The instance access-token lifetime is the one the root was applied with.
 - allow_register is false in the instance default login policy, and every
   organization has its own login policy with allow_register false.
@@ -23,7 +26,7 @@ Checks:
 - Each fixture user (infra/fixtures/test-identities.json) is in the organization of
   their home tenant with a verified email; the machine
   user issues JWT access tokens.
-- The sync adapter's token (sync_admin_token) is the identity-stack-sync machine
+- The sync adapter's token (ZITADEL_ADMIN_TOKEN) is the identity-stack-sync machine
   user's, and that user holds the instance role IAM_ORG_MANAGER and no other.
 """
 
@@ -42,7 +45,7 @@ PROJECT_ROLES = {"owner", "admin", "member", "viewer"}
 FIXTURE = json.loads((Path(__file__).resolve().parents[2] / "fixtures" / "test-identities.json").read_text())
 TENANT_ORGANIZATIONS = {key for key, tenant in FIXTURE["tenants"].items() if tenant["canonical"]}
 HOME_ORGANIZATIONS = {key: user["home"] for key, user in FIXTURE["users"].items()}
-SENSITIVE_OUTPUTS = {"test_user_passwords", "machine_user_client_secret", "sync_admin_token"}
+SENSITIVE_OUTPUTS = {"backend_environment", "test_credentials"}
 # The sync adapter's machine user and the one instance role it holds.
 SYNC_USER_NAME = "identity-stack-sync"
 SYNC_INSTANCE_ROLES = ["IAM_ORG_MANAGER"]
@@ -109,7 +112,14 @@ def flatten_strings(value: object) -> list[str]:
 def check_outputs(outputs: dict, token: str) -> None:
     sensitive = {name for name, output in outputs.items() if output["sensitive"]}
     check(sensitive == SENSITIVE_OUTPUTS, f"sensitive outputs are {sorted(sensitive)}, expected {sorted(SENSITIVE_OUTPUTS)}")
-    secrets = [token] + [s for name in sensitive for s in flatten_strings(outputs[name]["value"])]
+    # backend_environment is sensitive for its token alone: the issuer, project and
+    # client ids in it are public and appear in other outputs.
+    admin_token = outputs["backend_environment"]["value"].get("ZITADEL_ADMIN_TOKEN", "")
+    credentials = outputs["test_credentials"]["value"]
+    secrets = [token, admin_token, *flatten_strings(credentials)]
+    clients = sorted(credentials.get("clients", {}))
+    machine_client = outputs["machine_user"]["value"]["client_id"]
+    check(clients == [machine_client], f"test_credentials lists clients {clients}, expected {[machine_client]}")
     check(all(secrets), "a sensitive output holds an empty value")
     for name, output in outputs.items():
         if output["sensitive"]:
@@ -199,9 +209,9 @@ def check_users(instance: Instance, outputs: dict, org_ids: dict[str, str]) -> N
 
 
 def check_sync_user(instance: Instance, outputs: dict) -> None:
-    sync = Instance(instance.issuer, outputs["sync_admin_token"]["value"])
+    sync = Instance(instance.issuer, outputs["backend_environment"]["value"]["ZITADEL_ADMIN_TOKEN"])
     me = sync.get("/auth/v1/users/me")["user"]
-    check(me.get("userName") == SYNC_USER_NAME, f"sync_admin_token belongs to {me.get('userName')}, not {SYNC_USER_NAME}")
+    check(me.get("userName") == SYNC_USER_NAME, f"ZITADEL_ADMIN_TOKEN belongs to {me.get('userName')}, not {SYNC_USER_NAME}")
     members = instance._call("POST", "/admin/v1/members/_search", None, {"queries": [{"userIdQuery": {"userId": me["id"]}}]})
     roles = [role for member in members.get("result", []) for role in member.get("roles", [])]
     check(roles == SYNC_INSTANCE_ROLES, f"{SYNC_USER_NAME} holds instance roles {roles}, expected {SYNC_INSTANCE_ROLES}")
