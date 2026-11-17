@@ -252,7 +252,9 @@ async def canonical_identity(
             if isinstance(err, Forbidden):
                 # The organization is linked to no single active tenant, or its
                 # login was refused for its email (outside the tenant's domains,
-                # or held): one answer, so the email's holder is not disclosed.
+                # or held): one answer, so which refusal fired is not disclosed.
+                # Within the tenant's domains a free email gets 200, so this
+                # 403 still says a canonical user holds the email.
                 raise HTTPException(status_code=403, detail=ORGANIZATION_NOT_LINKED)
             if isinstance(err, ValidationError):
                 # Missing/unverified email in the token — a client-side problem.
