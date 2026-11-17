@@ -29,6 +29,11 @@ def _provider_name() -> str:
         raise pytest.UsageError(str(exc)) from exc
 
 
+def pytest_configure(config):
+    """Refuse an unknown ``E2E_PROVIDER`` once, before any module is imported."""
+    _provider_name()
+
+
 def pytest_collection_modifyitems(config, items):
     """Deselect the tests ``NOT_APPLICABLE`` lists for this run's provider."""
     provider = _provider_name()
