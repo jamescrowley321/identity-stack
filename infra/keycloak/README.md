@@ -94,7 +94,11 @@ the next `terraform plan`, and the next `terraform apply` removes them. Add memb
 When a change adds a user, client, role, organization or member to the import file, the same
 change adds it here. `make keycloak-terraform-check`
 ([`scripts/check-against-compose.sh`](scripts/check-against-compose.sh)) checks the two against
-each other in the compose `keycloak-test` container:
+each other in the compose `keycloak-test` container. If keycloak-test is not running, the check
+recreates it, so the `identity-stack` realm is imported from the checkout's
+[`keycloak/realm/identity-stack-realm.json`](../../keycloak/realm/identity-stack-realm.json); a
+keycloak-test that is already running keeps the import it was created with, and a failed
+comparison then says that `make test-down` refreshes it. The check:
 
 1. deletes any `identity-stack-terraform` realm an earlier killed or failed run left in a
    keycloak-test that is still up, then applies this root to a new realm of that name beside
@@ -137,5 +141,7 @@ The lock is re-entrant. A caller that already holds it does not deadlock the che
 `scripts/with-compose-lock.sh make keycloak-terraform-check` works everywhere (the helper marks
 the lock as held in `IDENTITY_STACK_COMPOSE_LOCK`), and on Linux so does
 `flock ~/.cache/identity-stack-compose.lock make keycloak-terraform-check` (the helper finds the
-descriptor flock passes down in `/dev/fd`). Other systems cannot see that descriptor, so there
+descriptor flock passes down in `/dev/fd` and takes the exclusive lock through it; an open
+descriptor whose lock is not held is never taken as proof, so the helper still waits for
+anyone else holding the lock). Other systems cannot see that descriptor, so there
 wrap with the helper, not with a bare `flock`; the helper prints a warning while it waits.
