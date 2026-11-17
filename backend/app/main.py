@@ -152,7 +152,14 @@ async def lifespan(app: FastAPI):
     try:
         sync_http_client = await _start_sync_provider(app)
     except Exception:
-        await http_client.aclose()
+        # Startup stops here: close what was opened before it, each close whatever the one before did.
+        try:
+            await http_client.aclose()
+        finally:
+            try:
+                await asyncio.get_running_loop().run_in_executor(None, shutdown_telemetry)
+            finally:
+                await engine.dispose()
         raise
 
     # Redis for cache invalidation pub/sub — optional, degrades gracefully
