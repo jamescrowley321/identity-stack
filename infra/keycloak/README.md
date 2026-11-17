@@ -145,3 +145,11 @@ descriptor flock passes down in `/dev/fd` and takes the exclusive lock through i
 descriptor whose lock is not held is never taken as proof, so the helper still waits for
 anyone else holding the lock). Other systems cannot see that descriptor, so there
 wrap with the helper, not with a bare `flock`; the helper prints a warning while it waits.
+
+Re-entrant means everything under the held lock shares it, so the lock does not keep two
+targets started in parallel under it apart: one could stop keycloak-test under the other. A
+`make` run under the helper (`IDENTITY_STACK_COMPOSE_LOCK` set) therefore runs its targets one
+at a time even with `-j` (the Makefile declares `.NOTPARALLEL` there). A bare
+`flock ~/.cache/identity-stack-compose.lock make ...` cannot be detected by the Makefile: do not
+pass `-j` to it with more than one test or check target. `make -j` without any outer lock is
+safe: each target takes the lock for itself.
