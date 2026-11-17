@@ -17,7 +17,8 @@ Through ``KeycloakAdminApi`` (the Admin REST API, one service account):
   ``emailVerified: false``: the realm trusts a verified email to link identities
   across providers, and the new address has not been verified. With
   ``left_tenant_id`` in the data (``UserService.remove_user_from_tenant``) it
-  ends the user's membership of that tenant's organization first, so a refused
+  ends the user's membership of that tenant's organization first (a user
+  Keycloak lacks is not created, and is an error: ``USER_NOT_IN_KEYCLOAK``), so a refused
   profile update cannot keep the user in the tenant, and then pushes only a
   changed email: leaving a tenant does not send ``enabled``, so it cannot undo a
   realm admin's disable. A status sync (activate, deactivate) does send it.
@@ -51,6 +52,11 @@ from app.services.adapters.base import LAST_ROLE_IN_TENANT, IdentityProviderAdap
 from app.services.keycloak_admin import KeycloakAdminApi, KeycloakAdminError
 
 tracer = trace.get_tracer(__name__)
+
+# A membership removal found no Keycloak user under the canonical id. A user the
+# adapter did not create (login-page sign-up, JIT-linked) may hold the membership
+# under another username, so it is reported, not counted as done.
+USER_NOT_IN_KEYCLOAK = "the user is not in Keycloak under the canonical user id: no membership was ended"
 
 # Canonical user status -> Keycloak ``enabled``.
 _ENABLED: dict[str, bool] = {"active": True, "provisioned": True, "inactive": False}
@@ -174,8 +180,10 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
 
         async def push() -> None:
             user = await self._api.find_user(username)
+            if user is None and left_alias is not None:
+                # Offboarding never provisions an account.
+                raise _Refused(USER_NOT_IN_KEYCLOAK)
             if user is None:
-                # A user created now belongs to no organization, so there is none to leave.
                 await self._api.create_user({"username": username, "email": email, "enabled": _ENABLED[status]})
                 return
             changed_email = not _same_email(user.get("email"), email)
@@ -246,8 +254,9 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
         """End the user's membership of the tenant's organization when this was their last role there.
 
         Without ``LAST_ROLE_IN_TENANT: True`` in the data another role still holds
-        the membership, and nothing is called. A tenant or user not in Keycloak, or
-        a user who is not a member, has no membership to end.
+        the membership, and nothing is called. A tenant not in Keycloak, or a user
+        who is not a member, has no membership to end. A user not in Keycloak under
+        the canonical id is an error (``USER_NOT_IN_KEYCLOAK``).
         """
         if (data or {}).get(LAST_ROLE_IN_TENANT) is not True:
             return Ok(None)
@@ -259,7 +268,7 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
                 return
             user = await self._api.find_user(username)
             if user is None:
-                return
+                raise _Refused(USER_NOT_IN_KEYCLOAK)
             await self._api.remove_member(organization["id"], user["id"])
 
         with tracer.start_as_current_span("keycloak.delete_role_assignment") as span:

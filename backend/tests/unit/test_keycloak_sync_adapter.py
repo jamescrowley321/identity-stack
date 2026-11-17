@@ -16,7 +16,7 @@ from expression import Ok
 
 from app.services.adapters.base import LAST_ROLE_IN_TENANT as LAST_ROLE
 from app.services.adapters.base import SyncError
-from app.services.adapters.keycloak import KeycloakSyncAdapter
+from app.services.adapters.keycloak import USER_NOT_IN_KEYCLOAK, KeycloakSyncAdapter
 from tests.helpers.keycloak_admin_recorded import (
     ADMIN_CLIENT_ID,
     ADMIN_CLIENT_SECRET,
@@ -410,11 +410,18 @@ class TestMembers:
         assert await adapter(api).sync_user(user_id=USER, data={**LEFT, "left_tenant_id": TENANT_ID}) == Ok(None)
         assert api.script == []
 
-    async def test_a_user_created_now_belongs_to_no_organization_to_leave(self):
-        api = RecordedAdminApi(["token", "user_find_none", "user_create"])
+    async def test_leaving_a_tenant_does_not_create_a_user_keycloak_lacks_and_says_so(self):
+        """Offboarding never provisions an account. A user the adapter did not create may hold the
+        membership under another username, so the membership not ended is an error, not done."""
+        api = RecordedAdminApi(["token", "user_find_none"])
 
-        assert await adapter(api).sync_user(user_id=USER, data={**LEFT, "left_tenant_id": TENANT_ID}) == Ok(None)
-        assert api.script == []
+        error = refused(
+            await adapter(api).sync_user(user_id=USER, data={**LEFT, "left_tenant_id": TENANT_ID}),
+            "sync_user",
+            None,
+        )
+
+        assert (error.message, api.script) == (USER_NOT_IN_KEYCLOAK, [])
 
     async def test_a_realm_wide_404_on_leaving_is_an_error(self):
         api = RecordedAdminApi(["token", "user_find", "organization_find", organizations_disabled()])
@@ -455,10 +462,9 @@ class TestMembers:
         "script",
         [
             ["token", "organization_find_none"],
-            ["token", "organization_find", "user_find_none"],
             ["token", "organization_find", "user_find", "member_remove_again"],
         ],
-        ids=["tenant-not-pushed", "user-not-pushed", "not-a-member"],
+        ids=["tenant-not-pushed", "not-a-member"],
     )
     async def test_removing_the_last_role_where_there_is_no_membership_is_done(self, script):
         api = RecordedAdminApi(list(script))
@@ -469,6 +475,20 @@ class TestMembers:
 
         assert result == Ok(None)
         assert api.script == []
+
+    async def test_removing_the_last_role_of_a_user_keycloak_lacks_is_an_error(self):
+        """A user the adapter did not create may hold the membership under another username."""
+        api = RecordedAdminApi(["token", "organization_find", "user_find_none"])
+
+        error = refused(
+            await adapter(api).delete_role_assignment(
+                user_id=USER, tenant_id=TENANT, role_id=ROLE, data={LAST_ROLE: True}
+            ),
+            "delete_role_assignment",
+            None,
+        )
+
+        assert (error.message, api.script) == (USER_NOT_IN_KEYCLOAK, [])
 
     async def test_a_realm_wide_404_on_removing_the_last_role_is_an_error(self):
         api = RecordedAdminApi(["token", "organization_find", "user_find", organizations_disabled()])

@@ -13,10 +13,12 @@ from app.dependencies import identity
 from app.dependencies.identity import (
     SYNC_ADAPTERS,
     get_permission_service,
+    get_reconciliation_service,
     get_role_service,
     get_tenant_service,
     get_user_service,
 )
+from app.errors.identity import Conflict, IdentityErrorRaised
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.role import Role
 from app.models.identity.user import User, UserStatus
@@ -28,6 +30,7 @@ from app.services.adapters.base import LAST_ROLE_IN_TENANT, IdentityProviderAdap
 from app.services.adapters.descope import DescopeSyncAdapter
 from app.services.adapters.keycloak import KeycloakSyncAdapter
 from app.services.keycloak_admin import ADMIN_CLIENT_ID_VARIABLE, ADMIN_CREDENTIAL_VARIABLE, KeycloakAdminApi
+from app.services.reconciliation import ReconciliationService
 from app.services.role import RoleService
 from app.services.user import UserService
 from tests.helpers.keycloak_admin_recorded import (
@@ -87,6 +90,23 @@ def recorded_client(api: RecordedAdminApi):
         return httpx.AsyncClient(transport=httpx.MockTransport(api.handle), timeout=timeout)
 
     return build
+
+
+class TestReconciliation:
+    """Reconciliation compares the canonical model with Descope: it runs only where Descope is synced to."""
+
+    async def test_descope_deployments_reconcile(self):
+        service = await get_reconciliation_service(mock_request(), session=AsyncMock())
+
+        assert isinstance(service, ReconciliationService)
+
+    async def test_keycloak_deployments_refuse_to_reconcile_against_descope(self, monkeypatch):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+
+        with pytest.raises(IdentityErrorRaised) as refused:
+            await get_reconciliation_service(mock_request(), session=AsyncMock())
+
+        assert refused.value.error == Conflict(message=identity.RECONCILIATION_NEEDS_DESCOPE)
 
 
 class FakeState:
@@ -204,6 +224,7 @@ class TestStartup:
         assert str(refused.value) == (
             "The Keycloak admin client's service account lacks realm-management roles "
             "['manage-organizations', 'manage-users']: grant it ['manage-organizations', 'manage-users'] "
+            "directly (roles reached through a group or a composite realm role are not read) "
             "or name another client in KEYCLOAK_ADMIN_CLIENT_ID"
         )
         assert built[0].is_closed
