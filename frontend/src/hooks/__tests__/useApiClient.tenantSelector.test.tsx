@@ -62,6 +62,16 @@ describe("useApiClient tenant selector", () => {
     expect(sentHeaders(fetchMock)).toEqual([{ authorization: "Bearer token-a" }]);
   });
 
+  it("sends no tenant a caller names when no tenant is selected", async () => {
+    mockUseAuth.mockReturnValue({ user: { access_token: "token-a" }, signinSilent: vi.fn(), removeUser: vi.fn() });
+    fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
+
+    const { result } = renderHook(() => useApiClient(), { wrapper: withTenant(null) });
+    await result.current.apiFetch("/api/roles", { headers: { "x-tenant-id": "tenant-globex" } });
+
+    expect(sentHeaders(fetchMock)).toEqual([{ authorization: "Bearer token-a" }]);
+  });
+
   it.each([
     ["the same case", { "X-Tenant-ID": "tenant-globex" }],
     ["lower case", { "x-tenant-id": "tenant-globex" }],
