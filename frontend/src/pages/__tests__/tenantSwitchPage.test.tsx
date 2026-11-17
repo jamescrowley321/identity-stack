@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { ComponentType } from "react";
 import { IdentityProvider, useIdentityContext, type CanonicalIdentity } from "@/contexts/IdentityContext";
 import { AppShell } from "@/components/layout/AppShell";
+import { toast } from "sonner";
 import MemberManagement from "../MemberManagement";
 import AccessKeys from "../AccessKeys";
 
@@ -16,7 +17,7 @@ vi.mock("react-oidc-context", () => ({
 }));
 
 vi.mock("sonner", () => ({
-  toast: { success: vi.fn(), error: vi.fn() },
+  toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
   Toaster: () => null,
 }));
 
@@ -145,6 +146,7 @@ async function switchToGlobex() {
 }
 
 beforeEach(() => {
+  vi.clearAllMocks();
   window.localStorage.clear();
   mockUseAuth.mockReturnValue({
     isAuthenticated: true,
@@ -161,7 +163,7 @@ afterEach(() => {
 });
 
 describe.each(pages)("$name across a tenant switch", (page) => {
-  it("a row action started in the previous tenant does not refill the list with its rows", async () => {
+  it("a row action started in the previous tenant neither refills the list nor reloads it there", async () => {
     stubNetwork(page);
     renderPage(page.Page);
     expect(await screen.findByText("tenant-acme-row")).toBeInTheDocument();
@@ -173,12 +175,14 @@ describe.each(pages)("$name across a tenant switch", (page) => {
     await switchToGlobex();
     expect(await screen.findByText("tenant-globex-row")).toBeInTheDocument();
 
+    sent.length = 0;
     await act(async () => {
       action.release(json(200, {}));
     });
 
     await waitFor(() => expect(screen.getByText("tenant-globex-row")).toBeInTheDocument());
     expect(screen.queryByText("tenant-acme-row")).not.toBeInTheDocument();
+    expect(sent.filter((r) => r.tenant === "tenant-acme")).toEqual([]);
   });
 
   it("shows no row of the previous tenant, and so offers no action on one, while the new tenant loads", async () => {
@@ -250,5 +254,32 @@ describe("AccessKeys across a tenant switch", () => {
 
     expect(sent.filter((r) => r.tenant === "tenant-acme")).toEqual([]);
     expect(screen.queryByText("tenant-acme-row")).not.toBeInTheDocument();
+  });
+
+  it("a key created as the user switches away: warns that its secret is lost, reloads nothing there", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    stubNetwork(keysPage, created);
+    renderPage(AccessKeys);
+    expect(await screen.findByText("tenant-acme-row")).toBeInTheDocument();
+
+    const creation = hold("POST", "/api/keys", "tenant-acme");
+    await createKey("in flight");
+    await switchToGlobex();
+    expect(await screen.findByText("tenant-globex-row")).toBeInTheDocument();
+
+    sent.length = 0;
+    await act(async () => {
+      creation.release(json(200, { cleartext: "secret-of-tenant-acme" }));
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(5000);
+    });
+
+    expect(vi.mocked(toast.warning).mock.calls).toEqual([
+      ["An access key was created in the tenant you left. Its secret can't be shown: revoke the key there if you need it."],
+    ]);
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(screen.queryByText("secret-of-tenant-acme")).not.toBeInTheDocument();
+    expect(sent.filter((r) => r.tenant === "tenant-acme")).toEqual([]);
   });
 });

@@ -50,31 +50,46 @@ interface AccessKey {
 
 export default function AccessKeys() {
   const { apiFetch } = useApiClient();
-  const [keys, setKeys] = useState<AccessKey[]>([]);
   const [name, setName] = useState("");
   const [expirationDays, setExpirationDays] = useState(DEFAULT_EXPIRATION_DAYS);
   const [newKeySecret, setNewKeySecret] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  // The list reloads when the tenant changes (apiFetch does). Only the latest
-  // load fills it, so an earlier tenant's answer arriving late is dropped, and a
-  // failed load empties it rather than leaving the previous tenant's keys.
+  // The page is mounted afresh for each tenant, so once it has gone, a call it
+  // started finishes in a tenant the user has left: nothing more is loaded or
+  // shown there.
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  // The list reloads when apiFetch changes. Only the latest load fills it, so
+  // an earlier answer arriving late is dropped. Rows are kept only for the
+  // apiFetch that loaded them; a failed load keeps them and says so.
+  const [loaded, setLoaded] = useState<{ by: typeof apiFetch | null; keys: AccessKey[] }>({ by: null, keys: [] });
+  const keys = loaded.by === apiFetch ? loaded.keys : [];
   const latestLoad = useRef(0);
   const delayedReload = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const loadKeys = useCallback(() => {
+    if (!mounted.current) return;
     const load = ++latestLoad.current;
-    const show = (rows: AccessKey[]) => {
-      if (load === latestLoad.current) setKeys(rows);
-    };
+    const isLatest = () => mounted.current && load === latestLoad.current;
     apiFetch("/api/keys")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => show(Array.isArray(data?.keys) ? data.keys : []))
-      .catch(() => show([]));
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`keys load failed: ${res.status}`);
+        const data = await res.json();
+        if (isLatest()) setLoaded({ by: apiFetch, keys: Array.isArray(data?.keys) ? data.keys : [] });
+      })
+      .catch(() => {
+        if (isLatest()) toast.error("Failed to load access keys");
+      });
   }, [apiFetch]);
 
   useEffect(() => {
     loadKeys();
-    // A reload scheduled in the previous tenant would refill the list with its keys.
     return () => clearTimeout(delayedReload.current);
   }, [loadKeys]);
 
@@ -96,6 +111,14 @@ export default function AccessKeys() {
       });
       if (res.ok) {
         const data = await res.json();
+        if (!mounted.current) {
+          // The user switched tenant while the key was created: its secret,
+          // shown only once, belongs to a page that is gone.
+          toast.warning(
+            "An access key was created in the tenant you left. Its secret can't be shown: revoke the key there if you need it.",
+          );
+          return;
+        }
         setNewKeySecret(data.cleartext || null);
         setName("");
         setCopied(false);
