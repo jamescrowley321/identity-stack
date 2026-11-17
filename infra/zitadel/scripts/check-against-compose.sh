@@ -13,7 +13,8 @@
 #
 # With --integration-tests it then runs the backend's live Zitadel suite
 # (backend/tests/integration_zitadel/) against the applied root, with its issuer,
-# project id and sync_admin_token. That suite also needs the test Postgres
+# project id, sync_admin_token, SPA client id and the test machine user's
+# client id and secret. That suite also needs the test Postgres
 # (`make test-up`, TEST_DATABASE_URL).
 set -euo pipefail
 
@@ -97,9 +98,15 @@ if [ "$integration_tests" = 1 ]; then
   echo "--- the backend's live Zitadel suite against the applied root"
   (
     cd "$repo/backend"
-    ZITADEL_TEST_ISSUER="$("$python" -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]]["value"])' "$work/outputs.json" issuer_url)" \
-      ZITADEL_TEST_PROJECT_ID="$("$python" -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]]["value"])' "$work/outputs.json" project_id)" \
-      ZITADEL_TEST_SYNC_TOKEN="$("$python" -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]]["value"])' "$work/outputs.json" sync_admin_token)" \
+    output() {
+      "$python" -c 'import json, sys; value = json.load(open(sys.argv[1]))[sys.argv[2]]["value"]; print(value[sys.argv[3]] if len(sys.argv) > 3 else value)' "$work/outputs.json" "$@"
+    }
+    ZITADEL_TEST_ISSUER="$(output issuer_url)" \
+      ZITADEL_TEST_PROJECT_ID="$(output project_id)" \
+      ZITADEL_TEST_SYNC_TOKEN="$(output sync_admin_token)" \
+      ZITADEL_TEST_SPA_CLIENT_ID="$(output spa_client_id)" \
+      ZITADEL_TEST_MACHINE_CLIENT_ID="$(output machine_user client_id)" \
+      ZITADEL_TEST_MACHINE_CLIENT_SECRET="$(output machine_user_client_secret)" \
       "$python" -m pytest tests/integration_zitadel/ -v
   )
 fi
