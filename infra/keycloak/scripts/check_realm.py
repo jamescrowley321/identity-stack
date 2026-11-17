@@ -68,6 +68,16 @@ REALM_SETTINGS = (
     "duplicateEmailsAllowed",
     "verifyEmail",
     "organizationsEnabled",
+    "bruteForceProtected",
+    "permanentLockout",
+    "failureFactor",
+    "waitIncrementSeconds",
+    "quickLoginCheckMilliSeconds",
+    "minimumQuickLoginWaitSeconds",
+    "maxFailureWaitSeconds",
+    "maxDeltaTimeSeconds",
+    "maxTemporaryLockouts",
+    "bruteForceStrategy",
 )
 CLIENT_SETTINGS = (
     "name",

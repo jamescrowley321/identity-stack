@@ -12,7 +12,7 @@ and git-ignored; `.terraform.lock.hcl` is committed.
 
 | Resource | What |
 |---|---|
-| `keycloak_realm.this` | The realm (default name `identity-stack-terraform`): Organizations on, registration off, unique emails, `verifyEmail` on, SSL mode `var.ssl_required` (`none` for the local container). |
+| `keycloak_realm.this` | The realm (default name `identity-stack-terraform`): Organizations on, registration off, unique emails, `verifyEmail` on, brute-force detection on with temporary lockouts (30 failures, wait growing from 60 s to 15 min), SSL mode `var.ssl_required` (`none` for the local container). |
 | `keycloak_openid_client.type` | Type clients `member` and `tenant-admin`: confidential, no flows, full scope off. |
 | `keycloak_role.client` | Their client roles, the permissions: `member` has `documents:read`, `documents:write`; `tenant-admin` has `members:invite`, `members:remove`, `settings:manage`. |
 | `keycloak_openid_client.app` | App clients `member-app` and `tenant-admin-app`: public, standard flow only, PKCE `S256`, full scope off, redirect URI and web origin `var.frontend_url`, post-logout redirect `<frontend_url>/login`. |

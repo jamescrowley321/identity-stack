@@ -26,7 +26,7 @@ variable "frontend_url" {
   default     = "http://localhost:3000"
 
   validation {
-    condition     = can(regex("^https?://[^/?#]+$", var.frontend_url))
+    condition     = can(regex("^https?://([A-Za-z0-9.-]+|\\[[0-9A-Fa-f:.]+\\])(:[0-9]+)?$", var.frontend_url))
     error_message = "frontend_url must be a bare origin, scheme://host[:port] with no path, query or trailing slash: it is the clients' web origin, and the post-logout redirect is <frontend_url>/login."
   }
 
