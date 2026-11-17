@@ -98,7 +98,8 @@ each other in the compose `keycloak-test` container:
 
 1. deletes any `identity-stack-terraform` realm an earlier killed or failed run left in a
    keycloak-test that is still up, then applies this root to a new realm of that name beside
-   the imported `identity-stack`, with its own state in a temporary directory;
+   the imported `identity-stack`, with its own state in a new directory under
+   `${XDG_CACHE_HOME:-~/.cache}/identity-stack-keycloak-terraform-check/`;
 2. runs `terraform plan` again and fails unless it is empty;
 3. runs [`scripts/check_realm.py`](scripts/check_realm.py), which compares, in both
    directions, the realm settings, every client (Keycloak's built-in ones by name only), client
@@ -113,10 +114,11 @@ each other in the compose `keycloak-test` container:
    with the directory client's generated secret. Users, organizations and members are read
    one page of `LISTING_PAGE_SIZE` at a time, and a full page fails the check as possibly cut off;
 4. destroys the realm, and stops the container (deleting its volumes) only if the script
-   started it: a keycloak-test that was already running is left up. The temporary state
+   started it: a keycloak-test that was already running is left up. The run's state
    directory holds the generated passwords and directory secret and is deleted, except when
    the destroy failed and the realm is still in a keycloak-test that stays up: then it is kept
-   and its path printed, and the next run deletes the realm.
+   and its path printed. The next run deletes the realm (step 1) and then every state
+   directory an earlier run kept or was killed with.
 
 It copies only the root's `.tf` files git does not ignore into its working directory, so a local
 `override.tf` or `*_override.tf` never changes what it applies.

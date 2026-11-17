@@ -287,7 +287,13 @@ def frontend_logins(realm: Realm, frontend_environment: dict) -> list[str]:
     """
     found = []
     for client_id, environment in sorted(frontend_environment.items()):
-        user = FRONTEND_LOGIN_USERS[client_id]
+        user = FRONTEND_LOGIN_USERS.get(client_id)
+        if user is None:
+            found.append(
+                f"app client {client_id} in output frontend_environment has no login user: "
+                "add one of its type, member of acme only, to FRONTEND_LOGIN_USERS"
+            )
+            continue
         login_as = KeycloakUser(user.username, realm.passwords[user.username], user.id)
         tokens = realm.source.login(login_as, client_id=client_id, scope=environment["VITE_OIDC_SCOPE"])
         _header, claims = decode_unverified(tokens.access_token)
@@ -330,7 +336,20 @@ def main() -> int:
     )
     built = Realm(KeycloakTokenSource(base_url=args.base_url, realm=args.terraform_realm), outputs["user_passwords"])
 
-    failures = differences("realm", describe(imported), describe(built))
+    failures: list[str] = []
+    try:
+        compare(imported, built, outputs, failures)
+    finally:
+        # Printed even when a later step raises, so the differences already found are not lost.
+        for failure in failures:
+            print(f"DIFFERENT {failure}")
+    print(f"{len(failures)} difference(s) between the imported realm and the Terraform-built realm")
+    return 1 if failures else 0
+
+
+def compare(imported: Realm, built: Realm, outputs: dict, failures: list[str]) -> None:
+    """Append every difference to ``failures`` as it is found."""
+    failures += differences("realm", describe(imported), describe(built))
     failures += differences("tokens", login_shapes(imported), login_shapes(built))
 
     fixture_claims = sorted(json.loads(FIXTURE_TOKEN.read_text())["claims"])
@@ -349,11 +368,6 @@ def main() -> int:
     )
     if organizations != ["acme", "globex"]:
         failures.append(f"directory client read bob's organizations as {organizations!r}")
-
-    for failure in failures:
-        print(f"DIFFERENT {failure}")
-    print(f"{len(failures)} difference(s) between the imported realm and the Terraform-built realm")
-    return 1 if failures else 0
 
 
 if __name__ == "__main__":
