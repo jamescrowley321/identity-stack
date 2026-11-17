@@ -33,6 +33,7 @@ GLOBEX = "22222222-2222-2222-2222-222222222222"
 ADMIN_ROUTE = "/api/access-checks/admin-role"
 VIEWER_ROUTE = "/api/access-checks/viewer-role"
 INSUFFICIENT_PERMISSIONS = {"detail": "Insufficient permissions"}
+NO_TENANT_CONTEXT = {"detail": "No tenant context"}
 
 
 class _Principal(BaseHTTPMiddleware):
@@ -104,4 +105,4 @@ class TestTheViewerCheck:
     def test_a_tenant_the_caller_is_not_in_is_refused(self, client):
         response = client.get(VIEWER_ROUTE, headers=_in("33333333-3333-3333-3333-333333333333"))
 
-        assert response.status_code == 403
+        assert (response.status_code, response.json()) == (403, NO_TENANT_CONTEXT)

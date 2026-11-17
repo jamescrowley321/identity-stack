@@ -61,7 +61,10 @@ def _read_outputs() -> Instance:
     if not raw:
         pytest.fail(f"{OUTPUTS_VARIABLE} is not set: run this suite with `make test-e2e-zitadel` (docs/zitadel.md)")
     try:
-        outputs = {name: output["value"] for name, output in json.loads(raw).items()}
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise TypeError(f"expected a JSON object, got {type(parsed).__name__}")
+        outputs = {name: output["value"] for name, output in parsed.items()}
         if not outputs:
             pytest.fail(f"{OUTPUTS_VARIABLE} holds no outputs: apply infra/zitadel first (docs/zitadel.md)")
         passwords = outputs["test_user_passwords"]
