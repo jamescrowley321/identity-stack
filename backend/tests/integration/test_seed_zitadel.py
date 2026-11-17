@@ -136,6 +136,40 @@ async def test_a_tenant_linked_to_its_organization_for_no_provider_is_linked_for
     assert await _state(db_session) == EXPECTED
 
 
+@pytest.mark.parametrize("external_org_id", [None, SEED.tenants["acme"]])
+async def test_a_tenant_with_domains_is_refused_not_linked(db_session, external_org_id):
+    """A tenant's domains admit its organization's first logins: domains written before the link are not the seed's."""
+    db_session.add(Tenant(name="acme", domains=["acme.test"], external_org_id=external_org_id))
+    await db_session.commit()
+
+    refusal = await _refused(db_session, SEED)
+
+    assert "acme" in str(refusal) and "domains" in str(refusal)
+    db_session.expire_all()
+    acme = (await db_session.execute(select(Tenant).where(Tenant.name == "acme"))).scalars().one()
+    assert (acme.domains, acme.external_org_id, acme.external_org_provider_id) == (
+        ["acme.test"],
+        external_org_id,
+        None,
+    )
+    assert await _provider_count(db_session) == 0
+
+
+async def test_a_tenant_the_seed_linked_keeps_the_domains_written_since(db_session):
+    """Domains an operator writes after the link are the operator's: a rerun neither refuses nor clears them."""
+    await apply_seed(db_session, SEED)
+    acme = (await db_session.execute(select(Tenant).where(Tenant.name == "acme"))).scalars().one()
+    acme.domains = ["acme.test"]
+    await db_session.commit()
+
+    changes = await apply_seed(db_session, SEED)
+
+    assert changes == []
+    db_session.expire_all()
+    acme = (await db_session.execute(select(Tenant).where(Tenant.name == "acme"))).scalars().one()
+    assert acme.domains == ["acme.test"]
+
+
 async def test_a_tenant_linked_to_its_organization_id_for_another_provider_is_refused(db_session):
     other = Provider(name="ory-local", type=ProviderType.ory)
     db_session.add(other)

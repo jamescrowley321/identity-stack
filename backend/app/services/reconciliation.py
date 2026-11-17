@@ -195,10 +195,13 @@ class ReconciliationService:
                     # Linked to a provider's organization: its domains are the
                     # admission list of that organization's first logins, set by
                     # an operator (conventions §28), and a Descope tenant that
-                    # shares its name does not choose them.
-                    logger.info(
-                        "Reconciliation: tenant '%s' is linked to an organization, domains left as they are", name
-                    )
+                    # shares its name does not choose them. Logged only when
+                    # they differ, not for every linked tenant on every run.
+                    if existing.domains != domains:
+                        logger.info(
+                            "Reconciliation: tenant '%s' is linked to an organization, domains left as they are",
+                            name,
+                        )
                 else:
                     changed = False
                     old_domains = list(existing.domains) if existing.domains else []

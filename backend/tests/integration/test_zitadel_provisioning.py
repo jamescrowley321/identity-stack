@@ -54,12 +54,13 @@ def _service(session) -> IdentityProvisioningService:
 
 
 async def _seeded(
-    session, *, globex_status: TenantStatus = TenantStatus.active, domains: dict[str, list[str]] = DOMAINS
+    session, *, globex_status: TenantStatus = TenantStatus.active, domains: dict[str, object] | None = None
 ) -> uuid.UUID:
     """The provider row and the two linked tenants, as ``scripts/seed_zitadel.py`` writes them, with ``domains``.
 
     The provider's id.
     """
+    domains = DOMAINS if domains is None else domains
     provider = Provider(name=PROVIDER, type=ProviderType.oidc, issuer_url=ISSUER, base_url=ISSUER, capabilities=["sso"])
     session.add(provider)
     await session.flush()
@@ -416,13 +417,62 @@ class TestAnOrganizationLoginOutsideItsTenantsDomains:
         assert result.is_ok(), result
         assert await _memberships(db_session, result.ok) == {("globex", MEMBER, True)}
 
-    async def test_the_emails_domain_is_read_without_a_trailing_dot(self, db_session):
+    async def test_an_email_whose_domain_ends_in_a_dot_is_refused(self, db_session):
+        """``globex.test.`` names the same host, but the held-email lookup is exact: no look-alike second user."""
         await _seeded(db_session)
 
-        result = await _provision(db_session, GLOBEX_ORG, email="globex-user@globex.test.")
+        await self._refused(db_session, email="globex-user@globex.test.")
+
+    async def test_a_dotted_look_alike_of_a_held_email_is_refused(self, db_session):
+        await _seeded(db_session)
+        db_session.add(User(email="admin@globex.test", user_name="admin@globex.test"))
+        await db_session.flush()
+
+        await self._refused(db_session, email="admin@globex.test.")
+
+        assert await UserRepository(db_session).get_by_email("admin@globex.test.") is None
+
+    @pytest.mark.parametrize("domain", ["", " ", "@", ".", "@.", " @. "])
+    @pytest.mark.parametrize("email", ["globex-user@", "globex-user@."])
+    async def test_a_tenant_domain_that_reads_as_empty_admits_nothing(self, db_session, domain, email):
+        await _seeded(db_session, domains={**DOMAINS, "globex": [domain]})
+
+        await self._refused(db_session, email=email)
+
+    @pytest.mark.parametrize("email", ["globex-user@globex.test", "globex-user@g", "globex-user@"])
+    async def test_domains_written_as_a_string_admit_nothing(self, db_session, email):
+        """Not read letter by letter: a ``domains`` that is not a list is a tenant with no domains."""
+        await _seeded(db_session, domains={**DOMAINS, "globex": "globex.test"})
+
+        await self._refused(db_session, email=email)
+
+    @pytest.mark.parametrize("domains", [None, {"globex.test": True}, 7])
+    async def test_domains_that_are_not_a_list_admit_nothing(self, db_session, domains):
+        await _seeded(db_session, domains={**DOMAINS, "globex": domains})
+
+        await self._refused(db_session)
+
+    async def test_the_pre_check_answers_a_tenant_with_null_domains(self, db_session):
+        """``GET /api/identity`` asks for the tenant before UserInfo: null domains must not fail it."""
+        await _seeded(db_session, domains={**DOMAINS, "globex": None})
+        globex = await TenantRepository(db_session).get_by_name("globex")
+        globex_id = globex.id
+
+        result = await _service(db_session).organization_tenant_id(PROVIDER, GLOBEX_ORG)
 
         assert result.is_ok(), result
-        assert await _memberships(db_session, result.ok) == {("globex", MEMBER, True)}
+        assert result.ok == globex_id
+
+    async def test_domains_that_are_not_a_list_are_logged_with_the_tenant(self, db_session, caplog):
+        await _seeded(db_session, domains={**DOMAINS, "globex": "globex.test"})
+        globex = await TenantRepository(db_session).get_by_name("globex")
+        globex_id = globex.id
+
+        with caplog.at_level(logging.WARNING, logger="app.services.identity_provisioning"):
+            await self._refused(db_session)
+
+        warnings = [r.getMessage() for r in caplog.records if r.name == "app.services.identity_provisioning"]
+        assert any(str(globex_id) in message and "not a list" in message for message in warnings), warnings
 
     async def test_the_refusal_logs_the_tenant_not_the_email(self, db_session, caplog):
         await _seeded(db_session)
