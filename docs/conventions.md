@@ -715,8 +715,8 @@ takes a first-login user's email and names from UserInfo, never from its token.
 A first login whose organization picks its tenant **MUST NOT** be linked to an existing
 canonical user by email, verified or not: an organization's administrators can set any
 email on their users. It **MUST NOT** create a user for an email with more than one `@`, an empty
-domain or a domain ending in `.`, or whose domain, whole and compared without case, is not one
-of that tenant's `domains` (each read without spaces, a leading `@` or a trailing dot; one that
+domain, a domain with an upper-case letter or ending in `.`, or whose domain, whole, is not one
+of that tenant's `domains` (each read lower-cased, without spaces, a leading `@` or trailing dots; one that
 reads as empty is dropped, and `domains` that are not a list are none). Either refusal is `Forbidden`,
 the answer an unlinked organization gets, and nothing is written. The one answer hides which
 refusal fired and anything about emails outside the tenant's domains; within those domains a

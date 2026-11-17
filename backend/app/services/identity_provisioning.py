@@ -51,19 +51,29 @@ class _OrganizationTenant:
 
 
 def _normalised_domain(domain: str) -> str:
-    """``domain`` lower-cased, without surrounding spaces, a leading ``@`` or a trailing ``.``."""
-    return domain.strip().removeprefix("@").removesuffix(".").lower()
+    """``domain`` lower-cased, without surrounding spaces, a leading ``@`` or trailing ``.``s."""
+    return domain.strip().removeprefix("@").rstrip(".").lower()
 
 
 def _domain_admitted(email: str, domains: frozenset[str]) -> bool:
-    """Whether ``email`` has one ``@`` and its domain, whole and compared without case, is one of ``domains``.
+    """Whether ``email`` has one ``@`` and its domain, whole and as it is written, is one of ``domains``.
 
-    The email's domain is read as it is: one ending in ``.`` names the same host
-    but is another email to the exact lookup by email, so it is admitted by no
-    domain. An empty domain is admitted by none either.
+    The email's domain is read as it is, because the lookup by email is exact:
+    one with an upper-case letter, or ending in ``.``, names the same host but
+    is another email to that lookup, a look-alike of the one a user may hold,
+    so it is admitted by no domain. ``domains`` are lower-case and end in no
+    ``.`` (``_normalised_domain``). An empty domain is admitted by none either.
     """
     local, at, domain = email.partition("@")
-    return bool(local and at and domain and "@" not in domain and domain.lower() in domains)
+    return bool(
+        local
+        and at
+        and domain
+        and "@" not in domain
+        and domain == domain.lower()
+        and not domain.endswith(".")
+        and domain in domains
+    )
 
 
 class IdentityProvisioningService:
@@ -128,9 +138,10 @@ class IdentityProvisioningService:
         user with any email and mark it verified, so on this path a verified
         email is not proof the login is that user's. Such a login creates a user
         only for an email with one ``@`` whose domain is one of that tenant's
-        ``domains`` (whole and compared without case; an email whose domain ends
-        in ``.`` is refused; a tenant domain is read without spaces, a leading
-        ``@`` or a trailing dot, and one that reads as empty is dropped; a
+        ``domains`` (whole; an email whose domain has an upper-case letter or
+        ends in ``.`` is refused, since the lookup by email is exact; a tenant
+        domain is read lower-cased, without spaces, a leading ``@`` or
+        trailing dots, and one that reads as empty is dropped; a
         tenant with none, or with ``domains`` that are not a list, admits no
         first login), and is never linked to an existing canonical user by
         email.
