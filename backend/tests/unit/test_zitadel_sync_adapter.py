@@ -13,6 +13,7 @@ import pytest
 
 from app.outbound import UpstreamStatusError, UpstreamTransportError
 from app.services.adapters.base import (
+    CHANGED_IN_TENANT,
     CREATED_IN_TENANT,
     LAST_ROLE_IN_TENANT,
     STATUS_CHANGED,
@@ -232,9 +233,9 @@ def _created(**overrides) -> dict:
     return data | overrides
 
 
-def _status_change(status: str) -> dict:
-    """What UserService sends on activate and deactivate."""
-    return {"email": "ada@initech.test", "status": status, STATUS_CHANGED: True}
+def _status_change(status: str, tenant_id: uuid.UUID = TENANT_ID) -> dict:
+    """What UserService sends on activate and deactivate, made in ``tenant_id``."""
+    return {"email": "ada@initech.test", "status": status, STATUS_CHANGED: True, CHANGED_IN_TENANT: str(tenant_id)}
 
 
 def test_it_is_an_identity_provider_adapter():
@@ -574,11 +575,9 @@ class TestSyncUserStatus:
     )
     async def test_the_linked_zitadel_user_follows_the_canonical_status(self, status, state, expected):
         api = FakeApi(users={SUB: _user(state)})
-        adapter, _, links = _adapter(api, FakeLinks(subjects={USER_ID: SUB}))
+        adapter, _, links = _adapter(api, _member_links(subjects={USER_ID: SUB}))
 
-        result = await adapter.sync_user(
-            user_id=USER_ID, data={"email": "ada@initech.test", "status": status, STATUS_CHANGED: True}
-        )
+        result = await adapter.sync_user(user_id=USER_ID, data=_status_change(status))
 
         assert result.is_ok()
         assert api.calls == expected
@@ -586,7 +585,7 @@ class TestSyncUserStatus:
 
     async def test_a_deactivation_zitadel_refuses_is_an_error_naming_the_state(self):
         api = FakeApi(users={SUB: _user(INITIAL)}, failing={"deactivate_user": _refusal(400)})
-        adapter, _, _ = _adapter(api, FakeLinks(subjects={USER_ID: SUB}))
+        adapter, _, _ = _adapter(api, _member_links(subjects={USER_ID: SUB}))
 
         result = await adapter.sync_user(user_id=USER_ID, data=_status_change("inactive"))
 
@@ -595,7 +594,7 @@ class TestSyncUserStatus:
         assert result.error.context == {"user_id": str(USER_ID), "status": 400, "state": INITIAL}
 
     async def test_a_linked_user_zitadel_no_longer_has_is_an_error(self):
-        adapter, _, _ = _adapter(FakeApi(), FakeLinks(subjects={USER_ID: SUB}))
+        adapter, _, _ = _adapter(FakeApi(), _member_links(subjects={USER_ID: SUB}))
 
         result = await adapter.sync_user(user_id=USER_ID, data=_status_change("inactive"))
 
@@ -604,7 +603,7 @@ class TestSyncUserStatus:
 
     async def test_an_unlinked_user_zitadel_does_not_have_is_an_error(self):
         api = FakeApi()
-        adapter, _, links = _adapter(api)
+        adapter, _, links = _adapter(api, _member_links())
 
         result = await adapter.sync_user(user_id=USER_ID, data=_status_change("inactive"))
 
@@ -634,24 +633,48 @@ class TestSyncUserStatus:
         assert links.writes == []
 
     @pytest.mark.parametrize("status", ["inactive", "active"])
-    @pytest.mark.parametrize(
-        "memberships",
-        [{}, {USER_ID: {uuid.UUID("00000000-0000-4000-8000-0000000000dd")}}],
-        ids=["no-membership", "member-of-another-tenant"],
-    )
-    async def test_a_user_with_this_id_outside_the_user_tenants_is_not_changed_and_not_linked(
-        self, status, memberships
+    @pytest.mark.parametrize("linked", [True, False], ids=["linked", "same-id"])
+    async def test_a_zitadel_user_outside_the_organization_of_the_tenant_changed_in_is_not_changed(
+        self, status, linked
     ):
-        """Zitadel takes a caller-chosen id: a user planted with the canonical id in a foreign org is left alone."""
-        api = FakeApi(users={str(USER_ID): _user(INACTIVE if status == "active" else ACTIVE, OTHER_ORG_ID)})
-        adapter, _, links = _adapter(api, FakeLinks(organizations={TENANT_ID: ORG_ID}, memberships=memberships))
+        """A status change reaches only a Zitadel user of the organization of the tenant it was made in.
+
+        A tenant admin can give a user of another tenant a role (``ends_memberships`` is
+        false, so nothing refuses a non-member), and then deactivate them: the change stays
+        canonical and is not pushed to the user's Zitadel account in the other tenant's
+        organization. A user planted with the canonical id in a foreign organization is
+        left alone the same way.
+        """
+        zitadel_id = SUB if linked else str(USER_ID)
+        api = FakeApi(users={zitadel_id: _user(INACTIVE if status == "active" else ACTIVE, OTHER_ORG_ID)})
+        links = _member_links(subjects={USER_ID: SUB}) if linked else _member_links()
+        adapter, _, links = _adapter(api, links)
 
         result = await adapter.sync_user(user_id=USER_ID, data=_status_change(status))
 
         assert result.is_error()
         assert result.error.context == {"user_id": str(USER_ID), "organization_id": OTHER_ORG_ID}
-        assert api.calls == [("find_user", {"user_id": str(USER_ID)})]
+        assert api.calls == [("find_user", {"user_id": zitadel_id})]
         assert links.writes == []
+
+    async def test_a_status_change_in_a_tenant_with_no_zitadel_organization_is_refused_before_any_call(self):
+        other_tenant = uuid.UUID("00000000-0000-4000-8000-0000000000dd")
+        adapter, opener, _ = _adapter(links=_member_links(subjects={USER_ID: SUB}))
+
+        result = await adapter.sync_user(user_id=USER_ID, data=_status_change("inactive", other_tenant))
+
+        assert result.is_error()
+        assert result.error.context == {"user_id": str(USER_ID), "tenant_id": str(other_tenant)}
+        assert opener.opened == 0
+
+    async def test_a_status_change_that_names_no_tenant_is_refused_before_any_call(self):
+        adapter, opener, _ = _adapter(links=_member_links(subjects={USER_ID: SUB}))
+        data = {"email": "ada@initech.test", "status": "inactive", STATUS_CHANGED: True}
+
+        result = await adapter.sync_user(user_id=USER_ID, data=data)
+
+        assert result.is_error()
+        assert opener.opened == 0
 
     @pytest.mark.parametrize("data", [_created(), _status_change("inactive")], ids=["create", "status-change"])
     async def test_a_user_with_a_zitadel_link_the_adapter_does_not_follow_is_refused_before_any_call(self, data):
@@ -826,7 +849,7 @@ class TestZitadelUnreachable:
             (
                 "sync_user",
                 {"user_id": USER_ID, "data": _status_change("inactive")},
-                {"subjects": {USER_ID: SUB}},
+                {"subjects": {USER_ID: SUB}, "organizations": {TENANT_ID: ORG_ID}},
             ),
             ("delete_user", {"user_id": USER_ID}, {"subjects": {USER_ID: SUB}}),
         ],

@@ -19,6 +19,7 @@ from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.base import RepositoryConflictError
 from app.repositories.user import UserRepository
 from app.services.adapters.base import (
+    CHANGED_IN_TENANT,
     CREATED_IN_TENANT,
     PROVIDER_SYNC,
     PROVIDER_SYNC_FAILED,
@@ -224,7 +225,12 @@ class UserService:
                 return Error(Conflict(message="User deactivation conflicts with existing data"))
 
             result_dict = user.model_dump()
-            sync_data = {"email": user.email, "status": user.status.value, STATUS_CHANGED: True}
+            sync_data = {
+                "email": user.email,
+                "status": user.status.value,
+                STATUS_CHANGED: True,
+                CHANGED_IN_TENANT: str(tenant_id),
+            }
             await self._repository.commit()
 
             await self._publisher.publish(
@@ -267,7 +273,12 @@ class UserService:
                 return Error(Conflict(message="User activation conflicts with existing data"))
 
             result_dict = user.model_dump()
-            sync_data = {"email": user.email, "status": user.status.value, STATUS_CHANGED: True}
+            sync_data = {
+                "email": user.email,
+                "status": user.status.value,
+                STATUS_CHANGED: True,
+                CHANGED_IN_TENANT: str(tenant_id),
+            }
             await self._repository.commit()
 
             await self._publisher.publish(

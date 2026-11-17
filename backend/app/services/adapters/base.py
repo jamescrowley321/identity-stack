@@ -37,6 +37,13 @@ PROVIDER_SYNC_FAILED = "failed"
 # organization (Zitadel) creates the user there. Absent on every other change.
 CREATED_IN_TENANT = "created_in_tenant"
 
+# ``sync_user`` data key, sent with ``STATUS_CHANGED``: the id of the tenant the status
+# was changed in (UserService.activate_user, deactivate_user). An adapter that keeps
+# each user in one tenant's organization (Zitadel) pushes the change only to a user of
+# that tenant's organization: an admin of another tenant the user was given a role in
+# does not reach the user's account.
+CHANGED_IN_TENANT = "changed_in_tenant"
+
 
 @dataclass(frozen=True)
 class SyncError:
