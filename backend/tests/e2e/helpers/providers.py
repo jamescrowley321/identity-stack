@@ -471,9 +471,20 @@ class ZitadelProvider(E2EProvider):
 
     @cached_property
     def _tenant_ids(self) -> dict[str, str]:
-        """Canonical tenant id by fixture tenant key, from the linked user's memberships."""
+        """Canonical tenant id by fixture tenant key, from the linked user's memberships.
+
+        Both fixture tenants must be there: without ``make zitadel-seed`` the
+        linked user is in neither, and the run fails here naming the step.
+        """
         identity = self._identity(self._signed_in_token())
-        return {membership["tenant_name"]: membership["tenant_id"] for membership in identity["tenant_memberships"]}
+        ids = {membership["tenant_name"]: membership["tenant_id"] for membership in identity["tenant_memberships"]}
+        missing = sorted({self._tenant_key(ADMIN), self._tenant_key(MEMBER)} - ids.keys())
+        if missing:
+            pytest.fail(
+                f"the linked user {self._linked.key} is not a member of {', '.join(missing)}: "
+                "run `make zitadel-seed` first"
+            )
+        return ids
 
     def check_ready(self, request: pytest.FixtureRequest) -> None:
         self._check_internal_endpoint_secrets()

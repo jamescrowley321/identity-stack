@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.e2e.helpers.pages import signed_in_page
 from tests.e2e.helpers.providers import ADMIN, MEMBER, PROVIDER_CLASSES, E2EProvider
 from tests.e2e.not_applicable import SUITE, UnknownE2EProvider, reason_not_applicable, selected_provider
 
@@ -169,11 +170,8 @@ def test_tenant_id(e2e_provider, request) -> str:
 
 # --- Failure evidence for browser tests -------------------------------------
 #
-# pytest-playwright's --screenshot/--tracing only cover ITS `page` fixture. The
-# authenticated fixtures below build their own context (they have to: the OIDC
-# session is injected via add_init_script before first paint), so those pages
-# are invisible to it and a UI failure reports only which locator it waited for
-# — never what the page actually showed. Capture it here instead.
+# The signed-in page fixtures below capture what the page showed when a test or
+# their own set-up fails (``helpers/pages.py``) into E2E_ARTIFACT_DIR.
 
 _ARTIFACT_DIR = os.environ.get("E2E_ARTIFACT_DIR", "")
 
@@ -186,50 +184,6 @@ def pytest_runtest_makereport(item, call):
     setattr(item, f"_report_{report.when}", report)
 
 
-def _record_console(page) -> list[str]:
-    """Collect console output and uncaught errors for the life of the page.
-
-    An SPA that throws during mount leaves `<div id="root"></div>` and nothing
-    else, so the DOM says only that nothing rendered. The reason is in the
-    console, which is otherwise discarded when the context closes.
-    """
-    messages: list[str] = []
-    page.on("console", lambda m: messages.append(f"{m.type}: {m.text}"))
-    page.on("pageerror", lambda e: messages.append(f"pageerror: {e}"))
-    return messages
-
-
-def _capture_on_failure(page, request, label: str, console: list[str] | None = None) -> None:
-    """Save a screenshot, the rendered HTML, and the console if the test failed."""
-    if not _ARTIFACT_DIR:
-        return
-    report = getattr(request.node, "_report_call", None)
-    if report is None or not report.failed:
-        return
-    out = Path(_ARTIFACT_DIR)
-    out.mkdir(parents=True, exist_ok=True)
-    stem = f"{request.node.name}-{label}".replace("/", "_").replace("::", "-")
-    try:
-        page.screenshot(path=str(out / f"{stem}.png"), full_page=True)
-        (out / f"{stem}.html").write_text(page.content(), encoding="utf-8")
-        (out / f"{stem}.url.txt").write_text(page.url, encoding="utf-8")
-        if console:
-            (out / f"{stem}.console.txt").write_text("\n".join(console), encoding="utf-8")
-    except Exception as exc:  # pragma: no cover - diagnostics must never fail a test
-        print(f"[e2e] could not capture failure evidence for {stem}: {exc}")
-
-
-def _signed_in_page(browser, e2e_provider, principal, request, label):
-    context = e2e_provider.signed_in_context(browser, principal, request)
-    page = context.new_page()
-    console = _record_console(page)
-    e2e_provider.open_app(page, principal)
-    page.wait_for_load_state("networkidle")
-    yield page
-    _capture_on_failure(page, request, label, console)
-    context.close()
-
-
 @pytest.fixture
 def admin_page(browser, e2e_provider, request):
     """Browser page signed in to the SPA as an admin/owner of the test tenant.
@@ -239,7 +193,7 @@ def admin_page(browser, e2e_provider, request):
     the admin API and then looks for it in the UI needs the browser session to be
     that same admin, or it is asserting against a page the identity can never see.
     """
-    yield from _signed_in_page(browser, e2e_provider, ADMIN, request, "admin_page")
+    yield from signed_in_page(browser, e2e_provider, ADMIN, request, "admin_page", _ARTIFACT_DIR)
 
 
 @pytest.fixture
@@ -250,4 +204,4 @@ def auth_page(browser, e2e_provider, request):
     add_init_script, so react-oidc-context treats the session as authenticated on
     first render; Keycloak and Zitadel sign in through their own forms.
     """
-    yield from _signed_in_page(browser, e2e_provider, MEMBER, request, "auth_page")
+    yield from signed_in_page(browser, e2e_provider, MEMBER, request, "auth_page", _ARTIFACT_DIR)
