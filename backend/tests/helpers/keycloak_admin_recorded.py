@@ -25,6 +25,9 @@ ADMIN_REALM = f"{BASE}/admin/realms/identity-stack"
 ADMIN_CLIENT_ID = "identity-stack-admin"
 # Local fixture value from the realm import.
 ADMIN_CLIENT_SECRET = "local-only-admin-client"
+# The realm's read-only directory client, which the startup role check refuses. Local fixture value.
+DIRECTORY_CLIENT_ID = "identity-stack-directory"
+DIRECTORY_CLIENT_SECRET = "local-only-directory-client"
 
 # The canonical ids the recording pushed: the organization's alias and the user's username.
 TENANT_ID = "7e5a0000-0000-4000-8000-000000000586"
@@ -33,6 +36,8 @@ USER_ID = "05e40000-0000-4000-8000-000000000586"
 ORGANIZATION_ID = RECORDED["organization_create"]["location"].rsplit("/", 1)[1]
 KEYCLOAK_USER_ID = RECORDED["user_create"]["location"].rsplit("/", 1)[1]
 RECORDED_TOKEN = RECORDED["token"]["body"]["access_token"]
+# The admin client's startup role check, as recorded: credential read, own account, its roles.
+ROLE_CHECK = ["credential_check", "service_account_find", "service_account_role_mappings", "service_account_roles"]
 
 
 def _expand(url: str) -> str:
@@ -90,9 +95,9 @@ class RecordedAdminApi:
         assert (request.method, request.url.path) == (entry["method"], recorded.path), step
         return recorded_response(step)
 
-    def api(self, *, secret: str = ADMIN_CLIENT_SECRET) -> KeycloakAdminApi:
+    def api(self, *, secret: str = ADMIN_CLIENT_SECRET, client_id: str = ADMIN_CLIENT_ID) -> KeycloakAdminApi:
         return KeycloakAdminApi(
-            KeycloakAdminSettings(issuer=ISSUER, client_id=ADMIN_CLIENT_ID, client_secret=secret),
+            KeycloakAdminSettings(issuer=ISSUER, client_id=client_id, client_secret=secret),
             http=httpx.AsyncClient(transport=httpx.MockTransport(self.handle), timeout=5.0),
         )
 

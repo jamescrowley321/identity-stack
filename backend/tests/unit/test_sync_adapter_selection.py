@@ -30,7 +30,12 @@ from app.services.adapters.keycloak import KeycloakSyncAdapter
 from app.services.keycloak_admin import ADMIN_CLIENT_ID_VARIABLE, ADMIN_CREDENTIAL_VARIABLE, KeycloakAdminApi
 from app.services.role import RoleService
 from app.services.user import UserService
-from tests.helpers.keycloak_admin_recorded import RecordedAdminApi
+from tests.helpers.keycloak_admin_recorded import (
+    DIRECTORY_CLIENT_ID,
+    DIRECTORY_CLIENT_SECRET,
+    ROLE_CHECK,
+    RecordedAdminApi,
+)
 from tests.unit.test_keycloak_admin_api import set_settings
 
 pytestmark = pytest.mark.anyio
@@ -112,7 +117,7 @@ class TestStartup:
     async def test_keycloak_checks_the_credential_and_keeps_the_client(self, monkeypatch):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
         set_settings(monkeypatch)
-        api = RecordedAdminApi(["token", "credential_check"])
+        api = RecordedAdminApi(["token", *ROLE_CHECK])
         monkeypatch.setattr(main, "outbound_client", recorded_client(api))
         app = FakeApp()
 
@@ -170,6 +175,38 @@ class TestStartup:
             await main._start_sync_provider(FakeApp())
 
         assert str(refused.value) == message
+
+    async def test_a_credential_without_the_write_roles_stops_startup_and_closes_the_client(self, monkeypatch):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        set_settings(
+            monkeypatch,
+            **{ADMIN_CLIENT_ID_VARIABLE: DIRECTORY_CLIENT_ID, ADMIN_CREDENTIAL_VARIABLE: DIRECTORY_CLIENT_SECRET},
+        )
+        api = RecordedAdminApi(
+            [
+                "directory_token",
+                "directory_credential_check",
+                "directory_service_account_find",
+                "directory_service_account_role_mappings",
+            ]
+        )
+        built = []
+
+        def build(*, timeout: float) -> httpx.AsyncClient:
+            built.append(recorded_client(api)(timeout=timeout))
+            return built[0]
+
+        monkeypatch.setattr(main, "outbound_client", build)
+
+        with pytest.raises(RuntimeError) as refused:
+            await main._start_sync_provider(FakeApp())
+
+        assert str(refused.value) == (
+            "The Keycloak admin client's service account lacks realm-management roles "
+            "['manage-organizations', 'manage-users']: grant it ['manage-organizations', 'manage-users'] "
+            "or name another client in KEYCLOAK_ADMIN_CLIENT_ID"
+        )
+        assert built[0].is_closed
 
     async def test_a_missing_credential_stops_startup(self, monkeypatch):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
@@ -233,6 +270,29 @@ class TestLosingTheLastRole:
         await service.unassign_role_from_user(user_id=user_id, tenant_id=tenant_id, role_id=role.id)
 
         assignments.list_by_user_tenant.assert_awaited_once_with(user_id, tenant_id)
+        adapter.delete_role_assignment.assert_awaited_once_with(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            role_id=role.id,
+            data={"role_name": "editor", LAST_ROLE_IN_TENANT: True},
+        )
+
+    async def test_the_remaining_roles_are_counted_after_the_commit(self):
+        """Counted before the commit, two concurrent unassigns of the last two roles each see the other's row."""
+        user_id, tenant_id = uuid.uuid4(), uuid.uuid4()
+        service, assignments, adapter, role = self.roles([])
+        calls: list[str] = []
+        assignments.commit.side_effect = lambda: calls.append("commit")
+
+        async def remaining(*_args) -> list[UserTenantRole]:
+            calls.append("count")
+            return []
+
+        assignments.list_by_user_tenant.side_effect = remaining
+
+        await service.unassign_role_from_user(user_id=user_id, tenant_id=tenant_id, role_id=role.id)
+
+        assert calls == ["commit", "count"]
         adapter.delete_role_assignment.assert_awaited_once_with(
             user_id=user_id,
             tenant_id=tenant_id,
@@ -326,9 +386,34 @@ class TestLifespan:
         assert ADMIN_CLIENT_ID_VARIABLE in str(refused.value)
         assert [client.is_closed for client in started] == [True, True]
 
+    async def test_a_failed_descope_client_close_still_closes_the_sync_client_and_the_engine(
+        self, monkeypatch, started
+    ):
+        """Shutdown is a finally chain: a BaseException from one close skips none of the later ones."""
+        set_settings(monkeypatch)
+        engine = FakeEngine()
+        monkeypatch.setattr(main, "get_engine", lambda: engine)
+        api = RecordedAdminApi(["token", *ROLE_CHECK])
+        self.build_into(monkeypatch, started, api)
+
+        class Interrupted(BaseException):
+            pass
+
+        with pytest.raises(Interrupted):
+            async with main.lifespan(FastAPI()):
+                descope_http, sync_http = started
+
+                async def interrupted_close() -> None:
+                    raise Interrupted
+
+                monkeypatch.setattr(descope_http, "aclose", interrupted_close)
+
+        assert sync_http.is_closed
+        assert engine.disposed
+
     async def test_a_working_admin_secret_serves_and_closes_on_shutdown(self, monkeypatch, started):
         set_settings(monkeypatch)
-        api = RecordedAdminApi(["token", "credential_check"])
+        api = RecordedAdminApi(["token", *ROLE_CHECK])
         self.build_into(monkeypatch, started, api)
         app = FastAPI()
 

@@ -5,9 +5,11 @@ Through ``KeycloakAdminApi`` (the Admin REST API, one service account):
 - ``sync_tenant`` creates or updates the tenant's **organization**. Its alias is
   the canonical tenant id, which Keycloak never lets change; its name is the
   tenant's name, and its domains exactly the tenant's ``self_provisioning_domains``
-  when that key is given (``[]`` clears them). An update sends only those fields,
-  so the organization's attributes (the realm admin's ``type:<type client>`` grant
-  markers) and, when the key is absent, its domains stay as they are.
+  when that key is given (``[]`` clears them). An update sends the organization
+  as found with only those fields replaced, so its ``enabled``, description and
+  redirect URL stay as a realm admin set them (Keycloak resets fields a PUT leaves
+  out). Its attributes are never sent, so the realm admin's ``type:<type client>``
+  grant markers stay, and when the key is absent its domains stay as they are.
 - ``delete_tenant`` deletes that organization; one not there is deleted.
 - ``sync_user`` creates or updates the user whose **username is the canonical
   user id**, with the canonical email, enabled while the status is ``active`` or
@@ -15,8 +17,10 @@ Through ``KeycloakAdminApi`` (the Admin REST API, one service account):
   ``emailVerified: false``: the realm trusts a verified email to link identities
   across providers, and the new address has not been verified. With
   ``left_tenant_id`` in the data (``UserService.remove_user_from_tenant``) it
-  first ends the user's membership of that tenant's organization, so a refused
-  profile update cannot keep the user in the tenant.
+  ends the user's membership of that tenant's organization first, so a refused
+  profile update cannot keep the user in the tenant, and then pushes only a
+  changed email: leaving a tenant does not send ``enabled``, so it cannot undo a
+  realm admin's disable. A status sync (activate, deactivate) does send it.
 - ``delete_user`` deletes that user; one not there is deleted.
 - ``sync_role_assignment`` adds the user to the tenant's organization: holding a
   role in a tenant is being its member. ``delete_role_assignment`` ends that
@@ -85,6 +89,18 @@ def _domains(value: object) -> list[dict]:
     return [{"name": domain} for domain in value]
 
 
+def _merged(found: dict, representation: dict) -> dict:
+    """The organization as found, with the adapter's fields replaced, to PUT back.
+
+    Keycloak 26.8.2 resets the fields a PUT leaves out (``enabled`` to true,
+    ``description`` and ``redirectUrl`` to nothing), so they are sent as found.
+    ``attributes`` (the realm admin's ``type:`` markers) are never sent: Keycloak
+    keeps them when a PUT leaves them out.
+    """
+    kept = {key: value for key, value in found.items() if key != "attributes"}
+    return {**kept, **representation}
+
+
 def _same_email(held: object, sent: str) -> bool:
     """Whether ``sent`` is the address Keycloak holds; Keycloak stores emails in lower case."""
     return isinstance(held, str) and held.lower() == sent.lower()
@@ -118,7 +134,7 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
             if organization is None:
                 await self._api.create_organization(representation)
             else:
-                await self._api.update_organization(organization["id"], representation)
+                await self._api.update_organization(organization["id"], _merged(organization, representation))
 
         with tracer.start_as_current_span("keycloak.sync_tenant") as span:
             span.set_attribute("tenant.id", alias)
@@ -162,13 +178,19 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
                 # A user created now belongs to no organization, so there is none to leave.
                 await self._api.create_user({"username": username, "email": email, "enabled": _ENABLED[status]})
                 return
+            changed_email = not _same_email(user.get("email"), email)
             if left_alias is not None:
                 # Before the profile update: a refused update must not keep the user in the tenant.
                 organization = await self._api.find_organization(left_alias)
                 if organization is not None:
                     await self._api.remove_member(organization["id"], user["id"])
+                # Leaving a tenant says nothing about the account's status: ``enabled``
+                # is not sent, so a realm admin's disable stands. Only a new email is pushed.
+                if changed_email:
+                    await self._api.update_user(user["id"], {"email": email, "emailVerified": False})
+                return
             update: dict = {"email": email, "enabled": _ENABLED[status]}
-            if not _same_email(user.get("email"), email):
+            if changed_email:
                 update["emailVerified"] = False
             await self._api.update_user(user["id"], update)
 

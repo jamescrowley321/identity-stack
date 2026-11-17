@@ -415,13 +415,15 @@ class RoleService:
                 return Error(identity_error(decision.error))
             unassigned = decision.ok
 
+            await self._assignment_repository.commit()
+
             # No role left in the tenant: the user no longer belongs to it, and an
             # adapter that keeps a membership (Keycloak organizations) ends it.
+            # Counted after the commit: counted before it, two concurrent unassigns
+            # of a user's last two roles would each still see the other's row.
             sync_data: dict = {"role_name": role_name}
             if not await self._assignment_repository.list_by_user_tenant(user_id, tenant_id):
                 sync_data[LAST_ROLE_IN_TENANT] = True
-
-            await self._assignment_repository.commit()
 
             await self._invalidate(unassigned, role_id, tenant_id)
 

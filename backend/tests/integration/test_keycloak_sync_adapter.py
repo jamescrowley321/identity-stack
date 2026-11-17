@@ -25,7 +25,9 @@ from app.services.keycloak_admin import (
     ADMIN_CREDENTIAL_VARIABLE,
     ADMIN_TIMEOUT_SECONDS,
     ISSUER_VARIABLE,
+    REQUIRED_ROLES,
     KeycloakAdminError,
+    KeycloakAdminRolesMissing,
     connect_keycloak_admin,
 )
 from tests.helpers.keycloak import KeycloakTokenSource
@@ -138,6 +140,19 @@ class TestOrganizations:
         assert find_organization(realm, tenant_id) is None
         assert await sync.delete_tenant(tenant_id=tenant_id) == Ok(None)
 
+    async def test_a_sync_keeps_what_the_realm_admin_set_beside_the_adapters_fields(self, sync, realm, tenant_id):
+        """Keycloak resets the fields a PUT leaves out: a disabled organization must stay disabled."""
+        await sync.sync_tenant(tenant_id=tenant_id, data={"name": f"Sync {tenant_id}"})
+        organization = find_organization(realm, tenant_id)
+        kept = {"enabled": False, "description": "Set by the realm admin", "redirectUrl": "http://localhost:3000/"}
+        realm.put(f"/organizations/{organization['id']}", json={**organization, **kept}).raise_for_status()
+
+        updated = await sync.sync_tenant(tenant_id=tenant_id, data={"name": f"Renamed {tenant_id}"})
+        organization = find_organization(realm, tenant_id)
+
+        assert updated == Ok(None)
+        assert {key: organization.get(key) for key in ("name", *kept)} == {"name": f"Renamed {tenant_id}", **kept}
+
     async def test_an_empty_domain_list_clears_the_domains(self, sync, realm, tenant_id):
         domain = f"{tenant_id.hex}.test"
         await sync.sync_tenant(
@@ -247,6 +262,20 @@ class TestMembers:
             user_id=user_id, tenant_id=tenant_id, role_id=role_id, data=last
         ) == Ok(None)
 
+    async def test_leaving_a_tenant_keeps_a_realm_disabled_account_disabled(self, sync, realm, tenant_id, user_id):
+        await sync.sync_tenant(tenant_id=tenant_id, data={"name": f"Sync {tenant_id}"})
+        await sync.sync_user(user_id=user_id, data={"email": email_of(user_id), "status": "active"})
+        organization = find_organization(realm, tenant_id)
+        await sync.sync_role_assignment(user_id=user_id, tenant_id=tenant_id, role_id=uuid.uuid4())
+        realm.put(f"/users/{find_user(realm, user_id)['id']}", json={"enabled": False}).raise_for_status()
+
+        left = {"email": email_of(user_id), "status": "active", "left_tenant_id": str(tenant_id)}
+        result = await sync.sync_user(user_id=user_id, data=left)
+
+        assert result == Ok(None)
+        assert members(realm, organization) == []
+        assert find_user(realm, user_id)["enabled"] is False
+
     async def test_a_refused_profile_update_still_ends_the_membership(self, sync, realm, tenant_id, user_id):
         await sync.sync_tenant(tenant_id=tenant_id, data={"name": f"Sync {tenant_id}"})
         await sync.sync_user(user_id=user_id, data={"email": email_of(user_id), "status": "active"})
@@ -281,16 +310,24 @@ class TestCredential:
 
         assert refused.value.status == 401
 
-    async def test_the_read_only_directory_client_cannot_write(self, environment, monkeypatch, tenant_id):
+    async def test_the_read_only_directory_client_is_refused_at_startup(self, environment, monkeypatch):
+        """Keycloak accepts its credential and lets it read; it would fail only on the first write."""
         monkeypatch.setenv(ADMIN_CLIENT_ID_VARIABLE, DIRECTORY_CLIENT_ID)
         monkeypatch.setenv(ADMIN_CREDENTIAL_VARIABLE, DIRECTORY_CLIENT_SECRET)
 
         async with httpx.AsyncClient(timeout=ADMIN_TIMEOUT_SECONDS) as http:
-            sync = KeycloakSyncAdapter(await connect_keycloak_admin(http))
-            result = await sync.sync_tenant(tenant_id=tenant_id, data={"name": f"Sync {tenant_id}"})
+            with pytest.raises(KeycloakAdminRolesMissing) as refused:
+                await connect_keycloak_admin(http)
 
-        assert result.is_error()
-        assert result.error.context["status"] == 403
+        assert (refused.value.status, refused.value.missing) == (403, REQUIRED_ROLES)
+
+    async def test_startup_stops_on_the_read_only_directory_client(self, environment, monkeypatch):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        monkeypatch.setenv(ADMIN_CLIENT_ID_VARIABLE, DIRECTORY_CLIENT_ID)
+        monkeypatch.setenv(ADMIN_CREDENTIAL_VARIABLE, DIRECTORY_CLIENT_SECRET)
+
+        with pytest.raises(RuntimeError, match="lacks realm-management roles"):
+            await main._start_sync_provider(FastAPI())
 
     async def test_startup_opens_the_adapter_with_a_working_credential(self, environment, monkeypatch):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")

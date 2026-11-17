@@ -24,13 +24,13 @@ USER = "05e40000-0000-4000-8000-000000000586"
 def main() -> None:
     out: dict[str, dict] = {}
 
-    def keep(name: str, response: httpx.Response, *, drop_token: bool = False) -> httpx.Response:
+    def keep(name: str, response: httpx.Response, *, drop_token: str | None = None) -> httpx.Response:
         try:
             body = response.json() if response.content else None
         except ValueError:
             body = response.text
         if drop_token and isinstance(body, dict):
-            body = {**body, "access_token": "recorded-access-token"}
+            body = {**body, "access_token": drop_token}
             body.pop("refresh_token", None)
         entry = {
             "method": response.request.method,
@@ -44,18 +44,33 @@ def main() -> None:
         return response
 
     http = httpx.Client(timeout=20)
-    token = keep("token", http.post(TOKEN_URL, data=GRANT, auth=ADMIN_CLIENT), drop_token=True)
+    token = keep("token", http.post(TOKEN_URL, data=GRANT, auth=ADMIN_CLIENT), drop_token="recorded-access-token")
     keep("token_wrong_secret", http.post(TOKEN_URL, data=GRANT, auth=(ADMIN_CLIENT[0], "wrong")))
     keep("token_unknown_client", http.post(TOKEN_URL, data=GRANT, auth=("no-such-client", "wrong")))
     bearer = {"Authorization": f"Bearer {token.json()['access_token']}"}
     first = {"first": 0, "max": 1}
     bad = {"Authorization": "Bearer not-a-token"}
     keep("admin_api_bad_token", http.get(f"{ADMIN}/organizations", params=first, headers=bad))
-    directory_token = http.post(TOKEN_URL, data=GRANT, auth=DIRECTORY_CLIENT).json()["access_token"]
+    directory_grant = http.post(TOKEN_URL, data=GRANT, auth=DIRECTORY_CLIENT)
+    directory_token = directory_grant.json()["access_token"]
+    keep("directory_token", directory_grant, drop_token="recorded-directory-token")
     forbidden = {"name": "Forbidden", "alias": "forbidden"}
     directory = {"Authorization": f"Bearer {directory_token}"}
     keep("organization_create_forbidden", http.post(f"{ADMIN}/organizations", json=forbidden, headers=directory))
     keep("credential_check", http.get(f"{ADMIN}/organizations", params=first, headers=bearer))
+    keep("directory_credential_check", http.get(f"{ADMIN}/organizations", params=first, headers=directory))
+
+    # The startup role check: each client reads its own service account's realm-management roles.
+    for prefix, client, headers in (("", ADMIN_CLIENT, bearer), ("directory_", DIRECTORY_CLIENT, directory)):
+        by_name = {"username": f"service-account-{client[0]}", "exact": "true"}
+        account = keep(f"{prefix}service_account_find", http.get(f"{ADMIN}/users", params=by_name, headers=headers))
+        mappings_path = f"{ADMIN}/users/{account.json()[0]['id']}/role-mappings"
+        mappings = keep(f"{prefix}service_account_role_mappings", http.get(mappings_path, headers=headers))
+        # The read-only directory client is shown no client mappings at all ({}).
+        realm_management = mappings.json().get("clientMappings", {}).get("realm-management")
+        if realm_management is not None:
+            roles_path = f"{mappings_path}/clients/{realm_management['id']}/composite"
+            keep(f"{prefix}service_account_roles", http.get(roles_path, headers=headers))
 
     def admin(method: str, path: str, **kwargs) -> httpx.Response:
         return http.request(method, f"{ADMIN}{path}", headers=bearer, **kwargs)

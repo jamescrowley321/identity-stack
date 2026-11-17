@@ -10,6 +10,7 @@ from app.services.keycloak_admin import (
     ISSUER_VARIABLE,
     KeycloakAdminError,
     KeycloakAdminNotConfigured,
+    KeycloakAdminRolesMissing,
     KeycloakAdminSettings,
     connect_keycloak_admin,
     keycloak_admin_settings,
@@ -17,7 +18,11 @@ from app.services.keycloak_admin import (
 from tests.helpers.keycloak_admin_recorded import (
     ADMIN_CLIENT_ID,
     ADMIN_CLIENT_SECRET,
+    DIRECTORY_CLIENT_ID,
+    DIRECTORY_CLIENT_SECRET,
     ISSUER,
+    RECORDED,
+    ROLE_CHECK,
     TOKEN_PATH,
     RecordedAdminApi,
     admin_path,
@@ -73,12 +78,64 @@ class TestSettings:
 @pytest.mark.anyio
 class TestCredentialCheck:
     async def test_a_working_credential_takes_a_token_and_reads_the_admin_api(self):
-        api = RecordedAdminApi(["token", "credential_check"])
+        api = RecordedAdminApi(["token", *ROLE_CHECK])
 
         await api.api().check_credentials()
 
-        assert api.calls() == [("POST", TOKEN_PATH), ("GET", admin_path("/organizations"))]
+        account = RECORDED["service_account_find"]["body"][0]["id"]
+        realm_management = RECORDED["service_account_role_mappings"]["body"]["clientMappings"]["realm-management"]["id"]
+        assert api.calls() == [
+            ("POST", TOKEN_PATH),
+            ("GET", admin_path("/organizations")),
+            ("GET", admin_path("/users")),
+            ("GET", admin_path(f"/users/{account}/role-mappings")),
+            ("GET", admin_path(f"/users/{account}/role-mappings/clients/{realm_management}/composite")),
+        ]
         assert api.sent[1].query == {"first": "0", "max": "1"}
+        assert api.sent[2].query == {"username": f"service-account-{ADMIN_CLIENT_ID}", "exact": "true"}
+
+    async def test_the_read_only_directory_client_lacks_the_roles(self):
+        """Keycloak accepts its credential and lets it read: only the role check refuses it."""
+        api = RecordedAdminApi(
+            [
+                "directory_token",
+                "directory_credential_check",
+                "directory_service_account_find",
+                "directory_service_account_role_mappings",
+            ]
+        )
+
+        with pytest.raises(KeycloakAdminRolesMissing) as refused:
+            await api.api(client_id=DIRECTORY_CLIENT_ID, secret=DIRECTORY_CLIENT_SECRET).check_credentials()
+
+        assert (refused.value.status, refused.value.missing) == (403, keycloak_admin.REQUIRED_ROLES)
+        assert api.script == []
+
+    async def test_a_service_account_with_one_of_the_two_roles_lacks_the_other(self):
+        held = [role for role in RECORDED["service_account_roles"]["body"] if role["name"] == "manage-users"]
+        api = RecordedAdminApi(["token", *ROLE_CHECK[:-1], httpx.Response(200, json=held)])
+
+        with pytest.raises(KeycloakAdminRolesMissing) as refused:
+            await api.api().check_credentials()
+
+        assert refused.value.missing == frozenset({"manage-organizations"})
+
+    async def test_a_service_account_that_cannot_be_found_lacks_the_roles(self):
+        api = RecordedAdminApi(["token", "credential_check", httpx.Response(200, json=[])])
+
+        with pytest.raises(KeycloakAdminRolesMissing) as refused:
+            await api.api().check_credentials()
+
+        assert refused.value.missing == keycloak_admin.REQUIRED_ROLES
+
+    async def test_roles_that_are_not_a_list_are_an_error(self):
+        api = RecordedAdminApi(["token", *ROLE_CHECK[:-1], httpx.Response(200, json={"name": "manage-users"})])
+
+        with pytest.raises(KeycloakAdminError) as refused:
+            await api.api().check_credentials()
+
+        assert not isinstance(refused.value, KeycloakAdminRolesMissing)
+        assert refused.value.status is None
 
     @pytest.mark.parametrize("answer", ["token_wrong_secret", "token_unknown_client"])
     async def test_a_refused_credential_raises_with_the_status(self, answer):
@@ -119,7 +176,7 @@ class TestCredentialCheck:
 class TestConnect:
     async def test_checks_the_credential_before_answering(self, monkeypatch):
         set_settings(monkeypatch)
-        api = RecordedAdminApi(["token", "credential_check"])
+        api = RecordedAdminApi(["token", *ROLE_CHECK])
         http = httpx.AsyncClient(
             transport=httpx.MockTransport(api.handle), timeout=keycloak_admin.ADMIN_TIMEOUT_SECONDS
         )
