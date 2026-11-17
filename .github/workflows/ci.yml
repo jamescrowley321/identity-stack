@@ -626,8 +626,10 @@ jobs:
 
       - name: Apply infra/zitadel
         # Local state in infra/zitadel, which the later steps read the outputs from.
+        # Assigned, then exported: `export X="$(...)"` returns export's status, not make's.
         run: |
-          export TF_VAR_zitadel_access_token="$(make -s zitadel-admin-pat)"
+          TF_VAR_zitadel_access_token="$(make -s zitadel-admin-pat)"
+          export TF_VAR_zitadel_access_token
           terraform -chdir=infra/zitadel init -input=false
           terraform -chdir=infra/zitadel apply -auto-approve -input=false -var-file=environments/dev.tfvars
 
@@ -640,8 +642,11 @@ jobs:
         # The root's frontend_environment, with no tenant scope template: a
         # Zitadel user switches tenant on the client.
         run: |
-          eval "$(terraform -chdir=infra/zitadel output -json frontend_environment \
+          # Captured first: `eval "$(...)"` would drop a terraform or jq failure.
+          set -o pipefail
+          vars="$(terraform -chdir=infra/zitadel output -json frontend_environment \
             | jq -er 'to_entries[] | if (.key | test("^VITE_OIDC_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
+          eval "$vars"
           cd frontend && VITE_OIDC_TENANT_SCOPE_TEMPLATE= npm run build
 
       - name: Start backend
@@ -649,8 +654,11 @@ jobs:
         # login for zitadel. Descope is left unconfigured: these tests present
         # Zitadel tokens only. The log goes to a file: the backend outlives this step.
         run: |
-          eval "$(terraform -chdir=infra/zitadel output -json backend_environment \
+          # Captured first: `eval "$(...)"` would drop a terraform or jq failure.
+          set -o pipefail
+          vars="$(terraform -chdir=infra/zitadel output -json backend_environment \
             | jq -er 'to_entries[] | if (.key | test("^ZITADEL_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
+          eval "$vars"
           cd backend
           uvicorn app.main:app --host 127.0.0.1 --port 8000 > "$RUNNER_TEMP/backend.log" 2>&1 &
           curl -fsS --retry 30 --retry-connrefused --retry-delay 1 -o /dev/null http://localhost:8000/api/health
