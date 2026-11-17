@@ -55,6 +55,8 @@ Startup fails when the issuer is set without the project id or the client id, an
 
 **An email already held is never linked.** A first login is never joined to an existing canonical user by email, whatever that user's tenant or provider, even when UserInfo says the email is verified. Each tenant organization's administrators (`ORG_OWNER`, `ORG_USER_MANAGER`) can create users with any email and mark it verified, so a verified email from Zitadel does not show who the user is. Such a login gets 409 `{"detail": "Could not provision identity"}`, which does not say why; the cause is logged. A Zitadel user who should be an existing canonical user is linked beforehand by an `idp_links` row, as `make zitadel-seed` writes for its user.
 
+The other direction holds too. A user a Zitadel first login creates is marked `email_from_organization`, and no first login of another provider (Ory, Keycloak, the Descope flow sync) is ever joined to that user by email, however verified that provider says the email is: the email is one an organization's administrators chose. Otherwise such an administrator could create a Zitadel user with another person's email, and that person's first Ory login would join the administrator's account. That login gets the same 409.
+
 **Logout** returns the instance's `end_session_endpoint` with `id_token_hint`, the SPA's client id and `ZITADEL_POST_LOGOUT_REDIRECT_URI`, which must be registered on the SPA application.
 
 ## Bootstrap

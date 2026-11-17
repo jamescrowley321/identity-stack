@@ -29,6 +29,13 @@ class User(SQLModel, table=True):
     user_name: str = Field(sa_column=sa.Column(sa.String, nullable=False))
     given_name: str = Field(default="", sa_column=sa.Column(sa.String, nullable=False, server_default=""))
     family_name: str = Field(default="", sa_column=sa.Column(sa.String, nullable=False, server_default=""))
+    # True for a user a Zitadel organization's first login created: its email is
+    # one the organization's administrators chose, so no first login of any
+    # provider links to this user by email (IdentityProvisioningService.provision).
+    email_from_organization: bool = Field(
+        default=False,
+        sa_column=sa.Column(sa.Boolean, nullable=False, server_default=sa.text("false")),
+    )
     status: UserStatus = Field(
         default=UserStatus.active,
         sa_column=sa.Column(sa.Enum(UserStatus, name="user_status"), nullable=False, server_default="active"),

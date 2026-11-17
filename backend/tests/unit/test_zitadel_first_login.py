@@ -366,6 +366,15 @@ class TestTheRecordedProvider:
         assert response.json() == {"detail": protected.PROVIDER_NOT_CONFIGURED}
         services.provisioner.provision.assert_not_awaited()
 
+    def test_none_recorded_for_a_zitadel_principal_is_refused(self, op):
+        """Never read as a token-claims provider: its organization and UserInfo rules would be skipped."""
+        response, services = self._get(op, None)
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": protected.PROVIDER_NOT_CONFIGURED}
+        services.provisioner.organization_tenant_id.assert_not_awaited()
+        services.provisioner.provision.assert_not_awaited()
+
 
 class TestAKnownUser:
     def test_is_resolved_without_userinfo(self, op, userinfo):

@@ -13,7 +13,7 @@ import uuid as uuid_mod
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
-from app.errors.identity import Conflict, IdentityError, NotFound, ValidationError
+from app.errors.identity import Conflict, EmailLinkRefused, IdentityError, NotFound, ValidationError
 from app.logbook import logbook
 from app.models.identity.provider import ProviderType
 from app.models.identity.sync_event import SyncEvent, SyncEventVerb
@@ -162,6 +162,10 @@ class InboundSyncService:
             # Check for existing user by email (upsert)
             existing_user = await self._user_repo.get_by_email(email)
             created = False
+            if existing_user is not None and existing_user.email_from_organization:
+                # An organization's administrators chose that email; it does not
+                # show this Descope identity is that user (IdentityProvisioningService).
+                return Error(EmailLinkRefused(message="The email is held by a canonical user this login may not link"))
 
             if existing_user is None:
                 # Create new user

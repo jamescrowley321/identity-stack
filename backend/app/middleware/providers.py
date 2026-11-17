@@ -46,6 +46,10 @@ AUTHORIZED_PARTY_CLAIM = "azp"
 # (RFC 8705 §3.1).
 CONFIRMATION_CLAIM = "cnf"
 SENDER_BINDINGS = frozenset({"jkt", "x5t#S256"})
+# Zitadel's config name, the authentication type of its principals. Its first
+# login is placed by organization and profiled from UserInfo, so it is never
+# provisioned without its recorded config (``routers/protected.py``).
+ZITADEL_PROVIDER_NAME = "Zitadel"
 
 
 class ProviderConfigurationError(ValueError):
@@ -625,7 +629,7 @@ def zitadel_config(
             "set ZITADEL_REQUIRE_HTTPS=false for a local plain-HTTP instance"
         )
     return ProviderTokenConfig(
-        name="Zitadel",
+        name=ZITADEL_PROVIDER_NAME,
         accepted_issuers=frozenset({issuer}),
         disco_address=f"{issuer}/.well-known/openid-configuration",
         audience=audience,

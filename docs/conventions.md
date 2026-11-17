@@ -714,6 +714,11 @@ takes a first-login user's email and names from UserInfo, never from its token.
 A first login whose organization picks its tenant **MUST NOT** be linked to an existing
 canonical user by email, verified or not: an organization's administrators can set any
 email on their users. It is refused with `EmailLinkRefused` and nothing is written.
+The user such a login creates is marked `users.email_from_organization`, and no first
+login of any provider (just-in-time provisioning, the Descope flow sync) **MUST** link to
+that user by email either: it is `EmailLinkRefused` too. A login that finds, by email,
+the user a concurrent login for its own subject just created gets that user. A Zitadel
+principal with no recorded provider config **MUST NOT** be provisioned (500).
 
 Both token middlewares **MUST** build the principal and read the tenant with the
 provider's extractor inside the code path that answers a failure with the uniform 401, so
