@@ -8,6 +8,13 @@ TEST_REDIS_URL := redis://localhost:16379/0
 # Runs a command holding the shared compose lock (re-entrant): every target
 # that starts, uses or stops the test stack goes through it.
 COMPOSE_LOCKED := scripts/with-compose-lock.sh
+# Under the held lock (this make runs inside the helper, which sets
+# IDENTITY_STACK_COMPOSE_LOCK) every nested lock call is re-entrant, so two
+# targets run in parallel would share the stack unexcluded: one could stop
+# keycloak-test under the other. Run the targets one at a time there, -j or not.
+ifneq ($(IDENTITY_STACK_COMPOSE_LOCK),)
+.NOTPARALLEL:
+endif
 
 # The base compose file refuses to parse without these three variables. The
 # Zitadel targets never start the services that read them, so placeholders keep

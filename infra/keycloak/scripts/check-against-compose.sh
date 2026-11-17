@@ -107,7 +107,7 @@ delete_leftover_realm() {
     404) ;;
     *) echo "could not delete leftover realm $terraform_realm (HTTP $code)" >&2; return 1 ;;
   esac
-  find "$runs" -mindepth 1 -maxdepth 1 -name 'run.*' ! -path "$work" -exec rm -rf {} +
+  find "$runs" -mindepth 1 -maxdepth 1 -name 'run.*' ! -name "${work##*/}" -exec rm -rf {} +
 }
 
 # Own working copy and state: never the root's terraform.tfstate. Only the

@@ -13,8 +13,9 @@
 # script under `make`). A caller that took the lock with flock(1) itself
 # (`flock ~/.cache/identity-stack-compose.lock make test-integration`) passes
 # its descriptor on the lock file down; on Linux this script finds it in
-# /dev/fd and takes the exclusive lock through it, which succeeds at once when
-# that descriptor is the one holding the lock. An open descriptor alone is never
+# /dev/fd and, once a new descriptor of its own finds the lock taken, takes the
+# exclusive lock through the inherited one, which succeeds at once when that
+# descriptor is the one holding the lock. An open descriptor alone is never
 # trusted: whichever descriptor the lock is taken on, the command runs only
 # after flock reports it held. Other systems cannot see which file a descriptor
 # names: wrap with this script instead
@@ -42,8 +43,8 @@ mkdir -p "$cache"
 touch "$lock"
 export IDENTITY_STACK_COMPOSE_LOCK="$lock"
 
-# Candidate descriptors: every inherited descriptor open on the lock file
-# (Linux only; see above), then a new open of it. Descriptors are listed before
+# Candidate descriptors: a new open of the lock file, then every inherited
+# descriptor open on it (Linux only; see above). Descriptors are listed before
 # the new one is opened, on a number no inherited descriptor uses.
 inherited=()
 if [ "$(uname -s)" = Linux ]; then
@@ -68,16 +69,27 @@ if [ -z "$own_fd" ]; then
 fi
 eval "exec $own_fd>>\"\$lock\""
 
-# Take the exclusive lock, without waiting, on each candidate in turn. On an
-# inherited descriptor it succeeds only if that descriptor's open file already
-# holds the lock (flock(2) converts its own lock) or no one holds it; on the new
-# descriptor only if no one holds it. Either way the lock is then held, through
-# a descriptor the command keeps open. Until one succeeds, someone else holds
-# it: poll, rather than block on one descriptor, so a caller's lock on another
-# candidate can never deadlock this run.
+# Take the exclusive lock, without waiting, on the new descriptor first: that
+# succeeds only if no one holds the lock. Only if it fails (someone holds it)
+# try each inherited descriptor: flock(2) converts a lock its open file already
+# holds, so a success there means the caller passed down the holder's own
+# descriptor. Trying an inherited descriptor while the lock is free would take
+# the lock on an open file the caller keeps after the command ends (a caller
+# that opened the lock file without locking it), leaving it held for good. The
+# lock is then held, through a descriptor the command keeps open. Until one
+# succeeds, someone else holds it: poll, rather than block on one descriptor,
+# so a caller's lock on an inherited descriptor can never deadlock this run.
+# (The holder can release between the two tries; an inherited unlocked
+# descriptor tried in that instant takes the lock. The window is one flock call
+# wide, and the lock then stays held only while that caller keeps the
+# descriptor open.)
 take() {
   local fd
-  for fd in ${inherited[@]+"${inherited[@]}"} "$own_fd"; do
+  if flock -n -x "$own_fd"; then
+    held_fd="$own_fd"
+    return 0
+  fi
+  for fd in ${inherited[@]+"${inherited[@]}"}; do
     if flock -n -x "$fd"; then
       held_fd="$fd"
       return 0
