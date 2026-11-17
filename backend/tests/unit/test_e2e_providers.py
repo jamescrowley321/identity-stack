@@ -269,3 +269,45 @@ class TestAFailedSignInIsNotRetried:
             tokens.get(providers.MEMBER, self._failing(calls))
 
         assert calls == ["sign_in"]
+
+
+class TestZitadelSeedMissing:
+    """A Zitadel run whose linked user is not in both fixture tenants fails naming them and the seed step."""
+
+    @pytest.fixture
+    def zitadel(self, monkeypatch):
+        provider = providers.ZitadelProvider(UNREACHABLE, UNREACHABLE)
+        monkeypatch.setattr(provider, "_signed_in_token", lambda: "token")
+        return provider
+
+    def _memberships(self, provider, monkeypatch, names):
+        answer = {
+            "tenant_memberships": [{"tenant_name": name, "tenant_id": f"id-{name}"} for name in names],
+        }
+        monkeypatch.setattr(provider, "_identity", lambda token, headers=None: answer)
+
+    def _fixture_tenants(self, provider):
+        return sorted({provider._tenant_key(providers.ADMIN), provider._tenant_key(providers.MEMBER)})
+
+    def test_both_tenants_present_give_their_ids(self, zitadel, monkeypatch):
+        tenants = self._fixture_tenants(zitadel)
+        self._memberships(zitadel, monkeypatch, tenants)
+
+        assert zitadel.headers(providers.ADMIN) == {"X-Tenant-ID": f"id-{zitadel._tenant_key(providers.ADMIN)}"}
+        assert zitadel.headers(providers.MEMBER) == {"X-Tenant-ID": f"id-{zitadel._tenant_key(providers.MEMBER)}"}
+
+    @pytest.mark.parametrize("principal", [providers.ADMIN, providers.MEMBER])
+    def test_an_unseeded_instance_fails_naming_the_seed(self, zitadel, monkeypatch, principal):
+        self._memberships(zitadel, monkeypatch, [])
+        missing = ", ".join(self._fixture_tenants(zitadel))
+
+        with pytest.raises(pytest.fail.Exception, match=rf"not a member of {missing}: run `make zitadel-seed`"):
+            zitadel.headers(principal)
+
+    def test_one_missing_tenant_is_named(self, zitadel, monkeypatch):
+        admin_tenant = zitadel._tenant_key(providers.ADMIN)
+        member_tenant = zitadel._tenant_key(providers.MEMBER)
+        self._memberships(zitadel, monkeypatch, [admin_tenant])
+
+        with pytest.raises(pytest.fail.Exception, match=rf"not a member of {member_tenant}: run `make zitadel-seed`"):
+            zitadel.tenant_id(None)
