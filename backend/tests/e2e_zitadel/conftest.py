@@ -23,6 +23,7 @@ without the Descope secrets, and this one needs no secret at all.
 import asyncio
 import json
 import os
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
@@ -42,6 +43,8 @@ OUTPUTS_VARIABLE = "ZITADEL_TERRAFORM_OUTPUTS"
 _PROBE_TIMEOUT_SECONDS = 10
 # The email domain of the globex test user (infra/zitadel/main.tf).
 GLOBEX_DOMAIN = "globex.test"
+# The outputs the suite reads as objects keyed by name.
+_MAP_OUTPUTS = ("organization_ids", "test_user_ids", "test_user_login_names", "test_user_passwords")
 
 
 @dataclass(frozen=True)
@@ -67,6 +70,9 @@ def _read_outputs() -> Instance:
         outputs = {name: output["value"] for name, output in parsed.items()}
         if not outputs:
             pytest.fail(f"{OUTPUTS_VARIABLE} holds no outputs: apply infra/zitadel first (docs/zitadel.md)")
+        for name in _MAP_OUTPUTS:
+            if not isinstance(outputs[name], dict):
+                raise TypeError(f"output {name} is a {type(outputs[name]).__name__}, not an object")
         passwords = outputs["test_user_passwords"]
         return Instance(
             issuer=outputs["issuer_url"],
@@ -121,6 +127,15 @@ class Database:
     def tenant_ids(self) -> dict[str, str]:
         return {name: str(tenant_id) for tenant_id, name in self._run("SELECT id, name FROM tenants")}
 
+    def tenant_domains(self, organization_id: str) -> list[list[str]]:
+        """The domains of each tenant linked to the organization: one entry per tenant."""
+        rows = self._run(
+            "SELECT domains FROM tenants WHERE external_org_id = :org"
+            " AND external_org_provider_id = (SELECT id FROM providers WHERE name = 'zitadel')",
+            org=organization_id,
+        )
+        return [domains for (domains,) in rows]
+
     def set_tenant_domains(self, organization_id: str, domains: list[str]) -> int:
         rows = self._run(
             "UPDATE tenants SET domains = CAST(:domains AS json) WHERE external_org_id = :org"
@@ -132,24 +147,31 @@ class Database:
 
 
 @pytest.fixture(scope="session")
-def database(zitadel: Instance) -> Database:
+def database(zitadel: Instance) -> Iterator[Database]:
     """The application database, with the globex tenant admitting its own email domain.
 
     ``make zitadel-seed`` gives the tenants no email domains, and a first login is
     admitted only for an email in its tenant's domains. No route sets them yet
-    (#621), so the suite writes them as an operator would (docs/zitadel.md).
+    (#621), so the suite writes them as an operator would (docs/zitadel.md), and
+    puts the tenant's own domains back when the session ends.
     """
     url = os.environ.get("DATABASE_URL", "")
     if not url:
         pytest.fail("DATABASE_URL is not set: the suite reads the application database the backend uses")
     database = Database(url)
+    globex = zitadel.organization_ids["globex"]
     try:
-        updated = database.set_tenant_domains(zitadel.organization_ids["globex"], [GLOBEX_DOMAIN])
+        before = database.tenant_domains(globex)
     except (SQLAlchemyError, OSError) as exc:
         pytest.fail(f"the application database at DATABASE_URL does not answer ({exc!r})")
-    if updated != 1:
-        pytest.fail("no tenant is linked to the globex organization: run `make zitadel-seed` first")
-    return database
+    if len(before) != 1:
+        pytest.fail(
+            f"expected one tenant linked to the globex organization, found {len(before)}: run `make zitadel-seed` first"
+        )
+    (original,) = before
+    database.set_tenant_domains(globex, [GLOBEX_DOMAIN])
+    yield database
+    database.set_tenant_domains(globex, original)
 
 
 @pytest.fixture(scope="session", autouse=True)

@@ -190,7 +190,9 @@ def test_logout_drops_the_tokens_and_the_next_sign_in_asks_for_credentials(
     signed_in = _sign_in_to_the_spa(page, frontend_url, zitadel.users[ACME])
     assert signed_in.get("refresh_token"), "the SPA got no refresh token (offline_access)"
 
-    page.locator("header").get_by_role("button").last.click()
+    # The user menu's trigger is the header button holding the avatar.
+    header = page.locator("header")
+    header.get_by_role("button").filter(has=page.locator("[data-slot='avatar']")).click()
     # The SPA leaves for Zitadel's end_session endpoint, which sends it back to /login.
     with page.expect_request(lambda request: request.url.startswith(f"{zitadel.issuer}/oidc/v1/end_session")):
         page.get_by_role("menuitem", name="Sign out").click()
