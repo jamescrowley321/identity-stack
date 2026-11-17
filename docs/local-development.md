@@ -28,6 +28,7 @@ make test-unit           # backend unit tests (auto-brings-up the test stack, so
 make test-integration    # backend integration tests (auto-brings-up the test stack)
 make test-frontend       # frontend unit tests (vitest)
 make test-e2e            # end-to-end tests (needs frontend + backend running, Playwright and Descope credentials)
+make test-e2e-keycloak   # Keycloak end-to-end suite, no credential (needs keycloak-test, the backend and the Keycloak-built SPA; see keycloak.md)
 make test-all            # lint + unit + frontend + integration
 make test-down           # tear the test stack down
 ```
@@ -124,6 +125,9 @@ token from `member-app`, and `erin` cannot. On `GET /api/access-checks/settings-
 organization, and `acme` marks them as tenant admins. `bob`'s is refused, because he belongs
 to two organizations. `GET /api/identity` lists each user's organizations from the same
 lookup.
+
+The end-to-end suite that drives the SPA and backend against this realm from Chromium, and how to
+run it locally, is in [keycloak.md](keycloak.md).
 
 `docker-compose.test.yml` runs the same realm as `keycloak-test` on `http://keycloak-test.localhost:18180`, resolved the same way. It sits behind the `keycloak` profile there: `make test-up` leaves it out, `make test-up-keycloak` starts the test stack with it, and so does `make test-integration`.
 

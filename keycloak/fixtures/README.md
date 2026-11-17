@@ -102,7 +102,9 @@ stops on an organization picker page.
 | Issuer string | `<KC_HOSTNAME>/realms/<realm>`. |
 | Full-URL `KC_HOSTNAME` with `http://` | Works. Every endpoint in discovery uses that origin, and the same URL answers from the host and from other containers through the `keycloak.localhost` network alias (checked from the Debian-based backend image and from Alpine). |
 | A refreshed token keeps its organization | Yes. A plain refresh returns `organization: ["acme"]` again. A refresh that asks for `scope=openid organization:globex` succeeds but returns a token with **no** `organization` claim, so refresh cannot switch organization. |
-| Second authorize request on a live SSO session | For a member of both organizations, a second authorize request with `organization:globex` returns a code with no login form, also with `prompt=none`. The new token has `organization: ["globex"]` and the same `sid`. The refresh token issued for `acme` keeps working and still yields `acme`. |
+| Second authorize request on a live SSO session | For a member of both organizations, a second authorize request with `organization:globex` returns a code with no login form, also with `prompt=none`. The new token has `organization: ["globex"]` and the same `sid`. The refresh token issued for `acme` keeps working and still yields `acme`. The end-to-end suite repeats this through the SPA's tenant switch on every pull request ([`docs/keycloak.md`](../../docs/keycloak.md)). |
+| Listing a user's organizations: the admin role it needs | `realm-management` `view-users` **and** `view-organizations`, plus the `kc-admin-api` client scope on the calling client; neither role alone opens it (see `identity-stack-directory` above). |
+| A token after the user is removed from its organization | The access token stays valid until it expires (300 s); `userinfo` and the next refresh answer `invalid_grant` "Invalid organization", so the `organization` claim does not survive a refresh. Measured below. |
 
 ## An organization the user is not in
 
