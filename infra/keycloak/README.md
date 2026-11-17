@@ -121,6 +121,12 @@ recreate it with `make test-down && make test-up-keycloak`, as a failed comparis
    The next run deletes the realm (step 1) and then every state directory an earlier run kept
    or was killed with.
 
+The comparison covers the fields the import file uses today, listed at the top of
+`check_realm.py` (`REALM_SETTINGS`, `CLIENT_SETTINGS`, `CLIENT_ATTRIBUTES`, `USER_SETTINGS`). A
+change that makes the import use a field outside those lists (a user attribute, a required
+action, another client attribute, a realm role or a group) adds the field to the list in the
+same change; the check does not notice an uncompared field by itself.
+
 It copies only the root's `.tf` files git does not ignore into its working directory, so a local
 `override.tf` or `*_override.tf` never changes what it applies.
 
