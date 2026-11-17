@@ -17,6 +17,9 @@ from pathlib import Path
 FIXTURE_PATH = Path(__file__).resolve().parents[3] / "infra" / "fixtures" / "test-identities.json"
 # The canonical roles a fixture user can hold in a tenant; None is a member with no grant.
 CANONICAL_ROLES = frozenset({"owner", "admin", "member", "viewer"})
+# Keys a root already uses beside the fixture's tenants: infra/zitadel's organization_ids
+# output names its project-owning organization ``platform``.
+RESERVED_TENANT_KEYS = frozenset({"platform"})
 
 
 class IdentityFixtureInvalid(ValueError):
@@ -85,7 +88,7 @@ def load_identity_fixture(raw: object) -> IdentityFixture:
     case_names = {field.name for field in fields(FixtureCases)}
     if not isinstance(named, dict) or set(named) != case_names:
         raise IdentityFixtureInvalid(f"cases must name exactly {sorted(case_names)}")
-    unknown = sorted(case for case, user in named.items() if user not in users)
+    unknown = sorted(case for case, user in named.items() if not isinstance(user, str) or user not in users)
     if unknown:
         raise IdentityFixtureInvalid(f"cases {unknown} name no fixture user")
     return IdentityFixture(tenants, users, FixtureCases(**{case: users[user] for case, user in named.items()}))
@@ -104,6 +107,8 @@ _KIND_NAMES = {bool: "boolean", str: "string"}
 
 
 def _tenant(key: str, spec: dict) -> FixtureTenant:
+    if key in RESERVED_TENANT_KEYS:
+        raise IdentityFixtureInvalid(f"tenant key {key!r} is reserved: a root already uses it beside the tenants")
     owner = f"tenant {key}"
     return FixtureTenant(
         key,

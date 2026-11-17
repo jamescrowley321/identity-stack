@@ -1,10 +1,12 @@
 """First-login provisioning into the tenant mapped from a Zitadel organization, against Postgres.
 
-The tenants and the user come from the ``canonical_seed`` output recorded from a
-real ``terraform apply`` (``tests/fixtures/zitadel/canonical-seed.json``): ``acme``
-and ``globex`` are linked to their organizations through ``external_org_id``, for
-the ``zitadel`` provider (``external_org_provider_id``). Each tenant lists the email
-domains its organization's first logins may hold (``domains``).
+The organizations come from the ``canonical_seed`` output recorded from a real
+``terraform apply`` (``tests/fixtures/zitadel/canonical-seed.json``): ``acme`` and
+``globex`` are linked to their organizations through ``external_org_id``, for the
+``zitadel`` provider (``external_org_provider_id``). Each tenant lists the email
+domains its organization's first logins may hold (``domains``): its domain in the
+shared fixture (``infra/fixtures/test-identities.json``). The user signing in for
+the first time is a newcomer, not a fixture user: provisioning creates it.
 """
 
 import json
@@ -28,6 +30,7 @@ from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 from app.services.identity_provisioning import DEFAULT_TENANT_NAME, IdentityProvisioningService
+from tests.helpers.identity_fixture import IDENTITIES
 
 SEED = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "zitadel" / "canonical-seed.json").read_text())
 ISSUER = SEED["issuer_url"]
@@ -35,8 +38,12 @@ ACME_ORG = SEED["tenants"]["acme"]
 GLOBEX_ORG = SEED["tenants"]["globex"]
 UNMAPPED_ORG = "399948686400000000"
 SUB = "399948690000000001"
-EMAIL = "globex-user@globex.test"
-DOMAINS = {"acme": ["acme.test"], "globex": ["globex.test"]}
+ACME_DOMAIN = IDENTITIES.tenants["acme"].domain
+GLOBEX_DOMAIN = IDENTITIES.tenants["globex"].domain
+DOMAINS = {tenant: [IDENTITIES.tenants[tenant].domain] for tenant in SEED["tenants"]}
+# A first login into globex: plainly no fixture user, so provisioning creates it.
+NEWCOMER = "newcomer"
+EMAIL = f"{NEWCOMER}@{GLOBEX_DOMAIN}"
 PROVIDER = "zitadel"
 MEMBER = "member"
 
@@ -94,8 +101,8 @@ async def _provision(session, organization_id: str | None, **changes):
         "sub": SUB,
         "email": EMAIL,
         "email_verified": True,
-        "given_name": "Globex",
-        "family_name": "User",
+        "given_name": "New",
+        "family_name": "Comer",
         "organization_id": organization_id,
         **changes,
     }
@@ -140,7 +147,7 @@ async def test_a_first_login_joins_the_organizations_tenant_as_member(db_session
     assert (link.user_id, link.external_email) == (result.ok, EMAIL)
     user = await UserRepository(db_session).get_by_email(EMAIL)
     assert user is not None
-    assert (user.id, user.given_name, user.family_name) == (result.ok, "Globex", "User")
+    assert (user.id, user.given_name, user.family_name) == (result.ok, "New", "Comer")
     assert await _memberships(db_session, result.ok) == {("globex", MEMBER, True)}
     assert await TenantRepository(db_session).get_by_name(DEFAULT_TENANT_NAME) is None
 
@@ -151,7 +158,7 @@ async def test_an_existing_global_member_role_is_reused(db_session):
     await db_session.flush()
     before = await _count(db_session, Role)
 
-    result = await _provision(db_session, ACME_ORG, email="acme-member@acme.test")
+    result = await _provision(db_session, ACME_ORG, email=f"acme-member@{ACME_DOMAIN}")
 
     assert result.is_ok(), result
     assert await _count(db_session, Role) == before
@@ -317,10 +324,10 @@ class TestAnEmailAlreadyHeldIsNeverLinked:
 
     async def test_a_login_in_the_users_own_organization_is_refused_too(self, db_session):
         await _seeded(db_session)
-        await self._acme_admin(db_session, email="admin@acme.test")
+        await self._acme_admin(db_session, email=f"admin@{ACME_DOMAIN}")
 
         before = await _written(db_session)
-        result = await _provision(db_session, ACME_ORG, email="admin@acme.test")
+        result = await _provision(db_session, ACME_ORG, email=f"admin@{ACME_DOMAIN}")
 
         assert result.is_error()
         assert type(result.error) is Forbidden
@@ -340,7 +347,7 @@ class TestAnOrganizationLoginOutsideItsTenantsDomains:
 
     So an organization's first login creates a user only for an email in one of
     its tenant's ``domains``: otherwise an administrator of globex could take
-    ``ceo@acme.test`` and refuse the real holder's first login through every
+    ``ceo@`` an acme domain and refuse the real holder's first login through every
     other provider. Outside them the login gets ``Forbidden``, as an unlinked
     organization does, and nothing is written, so it learns nothing about the
     email either.
@@ -359,7 +366,7 @@ class TestAnOrganizationLoginOutsideItsTenantsDomains:
     async def test_another_tenants_domain_is_refused(self, db_session):
         await _seeded(db_session)
 
-        await self._refused(db_session, email="ceo@acme.test")
+        await self._refused(db_session, email=f"ceo@{ACME_DOMAIN}")
 
     async def test_an_email_no_canonical_user_holds_is_refused_too(self, db_session):
         """Refused before any lookup by email: held or not, the answer is the same."""
@@ -371,21 +378,21 @@ class TestAnOrganizationLoginOutsideItsTenantsDomains:
 
     async def test_an_email_held_outside_the_domains_gets_the_same_answer(self, db_session):
         await _seeded(db_session)
-        db_session.add(User(email="ceo@acme.test", user_name="ceo@acme.test"))
+        db_session.add(User(email=f"ceo@{ACME_DOMAIN}", user_name=f"ceo@{ACME_DOMAIN}"))
         await db_session.flush()
 
-        await self._refused(db_session, email="ceo@acme.test")
+        await self._refused(db_session, email=f"ceo@{ACME_DOMAIN}")
 
     @pytest.mark.parametrize(
         "email",
         [
-            "user@sub.globex.test",
-            "user@evilglobex.test",
-            "user@globex.test.evil.test",
-            "globex.test",
-            "@globex.test",
-            "user@acme.test@globex.test",
-            "user@globex.test ",
+            f"user@sub.{GLOBEX_DOMAIN}",
+            f"user@evil{GLOBEX_DOMAIN}",
+            f"user@{GLOBEX_DOMAIN}.evil.test",
+            GLOBEX_DOMAIN,
+            f"@{GLOBEX_DOMAIN}",
+            f"user@{ACME_DOMAIN}@{GLOBEX_DOMAIN}",
+            f"user@{GLOBEX_DOMAIN} ",
         ],
     )
     async def test_a_domain_is_matched_whole(self, db_session, email):
@@ -399,31 +406,45 @@ class TestAnOrganizationLoginOutsideItsTenantsDomains:
         await self._refused(db_session)
 
     async def test_a_tenant_domain_is_compared_without_case(self, db_session):
-        await _seeded(db_session, domains={**DOMAINS, "globex": ["Globex.TEST"]})
+        await _seeded(db_session, domains={**DOMAINS, "globex": [GLOBEX_DOMAIN.upper()]})
 
-        result = await _provision(db_session, GLOBEX_ORG, email="Globex-User@globex.test")
+        result = await _provision(db_session, GLOBEX_ORG, email=f"{NEWCOMER.title()}@{GLOBEX_DOMAIN}")
 
         assert result.is_ok(), result
         assert await _memberships(db_session, result.ok) == {("globex", MEMBER, True)}
 
-    @pytest.mark.parametrize("email", ["globex-user@GLOBEX.test", "globex-user@Globex.Test", "globex-user@globex.TEST"])
+    @pytest.mark.parametrize(
+        "email",
+        [
+            f"{NEWCOMER}@{domain}"
+            for domain in (GLOBEX_DOMAIN.upper(), GLOBEX_DOMAIN.title(), GLOBEX_DOMAIN.capitalize())
+        ],
+    )
     async def test_an_email_whose_domain_is_not_lower_case_is_refused(self, db_session, email):
         """The held-email lookup is exact, so an upper-case domain would make a look-alike second user."""
-        await _seeded(db_session, domains={**DOMAINS, "globex": ["Globex.TEST"]})
+        await _seeded(db_session, domains={**DOMAINS, "globex": [GLOBEX_DOMAIN.upper()]})
 
         await self._refused(db_session, email=email)
 
     async def test_an_upper_case_look_alike_of_a_held_email_is_refused(self, db_session):
         await _seeded(db_session)
-        db_session.add(User(email="admin@globex.test", user_name="admin@globex.test"))
+        db_session.add(User(email=f"admin@{GLOBEX_DOMAIN}", user_name=f"admin@{GLOBEX_DOMAIN}"))
         await db_session.flush()
 
-        await self._refused(db_session, email="admin@GLOBEX.test")
+        await self._refused(db_session, email=f"admin@{GLOBEX_DOMAIN.upper()}")
 
-        assert await UserRepository(db_session).get_by_email("admin@GLOBEX.test") is None
+        assert await UserRepository(db_session).get_by_email(f"admin@{GLOBEX_DOMAIN.upper()}") is None
 
     @pytest.mark.parametrize(
-        "domain", [" globex.test", "globex.test.", "globex.test..", "@globex.test", "Globex.TEST", " @GLOBEX.test. "]
+        "domain",
+        [
+            f" {GLOBEX_DOMAIN}",
+            f"{GLOBEX_DOMAIN}.",
+            f"{GLOBEX_DOMAIN}..",
+            f"@{GLOBEX_DOMAIN}",
+            GLOBEX_DOMAIN.upper(),
+            f" @{GLOBEX_DOMAIN.upper()}. ",
+        ],
     )
     async def test_a_tenant_domain_is_read_without_spaces_at_sign_or_trailing_dot(self, db_session, domain):
         await _seeded(db_session, domains={**DOMAINS, "globex": [domain]})
@@ -434,13 +455,13 @@ class TestAnOrganizationLoginOutsideItsTenantsDomains:
         assert await _memberships(db_session, result.ok) == {("globex", MEMBER, True)}
 
     async def test_an_email_whose_domain_ends_in_a_dot_is_refused(self, db_session):
-        """``globex.test.`` names the same host, but the held-email lookup is exact: no look-alike second user."""
+        """A trailing dot names the same host, but the held-email lookup is exact: no look-alike second user."""
         await _seeded(db_session)
 
-        await self._refused(db_session, email="globex-user@globex.test.")
+        await self._refused(db_session, email=f"{EMAIL}.")
 
-    @pytest.mark.parametrize("domain", ["globex.test.", "globex.test..", "globex.test..."])
-    @pytest.mark.parametrize("email", ["globex-user@globex.test.", "globex-user@globex.test.."])
+    @pytest.mark.parametrize("domain", [f"{GLOBEX_DOMAIN}.", f"{GLOBEX_DOMAIN}..", f"{GLOBEX_DOMAIN}..."])
+    @pytest.mark.parametrize("email", [f"{EMAIL}.", f"{EMAIL}.."])
     async def test_a_tenant_domain_with_trailing_dots_admits_no_dotted_email(self, db_session, domain, email):
         await _seeded(db_session, domains={**DOMAINS, "globex": [domain]})
 
@@ -448,28 +469,28 @@ class TestAnOrganizationLoginOutsideItsTenantsDomains:
 
     async def test_a_dotted_look_alike_of_a_held_email_is_refused(self, db_session):
         await _seeded(db_session)
-        db_session.add(User(email="admin@globex.test", user_name="admin@globex.test"))
+        db_session.add(User(email=f"admin@{GLOBEX_DOMAIN}", user_name=f"admin@{GLOBEX_DOMAIN}"))
         await db_session.flush()
 
-        await self._refused(db_session, email="admin@globex.test.")
+        await self._refused(db_session, email=f"admin@{GLOBEX_DOMAIN}.")
 
-        assert await UserRepository(db_session).get_by_email("admin@globex.test.") is None
+        assert await UserRepository(db_session).get_by_email(f"admin@{GLOBEX_DOMAIN}.") is None
 
     @pytest.mark.parametrize("domain", ["", " ", "@", ".", "@.", " @. "])
-    @pytest.mark.parametrize("email", ["globex-user@", "globex-user@."])
+    @pytest.mark.parametrize("email", [f"{NEWCOMER}@", f"{NEWCOMER}@."])
     async def test_a_tenant_domain_that_reads_as_empty_admits_nothing(self, db_session, domain, email):
         await _seeded(db_session, domains={**DOMAINS, "globex": [domain]})
 
         await self._refused(db_session, email=email)
 
-    @pytest.mark.parametrize("email", ["globex-user@globex.test", "globex-user@g", "globex-user@"])
+    @pytest.mark.parametrize("email", [EMAIL, f"{NEWCOMER}@{GLOBEX_DOMAIN[0]}", f"{NEWCOMER}@"])
     async def test_domains_written_as_a_string_admit_nothing(self, db_session, email):
         """Not read letter by letter: a ``domains`` that is not a list is a tenant with no domains."""
-        await _seeded(db_session, domains={**DOMAINS, "globex": "globex.test"})
+        await _seeded(db_session, domains={**DOMAINS, "globex": GLOBEX_DOMAIN})
 
         await self._refused(db_session, email=email)
 
-    @pytest.mark.parametrize("domains", [None, {"globex.test": True}, 7])
+    @pytest.mark.parametrize("domains", [None, {GLOBEX_DOMAIN: True}, 7])
     async def test_domains_that_are_not_a_list_admit_nothing(self, db_session, domains):
         await _seeded(db_session, domains={**DOMAINS, "globex": domains})
 
@@ -487,7 +508,7 @@ class TestAnOrganizationLoginOutsideItsTenantsDomains:
         assert result.ok == globex_id
 
     async def test_domains_that_are_not_a_list_are_logged_with_the_tenant(self, db_session, caplog):
-        await _seeded(db_session, domains={**DOMAINS, "globex": "globex.test"})
+        await _seeded(db_session, domains={**DOMAINS, "globex": GLOBEX_DOMAIN})
         globex = await TenantRepository(db_session).get_by_name("globex")
         globex_id = globex.id
 
@@ -503,24 +524,24 @@ class TestAnOrganizationLoginOutsideItsTenantsDomains:
         globex_id = globex.id
 
         with caplog.at_level(logging.WARNING, logger="app.services.identity_provisioning"):
-            await self._refused(db_session, email="ceo@acme.test")
+            await self._refused(db_session, email=f"ceo@{ACME_DOMAIN}")
 
         refusals = [r.getMessage() for r in caplog.records if r.name == "app.services.identity_provisioning"]
         assert len(refusals) == 1, refusals
         assert str(globex_id) in refusals[0] and PROVIDER in refusals[0] and SUB in refusals[0]
-        assert "ceo@acme.test" not in refusals[0]
+        assert f"ceo@{ACME_DOMAIN}" not in refusals[0]
 
     async def test_a_user_linked_beforehand_signs_in_whatever_the_domains(self, db_session):
         """The link is found before any email is read: an administrator's ``idp_links`` row still admits its user."""
         provider_id = await _seeded(db_session, domains={"acme": [], "globex": []})
-        user = User(email="ceo@acme.test", user_name="ceo@acme.test")
+        user = User(email=f"ceo@{ACME_DOMAIN}", user_name=f"ceo@{ACME_DOMAIN}")
         db_session.add(user)
         await db_session.flush()
         user_id = user.id
         db_session.add(IdPLink(user_id=user_id, provider_id=provider_id, external_sub=SUB))
         await db_session.flush()
 
-        result = await _provision(db_session, GLOBEX_ORG, email="ceo@acme.test")
+        result = await _provision(db_session, GLOBEX_ORG, email=f"ceo@{ACME_DOMAIN}")
 
         assert result.is_ok() and result.ok == user_id, result
 
