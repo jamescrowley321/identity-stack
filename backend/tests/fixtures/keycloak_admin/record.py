@@ -92,6 +92,7 @@ def main() -> None:
     new_user = {"username": USER, "email": "recorded@recorded.test", "enabled": True}
     keep("user_create", admin("POST", "/users", json=new_user))
     user = keep("user_find", admin("GET", "/users", params=by_username)).json()[0]
+    keep("user_get", admin("GET", f"/users/{user['id']}"))
     taken_email = {"username": "another", "email": "alice@acme.test", "enabled": True}
     keep("user_create_email_taken", admin("POST", "/users", json=taken_email))
     keep("user_update", admin("PUT", f"/users/{user['id']}", json={"email": "renamed@recorded.test", "enabled": False}))
@@ -99,11 +100,20 @@ def main() -> None:
     members = f"{path}/members"
     keep("member_add", admin("POST", members, json=user["id"]))
     keep("member_add_again", admin("POST", members, json=user["id"]))
+    # A realm admin's grant markers listing the member, then the adapter trimming them as the membership ends.
+    found = admin("GET", path).json()
+    marked = {"type:tenant-admin": [user["id"], "another-member"], "type:viewer": [user["id"]], "note": ["kept"]}
+    keep("organization_mark", admin("PUT", path, json={**found, "attributes": marked}))
+    keep("organization_get_marked", admin("GET", path))
+    trimmed = {"type:tenant-admin": ["another-member"], "note": ["kept"]}
+    keep("organization_trim", admin("PUT", path, json={**found, "attributes": trimmed}))
+    keep("organization_get", admin("GET", path))
     keep("member_remove", admin("DELETE", f"{members}/{user['id']}"))
     keep("member_remove_again", admin("DELETE", f"{members}/{user['id']}"))
 
     keep("user_delete", admin("DELETE", f"/users/{user['id']}"))
     keep("user_delete_again", admin("DELETE", f"/users/{user['id']}"))
+    keep("user_get_none", admin("GET", f"/users/{user['id']}"))
     keep("organization_delete", admin("DELETE", path))
     keep("organization_delete_again", admin("DELETE", path))
     keep("member_add_unknown_organization", admin("POST", members, json=user["id"]))

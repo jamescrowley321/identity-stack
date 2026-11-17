@@ -220,3 +220,25 @@ async def test_tenant_isolation(db_session):
     # Tenant B has nothing
     b_results = await repo.list_by_user_tenant(user.id, tenant_b.id)
     assert len(b_results) == 0
+
+
+async def test_list_by_user_tenants_lists_the_assignments_of_exactly_the_pairs_given(db_session):
+    """One query for many pairs: a user's rows in a tenant paired with another user are not listed."""
+    repo = UserTenantRoleRepository(db_session)
+    alice, bob = _make_user(), _make_user()
+    first, second = _make_tenant(), _make_tenant()
+    db_session.add_all([alice, bob, first, second])
+    await db_session.flush()
+    role = _make_role()
+    db_session.add(role)
+    await db_session.flush()
+    for user_id, tenant_id in [(alice.id, first.id), (alice.id, second.id), (bob.id, first.id), (bob.id, second.id)]:
+        await repo.create(UserTenantRole(user_id=user_id, tenant_id=tenant_id, role_id=role.id))
+
+    listed = await repo.list_by_user_tenants([(alice.id, first.id), (bob.id, second.id)])
+
+    assert sorted((row.user_id, row.tenant_id) for row in listed) == sorted([(alice.id, first.id), (bob.id, second.id)])
+
+
+async def test_list_by_user_tenants_of_no_pairs_is_empty(db_session):
+    assert await UserTenantRoleRepository(db_session).list_by_user_tenants([]) == []

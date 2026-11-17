@@ -54,6 +54,16 @@ class IdPLinkRepository(BaseRepository[IdPLink]):
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def external_sub_of(self, user_id: uuid.UUID, provider_name: str) -> str | None:
+        """The external subject of the user's link to the provider named ``provider_name``, or None."""
+        stmt = (
+            sa.select(IdPLink.external_sub)
+            .join(Provider, Provider.id == IdPLink.provider_id)
+            .where(IdPLink.user_id == user_id, Provider.name == provider_name)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def get_by_user(self, user_id: uuid.UUID) -> list[IdPLink]:
         """Fetch all IdP links for a user."""
         stmt = sa.select(IdPLink).where(IdPLink.user_id == user_id)

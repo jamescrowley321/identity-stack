@@ -207,3 +207,56 @@ class TestConnect:
             await connect_keycloak_admin(http)
 
         assert api.sent == []
+
+
+@pytest.mark.anyio
+class TestReadsById:
+    """The reads the adapter makes by Keycloak id: a linked user, an organization with its attributes."""
+
+    async def test_get_user_answers_the_user_with_that_id(self):
+        user = RECORDED["user_get"]["body"]
+        api = RecordedAdminApi(["token", "user_get"])
+
+        found = await api.api().get_user(user["id"])
+
+        assert found == user
+        assert api.calls() == [("POST", TOKEN_PATH), ("GET", admin_path(f"/users/{user['id']}"))]
+
+    async def test_get_user_answers_none_for_a_user_the_realm_lacks(self):
+        gone = RECORDED["user_get"]["body"]["id"]
+        api = RecordedAdminApi(["token", "user_get_none"])
+
+        assert await api.api().get_user(gone) is None
+
+    async def test_get_user_does_not_read_a_realm_wide_404_as_no_user(self):
+        api = RecordedAdminApi(["token", httpx.Response(404, json={"error": "Realm not found."})])
+
+        with pytest.raises(KeycloakAdminError) as refused:
+            await api.api().get_user("c0b53945-7a52-4072-b076-dfdacf5d9700")
+
+        assert refused.value.status == 404
+
+    async def test_get_user_refuses_an_answer_for_another_id(self):
+        api = RecordedAdminApi(["token", httpx.Response(200, json=RECORDED["user_get"]["body"])])
+
+        with pytest.raises(KeycloakAdminError) as refused:
+            await api.api().get_user("another-id")
+
+        assert refused.value.status is None
+
+    async def test_get_organization_answers_it_with_its_attributes(self):
+        organization = RECORDED["organization_get_marked"]["body"]
+        api = RecordedAdminApi(["token", "organization_get_marked"])
+
+        found = await api.api().get_organization(organization["id"])
+
+        assert found == organization
+        assert api.calls() == [("POST", TOKEN_PATH), ("GET", admin_path(f"/organizations/{organization['id']}"))]
+
+    async def test_get_organization_refuses_an_organization_not_there(self):
+        api = RecordedAdminApi(["token", httpx.Response(404, json={"errorMessage": "Organization not found."})])
+
+        with pytest.raises(KeycloakAdminError) as refused:
+            await api.api().get_organization("49825999-d1c8-41ee-a4a8-f3590a592959")
+
+        assert refused.value.status == 404

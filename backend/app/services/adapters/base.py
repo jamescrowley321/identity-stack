@@ -21,6 +21,17 @@ LAST_ROLE_IN_TENANT = "last_role_in_tenant"
 # does not undo an enable or disable made in the identity provider (UserService).
 STATUS_CHANGED = "status_changed"
 
+# ``SyncError.context`` key: ``True`` when the provider gave no readable answer (no
+# response, a timeout). A service pushing many changes stops at the first such
+# failure instead of waiting out the timeout once per change (RoleService.delete_role).
+UNANSWERED = "unanswered"
+
+# Response key a service adds, set to PROVIDER_SYNC_FAILED, when an adapter that
+# keeps memberships (``ends_memberships``) could not end one or disable an account:
+# the canonical change is committed, but the identity provider still grants it.
+PROVIDER_SYNC = "provider_sync"
+PROVIDER_SYNC_FAILED = "failed"
+
 
 @dataclass(frozen=True)
 class SyncError:

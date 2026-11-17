@@ -306,6 +306,17 @@ class KeycloakAdminApi:
         with tracer.start_as_current_span("KeycloakAdminApi.find_organization"):
             return await self._find_one("/organizations", {"q": f"alias:{alias}", "exact": "true"}, "alias", alias)
 
+    async def get_organization(self, organization_id: str) -> dict:
+        """The whole organization, ``attributes`` included (a search answers it without them)."""
+        with tracer.start_as_current_span("KeycloakAdminApi.get_organization"):
+            response = await self._expect(
+                "GET", f"/organizations/{quote(organization_id, safe='')}", ok=frozenset({200})
+            )
+            found = _body(response)
+            if not isinstance(found, dict) or found.get("id") != organization_id:
+                raise KeycloakAdminError("admin API answer unreadable")
+            return found
+
     async def create_organization(self, representation: dict) -> None:
         with tracer.start_as_current_span("KeycloakAdminApi.create_organization"):
             await self._expect("POST", "/organizations", ok=frozenset({201}), json=representation)
@@ -332,6 +343,22 @@ class KeycloakAdminApi:
         """The user with exactly this username, or ``None``."""
         with tracer.start_as_current_span("KeycloakAdminApi.find_user"):
             return await self._find_one("/users", {"username": username, "exact": "true"}, "username", username)
+
+    async def get_user(self, user_id: str) -> dict | None:
+        """The user with this Keycloak id, or ``None`` when the realm has none."""
+        with tracer.start_as_current_span("KeycloakAdminApi.get_user"):
+            response = await self._expect(
+                "GET",
+                f"/users/{quote(user_id, safe='')}",
+                ok=frozenset({200}),
+                also_done=_answers(404, USER_NOT_FOUND_ANSWER),
+            )
+            if response.status_code == 404:
+                return None
+            found = _body(response)
+            if not isinstance(found, dict) or found.get("id") != user_id:
+                raise KeycloakAdminError("admin API answer unreadable")
+            return found
 
     async def create_user(self, representation: dict) -> None:
         with tracer.start_as_current_span("KeycloakAdminApi.create_user"):

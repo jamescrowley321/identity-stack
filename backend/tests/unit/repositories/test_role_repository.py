@@ -14,9 +14,14 @@ Tests cover:
 import uuid
 
 import pytest
+import sqlalchemy as sa
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.models.identity.assignment import UserTenantRole
 from app.models.identity.role import Permission, Role
 from app.models.identity.tenant import Tenant
+from app.models.identity.user import User
 from app.repositories.base import RepositoryConflictError
 from app.repositories.role import RoleRepository
 
@@ -238,3 +243,36 @@ async def test_remove_permission(db_session):
 async def test_remove_permission_not_found(db_session):
     repo = RoleRepository(db_session)
     assert await repo.remove_permission(uuid.uuid4(), uuid.uuid4()) is False
+
+
+async def test_lock_holds_off_an_assignment_of_the_role_until_the_transaction_ends(async_engine):
+    """RoleService.delete_role reads the role's holders under this lock: none can be added unseen."""
+    sessions = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+    user = User(id=uuid.uuid4(), email=f"lock-{uuid.uuid4().hex[:8]}@test.com", user_name="lock")
+    tenant = _make_tenant()
+    role = Role(id=uuid.uuid4(), name=f"role-{uuid.uuid4().hex[:8]}", tenant_id=None)
+    async with sessions() as setup:
+        setup.add_all([user, tenant, role])
+        await setup.commit()
+
+    async def assign(session: AsyncSession) -> None:
+        await session.execute(sa.text("SET LOCAL lock_timeout = '500ms'"))
+        session.add(UserTenantRole(user_id=user.id, tenant_id=tenant.id, role_id=role.id))
+        await session.flush()
+
+    try:
+        async with sessions() as holder, sessions() as other:
+            await RoleRepository(holder).lock(role.id)
+            with pytest.raises(DBAPIError, match="lock timeout"):
+                await assign(other)
+            await other.rollback()
+            await holder.rollback()
+        async with sessions() as unlocked:
+            await assign(unlocked)
+            await unlocked.rollback()
+    finally:
+        async with sessions() as cleanup:
+            await cleanup.execute(sa.delete(Role).where(Role.id == role.id))
+            await cleanup.execute(sa.delete(Tenant).where(Tenant.id == tenant.id))
+            await cleanup.execute(sa.delete(User).where(User.id == user.id))
+            await cleanup.commit()

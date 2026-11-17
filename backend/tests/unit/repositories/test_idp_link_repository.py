@@ -177,3 +177,22 @@ async def test_get_by_provider_and_sub_not_found(db_session):
     repo = IdPLinkRepository(db_session)
     result = await repo.get_by_provider_and_sub(uuid.uuid4(), "no-such-sub")
     assert result is None
+
+
+async def test_external_sub_of_reads_the_users_link_to_the_named_provider(db_session):
+    repo = IdPLinkRepository(db_session)
+    user, provider = await _seed_user_and_provider(db_session)
+    other = _make_provider()
+    db_session.add(other)
+    await db_session.flush()
+    await repo.create(_make_idp_link(user.id, provider.id, external_sub="keycloak-account-id"))
+    await repo.create(_make_idp_link(user.id, other.id, external_sub="another-account-id"))
+
+    assert await repo.external_sub_of(user.id, provider.name) == "keycloak-account-id"
+
+
+async def test_external_sub_of_a_user_with_no_link_to_the_provider_is_none(db_session):
+    repo = IdPLinkRepository(db_session)
+    user, provider = await _seed_user_and_provider(db_session)
+
+    assert await repo.external_sub_of(user.id, provider.name) is None
