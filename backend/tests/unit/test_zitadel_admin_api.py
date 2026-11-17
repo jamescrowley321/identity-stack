@@ -13,6 +13,7 @@ from app.outbound import UpstreamStatusError, UpstreamTransportError
 from app.services.adapters.zitadel_api import (
     LOGIN_POLICY_FIELDS,
     ZitadelAdminApi,
+    ZitadelUser,
     login_policy_without_registration,
 )
 
@@ -48,18 +49,26 @@ def _body(request: httpx.Request) -> dict:
     return json.loads(request.content)
 
 
-async def test_add_organization_posts_the_name_and_answers_the_id():
+async def test_add_organization_posts_its_id_and_name():
     recorder = Recorder(
         {("POST", "/v2/organizations"): httpx.Response(201, json={"organizationId": ORG_ID, "details": {}})}
     )
 
-    org_id = await _api(recorder).add_organization("Initech")
+    await _api(recorder).add_organization(ORG_ID, "Initech")
 
     request = recorder.only()
-    assert org_id == ORG_ID
     assert str(request.url) == f"{BASE_URL}/v2/organizations"
     assert request.headers["authorization"] == f"Bearer {TOKEN}"
-    assert _body(request) == {"name": "Initech"}
+    assert _body(request) == {"organizationId": ORG_ID, "name": "Initech"}
+
+
+@pytest.mark.parametrize(("result", "expected"), [([{"id": ORG_ID, "name": "Initech"}], True), ([], False)])
+async def test_has_organization_searches_by_id(result, expected):
+    answer = {"details": {"totalResult": str(len(result))}} | ({"result": result} if result else {})
+    recorder = Recorder({("POST", "/v2/organizations/_search"): httpx.Response(200, json=answer)})
+
+    assert await _api(recorder).has_organization(ORG_ID) is expected
+    assert _body(recorder.only()) == {"queries": [{"idQuery": {"id": ORG_ID}}]}
 
 
 async def test_effective_login_policy_reads_it_in_the_organization():
@@ -143,6 +152,27 @@ async def test_grant_project_grants_it_to_the_organization_with_the_roles():
     }
 
 
+async def test_grant_project_that_the_organization_already_has_counts_as_granted():
+    recorder = Recorder(
+        {
+            ("POST", "/zitadel.project.v2.ProjectService/CreateProjectGrant"): httpx.Response(
+                409, json={"code": "already_exists", "message": "Project Grant already exists (V3-DKcYh)"}
+            )
+        }
+    )
+
+    await _api(recorder).grant_project(PROJECT_ID, ORG_ID, ["admin", "member"])
+
+
+async def test_grant_project_refused_otherwise_raises():
+    recorder = Recorder(
+        {("POST", "/zitadel.project.v2.ProjectService/CreateProjectGrant"): httpx.Response(403, json={})}
+    )
+
+    with pytest.raises(UpstreamStatusError):
+        await _api(recorder).grant_project(PROJECT_ID, ORG_ID, ["admin", "member"])
+
+
 async def test_add_human_user_creates_it_in_the_organization_with_its_own_id():
     recorder = Recorder({("POST", "/v2/users/human"): httpx.Response(200, json={"userId": USER_ID})})
 
@@ -164,18 +194,20 @@ async def test_add_human_user_creates_it_in_the_organization_with_its_own_id():
     }
 
 
-async def test_user_state_reads_the_state():
-    recorder = Recorder(
-        {("GET", f"/v2/users/{USER_ID}"): httpx.Response(200, json={"user": {"state": "USER_STATE_INACTIVE"}})}
-    )
+async def test_find_user_reads_its_state_and_organization():
+    answer = {
+        "details": {"resourceOwner": ORG_ID},
+        "user": {"userId": USER_ID, "details": {"resourceOwner": ORG_ID}, "state": "USER_STATE_INACTIVE"},
+    }
+    recorder = Recorder({("GET", f"/v2/users/{USER_ID}"): httpx.Response(200, json=answer)})
 
-    assert await _api(recorder).user_state(USER_ID) == "USER_STATE_INACTIVE"
+    assert await _api(recorder).find_user(USER_ID) == ZitadelUser(state="USER_STATE_INACTIVE", organization_id=ORG_ID)
 
 
-async def test_user_state_of_a_user_zitadel_does_not_have_is_none():
+async def test_find_user_of_a_user_zitadel_does_not_have_is_none():
     recorder = Recorder({("GET", f"/v2/users/{USER_ID}"): httpx.Response(404, json={"code": 5})})
 
-    assert await _api(recorder).user_state(USER_ID) is None
+    assert await _api(recorder).find_user(USER_ID) is None
 
 
 @pytest.mark.parametrize(("method", "action"), [("deactivate_user", "deactivate"), ("reactivate_user", "reactivate")])
@@ -203,7 +235,7 @@ async def test_a_refusal_raises_the_upstream_status_error():
     recorder = Recorder({("POST", "/v2/organizations"): httpx.Response(409, json={"code": 6})})
 
     with pytest.raises(UpstreamStatusError) as raised:
-        await _api(recorder).add_organization("Initech")
+        await _api(recorder).add_organization(ORG_ID, "Initech")
 
     assert raised.value.response.status_code == 409
 
@@ -213,7 +245,7 @@ async def test_a_user_id_is_sent_as_one_path_segment():
     # httpx decodes url.path, so the answer is keyed decoded; raw_path is what was sent.
     recorder = Recorder({("GET", "/v2/users/a/deactivate"): httpx.Response(404, json={})})
 
-    assert await _api(recorder).user_state("a/deactivate") is None
+    assert await _api(recorder).find_user("a/deactivate") is None
     assert recorder.only().url.raw_path == b"/v2/users/a%2Fdeactivate"
 
 
@@ -224,4 +256,4 @@ async def test_no_answer_raises_the_upstream_transport_error():
     api = ZitadelAdminApi(httpx.AsyncClient(transport=httpx.MockTransport(unreachable)), base_url=BASE_URL, token=TOKEN)
 
     with pytest.raises(UpstreamTransportError):
-        await api.add_organization("Initech")
+        await api.add_organization(ORG_ID, "Initech")
