@@ -94,14 +94,13 @@ the next `terraform plan`, and the next `terraform apply` removes them. Add memb
 When a change adds a user, client, role, organization or member to the import file, the same
 change adds it here. `make keycloak-terraform-check`
 ([`scripts/check-against-compose.sh`](scripts/check-against-compose.sh)) checks the two against
-each other in the compose `keycloak-test` container. If keycloak-test is not running, the check
-recreates it, so the `identity-stack` realm is imported from the checkout's
-[`keycloak/realm/identity-stack-realm.json`](../../keycloak/realm/identity-stack-realm.json); a
-keycloak-test that is already running keeps the import it was created with, and a failed
-comparison then says that `make test-down` refreshes it. The check:
+each other in the compose `keycloak-test` container. The `identity-stack` realm there is the
+import from when the container was created; after a change to
+[`keycloak/realm/identity-stack-realm.json`](../../keycloak/realm/identity-stack-realm.json),
+recreate it with `make test-down && make test-up-keycloak`, as a failed comparison says. The check:
 
-1. deletes any `identity-stack-terraform` realm an earlier killed or failed run left in a
-   keycloak-test that is still up, then applies this root to a new realm of that name beside
+1. deletes any `identity-stack-terraform` realm an earlier killed or failed run left behind,
+   then applies this root to a new realm of that name beside
    the imported `identity-stack`, with its own state in a new directory under
    `${XDG_CACHE_HOME:-~/.cache}/identity-stack-keycloak-terraform-check/`;
 2. runs `terraform plan` again and fails unless it is empty;
@@ -117,39 +116,17 @@ comparison then says that `make test-down` refreshes it. The check:
    the output `VITE_OIDC_SCOPE` and fails unless the token names the user's organization; and reads `bob`'s organizations
    with the directory client's generated secret. Users, organizations and members are read
    one page of `LISTING_PAGE_SIZE` at a time, and a full page fails the check as possibly cut off;
-4. destroys the realm, and stops the container (deleting its volumes) only if the script
-   started it: a keycloak-test that was already running is left up. The run's state
-   directory holds the generated passwords and directory secret and is deleted, except when
-   the destroy failed and the realm is still in a keycloak-test that stays up: then it is kept
-   and its path printed. The next run deletes the realm (step 1) and then every state
-   directory an earlier run kept or was killed with.
+4. destroys the realm. The run's state directory holds the generated passwords and directory
+   secret and is deleted, except when the destroy failed: then it is kept and its path printed.
+   The next run deletes the realm (step 1) and then every state directory an earlier run kept
+   or was killed with.
 
 It copies only the root's `.tf` files git does not ignore into its working directory, so a local
 `override.tf` or `*_override.tf` never changes what it applies.
 
-It needs Docker, `terraform`, `curl`, `jq`, `flock` and the backend virtual environment
-(`cd backend && uv sync --locked --extra dev`), and checks for each before it starts anything.
-It holds the shared compose lock, `~/.cache/identity-stack-compose.lock`, for its whole run,
-through `scripts/with-compose-lock.sh`. The Makefile targets that start, use or stop the test
-stack (`test-up`, `test-up-keycloak`, `test-down`, `test-unit`, `test-integration`) take the
-same lock, `test-unit` and `test-integration` from bringing the stack up until their last test.
-So nothing else (a test run, another session, a second run of this check) can start or start
-using keycloak-test between the run deciding whether it started the container and the cleanup
-that stops it, and two runs never build the same realm at once.
-
-The lock is re-entrant. A caller that already holds it does not deadlock the check:
-`scripts/with-compose-lock.sh make keycloak-terraform-check` works everywhere (the helper marks
-the lock as held in `IDENTITY_STACK_COMPOSE_LOCK`), and on Linux so does
-`flock ~/.cache/identity-stack-compose.lock make keycloak-terraform-check` (the helper finds the
-descriptor flock passes down in `/dev/fd` and takes the exclusive lock through it; an open
-descriptor whose lock is not held is never taken as proof, so the helper still waits for
-anyone else holding the lock). Other systems cannot see that descriptor, so there
-wrap with the helper, not with a bare `flock`; the helper prints a warning while it waits.
-
-Re-entrant means everything under the held lock shares it, so the lock does not keep two
-targets started in parallel under it apart: one could stop keycloak-test under the other. A
-`make` run under the helper (`IDENTITY_STACK_COMPOSE_LOCK` set) therefore runs its targets one
-at a time even with `-j` (the Makefile declares `.NOTPARALLEL` there). A bare
-`flock ~/.cache/identity-stack-compose.lock make ...` cannot be detected by the Makefile: do not
-pass `-j` to it with more than one test or check target. `make -j` without any outer lock is
-safe: each target takes the lock for itself.
+It needs `terraform`, `curl`, `jq` and the backend virtual environment
+(`cd backend && uv sync --locked --extra dev`), and checks for each before it does anything.
+The script never starts, stops or removes keycloak-test: `make keycloak-terraform-check` brings
+the container up first, and the script fails when it is not answering. It runs on Linux and in
+CI. Two runs against one keycloak-test at the same time are not supported: where several
+sessions share a Docker host, serialise them (for example with `flock`).
