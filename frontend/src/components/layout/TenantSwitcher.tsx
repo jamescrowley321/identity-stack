@@ -30,7 +30,8 @@ import {
  * beside the current tenant and the switch (alone when there is no current
  * tenant), and the tenant asked for is not shown as current. A sign-in request that
  * fails before leaving the page is reported beside the switch, which keeps
- * showing the current tenant and can be used again.
+ * showing the current tenant and can be used again; that newer report
+ * replaces a failed switch report, so only one is shown.
  */
 export default function TenantSwitcher() {
   const { currentTenantId, tenants } = useTenants()
@@ -107,17 +108,22 @@ export default function TenantSwitcher() {
   if (switchFailureAlert && currentTenantId === null) return switchFailureAlert
 
   const current = renderCurrent()
-  if (!switchFailureAlert && requestFailedFor === null) return current
+  // One report at a time: a failed sign-in request is newer than the switch
+  // failure the page loaded with, so it replaces that report.
+  const report =
+    requestFailedFor !== null ? (
+      <span role="alert" className="text-sm text-destructive">
+        Could not switch to {requestFailedFor}
+      </span>
+    ) : (
+      switchFailureAlert
+    )
+  if (!report) return current
 
   return (
     <div className="flex items-center gap-2">
       {current}
-      {switchFailureAlert}
-      {requestFailedFor !== null && (
-        <span role="alert" className="text-sm text-destructive">
-          Could not switch to {requestFailedFor}
-        </span>
-      )}
+      {report}
     </div>
   )
 }

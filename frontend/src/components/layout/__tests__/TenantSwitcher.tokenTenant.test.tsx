@@ -177,6 +177,30 @@ describe("TenantSwitcher for a tenant that comes from the token", () => {
     logged.mockRestore();
   });
 
+  it("shows one report when a sign-in request fails after a failed switch", async () => {
+    const reason = new Error("not a scope token");
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ctx = context({
+      tenantSwitch: "sign-in",
+      tenantSwitchFailure: { requestedTenantId: "acme" },
+      signInToTenant: vi.fn(() => Promise.reject(reason)),
+    });
+    mockContext.mockReturnValue(ctx);
+    mockUseTenants.mockReturnValue(TWO_TENANTS);
+
+    render(<TenantSwitcher />);
+    fireEvent.click(screen.getByRole("combobox"));
+    fireEvent.click(screen.getByText("Acme"));
+
+    await waitFor(() =>
+      expect(logged).toHaveBeenCalledWith("Tenant sign-in request failed", "acme", reason),
+    );
+    const alerts = screen.getAllByRole("alert");
+    expect(alerts.map((alert) => alert.textContent)).toEqual(["Could not switch to acme"]);
+    expect(screen.getByRole("combobox")).toHaveTextContent("Globex");
+    logged.mockRestore();
+  });
+
   it("logs a failed request to sign in again", async () => {
     const reason = new Error("metadata unreachable");
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
