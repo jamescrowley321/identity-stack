@@ -14,7 +14,7 @@ import uuid
 import pytest
 
 from app.models.identity.provider import Provider, ProviderType
-from app.models.identity.user import IdPLink, User, UserStatus
+from app.models.identity.user import LINK_ORIGIN, LINKED_AT_SIGN_IN, IdPLink, User, UserStatus
 from app.repositories.base import RepositoryConflictError
 from app.repositories.idp_link import IdPLinkRepository
 
@@ -179,20 +179,37 @@ async def test_get_by_provider_and_sub_not_found(db_session):
     assert result is None
 
 
-async def test_external_sub_of_reads_the_users_link_to_the_named_provider(db_session):
+SIGN_IN = {LINK_ORIGIN: LINKED_AT_SIGN_IN}
+
+
+async def test_signed_in_sub_of_reads_the_users_sign_in_link_to_the_named_provider(db_session):
     repo = IdPLinkRepository(db_session)
     user, provider = await _seed_user_and_provider(db_session)
     other = _make_provider()
     db_session.add(other)
     await db_session.flush()
-    await repo.create(_make_idp_link(user.id, provider.id, external_sub="keycloak-account-id"))
-    await repo.create(_make_idp_link(user.id, other.id, external_sub="another-account-id"))
+    await repo.create(_make_idp_link(user.id, provider.id, external_sub="keycloak-account-id", metadata_=SIGN_IN))
+    await repo.create(_make_idp_link(user.id, other.id, external_sub="another-account-id", metadata_=SIGN_IN))
 
-    assert await repo.external_sub_of(user.id, provider.name) == "keycloak-account-id"
+    assert await repo.signed_in_sub_of(user.id, provider.name) == "keycloak-account-id"
 
 
-async def test_external_sub_of_a_user_with_no_link_to_the_provider_is_none(db_session):
+@pytest.mark.parametrize(
+    "metadata",
+    [None, {}, {"source": "migration"}, {LINK_ORIGIN: "admin"}],
+    ids=["none", "empty", "other-keys", "other-origin"],
+)
+async def test_signed_in_sub_of_ignores_a_link_not_made_at_sign_in(db_session, metadata):
+    """A link made through the admin route names whatever account the admin typed in: it is not followed."""
+    repo = IdPLinkRepository(db_session)
+    user, provider = await _seed_user_and_provider(db_session)
+    await repo.create(_make_idp_link(user.id, provider.id, external_sub="typed-in-account-id", metadata_=metadata))
+
+    assert await repo.signed_in_sub_of(user.id, provider.name) is None
+
+
+async def test_signed_in_sub_of_a_user_with_no_link_to_the_provider_is_none(db_session):
     repo = IdPLinkRepository(db_session)
     user, provider = await _seed_user_and_provider(db_session)
 
-    assert await repo.external_sub_of(user.id, provider.name) is None
+    assert await repo.signed_in_sub_of(user.id, provider.name) is None

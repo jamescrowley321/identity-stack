@@ -26,6 +26,7 @@ from app.services.adapters.base import (
     SyncError,
 )
 from app.services.cache_invalidation import CacheInvalidationPublisher
+from app.services.memberships import restore_memberships
 
 logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
@@ -308,15 +309,16 @@ class UserService:
 
             # Best-effort sync: notify IdP of membership removal
             payload: dict = {"status": "removed", "user_id": str(user_id)}
-            if self._revocation_failed(
-                await self._adapter.sync_user(
-                    user_id=user_id,
-                    data={"email": user.email, "status": user.status.value, "left_tenant_id": str(tenant_id)},
-                ),
-                user_id,
-                "remove_user_from_tenant",
-            ):
+            pushed = await self._adapter.sync_user(
+                user_id=user_id,
+                data={"email": user.email, "status": user.status.value, "left_tenant_id": str(tenant_id)},
+            )
+            if self._revocation_failed(pushed, user_id, "remove_user_from_tenant"):
                 payload[PROVIDER_SYNC] = PROVIDER_SYNC_FAILED
+            elif self._adapter.ends_memberships is True and pushed.is_ok():
+                # A role given in the tenant while the user left it pushed its
+                # membership before the removal, which undid it: it is added back.
+                await restore_memberships(self._assignment_repository, self._adapter, [(user_id, tenant_id)])
 
             return Ok(payload)
 

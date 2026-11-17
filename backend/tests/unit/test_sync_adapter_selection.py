@@ -18,7 +18,7 @@ from app.dependencies.identity import (
     get_tenant_service,
     get_user_service,
 )
-from app.errors.identity import Conflict, IdentityErrorRaised
+from app.errors.identity import Conflict, Forbidden, IdentityErrorRaised
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.role import Role
 from app.models.identity.user import User, UserStatus
@@ -42,7 +42,7 @@ from app.services.adapters.noop import NoOpSyncAdapter
 from app.services.adapters.ory import OrySyncAdapter
 from app.services.keycloak_admin import ADMIN_CLIENT_ID_VARIABLE, ADMIN_CREDENTIAL_VARIABLE, KeycloakAdminApi
 from app.services.reconciliation import ReconciliationService
-from app.services.role import RoleService
+from app.services.role import NOT_A_MEMBER_OF_THE_TENANT, RoleService
 from app.services.user import UserService
 from tests.helpers.keycloak_admin_recorded import (
     DIRECTORY_CLIENT_ID,
@@ -100,16 +100,25 @@ class TestSelection:
         user_id = uuid.uuid4()
         asked = []
 
-        async def external_sub_of(self, user: uuid.UUID, provider_name: str) -> str | None:
+        async def signed_in_sub_of(self, user: uuid.UUID, provider_name: str) -> str | None:
             asked.append((self._session, user, provider_name))
             return "keycloak-account-id"
 
-        monkeypatch.setattr(IdPLinkRepository, "external_sub_of", external_sub_of)
+        monkeypatch.setattr(IdPLinkRepository, "signed_in_sub_of", signed_in_sub_of)
 
         service = await get_role_service(request=mock_request(keycloak_admin=object()), session=session)
 
         assert await service._adapter._linked_subject(user_id) == "keycloak-account-id"
         assert asked == [(session, user_id, "keycloak")]
+
+    async def test_the_keycloak_adapter_serializes_organization_writes_through_the_database(self, monkeypatch):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        lock = object()
+        monkeypatch.setattr(identity, "keycloak_organization_lock", lambda: lock)
+
+        service = await get_role_service(request=mock_request(keycloak_admin=object()), session=AsyncMock())
+
+        assert service._adapter._organization_lock is lock
 
 
 def recorded_client(api: RecordedAdminApi):
@@ -288,6 +297,117 @@ class TestLeavingATenant:
         adapter.sync_user.assert_awaited_once_with(
             user_id=user.id, data={"email": "a@b.test", "status": "active", "left_tenant_id": str(tenant_id)}
         )
+
+
+class TestLeavingATenantWithAMembership:
+    """Where the adapter keeps memberships, a role given in the tenant while the user left it is added back."""
+
+    @staticmethod
+    def users(ends_memberships: bool) -> tuple[UserService, AsyncMock, AsyncMock, User, uuid.UUID]:
+        service, adapter, user, tenant_id = TestStatusChanges.users(UserStatus.active)
+        assignments = AsyncMock(spec=UserTenantRoleRepository)
+        assignments.delete_by_user_tenant.return_value = 1
+        assignments.list_by_user_tenants.return_value = []
+        service._assignment_repository = assignments
+        adapter.ends_memberships = ends_memberships
+        adapter.sync_role_assignment.return_value = Ok(None)
+        return service, adapter, assignments, user, tenant_id
+
+    async def test_a_role_given_while_leaving_gets_its_membership_back(self):
+        service, adapter, assignments, user, tenant_id = self.users(ends_memberships=True)
+        given = UserTenantRole(user_id=user.id, tenant_id=tenant_id, role_id=uuid.uuid4())
+        assignments.list_by_user_tenants.return_value = [given]
+
+        result = await service.remove_user_from_tenant(tenant_id=tenant_id, user_id=user.id)
+
+        assert result == Ok({"status": "removed", "user_id": str(user.id)})
+        assignments.list_by_user_tenants.assert_awaited_once_with([(user.id, tenant_id)])
+        adapter.sync_role_assignment.assert_awaited_once_with(
+            user_id=user.id, tenant_id=tenant_id, role_id=given.role_id
+        )
+
+    async def test_no_role_since_leaves_the_membership_ended(self):
+        service, adapter, assignments, user, tenant_id = self.users(ends_memberships=True)
+
+        await service.remove_user_from_tenant(tenant_id=tenant_id, user_id=user.id)
+
+        assignments.list_by_user_tenants.assert_awaited_once_with([(user.id, tenant_id)])
+        adapter.sync_role_assignment.assert_not_awaited()
+
+    async def test_a_failed_removal_is_not_recounted(self):
+        service, adapter, assignments, user, tenant_id = self.users(ends_memberships=True)
+        adapter.sync_user.return_value = Error(SyncError(message="no account", operation="sync_user"))
+
+        await service.remove_user_from_tenant(tenant_id=tenant_id, user_id=user.id)
+
+        assignments.list_by_user_tenants.assert_not_awaited()
+
+    async def test_an_adapter_that_keeps_no_memberships_is_not_recounted(self):
+        """Descope and Ory: the push as before, nothing added back."""
+        service, adapter, assignments, user, tenant_id = self.users(ends_memberships=False)
+
+        await service.remove_user_from_tenant(tenant_id=tenant_id, user_id=user.id)
+
+        assignments.list_by_user_tenants.assert_not_awaited()
+        adapter.sync_role_assignment.assert_not_awaited()
+
+
+class TestAssigningARole:
+    """Where a role assignment writes a provider membership, it is given only to a member of the tenant (#592)."""
+
+    @staticmethod
+    def roles(ends_memberships: bool, held: list[UserTenantRole]) -> tuple[RoleService, AsyncMock, AsyncMock, Role]:
+        role = Role(id=uuid.uuid4(), name="editor", description="", tenant_id=None)
+        repo = AsyncMock(spec=RoleRepository)
+        repo.get.return_value = role
+        assignments = AsyncMock(spec=UserTenantRoleRepository)
+        assignments.get.return_value = None
+        assignments.list_by_user_tenant.return_value = held
+        assignments.create.side_effect = lambda row: row
+        adapter = AsyncMock(spec=IdentityProviderAdapter)
+        adapter.ends_memberships = ends_memberships
+        adapter.sync_role_assignment.return_value = Ok(None)
+        service = RoleService(
+            repository=repo,
+            permission_repository=AsyncMock(spec=PermissionRepository),
+            assignment_repository=assignments,
+            adapter=adapter,
+            publisher=AsyncMock(),
+        )
+        return service, assignments, adapter, role
+
+    async def test_a_user_with_no_role_in_the_tenant_is_refused_and_nothing_is_written(self):
+        user_id, tenant_id = uuid.uuid4(), uuid.uuid4()
+        service, assignments, adapter, role = self.roles(ends_memberships=True, held=[])
+
+        result = await service.assign_role_to_user(user_id=user_id, tenant_id=tenant_id, role_id=role.id)
+
+        assert result == Error(Forbidden(message=NOT_A_MEMBER_OF_THE_TENANT))
+        assignments.list_by_user_tenant.assert_awaited_once_with(user_id, tenant_id)
+        assignments.create.assert_not_awaited()
+        adapter.sync_role_assignment.assert_not_awaited()
+
+    async def test_a_member_of_the_tenant_is_given_the_role(self):
+        user_id, tenant_id = uuid.uuid4(), uuid.uuid4()
+        member = UserTenantRole(user_id=user_id, tenant_id=tenant_id, role_id=uuid.uuid4())
+        service, assignments, adapter, role = self.roles(ends_memberships=True, held=[member])
+
+        result = await service.assign_role_to_user(user_id=user_id, tenant_id=tenant_id, role_id=role.id)
+
+        assert result.is_ok()
+        adapter.sync_role_assignment.assert_awaited_once_with(
+            user_id=user_id, tenant_id=tenant_id, role_id=role.id, data={"role_name": role.name}
+        )
+
+    async def test_an_adapter_that_keeps_no_memberships_assigns_as_before(self):
+        """Descope and Ory: no membership check (that is #592's)."""
+        user_id, tenant_id = uuid.uuid4(), uuid.uuid4()
+        service, assignments, adapter, role = self.roles(ends_memberships=False, held=[])
+
+        result = await service.assign_role_to_user(user_id=user_id, tenant_id=tenant_id, role_id=role.id)
+
+        assert result.is_ok()
+        assignments.list_by_user_tenant.assert_not_awaited()
 
 
 class TestRevocationsThatFail:

@@ -9,6 +9,8 @@ are compared whole.
 import base64
 import logging
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import httpx
 import pytest
@@ -748,16 +750,116 @@ class TestLinkedAccounts:
         assert result == Ok(None)
         assert api.sent[1:] == [find_organization(), get_account(), Sent("POST", MEMBERS, {}, ACCOUNT["id"], BEARER)]
 
-    async def test_a_profile_update_does_not_read_the_link(self):
-        """Profile pushes reach only the account the adapter created under the canonical id."""
+    async def test_a_profile_update_of_a_linked_user_sends_nothing_and_creates_no_account(self):
+        """The linked account is the user's: no second account under the canonical id, and no email pushed to it."""
         link = linked_to(ACCOUNT["id"])
-        api = RecordedAdminApi(["token", "user_find"])
+        api = RecordedAdminApi(["token", httpx.Response(200, json=LINKED_ACCOUNT)])
+
+        result = await KeycloakSyncAdapter(api.api(), linked_subject=link).sync_user(
+            user_id=USER, data={"email": "canonical@acme.test", "status": "active"}
+        )
+
+        assert (result, link.asked) == (Ok(None), [USER])
+        assert api.sent[1:] == [get_account()]
+
+    async def test_a_new_user_with_no_link_is_created_under_the_canonical_id(self):
+        link = linked_to(None)
+        api = RecordedAdminApi(["token", "user_find_none", "user_create"])
 
         result = await KeycloakSyncAdapter(api.api(), linked_subject=link).sync_user(
             user_id=USER, data={"email": RECORDED_EMAIL, "status": "active"}
         )
 
-        assert (result, link.asked) == (Ok(None), [])
+        assert (result, link.asked) == (Ok(None), [USER])
+        assert api.sent[1:] == [
+            find_user(),
+            Sent("POST", USERS, {}, {"username": USER_ID, "email": RECORDED_EMAIL, "enabled": True}, BEARER),
+        ]
+
+    @pytest.mark.parametrize(
+        "service_account",
+        [
+            {**ACCOUNT, "username": "service-account-identity-stack-admin"},
+            {**ACCOUNT, "serviceAccountClientId": "identity-stack-admin"},
+        ],
+        ids=["by-username", "by-client-id"],
+    )
+    async def test_a_link_naming_a_service_account_is_not_followed(self, service_account):
+        """A client's service account is nobody's sign-in: no membership is written for it."""
+        api = RecordedAdminApi(
+            ["token", "organization_find", httpx.Response(200, json=service_account), "user_find_none"]
+        )
+
+        error = refused(
+            await KeycloakSyncAdapter(api.api(), linked_subject=linked_to(ACCOUNT["id"])).sync_role_assignment(
+                user_id=USER, tenant_id=TENANT, role_id=ROLE
+            ),
+            "sync_role_assignment",
+            None,
+        )
+
+        assert error.message == "the user is not in Keycloak"
+        assert [sent for sent in api.sent if sent.method == "POST" and sent.path == MEMBERS] == []
+
+
+def recording_lock(api: RecordedAdminApi, held: list[tuple[str, int, int]]):
+    """An organization lock that records, per hold, the alias and the requests sent while it was held."""
+
+    @asynccontextmanager
+    async def lock(alias: str) -> AsyncIterator[None]:
+        entered = len(api.sent)
+        try:
+            yield
+        finally:
+            held.append((alias, entered, len(api.sent)))
+
+    return lock
+
+
+class TestOrganizationWritesAreSerialized:
+    """Writes that send an organization back whole run under the organization's lock, so none undoes another."""
+
+    async def test_ending_a_membership_reads_trims_and_removes_under_the_lock(self):
+        api = RecordedAdminApi(
+            ["token", "organization_find", "user_find", "organization_get_marked", "organization_trim", "member_remove"]
+        )
+        held: list[tuple[str, int, int]] = []
+
+        result = await KeycloakSyncAdapter(
+            api.api(), organization_lock=recording_lock(api, held)
+        ).delete_role_assignment(user_id=USER, tenant_id=TENANT, role_id=ROLE, data={LAST_ROLE: True})
+
+        assert result == Ok(None)
+        [(alias, entered, left)] = held
+        assert alias == TENANT_ID
+        assert api.calls()[entered:] == [("GET", ORGANIZATION), ("PUT", ORGANIZATION), ("DELETE", MEMBER)]
+        assert left == len(api.sent)
+
+    async def test_a_tenant_update_reads_and_writes_the_organization_under_the_lock(self):
+        api = RecordedAdminApi(["token", "organization_find", "organization_update"])
+        held: list[tuple[str, int, int]] = []
+
+        result = await KeycloakSyncAdapter(api.api(), organization_lock=recording_lock(api, held)).sync_tenant(
+            tenant_id=TENANT, data={"name": "Recorded Co Renamed"}
+        )
+
+        assert result == Ok(None)
+        assert held == [(TENANT_ID, 0, len(api.sent))]
+
+    async def test_leaving_a_tenant_ends_the_membership_under_the_lock(self):
+        api = RecordedAdminApi(
+            ["token", "user_find", "organization_find", "organization_get_marked", "organization_trim", "member_remove"]
+        )
+        held: list[tuple[str, int, int]] = []
+
+        result = await KeycloakSyncAdapter(api.api(), organization_lock=recording_lock(api, held)).sync_user(
+            user_id=USER, data={"email": RECORDED_EMAIL, "status": "active", "left_tenant_id": TENANT_ID}
+        )
+
+        assert result == Ok(None)
+        [(alias, entered, left)] = held
+        assert alias == TENANT_ID
+        assert api.calls()[entered:left] == [("GET", ORGANIZATION), ("PUT", ORGANIZATION), ("DELETE", MEMBER)]
 
 
 class TestUpstreamFailures:
