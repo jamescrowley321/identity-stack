@@ -12,7 +12,14 @@ import httpx
 import pytest
 
 from app.outbound import UpstreamStatusError
-from app.services.adapters.base import CREATED_IN_TENANT, IdentityProviderAdapter, SyncError
+from app.services.adapters.base import (
+    CREATED_IN_TENANT,
+    LAST_ROLE_IN_TENANT,
+    STATUS_CHANGED,
+    UNANSWERED,
+    IdentityProviderAdapter,
+    SyncError,
+)
 from app.services.adapters.zitadel import ZitadelSyncAdapter
 from app.services.adapters.zitadel_api import ZitadelAdminApi
 
@@ -147,6 +154,11 @@ def _created(**overrides) -> dict:
         CREATED_IN_TENANT: str(TENANT_ID),
     }
     return data | overrides
+
+
+def _status_change(status: str) -> dict:
+    """What UserService sends on activate and deactivate."""
+    return {"email": "ada@initech.test", "status": status, STATUS_CHANGED: True}
 
 
 def test_it_is_an_identity_provider_adapter():
@@ -303,14 +315,15 @@ class TestSyncUserCreate:
         assert result.is_error()
         assert opener.opened == 0
 
-    async def test_a_linked_user_is_not_created_again(self):
-        api = FakeApi(states={SUB: ACTIVE})
-        adapter, _, links = _adapter(api, FakeLinks(organizations={TENANT_ID: ORG_ID}, subjects={USER_ID: SUB}))
+    async def test_a_linked_user_is_not_created_again_and_its_status_is_not_pushed(self):
+        api = FakeApi(states={SUB: INACTIVE})
+        adapter, opener, links = _adapter(api, FakeLinks(organizations={TENANT_ID: ORG_ID}, subjects={USER_ID: SUB}))
 
         result = await adapter.sync_user(user_id=USER_ID, data=_created())
 
         assert result.is_ok()
-        assert api.calls == [("user_state", {"user_id": SUB})]
+        assert opener.opened == 0
+        assert api.calls == []
         assert links.writes == []
 
 
@@ -329,7 +342,9 @@ class TestSyncUserStatus:
         api = FakeApi(states={SUB: state})
         adapter, _, links = _adapter(api, FakeLinks(subjects={USER_ID: SUB}))
 
-        result = await adapter.sync_user(user_id=USER_ID, data={"email": "ada@initech.test", "status": status})
+        result = await adapter.sync_user(
+            user_id=USER_ID, data={"email": "ada@initech.test", "status": status, STATUS_CHANGED: True}
+        )
 
         assert result.is_ok()
         assert api.calls == expected
@@ -338,7 +353,7 @@ class TestSyncUserStatus:
     async def test_a_linked_user_zitadel_no_longer_has_is_an_error(self):
         adapter, _, _ = _adapter(FakeApi(), FakeLinks(subjects={USER_ID: SUB}))
 
-        result = await adapter.sync_user(user_id=USER_ID, data={"email": "ada@initech.test", "status": "inactive"})
+        result = await adapter.sync_user(user_id=USER_ID, data=_status_change("inactive"))
 
         assert result.is_error()
         assert result.error.context == {"user_id": str(USER_ID)}
@@ -346,7 +361,7 @@ class TestSyncUserStatus:
     async def test_an_unlinked_user_that_was_not_just_created_is_an_error_without_a_call(self):
         adapter, opener, _ = _adapter()
 
-        result = await adapter.sync_user(user_id=USER_ID, data={"email": "ada@initech.test", "status": "inactive"})
+        result = await adapter.sync_user(user_id=USER_ID, data=_status_change("inactive"))
 
         assert result.is_error()
         assert result.error.operation == "sync_user"
@@ -355,10 +370,40 @@ class TestSyncUserStatus:
     async def test_an_unknown_status_is_refused_before_any_call(self):
         adapter, opener, _ = _adapter(links=FakeLinks(subjects={USER_ID: SUB}))
 
-        result = await adapter.sync_user(user_id=USER_ID, data={"email": "ada@initech.test", "status": "removed"})
+        result = await adapter.sync_user(user_id=USER_ID, data=_status_change("removed"))
 
         assert result.is_error()
         assert opener.opened == 0
+
+
+class TestSyncUserWithoutAStatusChange:
+    """A profile update or a tenant left (UserService) sends no STATUS_CHANGED: nothing reaches Zitadel.
+
+    An enable or disable made in Zitadel is not undone by a canonical profile edit, and
+    a membership is canonical, so leaving a tenant changes nothing in Zitadel.
+    """
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            {"email": "ada@initech.test", "status": "active"},
+            {"email": "ada@initech.test", "status": "inactive"},
+            {"email": "ada@initech.test", "status": "active", STATUS_CHANGED: False},
+            {"email": "ada@initech.test", "status": "active", "left_tenant_id": str(TENANT_ID)},
+        ],
+        ids=["profile-active", "profile-inactive", "status-changed-false", "left-tenant"],
+    )
+    @pytest.mark.parametrize("subjects", [{USER_ID: SUB}, {}], ids=["linked", "unlinked"])
+    async def test_returns_ok_and_calls_nothing(self, data, subjects):
+        api = FakeApi(states={SUB: INACTIVE})
+        adapter, opener, links = _adapter(api, FakeLinks(subjects=dict(subjects)))
+
+        result = await adapter.sync_user(user_id=USER_ID, data=data)
+
+        assert result.is_ok()
+        assert opener.opened == 0
+        assert api.calls == []
+        assert links.writes == []
 
 
 class TestDeleteUser:
@@ -395,6 +440,15 @@ class TestCanonicalOnly:
             ("sync_permission", {"permission_id": uuid.uuid4(), "data": {"name": "documents:read"}}),
             ("sync_role_assignment", {"user_id": USER_ID, "tenant_id": TENANT_ID, "role_id": uuid.uuid4()}),
             ("delete_role_assignment", {"user_id": USER_ID, "tenant_id": TENANT_ID, "role_id": uuid.uuid4()}),
+            (
+                "delete_role_assignment",
+                {
+                    "user_id": USER_ID,
+                    "tenant_id": TENANT_ID,
+                    "role_id": uuid.uuid4(),
+                    "data": {LAST_ROLE_IN_TENANT: True},
+                },
+            ),
             ("delete_role", {"role_id": uuid.uuid4()}),
             ("delete_permission", {"permission_id": uuid.uuid4()}),
             ("delete_tenant", {"tenant_id": TENANT_ID}),
@@ -410,6 +464,11 @@ class TestCanonicalOnly:
         assert opener.opened == 0
         assert api.calls == []
         assert links.writes == []
+
+
+def test_it_keeps_no_memberships_beside_the_role_assignments():
+    """Memberships are canonical: RoleService does not tell it which users lost their last role."""
+    assert ZitadelSyncAdapter.ends_memberships is False
 
 
 class TestZitadelUnreachable:
@@ -434,7 +493,7 @@ class TestZitadelUnreachable:
             ("sync_user", {"user_id": USER_ID, "data": _created()}, {"organizations": {TENANT_ID: ORG_ID}}),
             (
                 "sync_user",
-                {"user_id": USER_ID, "data": {"email": "a@initech.test", "status": "inactive"}},
+                {"user_id": USER_ID, "data": _status_change("inactive")},
                 {"subjects": {USER_ID: SUB}},
             ),
             ("delete_user", {"user_id": USER_ID}, {"subjects": {USER_ID: SUB}}),
@@ -449,6 +508,7 @@ class TestZitadelUnreachable:
         assert result.is_error()
         assert isinstance(result.error, SyncError)
         assert result.error.operation == method
+        assert result.error.context[UNANSWERED] is True
         assert "local-test-token" not in result.error.message
         assert fake_links.writes == []
 
@@ -478,3 +538,47 @@ class TestZitadelUnreachable:
         ]:
             assert result.is_error()
         assert opener.opened == 0
+
+
+class TestUnanswered:
+    """``context[UNANSWERED]`` marks a failure where Zitadel gave no readable answer, and only that."""
+
+    @staticmethod
+    def _adapter_answering(handler) -> ZitadelSyncAdapter:
+        @asynccontextmanager
+        async def open_api():
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+                yield ZitadelAdminApi(http, base_url="http://zitadel.localhost:8480", token="local-test-token")
+
+        return ZitadelSyncAdapter(open_api, FakeLinks(), project_id=PROJECT_ID)
+
+    async def test_a_timeout_is_unanswered(self):
+        def time_out(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("timed out", request=request)
+
+        result = await self._adapter_answering(time_out).sync_tenant(tenant_id=TENANT_ID, data={"name": "Initech"})
+
+        assert result.error.context == {"tenant_id": str(TENANT_ID), UNANSWERED: True}
+
+    async def test_an_answer_that_is_not_json_is_unanswered(self):
+        def garble(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text="<html>proxy</html>")
+
+        result = await self._adapter_answering(garble).sync_tenant(tenant_id=TENANT_ID, data={"name": "Initech"})
+
+        assert result.error.context == {"tenant_id": str(TENANT_ID), UNANSWERED: True}
+
+    async def test_a_refusal_is_answered(self):
+        api = FakeApi(failing={"add_organization": _refusal(409)})
+        adapter, _, _ = _adapter(api)
+
+        result = await adapter.sync_tenant(tenant_id=TENANT_ID, data={"name": "Initech"})
+
+        assert result.error.context == {"tenant_id": str(TENANT_ID), "status": 409}
+
+    async def test_a_refusal_before_any_call_is_not_unanswered(self):
+        adapter, _, _ = _adapter(links=FakeLinks(provider_id=None))
+
+        result = await adapter.sync_tenant(tenant_id=TENANT_ID, data={"name": "Initech"})
+
+        assert result.error.context == {"tenant_id": str(TENANT_ID)}
