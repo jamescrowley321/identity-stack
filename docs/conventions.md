@@ -717,7 +717,8 @@ canonical user by email, verified or not: an organization's administrators can s
 email on their users. It is refused with `EmailLinkRefused` and nothing is written.
 The user such a login creates is marked `users.email_from_organization`, and no first
 login of any provider (just-in-time provisioning, the Descope flow sync) **MUST** link to
-that user by email either: it is `EmailLinkRefused` too. A login that finds, by email,
+that user by email either: it is `EmailLinkRefused` too. A Descope reconciliation run
+**MUST NOT** link or update that user either; it skips it and logs the holder's id. A login that finds, by email,
 the user a concurrent login for its own subject just created gets that user. A Zitadel
 principal with no recorded provider config **MUST NOT** be provisioned (500).
 

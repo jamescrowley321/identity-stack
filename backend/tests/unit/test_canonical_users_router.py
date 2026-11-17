@@ -57,7 +57,7 @@ ADMIN_CLAIMS = {
 AUTH_HEADER = {"Authorization": "Bearer valid.token"}
 
 
-def _make_user(status: UserStatus = UserStatus.active) -> User:
+def _make_user(status: UserStatus = UserStatus.active, *, email_from_organization: bool = False) -> User:
     now = datetime.now(timezone.utc)
     return User(
         id=uuid.uuid4(),
@@ -66,6 +66,7 @@ def _make_user(status: UserStatus = UserStatus.active) -> User:
         given_name="Test",
         family_name="User",
         status=status,
+        email_from_organization=email_from_organization,
         created_at=now,
         updated_at=now,
     )
@@ -90,7 +91,7 @@ async def test_list_users_rejects_admin(mock_validate, client):
 async def test_list_users_returns_payload(mock_validate, mock_user_service, client):
     """Router serializes each User domain object to the public payload shape verbatim."""
     mock_validate.return_value = OPERATOR_CLAIMS
-    users = [_make_user(), _make_user()]
+    users = [_make_user(), _make_user(email_from_organization=True)]
     mock_user_service.list_canonical_users.return_value = users
 
     response = await client.get("/api/users", headers=AUTH_HEADER)
@@ -105,6 +106,7 @@ async def test_list_users_returns_payload(mock_validate, mock_user_service, clie
                 "given_name": u.given_name,
                 "family_name": u.family_name,
                 "status": u.status.value,
+                "email_from_organization": u.email_from_organization,
                 "created_at": u.created_at.isoformat(),
                 "updated_at": u.updated_at.isoformat(),
             }

@@ -214,4 +214,14 @@ async def test_list_users_payload_shape(mock_validate, app_with_session, seeded_
     users = resp.json()["users"]
     assert users, "expected seeded users in response"
     keys = set(users[0].keys())
-    assert {"id", "email", "user_name", "given_name", "family_name", "status", "created_at", "updated_at"} <= keys
+    assert {
+        "id",
+        "email",
+        "user_name",
+        "given_name",
+        "family_name",
+        "status",
+        "email_from_organization",
+        "created_at",
+        "updated_at",
+    } <= keys

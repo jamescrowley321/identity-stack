@@ -52,6 +52,9 @@ async def list_canonical_users(
                 "given_name": u.given_name,
                 "family_name": u.family_name,
                 "status": u.status.value,
+                # True when a Zitadel organization's first login created the user:
+                # its email is one the organization's administrators chose.
+                "email_from_organization": u.email_from_organization,
                 "created_at": u.created_at.isoformat(),
                 "updated_at": u.updated_at.isoformat(),
             }
