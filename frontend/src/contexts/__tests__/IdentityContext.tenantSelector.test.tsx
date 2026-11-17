@@ -1,12 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, act } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { useEffect } from "react";
 import { IdentityProvider, useIdentityContext, type CanonicalIdentity } from "../IdentityContext";
 import { useApiClient } from "../../hooks/useApiClient";
 import { RequireRole } from "../../components/auth/RequireRole";
 import { Unauthorized } from "../../components/Unauthorized";
-import TenantSwitcher from "../../components/layout/TenantSwitcher";
+import { AppShell } from "../../components/layout/AppShell";
+import TenantSettings from "../../pages/TenantSettings";
 
 // The real IdentityProvider and the real useApiClient, with only the OIDC
 // session and the network stubbed: what a canonical-provider session (Zitadel,
@@ -47,10 +48,19 @@ function stubNetwork(identity: Response | (() => Response)) {
   sent = [];
   globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
-    const headers = (init?.headers ?? {}) as Record<string, string>;
-    sent.push({ url, tenant: headers["X-Tenant-ID"] ?? null });
+    const tenant = new Headers(init?.headers).get("X-Tenant-ID");
+    sent.push({ url, tenant });
     if (url === "/api/identity") {
       return Promise.resolve(typeof identity === "function" ? identity() : identity);
+    }
+    if (url === "/api/tenants/current/settings") {
+      // As the backend answers a canonical caller in several tenants: an
+      // untenanted call is refused, a tenanted one answered in that tenant.
+      return Promise.resolve(
+        tenant === null
+          ? json(403, { detail: "Tenant required" })()
+          : json(200, { tenant_id: tenant, name: `Settings of ${tenant}`, custom_attributes: null })(),
+      );
     }
     return Promise.resolve(new Response("{}", { status: 200 }));
   }) as typeof fetch;
@@ -74,7 +84,6 @@ function TenantPage() {
   }, [apiFetch]);
   return (
     <div>
-      <TenantSwitcher />
       <RequireRole role="admin" fallback={<Unauthorized />}>
         <p>Admin settings</p>
       </RequireRole>
@@ -83,11 +92,17 @@ function TenantPage() {
   );
 }
 
-function renderApp() {
+/** The app's own shell, with the routed page at `path`. */
+function renderApp(path = "/") {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[path]}>
       <IdentityProvider>
-        <TenantPage />
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<TenantPage />} />
+            <Route path="settings" element={<TenantSettings />} />
+          </Route>
+        </Routes>
       </IdentityProvider>
     </MemoryRouter>,
   );
@@ -116,9 +131,8 @@ describe("the active tenant on every API call", () => {
     renderApp();
 
     expect(await screen.findByText("Admin settings")).toBeInTheDocument();
-    // The page mounts before the identity answers, so its first call names no
-    // tenant; once the active tenant is known it loads again, in that tenant.
-    await waitFor(() => expect(tenantsSentTo("/api/tenants/current")).toEqual(new Set([null, "tenant-acme"])));
+    // The page mounts once the active tenant is known, so even its first call names it.
+    await waitFor(() => expect(tenantsSentTo("/api/tenants/current")).toEqual(new Set(["tenant-acme"])));
 
     sent.length = 0;
     await act(async () => {
@@ -132,6 +146,15 @@ describe("the active tenant on every API call", () => {
     await waitFor(() => expect(tenantsSentTo("/api/tenants/current")).toEqual(new Set(["tenant-globex"])));
     expect(sent.filter((r) => r.tenant === "tenant-acme")).toEqual([]);
     expect(window.localStorage.getItem(STORAGE_KEY)).toBe("tenant-globex");
+  });
+
+  it("a page loaded straight away waits for the tenant: no untenanted call, no lasting refusal", async () => {
+    stubNetwork(json(200, twoTenants));
+    renderApp("/settings");
+
+    expect(await screen.findByText("Settings of tenant-acme")).toBeInTheDocument();
+    expect(screen.queryByText("Access Denied")).not.toBeInTheDocument();
+    expect(tenantsSentTo("/api/tenants/current/settings")).toEqual(new Set(["tenant-acme"]));
   });
 
   it("never sends a tenant with the identity request, which spans every tenant", async () => {
