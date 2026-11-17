@@ -427,6 +427,40 @@ async def test_user_name_splitting(db_session, descope_provider):
 
 
 @pytest.mark.asyncio
+async def test_never_links_a_descope_user_to_a_user_an_organization_created(db_session, descope_provider):
+    """A canonical user whose email a Zitadel organization chose gets no Descope link and no Descope update."""
+    suffix = uuid.uuid4().hex[:8]
+    email = f"org-chosen-{suffix}@test.com"
+    holder = User(
+        email=email,
+        user_name=email,
+        given_name="Org",
+        family_name="Chosen",
+        status=UserStatus.active,
+        email_from_organization=True,
+    )
+    db_session.add(holder)
+    await db_session.flush()
+
+    client = _make_descope_client()
+    client.search_all_users.return_value = [
+        {"userId": f"victim-{suffix}", "email": email, "givenName": "Victim", "status": "disabled"},
+    ]
+
+    result = await _build_service(db_session, client).run()
+
+    assert result.is_ok()
+    assert result.ok["stats"]["links_created"] == 0
+    assert result.ok["stats"]["users_updated"] == 0
+    link = await IdPLinkRepository(db_session).get_by_provider_and_sub(
+        provider_id=descope_provider.id, external_sub=f"victim-{suffix}"
+    )
+    assert link is None
+    stored = await UserRepository(db_session).get_by_email(email)
+    assert (stored.id, stored.given_name, stored.status) == (holder.id, "Org", UserStatus.active)
+
+
+@pytest.mark.asyncio
 async def test_skips_users_without_email(db_session, descope_provider):
     """Users missing email or userId are silently skipped."""
     suffix = uuid.uuid4().hex[:8]

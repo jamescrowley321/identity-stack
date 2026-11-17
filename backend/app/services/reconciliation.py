@@ -355,6 +355,19 @@ class ReconciliationService:
 
                 existing = canonical_by_email.get(email)
 
+                if existing is not None and existing.email_from_organization:
+                    # A Zitadel organization's administrators chose that email; it
+                    # does not show this Descope identity is that user
+                    # (IdentityProvisioningService.provision). Neither link nor
+                    # update it. Log the holder's id, never the email.
+                    logger.warning(
+                        "Reconciliation refused: Descope subject %s has the email of canonical user %s, "
+                        "whose email an organization chose",
+                        user_id,
+                        existing.id,
+                    )
+                    continue
+
                 if existing is None:
                     user = User(
                         email=email,
