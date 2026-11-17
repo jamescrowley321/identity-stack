@@ -112,8 +112,8 @@ the canonical model with Descope, so with `SYNC_PROVIDER=keycloak` it is refused
 
 Every failure comes back to the service as an error, with the HTTP status, and is logged; the
 canonical change stands, as with Descope. Nothing raises. A failure of the service's own database
-during a push (taking or releasing the organization lock, reading the user's IdP link) is such an
-error too, with no status: Keycloak was not asked, so `delete_role` goes on to the next user. A push that takes access away (ending a
+during a push (taking the organization lock, or not within its wait limit, reading the user's IdP
+link) is such an error too, with no status: Keycloak was not asked, so `delete_role` goes on to the next user. A push that takes access away (ending a
 membership, a deactivation) and fails is logged as an `ERROR` beginning `IdP revocation failed`,
 and the service's answer carries `"provider_sync": "failed"`: Keycloak still grants what the
 canonical change took away until the push is made again (identity-stack#612). `DELETE
@@ -146,9 +146,14 @@ stay. Keycloak takes an organization's attributes only whole, so the organizatio
 read. The read, that write and the removal run under a Postgres advisory lock on the organization's
 alias, as does a tenant update (also sent back as read), so two such writes from any backend worker
 never interleave and the later never undoes the earlier. The lock is taken on the connection the
-request's database session already holds and released by ending that session's transaction (it holds
-only reads: the push runs after the service committed), so a request never waits for a second pooled
-connection and any number of concurrent membership endings cannot exhaust the pool. A realm admin's edit in Keycloak takes no
+request's database session already holds, in a savepoint of its transaction, and released by rolling
+that savepoint back (the push runs after the service committed, so the savepoint holds only the lock
+and the rows the request loaded stay loaded), so a request never waits for a second pooled
+connection. A push waits for the lock at most `KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS` (default
+10): requests queued behind a slow holder each hold their connection while they wait, and the limit
+lets them go before they stall other routes waiting for the pool. A push that gives up is a failed
+push, logged and told as below (a membership ending is an `IdP revocation failed`); making it again
+ends the membership. A realm admin's edit in Keycloak takes no
 such lock: one made between the adapter's read and its write is overwritten. A later membership therefore starts with no grant a realm admin gave the earlier one. Markers
 go first: should the removal then fail, the member is left without the grant rather than with it.
 When `RoleService` or `UserService` finds, after the removal, that the user was given a role in the tenant meanwhile
