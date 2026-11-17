@@ -157,6 +157,30 @@ jobs:
       - name: Apply infra/keycloak and compare it with the imported realm
         run: make keycloak-terraform-check
 
+  zitadel-terraform-check:
+    name: Zitadel Terraform Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # No credential: infra/zitadel is applied to a fresh compose Zitadel, with the
+    # token its first start writes to a volume, so this runs on every pull request.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.2"
+          terraform_wrapper: false
+
+      - name: Start the local Zitadel
+        # The issuer is a fixed *.localhost name; pin it to loopback rather than
+        # depend on the runner's resolver.
+        run: |
+          echo "127.0.0.1 zitadel.localhost" | sudo tee -a /etc/hosts
+          make zitadel-up
+
+      - name: Apply infra/zitadel and read the instance back
+        run: make zitadel-terraform-check
+
   e2e-tests:
     name: E2E Tests
     runs-on: ubuntu-latest

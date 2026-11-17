@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup lint test-up test-down test-unit test-frontend test-integration test-e2e test-all security dev-backend dev-frontend dev test-gateway-proxy dev-gateway test-integration-standalone test-integration-gateway seed zitadel-up zitadel-reset zitadel-admin-pat
+.PHONY: help setup lint test-up test-down test-unit test-frontend test-integration test-e2e test-all security dev-backend dev-frontend dev test-gateway-proxy dev-gateway test-integration-standalone test-integration-gateway seed zitadel-up zitadel-reset zitadel-admin-pat zitadel-terraform-check zitadel-seed
 
 COMPOSE_TEST := docker compose -f docker-compose.test.yml
 TEST_DATABASE_URL := postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
@@ -97,3 +97,9 @@ zitadel-admin-pat: ## print the bootstrap admin machine user's personal access t
 		exit 1; \
 	fi; \
 	printf '%s\n' "$$pat"
+
+zitadel-terraform-check: ## apply infra/zitadel to a fresh local Zitadel (make zitadel-reset first), check plan is empty and read the instance back
+	TF_VAR_zitadel_access_token="$$($(MAKE) -s zitadel-admin-pat)" infra/zitadel/scripts/check-against-compose.sh
+
+zitadel-seed: ## link the applied infra/zitadel root to canonical tenants in DATABASE_URL (migrated database; idempotent)
+	terraform -chdir=infra/zitadel output -json canonical_seed | (cd backend && python -m scripts.seed_zitadel)
