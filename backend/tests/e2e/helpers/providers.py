@@ -19,8 +19,12 @@ their applied Terraform root outputs, sign in through the SPA and the provider's
 own forms, and fail the run, never skip it, when anything they need is missing.
 """
 
+import base64
+import json
 import os
+import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from functools import cached_property
 
 import httpx
@@ -28,7 +32,14 @@ import pytest
 from playwright.sync_api import Browser, BrowserContext, Page, Request, expect
 from playwright.sync_api import Error as PlaywrightError
 
-from tests.e2e.not_applicable import DESCOPE, KEYCLOAK, ZITADEL
+from tests.e2e.not_applicable import (
+    DESCOPE,
+    INTERNAL_ENDPOINT_SECRETS,
+    KEYCLOAK,
+    KEYCLOAK_SPA_ADMIN,
+    ZITADEL,
+    missing_internal_endpoint_secrets,
+)
 
 MEMBER = "member"
 ADMIN = "admin"
@@ -36,6 +47,38 @@ PRINCIPALS = (MEMBER, ADMIN)
 
 _PROBE_TIMEOUT_SECONDS = 10
 _IDENTITY = "/api/identity"
+
+
+class SignedInTokens:
+    """Each principal's access token, signed in again once it is about to expire.
+
+    Keycloak (300 s) and Zitadel (15 min) tokens expire within a slow run, so the
+    suite asks for a principal's token per test and gets the one it already has
+    while ``exp`` is more than ``MARGIN_SECONDS`` away.
+    """
+
+    MARGIN_SECONDS = 60
+
+    def __init__(self, clock: Callable[[], float] = time.time) -> None:
+        self._clock = clock
+        self._tokens: dict[str, tuple[str, float]] = {}
+
+    def get(self, principal: str, sign_in: Callable[[], str]) -> str:
+        held = self._tokens.get(principal)
+        if held is not None and held[1] - self._clock() > self.MARGIN_SECONDS:
+            return held[0]
+        token = sign_in()
+        self._tokens[principal] = (token, _expiry(token))
+        return token
+
+
+def _expiry(token: str) -> float:
+    """The ``exp`` claim of a JWT the provider just issued, read without verifying it."""
+    payload = token.split(".")[1]
+    claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    if not isinstance(claims.get("exp"), int | float):
+        pytest.fail("the provider issued an access token with no exp claim")
+    return float(claims["exp"])
 
 
 class E2EProvider(ABC):
@@ -79,6 +122,15 @@ class E2EProvider(ABC):
         """The id the backend's routes take for ``MEMBER``."""
 
     # --- shared by the providers that sign in through the SPA ---------------------
+
+    def _check_internal_endpoint_secrets(self) -> None:
+        """Fail when the internal-endpoint tests would skip: they read these secrets from the environment."""
+        missing = missing_internal_endpoint_secrets(self.name)
+        if missing:
+            pytest.fail(
+                f"the {self.name} run needs {', '.join(INTERNAL_ENDPOINT_SECRETS)}, the same values the "
+                f"backend has; unset: {', '.join(missing)}"
+            )
 
     def _check_stack_answers(self, browser: Browser) -> None:
         """Fail when the backend or the SPA does not answer; the SPA must show its own Sign In."""
@@ -140,6 +192,10 @@ class DescopeProvider(E2EProvider):
 
     name = DESCOPE
 
+    def __init__(self, backend_url: str, frontend_url: str) -> None:
+        super().__init__(backend_url, frontend_url)
+        self._tokens: dict[str, str] = {}
+
     @property
     def _has_mgmt_key(self) -> bool:
         return bool(os.environ.get("DESCOPE_MANAGEMENT_KEY"))
@@ -186,6 +242,12 @@ class DescopeProvider(E2EProvider):
         return ensure_test_user()
 
     def access_token(self, principal: str, request: pytest.FixtureRequest) -> str:
+        """One token per principal for the whole run, as the suite always had."""
+        if principal not in self._tokens:
+            self._tokens[principal] = self._new_token(principal)
+        return self._tokens[principal]
+
+    def _new_token(self, principal: str) -> str:
         from tests.e2e.helpers.auth import get_admin_session_token, get_oidc_access_token
 
         if principal == ADMIN:
@@ -246,6 +308,10 @@ class KeycloakProvider(E2EProvider):
 
     name = KEYCLOAK
 
+    def __init__(self, backend_url: str, frontend_url: str) -> None:
+        super().__init__(backend_url, frontend_url)
+        self._tokens = SignedInTokens()
+
     @cached_property
     def _keycloak(self):
         # Imported here: the module reads the KEYCLOAK_TEST_* target at import,
@@ -261,6 +327,7 @@ class KeycloakProvider(E2EProvider):
         return self._keycloak.TENANT_ADMIN_APP_CLIENT if principal == ADMIN else self._keycloak.MEMBER_APP_CLIENT
 
     def check_ready(self, request: pytest.FixtureRequest) -> None:
+        self._check_internal_endpoint_secrets()
         source = self._keycloak.KeycloakTokenSource()
         try:
             source.check_reachable()
@@ -269,16 +336,28 @@ class KeycloakProvider(E2EProvider):
         self._check_stack_answers(request.getfixturevalue("browser"))
 
     def access_token(self, principal: str, request: pytest.FixtureRequest) -> str:
-        source = self._keycloak.KeycloakTokenSource()
-        return source.login(
-            self._user(principal), client_id=self._client(principal), scope=self._keycloak.ACME_SCOPE
-        ).access_token
+        def sign_in() -> str:
+            return (
+                self._keycloak.KeycloakTokenSource()
+                .login(self._user(principal), client_id=self._client(principal), scope=self._keycloak.ACME_SCOPE)
+                .access_token
+            )
+
+        return self._tokens.get(principal, sign_in)
+
+    @staticmethod
+    def _member_app_only(principal: str) -> None:
+        """The SPA signs in through member-app: a page as the tenant admin would be a member's session."""
+        if principal == ADMIN:
+            pytest.fail(f"no Keycloak admin page: {KEYCLOAK_SPA_ADMIN}; list the test in tests/e2e/not_applicable.py")
 
     def signed_in_context(self, browser: Browser, principal: str, request: pytest.FixtureRequest) -> BrowserContext:
+        self._member_app_only(principal)
         return browser.new_context(viewport={"width": 1280, "height": 720})
 
     def open_app(self, page: Page, principal: str) -> None:
         """Sign In on the SPA's login page, then Keycloak's identity-first form."""
+        self._member_app_only(principal)
         user = self._user(principal)
         page.goto(f"{self.frontend_url}/login")
         page.get_by_role("button", name="Sign In").click()
@@ -289,11 +368,11 @@ class KeycloakProvider(E2EProvider):
         page.wait_for_url(f"{self.frontend_url}/")
 
     def tenant_id(self, request: pytest.FixtureRequest) -> str:
-        identity = self._identity(request.getfixturevalue("admin_access_token"))
+        identity = self._identity(self.access_token(ADMIN, request))
         return identity["token_tenant"]["tenant_id"]
 
     def user_id(self, request: pytest.FixtureRequest) -> str:
-        return self._identity(request.getfixturevalue("auth_access_token"))["user"]["id"]
+        return self._identity(self.access_token(MEMBER, request))["user"]["id"]
 
 
 # --- Zitadel -------------------------------------------------------------------------
@@ -313,7 +392,8 @@ class ZitadelProvider(E2EProvider):
 
     def __init__(self, backend_url: str, frontend_url: str) -> None:
         super().__init__(backend_url, frontend_url)
-        self._token: str | None = None
+        self._tokens = SignedInTokens()
+        self._browser: Browser | None = None
 
     @cached_property
     def _instance(self):
@@ -339,6 +419,7 @@ class ZitadelProvider(E2EProvider):
         return {membership["tenant_name"]: membership["tenant_id"] for membership in identity["tenant_memberships"]}
 
     def check_ready(self, request: pytest.FixtureRequest) -> None:
+        self._check_internal_endpoint_secrets()
         instance = self._instance
         try:
             httpx.get(
@@ -351,25 +432,28 @@ class ZitadelProvider(E2EProvider):
         self._browser = browser
 
     def _signed_in_token(self) -> str:
-        """One sign-in of the linked user through the SPA's application, for the whole run."""
-        if self._token is None:
-            from tests.e2e_zitadel.browser_login import BrowserLogin
+        """The linked user's token, signed in through the SPA's application (again when it is about to expire)."""
+        return self._tokens.get(self._linked.key, self._sign_in)
 
-            context = self._browser.new_context()
-            try:
-                self._token = (
-                    BrowserLogin(self._instance.issuer, self.frontend_url)
-                    .authorize(
-                        context,
-                        self._instance.users[self._linked.key],
-                        client_id=self._instance.spa_client_id,
-                        scope=self._instance.spa_scope,
-                    )
-                    .access_token
+    def _sign_in(self) -> str:
+        from tests.e2e_zitadel.browser_login import BrowserLogin
+
+        if self._browser is None:
+            pytest.fail("the Zitadel provider signs in only after check_ready")
+        context = self._browser.new_context()
+        try:
+            return (
+                BrowserLogin(self._instance.issuer, self.frontend_url)
+                .authorize(
+                    context,
+                    self._instance.users[self._linked.key],
+                    client_id=self._instance.spa_client_id,
+                    scope=self._instance.spa_scope,
                 )
-            finally:
-                context.close()
-        return self._token
+                .access_token
+            )
+        finally:
+            context.close()
 
     def access_token(self, principal: str, request: pytest.FixtureRequest) -> str:
         return self._signed_in_token()

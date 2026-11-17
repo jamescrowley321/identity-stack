@@ -111,3 +111,48 @@ class TestReasonNotApplicable:
     )
     def test_matches_a_key_and_what_is_below_it_only(self, nodeid, provider, reason):
         assert na.reason_not_applicable(nodeid, provider) == reason
+
+
+def _environment_names_read(module: Path) -> set[str]:
+    """Every ``os.environ.get("X")`` / ``os.environ["X"]`` name ``module`` reads."""
+    names = set()
+    for node in ast.walk(ast.parse(module.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get":
+            target, key = node.func.value, node.args[0] if node.args else None
+        elif isinstance(node, ast.Subscript):
+            target, key = node.value, node.slice
+        else:
+            continue
+        if (
+            isinstance(target, ast.Attribute)
+            and target.attr == "environ"
+            and isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+        ):
+            names.add(key.value)
+    return names
+
+
+class TestInternalEndpointSecrets:
+    """A Keycloak or Zitadel run needs the secrets the internal-endpoint tests would otherwise skip without."""
+
+    def test_they_are_every_variable_the_internal_endpoint_tests_read(self):
+        modules = ("test_internal_endpoints_e2e.py", "test_multi_idp_e2e.py")
+        read = set().union(*(_environment_names_read(SUITE_DIR / module) for module in modules))
+        assert set(na.INTERNAL_ENDPOINT_SECRETS) == read
+
+    @pytest.mark.parametrize("provider", [na.KEYCLOAK, na.ZITADEL])
+    def test_a_provider_run_names_each_one_unset(self, provider):
+        environment = {"DESCOPE_WEBHOOK_SECRET": "set", "INTERNAL_IDENTITY_KEY": ""}
+        assert na.missing_internal_endpoint_secrets(provider, environment) == [
+            "DESCOPE_FLOW_SYNC_SECRET",
+            "INTERNAL_IDENTITY_KEY",
+        ]
+
+    @pytest.mark.parametrize("provider", [na.KEYCLOAK, na.ZITADEL])
+    def test_a_provider_run_with_all_of_them_misses_none(self, provider):
+        environment = dict.fromkeys(na.INTERNAL_ENDPOINT_SECRETS, "set")
+        assert na.missing_internal_endpoint_secrets(provider, environment) == []
+
+    def test_the_descope_run_still_skips_instead(self):
+        assert na.missing_internal_endpoint_secrets(na.DESCOPE, {}) == []
