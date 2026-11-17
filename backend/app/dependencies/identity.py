@@ -2,7 +2,9 @@
 
 AC-2.1.7: get_user_service() wires AsyncSession -> UserRepository -> UserService
 AC-2.2.6: get_role_service(), get_permission_service(), get_tenant_service()
-with DescopeSyncAdapter wrapping the singleton DescopeManagementClient.
+with the sync adapter of the configured provider (get_sync_adapter): DescopeSyncAdapter
+wrapping the singleton DescopeManagementClient by default, KeycloakSyncAdapter with
+SYNC_PROVIDER=keycloak.
 AC-3.1.1: get_inbound_sync_service() wires repositories for inbound sync.
 AC-3.2.1: get_reconciliation_service() wires repositories + Descope client for reconciliation.
 AC-4.1.3: get_idp_link_service(), get_provider_service() for IdP link/provider domain services.
@@ -11,10 +13,14 @@ AC-4.3.1: get_identity_resolution_service() for identity resolution with Redis c
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from fastapi import Depends, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.datastructures import State
 
+from app.knobs import knob
 from app.models.database import get_async_session
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
@@ -24,7 +30,9 @@ from app.repositories.role import RoleRepository
 from app.repositories.sync_event import SyncEventRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
+from app.services.adapters.base import IdentityProviderAdapter
 from app.services.adapters.descope import DescopeSyncAdapter
+from app.services.adapters.keycloak import KeycloakSyncAdapter
 from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
 from app.services.idp_link import IdPLinkService
@@ -40,6 +48,22 @@ from app.services.user import UserService
 # Postgres advisory lock ID for reconciliation (arbitrary constant)
 _RECONCILIATION_LOCK_ID = 73_82_69_67  # "RECON" in digits
 
+# The provider the canonical services push tenants, users and assignments to.
+# Fixed for the process; main.lifespan refuses a value not in SYNC_ADAPTERS and
+# opens what the chosen adapter needs (app.state.keycloak_admin for keycloak).
+SYNC_PROVIDER = knob("SYNC_PROVIDER", "descope").strip().lower()
+
+# One entry per provider: how its adapter is built from the application state.
+SYNC_ADAPTERS: dict[str, Callable[[State], IdentityProviderAdapter]] = {
+    "descope": lambda state: DescopeSyncAdapter(client=state.descope_client),
+    "keycloak": lambda state: KeycloakSyncAdapter(state.keycloak_admin),
+}
+
+
+def get_sync_adapter(request: Request) -> IdentityProviderAdapter:
+    """The sync adapter of the configured provider (``SYNC_PROVIDER``)."""
+    return SYNC_ADAPTERS[SYNC_PROVIDER](request.app.state)
+
 
 async def get_user_service(
     request: Request,
@@ -48,12 +72,12 @@ async def get_user_service(
     """Build a UserService with its repository and sync adapter.
 
     Wiring: AsyncSession -> UserRepository(session) + UserTenantRoleRepository(session)
-            DescopeManagementClient -> DescopeSyncAdapter(client)
+            get_sync_adapter(request)
             -> UserService(repository, adapter, assignment_repository)
     """
     repository = UserRepository(session)
     assignment_repository = UserTenantRoleRepository(session)
-    adapter = DescopeSyncAdapter(client=request.app.state.descope_client)
+    adapter = get_sync_adapter(request)
     return UserService(
         repository=repository,
         adapter=adapter,
@@ -69,13 +93,13 @@ async def get_role_service(
     """Build a RoleService with its repositories and sync adapter.
 
     Wiring: AsyncSession -> RoleRepository + PermissionRepository + UserTenantRoleRepository
-            DescopeManagementClient -> DescopeSyncAdapter(client)
+            get_sync_adapter(request)
             -> RoleService(repository, permission_repository, assignment_repository, adapter)
     """
     repository = RoleRepository(session)
     permission_repository = PermissionRepository(session)
     assignment_repository = UserTenantRoleRepository(session)
-    adapter = DescopeSyncAdapter(client=request.app.state.descope_client)
+    adapter = get_sync_adapter(request)
     return RoleService(
         repository=repository,
         permission_repository=permission_repository,
@@ -92,11 +116,11 @@ async def get_permission_service(
     """Build a PermissionService with its repository and sync adapter.
 
     Wiring: AsyncSession -> PermissionRepository(session)
-            DescopeManagementClient -> DescopeSyncAdapter(client)
+            get_sync_adapter(request)
             -> PermissionService(repository, adapter)
     """
     repository = PermissionRepository(session)
-    adapter = DescopeSyncAdapter(client=request.app.state.descope_client)
+    adapter = get_sync_adapter(request)
     return PermissionService(repository=repository, adapter=adapter, publisher=request.app.state.cache_publisher)
 
 
@@ -107,11 +131,11 @@ async def get_tenant_service(
     """Build a TenantService with its repository and sync adapter.
 
     Wiring: AsyncSession -> TenantRepository(session)
-            DescopeManagementClient -> DescopeSyncAdapter(client)
+            get_sync_adapter(request)
             -> TenantService(repository, adapter)
     """
     repository = TenantRepository(session)
-    adapter = DescopeSyncAdapter(client=request.app.state.descope_client)
+    adapter = get_sync_adapter(request)
     return TenantService(repository=repository, adapter=adapter, publisher=request.app.state.cache_publisher)
 
 

@@ -17,8 +17,8 @@ users, clients and organizations are listed in
 | Run | What it proves | CI job |
 |---|---|---|
 | `backend/tests/e2e_keycloak/` | The shipped SPA and backend against the compose realm, driven from Chromium. No credential. | `E2E Tests (Keycloak)`, every pull request |
-| `backend/tests/integration/test_keycloak_*.py` against the import | Token validation, organizations and client roles, `GET /api/identity` and the organization lookup, in-process | `Integration Tests` |
-| The same tests against the Terraform-built realm (`make keycloak-terraform-integration`) | `infra/keycloak/` builds a realm the backend accepts the same way: generated user ids, passwords and directory secret, same results | `Integration Tests` |
+| `backend/tests/integration/test_keycloak_*.py` against the import | Token validation, organizations and client roles, `GET /api/identity` and the organization lookup, in-process; every write of the [admin adapter](#admin-adapter) and its startup credential check | `Integration Tests` |
+| The same tests against the Terraform-built realm (`make keycloak-terraform-integration`) | `infra/keycloak/` builds a realm the backend accepts the same way: generated user ids, passwords and directory and admin secrets, same results | `Integration Tests` |
 | `make keycloak-terraform-check` | Every user, client, role, organization, member and marker of the import is in the Terraform root and the other way round, and both realms issue tokens of the same shape | `Keycloak Terraform Check`, every pull request |
 
 The end-to-end suite asks for each of these, in order:
@@ -79,17 +79,55 @@ calls go through the preview server's proxy to `localhost:8000`. The CI job
 `E2E Tests (Keycloak)` in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs these
 steps.
 
+## Admin adapter
+
+With `SYNC_PROVIDER=keycloak` the canonical services push tenants, users and memberships to the
+realm through `KeycloakSyncAdapter` (`backend/app/services/adapters/keycloak.py`) instead of
+Descope. It writes through the Admin REST API with one service account,
+`KEYCLOAK_ADMIN_CLIENT_ID`/`KEYCLOAK_ADMIN_CLIENT_SECRET` (`identity-stack-admin` in the compose
+realm: `realm-management` `manage-users` and `manage-organizations`, client scope `kc-admin-api`),
+on one HTTP client with a 5-second timeout. Startup takes a token and makes one Admin API read
+with it; a missing setting or a credential Keycloak refuses stops the backend before it serves a
+request ([environment-variables.md](environment-variables.md)). No route changes: the services
+that synced to Descope sync to Keycloak instead.
+
+| Canonical change | What the adapter does in Keycloak |
+|---|---|
+| A tenant is created (`sync_tenant`) | Creates the organization whose alias is the canonical tenant id, named as the tenant, with its `self_provisioning_domains` as domains. Pushed again, it updates the name and, when given, the domains of the organization it finds by that alias. An update leaves the organization's attributes, the realm admin's `type:<type client>` grant markers, as they are. |
+| A tenant is deleted (`delete_tenant`) | Deletes that organization. One that is not there counts as deleted. |
+| A user is created or updated (`sync_user`) | Creates or updates the user whose username is the canonical user id, with the canonical email. |
+| A user is deactivated or activated | Disables (`inactive`) or enables (`active`, `provisioned`) that user. |
+| A user is deleted (`delete_user`) | Deletes that user. One that is not there counts as deleted. |
+| A role is assigned in a tenant (`sync_role_assignment`) | Adds the user to the tenant's organization: holding a role in a tenant is being its member. Already a member counts as added. |
+| A user is removed from a tenant (`remove_user_from_tenant`) | Ends the user's membership of that tenant's organization. Not a member, or no organization, counts as removed. |
+| A role or permission is defined, changed or deleted; one role of several is unassigned | Nothing. Roles and permissions stay canonical, as with Ory; a user keeps the membership while any role remains. |
+
+Every failure comes back to the service as an error, with the HTTP status, and is logged; the
+canonical change stands, as with Descope. Nothing raises. The unit tests replay answers recorded
+from Keycloak 26.8.2 ([`backend/tests/fixtures/keycloak_admin/`](../backend/tests/fixtures/keycloak_admin/README.md)).
+
+What Keycloak does not do, or the adapter does not take on:
+
+| Limit | What happens |
+|---|---|
+| The adapter manages only the users it created (username = canonical user id). A Keycloak user who signed up through the login page, such as the realm's fixture users, has another username and is not taken over by email. | Keycloak refuses to create a second user with the same email (409); the adapter returns that error. A membership change for a user the adapter did not create returns an error too. |
+| An organization's alias cannot change in Keycloak. | The alias is the canonical tenant id, which does not change either. |
+| An organization's domains must be valid domain names, each held by one organization in the realm. Keycloak's domains route a login to an organization's identity provider; they do not add users to it the way Descope's self-provisioning domains do. | A domain Keycloak refuses (400) is an error, and the organization keeps its name and domains. |
+| An organization's name must be unique in the realm. | A second tenant with a name another organization holds is refused (409). |
+| A role assignment is not mirrored to client roles. Client roles are realm-wide and say nothing of an organization (decision 10); the realm admin grants them and the `type:` markers. | The membership is pushed; the grant is not. |
+| A membership can be pushed only once the tenant and the user are both in Keycloak. | Assigning a role in a tenant that was never pushed returns an error. |
+
 ## Limits found
 
 | Limit | Where it shows | Follow-up |
 |---|---|---|
 | An organization-bound type is refused to anyone in two organizations, in both (decision 10). `bob` cannot administer either organization. | Scope 7 | By design |
 | A portable type carries only the read permissions listed for it. A write permission a user holds on `member` is never granted. | Scope 9 | By design |
-| Only `settings:manage` of the `tenant-admin` permissions has a route that checks it. `members:invite` and `members:remove` are in the realm and in tokens and are gated nowhere yet. | Scope 7 | [identity-stack#586](https://github.com/jamescrowley321/identity-stack/issues/586) adds the admin adapter |
+| Only `settings:manage` of the `tenant-admin` permissions has a route that checks it. `members:invite` and `members:remove` are in the realm and in tokens and are gated nowhere yet. | Scope 7 | Open: the [admin adapter](#admin-adapter) pushes memberships from the canonical model, and no route checks these permissions |
 | Keycloak does not refuse an authorize request for an organization the user is not in. It issues a token without the `organization` claim, so the backend refuses that token (403), not Keycloak. | Scope 8 | None: the backend refuses |
 | A user removed from an organization keeps a portable token's permissions until it expires (300 s with realm defaults). Keycloak refuses the next refresh. An organization-bound token is checked against the directory on every request. | [`keycloak/fixtures/README.md`](../keycloak/fixtures/README.md#leaving-an-organization-while-holding-a-token-for-it) | Recorded (decision 13) |
 | Signing out ends the SPA's Keycloak session only. The user's other sessions (another browser, another app client) stay. | Scope 5 | None |
 | A silent token renewal can bring back a token for another organization than the one shown. | SPA | [identity-stack#602](https://github.com/jamescrowley321/identity-stack/issues/602) |
-| Routes that send the tenant to Descope, parse it as a canonical tenant id or gate by role answer a Keycloak principal 403, `GET /api/tenants` included. | [architecture.md](architecture.md#keycloak-token-model) | [identity-stack#586](https://github.com/jamescrowley321/identity-stack/issues/586) for organizations and users |
+| Routes that send the tenant to Descope, parse it as a canonical tenant id or gate by role answer a Keycloak principal 403, `GET /api/tenants` included. | [architecture.md](architecture.md#keycloak-token-model) | Open: the [admin adapter](#admin-adapter) changes no route |
 | The realm registers one SPA origin, `http://localhost:3000`, so the Keycloak end-to-end suite runs in a job of its own, apart from the Descope one that serves its SPA there. | CI | None |
 | Keycloak sets its session cookies `Secure` on the plain-HTTP origin. Chromium keeps them for a `*.localhost` host; other clients may not, and the login form then answers 400. | Every browser login | None: local and CI only |

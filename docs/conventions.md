@@ -159,8 +159,8 @@ Log calls **MUST** pass values as `%`-style arguments, as in
 
 Log records **MUST NOT** contain credentials. That covers bearer tokens, the Descope
 management key, `DESCOPE_WEBHOOK_SECRET`, `DESCOPE_FLOW_SYNC_SECRET`,
-`INTERNAL_IDENTITY_KEY`, `KEYCLOAK_DIRECTORY_CLIENT_SECRET` and the service-account token
-it is exchanged for, and raw `Authorization` headers. Log identifiers instead, such as a
+`INTERNAL_IDENTITY_KEY`, `KEYCLOAK_DIRECTORY_CLIENT_SECRET` and `KEYCLOAK_ADMIN_CLIENT_SECRET` and the
+service-account tokens they are exchanged for, and raw `Authorization` headers. Log identifiers instead, such as a
 user id, tenant id, provider name or HTTP status. An upstream response body **MUST** be
 truncated to 500 characters before it is logged (`exc.response.text[:500]`).
 

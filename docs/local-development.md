@@ -111,6 +111,15 @@ KEYCLOAK_DIRECTORY_CLIENT_SECRET=local-only-directory-client   # local fixture v
 JIT_ENABLED_PROVIDERS=ory,keycloak   # opt-in: provision Keycloak users on first login
 ```
 
+To push canonical tenants, users and memberships to the realm instead of Descope, add the admin
+client ([docs/keycloak.md](keycloak.md#admin-adapter)):
+
+```bash
+SYNC_PROVIDER=keycloak
+KEYCLOAK_ADMIN_CLIENT_ID=identity-stack-admin
+KEYCLOAK_ADMIN_CLIENT_SECRET=local-only-admin-client   # local fixture value
+```
+
 Register the provider row once, so that a first login is provisioned:
 `cd backend && DATABASE_URL=... KEYCLOAK_ISSUER_URL=... python -m scripts.seed_keycloak`.
 
