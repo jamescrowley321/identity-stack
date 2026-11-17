@@ -5,6 +5,11 @@ repository that shows it (a test, a recorded fixture, a Terraform root), so no c
 rests on a provider's documentation alone. "Not built" and "Planned" name the issue
 that tracks the gap. A cited file must exist, and a cited ``path::A::b`` must name a
 class or function ``A`` defined at the top of that file and ``b`` defined in ``A``.
+A cited path must stay inside the repository, and only a Python file can define a name.
+
+What this checks is that a citation exists, not that it shows what the cell says: a
+cell citing a whole file passes whatever it claims. Whether the cited test, fixture
+or root backs the claim is for the reader and the reviewer.
 """
 
 import ast
@@ -126,12 +131,16 @@ DEFINITIONS = (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
 def _missing(path: str, names: list[str]) -> list[str]:
     """What of ``path::names[0]::names[1]...`` is not there, each name looked up inside the one before."""
     target = REPO / path
+    if not target.resolve().is_relative_to(REPO):
+        return [f"{path} is outside the repository"]
     if not target.exists():
         return [f"{path} does not exist"]
     if not names:
         return []
     if not target.is_file():
         return [f"{path} is not a file, so it defines no {'::'.join(names)}"]
+    if target.suffix != ".py":
+        return [f"{path} is not a Python file, so it defines no {'::'.join(names)}"]
     body: list[ast.stmt] = ast.parse(target.read_text(encoding="utf-8")).body
     found = path
     for name in names:
@@ -192,27 +201,47 @@ def test_the_planned_provider_is_planned_in_every_cell():
     assert [cell.where for cell in _all_cells() if cell.provider == PLANNED_PROVIDER and cell.status != PLANNED] == []
 
 
-def _unexplained_differences(cells: list[Cell], gaps: str) -> list[str]:
-    """Rows where Keycloak and Zitadel differ in status that ``gaps`` names neither by issue nor by row label."""
+def _explanations(gaps: list[str]) -> str:
+    """The bullets of the gaps section, continuation lines included; prose around them explains nothing."""
+    bullets: list[str] = []
+    in_bullet = False
+    for line in gaps:
+        if line.startswith("- "):
+            bullets.append(line[2:])
+            in_bullet = True
+        elif in_bullet and line.startswith("  ") and line.strip():
+            bullets[-1] += " " + line.strip()
+        else:
+            in_bullet = False
+    return "\n".join(bullets)
+
+
+def _names(label: str, text: str) -> bool:
+    """Whether ``text`` names the row ``label`` as whole words, ignoring case and code spans."""
+    return re.search(rf"\b{re.escape(label.replace('`', ''))}\b", text.replace("`", ""), re.IGNORECASE) is not None
+
+
+def _unexplained_differences(cells: list[Cell], explanations: str) -> list[str]:
+    """Rows where Keycloak and Zitadel differ in status that ``explanations`` names by neither issue nor row label."""
     rows: dict[tuple[str, str], dict[str, Cell]] = {}
     for cell in cells:
         rows.setdefault((cell.section, cell.row), {})[cell.provider] = cell
-    mentioned = set(ISSUE.findall(gaps))
+    mentioned = set(ISSUE.findall(explanations))
     unexplained = []
     for (section, row), by_provider in rows.items():
         keycloak, zitadel = by_provider.get("Keycloak"), by_provider.get("Zitadel")
         if keycloak is None or zitadel is None or keycloak.status == zitadel.status:
             continue
         issues = set(ISSUE.findall(keycloak.text)) | set(ISSUE.findall(zitadel.text))
-        if not issues & mentioned and row.replace("`", "").lower() not in gaps.replace("`", "").lower():
+        if not issues & mentioned and not _names(row, explanations):
             unexplained.append(f"{section} / {row}")
     return unexplained
 
 
 def test_every_difference_between_keycloak_and_zitadel_is_explained():
-    gaps = "\n".join(_sections(MATRIX.read_text(encoding="utf-8")).get(GAPS_SECTION, []))
-    assert gaps, f"## {GAPS_SECTION} is missing"
-    assert _unexplained_differences(_all_cells(), gaps) == []
+    explanations = _explanations(_sections(MATRIX.read_text(encoding="utf-8")).get(GAPS_SECTION, []))
+    assert explanations, f"## {GAPS_SECTION} has no explanation bullets"
+    assert _unexplained_differences(_all_cells(), explanations) == []
 
 
 @pytest.mark.parametrize("index", ["README.md", "docs/README.md"])
@@ -261,6 +290,14 @@ class TestTheChecksThemselves:
             "backend/tests/unit/test_provider_matrix.py::test_a_defined_name_is_found is not defined there"
         ]
 
+    def test_a_path_leaving_the_repository_is_refused(self):
+        assert _missing("backend/../../outside.md", []) == ["backend/../../outside.md is outside the repository"]
+
+    def test_a_name_in_a_file_that_is_not_python_is_reported_not_parsed(self):
+        assert _missing("docs/providers.md", ["Anything"]) == [
+            "docs/providers.md is not a Python file, so it defines no Anything"
+        ]
+
     def test_a_directory_defines_no_name(self):
         assert _missing("backend/tests/unit", ["Anything"]) == [
             "backend/tests/unit is not a file, so it defines no Anything"
@@ -287,6 +324,27 @@ class TestTheChecksThemselves:
             "S / Unexplained",
             "S / Also unexplained",
         ]
+
+    def test_only_the_bullets_explain_a_difference(self):
+        gaps = [
+            "Where they differ:",
+            "",
+            "- **Built for one only**: tenant update",
+            "  (#1).",
+            "",
+            "Everything else is the same, including client credentials (#2).",
+        ]
+        assert _explanations(gaps) == "**Built for one only**: tenant update (#1)."
+        cells = [
+            Cell("S", "Client credentials", "Keycloak", "Supported (`a`)"),
+            Cell("S", "Client credentials", "Zitadel", "Not built (#2)"),
+        ]
+        assert _unexplained_differences(cells, _explanations(gaps)) == ["S / Client credentials"]
+
+    def test_a_label_inside_a_longer_word_does_not_name_the_row(self):
+        assert not _names("PAR", "compare the two")
+        assert _names("PAR", "DPoP and `par` are advertised")
+        assert _names("`require_role`", "Keycloak has no require_role.")
 
     def test_a_status_must_open_the_cell(self):
         assert Cell("s", "r", "p", "Not built (#1)").status == NOT_BUILT
