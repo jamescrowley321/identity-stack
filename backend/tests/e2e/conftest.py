@@ -116,9 +116,9 @@ def _ensure_test_user(e2e_provider):
     return e2e_provider.ensure_test_user()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def auth_access_token(e2e_provider, request):
-    """A token for a signed-in principal with no admin role in its tenant."""
+    """A token for a signed-in principal with no admin role in its tenant (the provider keeps it fresh)."""
     return e2e_provider.access_token(MEMBER, request)
 
 
@@ -133,9 +133,9 @@ def auth_api_context(playwright, e2e_provider, auth_access_token):
     context.dispose()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def admin_access_token(e2e_provider, request):
-    """A token for an owner/admin of the test tenant, carrying what require_role() reads."""
+    """A token for an owner/admin of the test tenant, carrying what require_role() reads (kept fresh)."""
     return e2e_provider.access_token(ADMIN, request)
 
 

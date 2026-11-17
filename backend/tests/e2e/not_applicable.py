@@ -44,6 +44,19 @@ def descope_credentials_missing(*names: str, environment: Mapping[str, str] = os
     return selected_provider(environment) == DESCOPE and not all(environment.get(name) for name in names)
 
 
+#: The backend's internal-endpoint secrets. The Descope-era internal-endpoint
+#: tests compute their headers and HMACs from them and skip a test when one is
+#: unset, so a Keycloak or Zitadel run requires all three up front instead.
+INTERNAL_ENDPOINT_SECRETS = ("DESCOPE_FLOW_SYNC_SECRET", "DESCOPE_WEBHOOK_SECRET", "INTERNAL_IDENTITY_KEY")
+
+
+def missing_internal_endpoint_secrets(provider: str, environment: Mapping[str, str] = os.environ) -> list[str]:
+    """The ``INTERNAL_ENDPOINT_SECRETS`` unset in ``provider``'s run; none for Descope, whose tests skip instead."""
+    if provider == DESCOPE:
+        return []
+    return [name for name in INTERNAL_ENDPOINT_SECRETS if not environment.get(name)]
+
+
 # --- Reasons -------------------------------------------------------------------------
 #
 # One sentence each, saying what about the provider makes the test inapplicable.
