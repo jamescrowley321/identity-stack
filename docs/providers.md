@@ -23,12 +23,13 @@ Every cell opens with one of five words:
 No cell rests on a provider's documentation alone. Where nothing in this repository shows what a
 hosted provider offers, the cell says **Not built** and names the issue; that includes a setting
 the hosted project holds and no Terraform root here sets. A licence is the upstream project's,
-not something a test can show: a Licence cell names it and cites the compose file that runs the
-upstream image unmodified. Paths are relative to the repository root; `file::Name` names a test
-class or function in that file. `backend/tests/unit/test_provider_matrix.py` fails when a table
-of an area does not have one column per provider, a cell has no status, a Supported or Not
-supported cell names no file, a Not built or Planned cell names no issue, a cited file or name
-does not exist, or a row where Keycloak and Zitadel differ is not explained under
+not something a test can show: a self-hosted provider's Licence cell names it and cites the
+compose file that runs the upstream image unmodified, and a hosted provider's is Not applicable.
+Paths are relative to the repository root; `file::Name` names a test class or function in that
+file. `backend/tests/unit/test_provider_matrix.py` fails when a table of an area does not have
+one column per provider, a cell has no status, a Supported or Not supported cell names no file, a
+Not built or Planned cell names no issue, a cited file or name does not exist, a `file::Name`
+citation is malformed, or a row where Keycloak and Zitadel differ is not explained under
 [Gaps between Keycloak and Zitadel](#gaps-between-keycloak-and-zitadel) by its issue or by its
 label in bold or code. It checks that a citation exists, not that it shows what the cell says: a
 cell that cites a whole file passes whatever it claims, so whether the cited file backs the claim
@@ -113,7 +114,7 @@ What the backend pushes to the provider when the canonical model changes, throug
 | Compose profile | Not applicable: hosted | Not applicable: hosted; `hydra-test` in the test stack stands in for it (`docker-compose.test.yml`) | Supported: `keycloak`, and `keycloak-test` in the test stack (`docker-compose.yml`, `docker-compose.test.yml`) | Supported: `zitadel` (`docker-compose.yml`) | Planned (#531) |
 | Terraform root | Supported: `infra/`, HCP Terraform workspace (`infra/main.tf`) | Supported: `infra/ory/`, local state (`infra/ory/main.tf`) | Supported: `infra/keycloak/`, local state, checked against the import in CI (`infra/keycloak/main.tf`) | Supported: `infra/zitadel/`, local state (`infra/zitadel/main.tf`) | Planned (#532) |
 | Containers | Not applicable: hosted | Supported: one, `oryd/hydra:v2.2.0`, tests only (`docker-compose.test.yml`) | Supported: one, `quay.io/keycloak/keycloak:26.8.2` (`docker-compose.yml`) | Supported: four, `zitadel-proxy`, `zitadel-api`, `zitadel-login`, `zitadel-db` (`docker-compose.yml`) | Planned (#531) |
-| Licence | Not applicable: a commercial hosted service | Supported: Hydra is Apache-2.0, the upstream Hydra image run unmodified (`docker-compose.test.yml`) | Supported: Apache-2.0, the upstream Keycloak image run unmodified (`docker-compose.yml`, `docker-compose.test.yml`) | Supported: AGPL-3.0, the upstream Zitadel images run unmodified (`docker-compose.yml`) | Planned (#531) |
+| Licence | Not applicable: a commercial hosted service | Not applicable: a commercial hosted service; `hydra-test`, the stand-in used in tests, runs the upstream Hydra image unmodified, which is Apache-2.0 (`docker-compose.test.yml`) | Supported: Apache-2.0, the upstream Keycloak image run unmodified (`docker-compose.yml`, `docker-compose.test.yml`) | Supported: AGPL-3.0, the upstream Zitadel images run unmodified (`docker-compose.yml`) | Planned (#531) |
 
 ## Test coverage
 
