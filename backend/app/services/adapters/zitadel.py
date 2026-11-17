@@ -19,7 +19,10 @@ Outbound only, with a machine user's token (``ZitadelAdminApi``):
   first login finds them; the new user is brought to the canonical status. Otherwise it
   pushes only a status change (``STATUS_CHANGED``, from activate and deactivate):
   deactivated unless already inactive, reactivated when inactive and wanted active or
-  provisioned. A profile update or a tenant left sends no status change and reaches
+  provisioned. The change reaches only a Zitadel user of the organization of the tenant
+  it was made in (``CHANGED_IN_TENANT``): a tenant admin may give a user of another
+  tenant a role, but does not decide whether that user's account in the other tenant's
+  organization is active. A profile update or a tenant left sends no status change and reaches
   nothing, so it does not undo an enable or disable made in Zitadel, and memberships
   stay canonical.
 - ``delete_user`` removes the linked Zitadel user.
@@ -34,7 +37,8 @@ adapter gives the users it creates: a create whose answer was lost, or whose lin
 failed, is found and linked by the next call instead of being made again. Zitadel lets
 any user manager choose a new user's id, so the user found by id is acted on only when
 it is in the organization of one of the user's tenants, and linked only by the create
-path, in the organization of the tenant the user was created in.
+path, in the organization of the tenant the user was created in. A status change acts
+only in the organization of the tenant it was made in, linked user or not.
 
 Every method returns ``Error(SyncError)`` for any failure, Zitadel unreachable included,
 and raises nothing; ``context[UNANSWERED]`` is set when Zitadel gave no readable answer
@@ -59,6 +63,7 @@ from opentelemetry import trace
 from app.logbook import logbook
 from app.outbound import UpstreamStatusError, UpstreamTransportError
 from app.services.adapters.base import (
+    CHANGED_IN_TENANT,
     CREATED_IN_TENANT,
     STATUS_CHANGED,
     UNANSWERED,
@@ -235,6 +240,20 @@ def _check_organization(found: ZitadelUser, organizations: frozenset[str]) -> No
         )
 
 
+def _check_changed_in(found: ZitadelUser, org_id: str | None) -> None:
+    """Refuse a status change for a Zitadel user outside the organization of the tenant it was made in.
+
+    The status was changed by an admin of that tenant. A user of another tenant's
+    organization may hold a role there too (a role needs no earlier membership), and
+    that admin does not decide whether their account in the other organization is active.
+    """
+    if found.organization_id != org_id:
+        raise _Refused(
+            "The Zitadel user is not in the organization of the tenant the status was changed in",
+            {"organization_id": found.organization_id},
+        )
+
+
 async def _bring_to(api: ZitadelAdminApi, sub: str, state: str, wanted: str) -> None:
     """Bring the Zitadel user from ``state`` to the ``wanted`` one.
 
@@ -310,9 +329,9 @@ class ZitadelSyncAdapter(IdentityProviderAdapter):
         """Create the user in its tenant's organization when just created; push a status change.
 
         Expected data keys: email, status; on creation also ``CREATED_IN_TENANT``,
-        user_name, given_name and family_name; ``STATUS_CHANGED: True`` on activate and
-        deactivate. An empty given or family name is sent as the user name: Zitadel
-        refuses an empty one. Any other change reaches nothing.
+        user_name, given_name and family_name; ``STATUS_CHANGED: True`` and
+        ``CHANGED_IN_TENANT`` on activate and deactivate. An empty given or family name is
+        sent as the user name: Zitadel refuses an empty one. Any other change reaches nothing.
 
         A user with no followed link is looked up by its canonical id, the id this adapter
         gives the users it creates. On create, one an earlier try made but did not link (its
@@ -335,11 +354,13 @@ class ZitadelSyncAdapter(IdentityProviderAdapter):
                 if sub is not None and not status_changed:
                     # Already in Zitadel (linked before this call): nothing was created, no status changed.
                     return Ok(None)
+                changed_in = await self._changed_in(provider_id, data) if status_changed else None
                 if sub is not None:
                     async with self._open_api() as api:
                         found = await api.find_user(sub)
                         if found is None:
                             raise _Refused("The linked Zitadel user does not exist", {})
+                        _check_changed_in(found, changed_in)
                         await _bring_to(api, sub, found.state, wanted)
                     return Ok(None)
                 await self._refuse_unfollowed_link(user_id, provider_id)
@@ -355,13 +376,25 @@ class ZitadelSyncAdapter(IdentityProviderAdapter):
                     return Ok(None)
                 # A status change with no followed link reaches the user with the canonical id
                 # but never links it: any user manager of the organization can choose that id.
-                organizations = await self._links.organizations_of_user(user_id, provider_id)
                 async with self._open_api() as api:
-                    found = await _same_id_user(api, user_id, organizations)
+                    found = await api.find_user(str(user_id))
+                    if found is None:
+                        raise _Refused("No Zitadel user is linked to this user", {})
+                    _check_changed_in(found, changed_in)
                     await _bring_to(api, str(user_id), found.state, wanted)
                 return Ok(None)
             except Exception as exc:
                 return Error(_sync_error("sync_user", exc, context))
+
+    async def _changed_in(self, provider_id: uuid.UUID, data: dict) -> str:
+        """The organization of the tenant a status change was made in, checked before Zitadel is called."""
+        tenant_id = data.get(CHANGED_IN_TENANT)
+        if tenant_id is None:
+            raise _Refused("A status change must name the tenant it was made in", {})
+        org_id = await self._links.organization_of(uuid.UUID(str(tenant_id)), provider_id)
+        if org_id is None:
+            raise _Refused("The tenant has no Zitadel organization", {"tenant_id": str(tenant_id)})
+        return org_id
 
     async def _refuse_unfollowed_link(self, user_id: uuid.UUID, provider_id: uuid.UUID) -> None:
         """Refuse a user whose Zitadel link the adapter does not follow, before Zitadel is called.

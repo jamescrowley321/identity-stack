@@ -28,6 +28,7 @@ from app.repositories.permission import PermissionRepository
 from app.repositories.role import RoleRepository
 from app.repositories.user import UserRepository
 from app.services.adapters.base import (
+    CHANGED_IN_TENANT,
     LAST_ROLE_IN_TENANT,
     PROVIDER_SYNC,
     PROVIDER_SYNC_FAILED,
@@ -481,7 +482,8 @@ class TestStatusChanges:
         await service.deactivate_user(tenant_id=tenant_id, user_id=user.id)
 
         adapter.sync_user.assert_awaited_once_with(
-            user_id=user.id, data={"email": "a@b.test", "status": "inactive", STATUS_CHANGED: True}
+            user_id=user.id,
+            data={"email": "a@b.test", "status": "inactive", STATUS_CHANGED: True, CHANGED_IN_TENANT: str(tenant_id)},
         )
 
     async def test_activating_says_the_status_changed(self):
@@ -490,7 +492,8 @@ class TestStatusChanges:
         await service.activate_user(tenant_id=tenant_id, user_id=user.id)
 
         adapter.sync_user.assert_awaited_once_with(
-            user_id=user.id, data={"email": "a@b.test", "status": "active", STATUS_CHANGED: True}
+            user_id=user.id,
+            data={"email": "a@b.test", "status": "active", STATUS_CHANGED: True, CHANGED_IN_TENANT: str(tenant_id)},
         )
 
 
