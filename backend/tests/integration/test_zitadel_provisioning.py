@@ -6,11 +6,12 @@ and ``globex`` are linked to their organizations through ``external_org_id``.
 """
 
 import json
+import uuid
 from pathlib import Path
 
 from sqlmodel import func, select
 
-from app.errors.identity import Forbidden, ValidationError
+from app.errors.identity import EmailLinkRefused, Forbidden, ValidationError
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.role import Role
@@ -174,3 +175,54 @@ class TestARefusedFirstLoginWritesNothing:
         await _seeded(db_session)
 
         await self._refused(db_session, GLOBEX_ORG, ValidationError, email_verified=False)
+
+
+class TestAnEmailAlreadyHeldIsNeverLinked:
+    """A tenant organization's administrators choose its users' emails and can mark them verified.
+
+    So an organization's first login never takes over the canonical user who
+    already holds that email, whatever tenant or provider that user came from:
+    linking it would hand them that user's roles in every tenant.
+    """
+
+    async def _acme_admin(self, session) -> uuid.UUID:
+        """An acme admin holding ``EMAIL``; its id, read before anything expires the row."""
+        user = User(email=EMAIL, user_name=EMAIL)
+        role = Role(name="admin")
+        session.add_all([user, role])
+        await session.flush()
+        acme = await TenantRepository(session).get_by_name("acme")
+        session.add(UserTenantRole(user_id=user.id, tenant_id=acme.id, role_id=role.id))
+        await session.flush()
+        return user.id
+
+    async def _refused(self, session, organization_id) -> None:
+        before = await _written(session)
+
+        result = await _provision(session, organization_id)
+
+        assert result.is_error()
+        assert type(result.error) is EmailLinkRefused
+        assert await _written(session) == before
+        assert await IdPLinkRepository(session).get_by_provider_name_and_sub(PROVIDER, SUB) is None
+
+    async def test_a_globex_login_with_an_acme_users_email_links_and_grants_nothing(self, db_session):
+        await _seeded(db_session)
+        admin_id = await self._acme_admin(db_session)
+
+        await self._refused(db_session, GLOBEX_ORG)
+
+        assert await _memberships(db_session, admin_id) == {("acme", "admin", True)}
+
+    async def test_a_login_in_the_users_own_organization_is_refused_too(self, db_session):
+        await _seeded(db_session)
+        await self._acme_admin(db_session)
+
+        await self._refused(db_session, ACME_ORG)
+
+    async def test_a_user_with_no_membership_is_not_linked_either(self, db_session):
+        await _seeded(db_session)
+        db_session.add(User(email=EMAIL, user_name=EMAIL))
+        await db_session.flush()
+
+        await self._refused(db_session, GLOBEX_ORG)

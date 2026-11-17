@@ -9,6 +9,7 @@ are doubles: what provisioning writes is ``tests/integration/test_zitadel_provis
 
 import ast
 import json
+import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -16,10 +17,11 @@ import pytest
 from expression import Error, Ok
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from py_identity_model import to_principal
 from slowapi.errors import RateLimitExceeded
 
 from app.dependencies.identity import get_identity_provisioning_service, get_identity_resolution_service
-from app.errors.identity import Forbidden, NotFound, ProviderError, ValidationError
+from app.errors.identity import EmailLinkRefused, Forbidden, NotFound, ProviderError, ValidationError
 from app.main import app as shipped_app
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.providers import ProviderTokenConfig, descope_config, zitadel_config
@@ -44,6 +46,7 @@ ACCESS = _recorded("human-access-token-project.json")["claims"]
 USERINFO = _recorded("human-userinfo-project.json")
 SUB = ACCESS["sub"]
 ORGANIZATION = ACCESS[ORGANIZATION_CLAIM]
+ORGANIZATION_TENANT = uuid.UUID("5b0f6a52-3c9e-4f0e-9d38-0d1f1c2b3a40")
 CANONICAL = {"user": {"id": "c0de", "status": "active"}, "roles": [], "tenant_memberships": [], "linked_idps": []}
 
 
@@ -197,16 +200,19 @@ class TestUserinfoProfile:
 
 
 class _Services:
-    def __init__(self, provisioned) -> None:
+    def __init__(self, provisioned, linked) -> None:
         self.resolver = AsyncMock()
         self.resolver.resolve.side_effect = [Error(NotFound("no identity")), Ok(CANONICAL)]
         self.provisioner = AsyncMock()
         self.provisioner.provision.return_value = provisioned
+        self.provisioner.organization_tenant_id.return_value = linked
 
 
-def _get(op: LocalProvider, token: str, *, provisioned=Ok("c0de"), jit=("ory", "zitadel")):
+def _get(
+    op: LocalProvider, token: str, *, provisioned=Ok("c0de"), linked=Ok(ORGANIZATION_TENANT), jit=("ory", "zitadel")
+):
     limiter.reset()
-    services = _Services(provisioned)
+    services = _Services(provisioned, linked)
     app = FastAPI()
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
@@ -255,11 +261,26 @@ class TestAFirstLogin:
         services.provisioner.provision.assert_not_awaited()
         assert op.userinfo_authorizations == []
 
-    def test_an_organization_no_tenant_names_is_refused(self, op, userinfo):
+    def test_an_organization_no_tenant_names_is_refused_before_userinfo(self, op, userinfo):
+        response, services = _get(op, _token(op), linked=Error(Forbidden("not linked")))
+
+        assert response.status_code == 403
+        assert response.json() == {"detail": protected.ORGANIZATION_NOT_LINKED}
+        services.provisioner.organization_tenant_id.assert_awaited_once_with(ORGANIZATION)
+        services.provisioner.provision.assert_not_awaited()
+        assert op.userinfo_authorizations == []
+
+    def test_an_organization_unlinked_by_the_time_of_provisioning_is_refused(self, op, userinfo):
         response, _ = _get(op, _token(op), provisioned=Error(Forbidden("not linked")))
 
         assert response.status_code == 403
         assert response.json() == {"detail": protected.ORGANIZATION_NOT_LINKED}
+
+    def test_an_email_another_canonical_user_holds_is_refused_without_saying_so(self, op, userinfo):
+        response, _ = _get(op, _token(op), provisioned=Error(EmailLinkRefused("held")))
+
+        assert response.status_code == 409
+        assert response.json() == {"detail": protected.PROVISIONING_FAILED}
 
     def test_a_userinfo_sub_that_differs_is_refused_before_provisioning(self, op, userinfo):
         op.serve_userinfo({**USERINFO, "sub": "399781146147897348"})
@@ -285,12 +306,13 @@ class TestAFirstLogin:
 
         assert services.provisioner.provision.await_args.kwargs["email"] == USERINFO["email"]
 
-    def test_userinfo_unavailable_is_502(self, op, userinfo):
+    def test_userinfo_unavailable_is_503(self, op, userinfo):
+        """The same answer as every other provider fault in the module: the provider, not the token."""
         op.fail(op.userinfo_path, 500)
 
         response, services = _get(op, _token(op))
 
-        assert response.status_code == 502
+        assert response.status_code == 503
         assert response.json() == {"detail": protected.UNAVAILABLE_DETAIL}
         services.provisioner.provision.assert_not_awaited()
 
@@ -300,6 +322,49 @@ class TestAFirstLogin:
         assert response.status_code == 404
         services.provisioner.provision.assert_not_awaited()
         assert op.userinfo_authorizations == []
+
+
+class TestTheRecordedProvider:
+    """``_first_login_profile`` trusts only the provider the middleware recorded for this principal."""
+
+    def _get(self, op: LocalProvider, recorded) -> tuple:
+        limiter.reset()
+        services = _Services(Ok("c0de"), Ok(ORGANIZATION_TENANT))
+        claims = {**ACCESS, "email": "token@example.test", "email_verified": True}
+        app = FastAPI()
+        app.include_router(shipped_app.router)
+        app.dependency_overrides[get_identity_resolution_service] = lambda: services.resolver
+        app.dependency_overrides[get_identity_provisioning_service] = lambda: services.provisioner
+
+        @app.middleware("http")
+        async def _inject(request, call_next):
+            request.state.claims = claims
+            request.state.principal = to_principal(claims, "zitadel")
+            request.state.provider = recorded
+            return await call_next(request)
+
+        original = protected.JIT_ENABLED_PROVIDERS
+        protected.JIT_ENABLED_PROVIDERS = frozenset({"zitadel"})
+        try:
+            response = TestClient(app).get(IDENTITY, headers={"Authorization": "Bearer t"})
+        finally:
+            protected.JIT_ENABLED_PROVIDERS = original
+        return response, services
+
+    @pytest.mark.parametrize("recorded", ["zitadel", object()], ids=["a-name", "an-object"])
+    def test_one_that_is_not_a_provider_config_is_refused(self, op, recorded):
+        response, services = self._get(op, recorded)
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": protected.PROVIDER_NOT_CONFIGURED}
+        services.provisioner.provision.assert_not_awaited()
+
+    def test_another_providers_config_is_refused(self, op):
+        response, services = self._get(op, descope_config("P-first-login"))
+
+        assert response.status_code == 500
+        assert response.json() == {"detail": protected.PROVIDER_NOT_CONFIGURED}
+        services.provisioner.provision.assert_not_awaited()
 
 
 class TestAKnownUser:

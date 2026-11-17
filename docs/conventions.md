@@ -219,7 +219,8 @@ RFC 9457 problem-detail bodies (`application/problem+json`) **MUST** be built on
   endpoint's published contract. The first-login refusals of a provider whose
   organization picks the tenant (Zitadel) answer in the same `{"detail": ...}` style:
   403 for no organization, an organization linked to no single active tenant, or a
-  UserInfo `sub` that differs, and 502 when UserInfo cannot be read.
+  UserInfo `sub` that differs, 409 for an email a canonical user already holds, and
+  503 when UserInfo cannot be read, as for every provider fault in the module.
 - Exception: the handlers in `routers/users.py` and `routers/attributes.py`, and
   `routers/accesskeys.py::_verify_key_tenant`. They answer an `Error` from
   `DescopeManagementAdapter` with the `{"detail": ...}` 400/403/502 bodies those routes had
@@ -710,6 +711,9 @@ principals are decided from the canonical model. Its organization claim is read 
 `zitadel.organization_id` alone, and only first-login provisioning calls it, through
 `ProviderTokenConfig.first_login_organization`. A provider with `profile_from_userinfo`
 takes a first-login user's email and names from UserInfo, never from its token.
+A first login whose organization picks its tenant **MUST NOT** be linked to an existing
+canonical user by email, verified or not: an organization's administrators can set any
+email on their users. It is refused with `EmailLinkRefused` and nothing is written.
 
 Both token middlewares **MUST** build the principal and read the tenant with the
 provider's extractor inside the code path that answers a failure with the uniform 401, so
