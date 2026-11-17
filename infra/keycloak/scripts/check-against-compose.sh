@@ -86,7 +86,7 @@ delete_leftover_realm() {
 # *_override.tf (git-ignored) never changes what the check applies.
 work="$(mktemp -d "$runs/run.XXXXXX")"
 git -C "$repo" ls-files -z --cached --others --exclude-standard -- ':(glob)infra/keycloak/*.tf' |
-  (cd "$repo" && while IFS= read -r -d '' file; do cp "$file" "$work/"; done)
+  (cd "$repo" && while IFS= read -r -d '' file; do [ -e "$file" ] || continue; cp "$file" "$work/"; done)
 cp "$root/.terraform.lock.hcl" "$work/"
 
 delete_leftover_realm
