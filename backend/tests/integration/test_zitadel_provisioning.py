@@ -398,16 +398,32 @@ class TestAnOrganizationLoginOutsideItsTenantsDomains:
 
         await self._refused(db_session)
 
-    async def test_the_domain_is_compared_without_case(self, db_session):
+    async def test_a_tenant_domain_is_compared_without_case(self, db_session):
         await _seeded(db_session, domains={**DOMAINS, "globex": ["Globex.TEST"]})
 
-        result = await _provision(db_session, GLOBEX_ORG, email="Globex-User@GLOBEX.test")
+        result = await _provision(db_session, GLOBEX_ORG, email="Globex-User@globex.test")
 
         assert result.is_ok(), result
         assert await _memberships(db_session, result.ok) == {("globex", MEMBER, True)}
 
+    @pytest.mark.parametrize("email", ["globex-user@GLOBEX.test", "globex-user@Globex.Test", "globex-user@globex.TEST"])
+    async def test_an_email_whose_domain_is_not_lower_case_is_refused(self, db_session, email):
+        """The held-email lookup is exact, so an upper-case domain would make a look-alike second user."""
+        await _seeded(db_session, domains={**DOMAINS, "globex": ["Globex.TEST"]})
+
+        await self._refused(db_session, email=email)
+
+    async def test_an_upper_case_look_alike_of_a_held_email_is_refused(self, db_session):
+        await _seeded(db_session)
+        db_session.add(User(email="admin@globex.test", user_name="admin@globex.test"))
+        await db_session.flush()
+
+        await self._refused(db_session, email="admin@GLOBEX.test")
+
+        assert await UserRepository(db_session).get_by_email("admin@GLOBEX.test") is None
+
     @pytest.mark.parametrize(
-        "domain", [" globex.test", "globex.test.", "@globex.test", "Globex.TEST", " @GLOBEX.test. "]
+        "domain", [" globex.test", "globex.test.", "globex.test..", "@globex.test", "Globex.TEST", " @GLOBEX.test. "]
     )
     async def test_a_tenant_domain_is_read_without_spaces_at_sign_or_trailing_dot(self, db_session, domain):
         await _seeded(db_session, domains={**DOMAINS, "globex": [domain]})
@@ -422,6 +438,13 @@ class TestAnOrganizationLoginOutsideItsTenantsDomains:
         await _seeded(db_session)
 
         await self._refused(db_session, email="globex-user@globex.test.")
+
+    @pytest.mark.parametrize("domain", ["globex.test.", "globex.test..", "globex.test..."])
+    @pytest.mark.parametrize("email", ["globex-user@globex.test.", "globex-user@globex.test.."])
+    async def test_a_tenant_domain_with_trailing_dots_admits_no_dotted_email(self, db_session, domain, email):
+        await _seeded(db_session, domains={**DOMAINS, "globex": [domain]})
+
+        await self._refused(db_session, email=email)
 
     async def test_a_dotted_look_alike_of_a_held_email_is_refused(self, db_session):
         await _seeded(db_session)
