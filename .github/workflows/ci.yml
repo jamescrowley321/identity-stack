@@ -584,6 +584,8 @@ jobs:
   e2e-zitadel:
     name: E2E Tests (Zitadel)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 25
     # No credential: infra/zitadel is applied to a fresh compose Zitadel with the
     # token its first start writes to a volume, so this runs on every pull
