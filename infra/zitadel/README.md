@@ -24,6 +24,7 @@ directory) and git-ignored: the instance is disposable, and a remote run could n
 | `zitadel_application_oidc.spa` | The SPA: user agent, authorization code with PKCE, auth method none, refresh-token grant, JWT access tokens, no roles in the access token or ID token, redirect URI `var.frontend_url`, post-logout redirect `<frontend_url>/login`. Development mode is on while `frontend_url` is plain http, which Zitadel requires for an http redirect URI. |
 | `zitadel_application_oidc.other` | A second application in the same project, for negative tests: the same settings without the refresh-token grant. A human's access token lists every application of the project in `aud`, so a token issued to this one proves audience alone does not identify the SPA. |
 | `zitadel_machine_user.tests` | Machine user `identity-stack-tests` in `identity-stack`: JWT access tokens, a client secret for the client credentials grant. |
+| `zitadel_machine_user.sync`, `zitadel_instance_member.sync`, `zitadel_personal_access_token.sync` | Machine user `identity-stack-sync` in `identity-stack`, the backend's sync adapter (`SYNC_PROVIDER=zitadel`, [`docs/zitadel.md`](../../docs/zitadel.md#admin-adapter)): instance role `IAM_ORG_MANAGER`, the narrowest one that may create an organization (`IAM_USER_MANAGER` may not), and a personal access token. |
 | `zitadel_human_user.this`, `random_password.user` | One test user per organization (`acme-user`, `globex-user`, `unlinked-user`), email `<user>@<org>.test`, verified, with a generated password. |
 
 The canonical store decides access. No user holds a Zitadel role grant and the project checks
@@ -68,6 +69,7 @@ Variables:
 | `test_user_passwords` (sensitive) | Each test user's password. |
 | `machine_user` | The machine user's id and client id. |
 | `machine_user_client_secret` (sensitive) | Its client secret. |
+| `sync_admin_token` (sensitive) | The sync adapter's personal access token: the backend's `ZITADEL_ADMIN_TOKEN`. |
 | `frontend_environment` | Frontend `VITE_OIDC_AUTHORITY`, `VITE_OIDC_CLIENT_ID`, `VITE_OIDC_REDIRECT_URI`, `VITE_OIDC_SCOPE`. The scope asks for `offline_access` (a refresh token) and `urn:zitadel:iam:user:resourceowner`, which puts the user's organization in the access token. |
 | `backend_environment` | Backend `ZITADEL_ISSUER_URL`, `ZITADEL_AUDIENCE` (the project id), `ZITADEL_CLIENT_ID` (the SPA) and `ZITADEL_REQUIRE_HTTPS`. |
 | `canonical_seed` | What the seed reads. |
@@ -124,8 +126,15 @@ container, and fails when the instance does not answer. It:
    organization's own policy; the Login V2 register page of every organization shows no form,
    only "registration is disabled" (self-service registration only: see the API note below); the project's checks, roles and grants; no user role grant
    in any organization; both applications' settings; the users' organizations, verified emails
-   and the machine user's token type; and that no non-sensitive output contains the value of a
-   sensitive output or the admin token.
+   and the machine user's token type; that `sync_admin_token` is `identity-stack-sync`'s and that
+   user holds the instance role `IAM_ORG_MANAGER` and no other; and that no non-sensitive output
+   contains the value of a sensitive output or the admin token.
+
+`make zitadel-terraform-integration` runs the same check with `--integration-tests`: after the
+read-back it runs the backend's live Zitadel suite
+([`backend/tests/integration_zitadel/`](../../backend/tests/integration_zitadel/)) as the sync
+adapter's machine user, against the applied root. It also needs the test Postgres (`make
+test-up`). CI's Zitadel job runs this target.
 
 The temporary directory holds generated secrets and is deleted when the check ends. It needs
 `terraform`, `curl` and the backend venv (`cd backend && uv sync --locked`), whose `httpx` the

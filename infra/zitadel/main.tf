@@ -247,6 +247,30 @@ resource "zitadel_machine_user" "tests" {
   with_secret       = true
 }
 
+# Machine user the backend's sync adapter calls Zitadel as (SYNC_PROVIDER=zitadel):
+# it creates tenant organizations, their login policies and project grants, and
+# human users in them. IAM_ORG_MANAGER is the narrowest instance role that may
+# create an organization; IAM_USER_MANAGER may not.
+resource "zitadel_machine_user" "sync" {
+  org_id            = zitadel_org.platform.id
+  user_name         = "identity-stack-sync"
+  name              = "identity-stack sync adapter"
+  access_token_type = "ACCESS_TOKEN_TYPE_BEARER"
+}
+
+resource "zitadel_instance_member" "sync" {
+  user_id = zitadel_machine_user.sync.id
+  roles   = ["IAM_ORG_MANAGER"]
+}
+
+# The adapter's credential (ZITADEL_ADMIN_TOKEN). The instance is disposable, so
+# the token lives as long as it does.
+resource "zitadel_personal_access_token" "sync" {
+  org_id          = zitadel_org.platform.id
+  user_id         = zitadel_machine_user.sync.id
+  expiration_date = "2099-01-01T00:00:00Z"
+}
+
 resource "random_password" "user" {
   for_each = local.test_users
 

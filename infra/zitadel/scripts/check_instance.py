@@ -22,6 +22,8 @@ Checks:
   root declares, without a roles claim.
 - Each human test user is in its organization with a verified email; the machine
   user issues JWT access tokens.
+- The sync adapter's token (sync_admin_token) is the identity-stack-sync machine
+  user's, and that user holds the instance role IAM_ORG_MANAGER and no other.
 """
 
 import json
@@ -36,7 +38,10 @@ GO_DURATION = re.compile(r"^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")
 PROJECT_ROLES = {"owner", "admin", "member", "viewer"}
 TENANT_ORGANIZATIONS = {"acme", "globex"}
 USER_ORGANIZATIONS = TENANT_ORGANIZATIONS | {"unlinked"}
-SENSITIVE_OUTPUTS = {"test_user_passwords", "machine_user_client_secret"}
+SENSITIVE_OUTPUTS = {"test_user_passwords", "machine_user_client_secret", "sync_admin_token"}
+# The sync adapter's machine user and the one instance role it holds.
+SYNC_USER_NAME = "identity-stack-sync"
+SYNC_INSTANCE_ROLES = ["IAM_ORG_MANAGER"]
 # What Login V2 renders on its register page: the form's email field, and the
 # text it shows instead of the form when the organization's policy refuses.
 REGISTER_FORM_MARKER = 'data-testid="email-text-input"'
@@ -187,6 +192,15 @@ def check_users(instance: Instance, outputs: dict, org_ids: dict[str, str]) -> N
     check(token_type == "ACCESS_TOKEN_TYPE_JWT", f"the machine user's access-token type is {token_type}")
 
 
+def check_sync_user(instance: Instance, outputs: dict) -> None:
+    sync = Instance(instance.issuer, outputs["sync_admin_token"]["value"])
+    me = sync.get("/auth/v1/users/me")["user"]
+    check(me.get("userName") == SYNC_USER_NAME, f"sync_admin_token belongs to {me.get('userName')}, not {SYNC_USER_NAME}")
+    members = instance._call("POST", "/admin/v1/members/_search", None, {"queries": [{"userIdQuery": {"userId": me["id"]}}]})
+    roles = [role for member in members.get("result", []) for role in member.get("roles", [])]
+    check(roles == SYNC_INSTANCE_ROLES, f"{SYNC_USER_NAME} holds instance roles {roles}, expected {SYNC_INSTANCE_ROLES}")
+
+
 def main() -> int:
     with open(sys.argv[1]) as handle:
         outputs = json.load(handle)
@@ -200,6 +214,7 @@ def main() -> int:
         check_settings(instance, org_ids, expected_lifetime)
         check_project(instance, outputs, org_ids)
         check_users(instance, outputs, org_ids)
+        check_sync_user(instance, outputs)
     except httpx.HTTPStatusError as exc:
         response = exc.response
         failures.append(

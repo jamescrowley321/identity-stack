@@ -179,6 +179,8 @@ jobs:
     timeout-minutes: 15
     # No credential: infra/zitadel is applied to a fresh compose Zitadel, with the
     # token its first start writes to a volume, so this runs on every pull request.
+    # The backend's live Zitadel suite (tests/integration_zitadel) then runs against
+    # the applied root, with the test Postgres.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -196,8 +198,11 @@ jobs:
           echo "127.0.0.1 zitadel.localhost" | sudo tee -a /etc/hosts
           make zitadel-up
 
-      - name: Apply infra/zitadel and read the instance back
-        run: make zitadel-terraform-check
+      - name: Start the test Postgres
+        run: make test-up
+
+      - name: Apply infra/zitadel, read the instance back and run the live Zitadel suite
+        run: make zitadel-terraform-integration
 
   e2e-tests:
     name: E2E Tests

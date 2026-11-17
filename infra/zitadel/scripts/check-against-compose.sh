@@ -10,7 +10,19 @@
 # anywhere in the repo, with terraform, curl, the backend venv and the bootstrap
 # admin's token in TF_VAR_zitadel_access_token (`make zitadel-terraform-check`
 # sets it from `make -s zitadel-admin-pat`).
+#
+# With --integration-tests it then runs the backend's live Zitadel suite
+# (backend/tests/integration_zitadel/) against the applied root, with its issuer,
+# project id and sync_admin_token. That suite also needs the test Postgres
+# (`make test-up`, TEST_DATABASE_URL).
 set -euo pipefail
+
+integration_tests=0
+case "${1:-}" in
+  "") ;;
+  --integration-tests) integration_tests=1 ;;
+  *) echo "usage: $0 [--integration-tests]" >&2; exit 2 ;;
+esac
 
 repo="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 root="$repo/infra/zitadel"
@@ -80,3 +92,14 @@ echo "terraform plan after apply: no changes"
 
 tf output -json >"$work/outputs.json"
 "$python" "$root/scripts/check_instance.py" "$work/outputs.json" "$lifetime"
+
+if [ "$integration_tests" = 1 ]; then
+  echo "--- the backend's live Zitadel suite against the applied root"
+  (
+    cd "$repo/backend"
+    ZITADEL_TEST_ISSUER="$("$python" -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]]["value"])' "$work/outputs.json" issuer_url)" \
+      ZITADEL_TEST_PROJECT_ID="$("$python" -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]]["value"])' "$work/outputs.json" project_id)" \
+      ZITADEL_TEST_SYNC_TOKEN="$("$python" -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]]["value"])' "$work/outputs.json" sync_admin_token)" \
+      "$python" -m pytest tests/integration_zitadel/ -v
+  )
+fi

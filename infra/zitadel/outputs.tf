@@ -65,6 +65,12 @@ output "machine_user_client_secret" {
   sensitive   = true
 }
 
+output "sync_admin_token" {
+  description = "Personal access token of the sync adapter's machine user (identity-stack-sync, IAM_ORG_MANAGER): the backend's ZITADEL_ADMIN_TOKEN."
+  value       = zitadel_personal_access_token.sync.token
+  sensitive   = true
+}
+
 output "frontend_environment" {
   description = "Frontend VITE_OIDC_* settings for the SPA application."
   value = {
