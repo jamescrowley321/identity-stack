@@ -17,6 +17,7 @@ users, clients and organizations are listed in
 | Run | What it proves | CI job |
 |---|---|---|
 | `backend/tests/e2e_keycloak/` | The shipped SPA and backend against the realm `infra/keycloak/` builds in `keycloak-test`, configured from the root's outputs, driven from Chromium. No credential. | `E2E Tests (Keycloak)`, every pull request |
+| `backend/tests/e2e/` with `E2E_PROVIDER=keycloak` | The shared UI and API suite ([local-development.md](local-development.md#end-to-end-suites)) against the same stack: `alice` (member, `member-app`) and `dave` (tenant admin of `acme`, `tenant-admin-app`). The tests that do not apply to Keycloak are listed with the reason in `backend/tests/e2e/not_applicable.py` | `E2E Tests (Keycloak)`, every pull request |
 | `backend/tests/integration/test_keycloak_*.py` against the import | Token validation, organizations and client roles, `GET /api/identity` and the organization lookup, in-process; every write of the [admin adapter](#admin-adapter) and its startup credential check | `Integration Tests` |
 | The same tests against the Terraform-built realm (`make keycloak-terraform-integration`) | `infra/keycloak/` builds a realm the backend accepts the same way: generated user ids, passwords and directory and admin secrets, same results | `Integration Tests` |
 | `make keycloak-terraform-check` | Every user, client, role, organization, member and marker of the import is in the Terraform root and the other way round, and both realms issue tokens of the same shape | `Keycloak Terraform Check`, every pull request |
@@ -78,6 +79,8 @@ KEYCLOAK_ISSUER_URL=<KEYCLOAK_ISSUER_URL above> python -m scripts.seed_keycloak
 # JIT_ENABLED_PROVIDERS=keycloak, plus RATE_LIMIT_DEFAULT=2000/minute RATE_LIMIT_AUTH=1000/minute:
 # the suite's refused requests share one client address, and the 60/minute default would
 # answer some of them 429
+# and INTERNAL_IDENTITY_KEY, DESCOPE_WEBHOOK_SECRET and DESCOPE_FLOW_SYNC_SECRET set to throwaway
+# values, exported the same in the shell that runs the suite
 
 cd ../frontend
 # the frontend lines, with the suite's scopes: bob starts in acme, and a tenant switch asks
@@ -87,7 +90,8 @@ VITE_OIDC_SCOPE="openid profile email organization:acme" \
   VITE_OIDC_TENANT_SCOPE_TEMPLATE="openid profile email organization:{tenant}" npm run build
 npx vite preview --port 3000 --strictPort
 
-make test-e2e-keycloak   # from the repository root; reads the realm, user ids and passwords from the outputs
+make test-e2e-keycloak   # from the repository root; the shared suite, then backend/tests/e2e_keycloak/;
+                         # reads the realm, user ids and passwords from the outputs
 ```
 
 `E2E_BACKEND_URL` points the suite's API calls at another backend address; the SPA's own `/api`
