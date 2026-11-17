@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, act } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import { useEffect } from "react";
 import { IdentityProvider, useIdentityContext, type CanonicalIdentity } from "../IdentityContext";
 import { useApiClient } from "../../hooks/useApiClient";
@@ -79,6 +79,7 @@ function json(status: number, body: unknown): () => Response {
 function TenantPage() {
   const { apiFetch } = useApiClient();
   const { setCurrentTenantId } = useIdentityContext();
+  const navigate = useNavigate();
   useEffect(() => {
     void apiFetch("/api/tenants/current");
   }, [apiFetch]);
@@ -88,6 +89,7 @@ function TenantPage() {
         <p>Admin settings</p>
       </RequireRole>
       <button onClick={() => setCurrentTenantId("tenant-globex")}>pick globex</button>
+      <button onClick={() => navigate("/settings")}>go to settings</button>
     </div>
   );
 }
@@ -155,6 +157,22 @@ describe("the active tenant on every API call", () => {
     expect(await screen.findByText("Settings of tenant-acme")).toBeInTheDocument();
     expect(screen.queryByText("Access Denied")).not.toBeInTheDocument();
     expect(tenantsSentTo("/api/tenants/current/settings")).toEqual(new Set(["tenant-acme"]));
+  });
+
+  it("moving to another page keeps the identity: no reload of it and no loading screen", async () => {
+    stubNetwork(json(200, twoTenants));
+    renderApp();
+    expect(await screen.findByText("Admin settings")).toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "go to settings" }).click();
+    });
+
+    // The next page mounts straight away in the active tenant; the shell never
+    // drops back to its loading state, which an identity reload would cause.
+    expect(screen.queryByText("Loading...")).not.toBeInTheDocument();
+    expect(await screen.findByText("Settings of tenant-acme")).toBeInTheDocument();
+    expect(sent.filter((r) => r.url === "/api/identity")).toEqual([{ url: "/api/identity", tenant: null }]);
   });
 
   it("never sends a tenant with the identity request, which spans every tenant", async () => {

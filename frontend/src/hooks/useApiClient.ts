@@ -56,13 +56,21 @@ export function useApiClient() {
     authRef.current = auth;
   }, [auth]);
 
+  // navigate changes on every route change. Read through a ref, it leaves
+  // apiFetch to change with the tenant alone: a new apiFetch reloads the
+  // identity and each page's data, which a move to another page must not do.
+  const navigateRef = useRef(navigate);
+  useEffect(() => {
+    navigateRef.current = navigate;
+  }, [navigate]);
+
   const apiFetch = useCallback(
     async (path: string, options: RequestInit = {}): Promise<Response> => {
       const currentAuth = authRef.current;
       const token = currentAuth.user?.access_token;
 
       if (!token) {
-        navigate("/login");
+        navigateRef.current("/login");
         return Promise.reject(new Error("No access token"));
       }
 
@@ -94,12 +102,12 @@ export function useApiClient() {
           // Silent renewal failed — session is unrecoverable.
         }
         await currentAuth.removeUser();
-        navigate("/login", { state: { sessionExpired: true } });
+        navigateRef.current("/login", { state: { sessionExpired: true } });
       }
 
       return response;
     },
-    [navigate, tenantId],
+    [tenantId],
   );
 
   return { apiFetch };
