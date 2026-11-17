@@ -31,6 +31,12 @@ class TenantRepository(BaseRepository[Tenant]):
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def list_by_external_org_id(self, external_org_id: str) -> list[Tenant]:
+        """Every tenant linked to the provider organization ``external_org_id``."""
+        stmt = sa.select(Tenant).where(Tenant.external_org_id == external_org_id)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def list_all(self) -> list[Tenant]:
         """List all tenants ordered by creation time."""
         stmt = sa.select(Tenant).order_by(Tenant.created_at.desc())

@@ -30,7 +30,30 @@ The two Zitadel images are AGPL-3.0 and run unmodified. Traefik is MIT and Postg
 Two limits, both observed:
 
 - curl inside a container cannot use the URL: it resolves `*.localhost` to loopback itself and never asks Docker's DNS. Python (`urllib`, `httpx`) and BusyBox `wget` resolve the alias.
-- py-identity-model 3.18.2 refuses the discovery fetch under its default policy ("HTTPS is required by discovery policy"): the issuer is plain HTTP and `zitadel.localhost` does not count as a loopback address. A backend that validates against this issuer has to opt in to HTTP for it.
+- py-identity-model 3.18.2 refuses the discovery fetch under its default policy ("HTTPS is required by discovery policy"): the issuer is plain HTTP and `zitadel.localhost` does not count as a loopback address. A backend that validates against this issuer has to opt in to HTTP for it: `ZITADEL_REQUIRE_HTTPS=false` ([below](#the-backend-against-this-instance)).
+
+## The backend against this instance
+
+The backend accepts Zitadel access tokens when `ZITADEL_ISSUER_URL` is set ([environment variables](environment-variables.md)). `terraform -chdir=infra/zitadel output backend_environment` prints the four `ZITADEL_*` values for the applied instance; add the two provider lists:
+
+```bash
+ZITADEL_ISSUER_URL=http://zitadel.localhost:8480
+ZITADEL_AUDIENCE=<project id>
+ZITADEL_CLIENT_ID=<SPA client id>
+ZITADEL_REQUIRE_HTTPS=false          # the local issuer is plain HTTP; never off for a real instance
+CANONICAL_RBAC_PROVIDERS=ory,zitadel
+JIT_ENABLED_PROVIDERS=ory,zitadel
+```
+
+Startup fails when the issuer is set without the project id or the client id, and when the issuer is `http` while `ZITADEL_REQUIRE_HTTPS` is on.
+
+**Which tokens are accepted.** A JWT access token is accepted only when its signature verifies against the instance's keys, `iss` is the configured issuer, `aud` contains the project id, `client_id` is the SPA's, and it carries none of `azp`, `at_hash`, `auth_time`, `sid` or `nonce`. Everything else gets the uniform 401: another application's token (its `aud` names the SPA and the project too), the SPA's own ID token (same `aud`, `iss` and `typ`), a machine user's token, an opaque token and a token from another issuer. The last two checks rest on the claim sets recorded from v4.20.3 below; the tests are built from those fixtures, so a re-record after a version change that moves one of the claims fails them.
+
+**Authorization is canonical.** Roles and permissions come from the canonical store; a roles claim on the token is never read, and a deactivated canonical user gets 403 with a valid token. A user in several tenants picks one with the `X-Tenant-ID` header.
+
+**First login.** `GET /api/identity` provisions a user the canonical store does not know. The token's organization (`urn:zitadel:iam:user:resourceowner:id`, present when the SPA requests scope `urn:zitadel:iam:user:resourceowner`) must be linked to exactly one active tenant through `external_org_id`, as `make zitadel-seed` links `acme` and `globex`; the user joins it as `member`. The email, `email_verified` and the names come from UserInfo, whose `sub` must equal the token's. Self-registration is off in every tenant organization, so only users that organization's administrators or Terraform created can get that membership. No organization, an unlinked organization, a missing or unverified email, or a UserInfo `sub` that differs: nothing is created and the request is refused.
+
+**Logout** returns the instance's `end_session_endpoint` with `id_token_hint`, the SPA's client id and `ZITADEL_POST_LOGOUT_REDIRECT_URI`, which must be registered on the SPA application.
 
 ## Bootstrap
 

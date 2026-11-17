@@ -21,10 +21,10 @@ from opentelemetry import trace
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.errors.identity import Conflict, IdentityError, NotFound, ValidationError
+from app.errors.identity import Conflict, Forbidden, IdentityError, NotFound, ValidationError
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.role import Role
-from app.models.identity.tenant import Tenant
+from app.models.identity.tenant import Tenant, TenantStatus
 from app.models.identity.user import IdPLink, User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
@@ -75,6 +75,7 @@ class IdentityProvisioningService:
         given_name: str = "",
         family_name: str = "",
         assign_default_role: bool = True,
+        organization_id: str | None = None,
     ) -> Result[uuid.UUID, IdentityError]:
         """Ensure a canonical user exists for (provider, sub). Returns the user id.
 
@@ -89,6 +90,13 @@ class IdentityProvisioningService:
         grants from the token alone passes ``False``: those grants are never read
         from the canonical model, and a role written for a user it links would be
         held by that user's sessions of providers that do read it.
+
+        With ``organization_id`` (Zitadel's organization claim) the user joins,
+        as the global ``member`` role, the one active tenant whose
+        ``external_org_id`` is that organization, in place of the default
+        tenant. No such tenant, or more than one, is ``Forbidden`` and nothing
+        is written: an organization grants a membership only where a canonical
+        tenant already names it.
         """
         with tracer.start_as_current_span(
             "IdentityProvisioningService.provision",
@@ -105,6 +113,12 @@ class IdentityProvisioningService:
             existing = await self._idp_link_repository.get_by_provider_and_sub(provider_id, sub)
             if existing is not None:
                 return Ok(existing.user_id)
+
+            organization_tenant_id: uuid.UUID | None = None
+            if organization_id is not None:
+                organization_tenant_id = await self._organization_tenant_id(organization_id)
+                if organization_tenant_id is None:
+                    return Error(Forbidden("The organization is not linked to exactly one active tenant"))
 
             # Account-takeover guard: never create or link on an unverified email.
             # An attacker who asserts a victim's (unverified) email must not be
@@ -140,7 +154,9 @@ class IdentityProvisioningService:
                     )
                     await self._session.flush()
 
-                    if assign_default_role:
+                    if assign_default_role and organization_tenant_id is not None:
+                        await self._assign_organization_member(user.id, organization_tenant_id)
+                    elif assign_default_role:
                         await self._assign_default_role(user.id)
 
                     await self._session.commit()
@@ -154,6 +170,31 @@ class IdentityProvisioningService:
                         return Ok(existing.user_id)
                     # Otherwise a bootstrap race on the default tenant/role — retry.
             return Error(Conflict("Could not provision identity after retry; please retry"))
+
+    async def _organization_tenant_id(self, organization_id: str) -> uuid.UUID | None:
+        """The id of the one active tenant linked to ``organization_id``, or ``None``.
+
+        Captured as a plain id: a rollback in the retry loop expires loaded rows.
+        """
+        tenants = await self._tenant_repository.list_by_external_org_id(organization_id)
+        if len(tenants) != 1 or tenants[0].status != TenantStatus.active:
+            return None
+        return tenants[0].id
+
+    async def _assign_organization_member(self, user_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
+        """Give the user the global default role in the organization's tenant.
+
+        Global, as the canonical seed's roles are (``scripts/seed_zitadel.py``),
+        and created without permissions only when missing.
+        """
+        role = await self._role_repository.get_by_name(self._default_role_name)
+        if role is None:
+            role = Role(name=self._default_role_name, description="Default role assigned on just-in-time provisioning")
+            self._session.add(role)
+            await self._session.flush()
+        if await self._assignment_repository.get(user_id, tenant_id, role.id) is None:
+            self._session.add(UserTenantRole(user_id=user_id, tenant_id=tenant_id, role_id=role.id))
+            await self._session.flush()
 
     async def _assign_default_role(self, user_id: uuid.UUID) -> None:
         tenant = await self._get_or_create_tenant(self._default_tenant_name)
