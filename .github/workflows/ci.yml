@@ -450,8 +450,9 @@ jobs:
     # keycloak-test with the compose bootstrap admin, so this runs on every
     # pull request, forks and Dependabot included. The Descope E2E job above
     # needs secrets and serves its own SPA on localhost:3000, the only origin
-    # the realm's app clients redirect to, so the Keycloak suite has a job of
-    # its own (backend/tests/e2e_keycloak/).
+    # the realm's app clients redirect to, so Keycloak has a job of its own: the
+    # shared UI and API suite (backend/tests/e2e/, E2E_PROVIDER=keycloak) and
+    # the Keycloak suite (backend/tests/e2e_keycloak/).
     env:
       DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
     steps:
@@ -516,6 +517,17 @@ jobs:
           cd backend
           python -m alembic upgrade head
           python -m scripts.seed_keycloak
+
+      # The internal endpoints' shared secrets, generated per run as in the
+      # Descope E2E job: the shared suite's internal-endpoint tests compute
+      # their headers and HMACs from the same variables.
+      - name: Generate the test stack's shared secrets
+        run: |
+          for name in INTERNAL_IDENTITY_KEY DESCOPE_WEBHOOK_SECRET DESCOPE_FLOW_SYNC_SECRET; do
+            value="$(openssl rand -hex 32)"
+            echo "::add-mask::$value"
+            echo "$name=$value" >> "$GITHUB_ENV"
+          done
 
       - name: Start backend
         # The root's backend_environment without the admin client: this backend
@@ -612,11 +624,13 @@ jobs:
     permissions:
       contents: read
     timeout-minutes: 25
-    # No credential: infra/zitadel is applied to a fresh compose Zitadel with the
-    # token its first start writes to a volume, so this runs on every pull
-    # request, forks and Dependabot included. The SPA is served on
-    # localhost:3000, the origin the root's applications redirect to, so the
-    # suite has a job of its own (backend/tests/e2e_zitadel/).
+    # This job uses no repository secrets. infra/zitadel is applied to a fresh
+    # compose Zitadel with the token its first start writes to a volume, so
+    # this runs on every pull request, forks and Dependabot included. The SPA
+    # is served on localhost:3000, the origin the root's applications redirect
+    # to, so Zitadel has a job of its own: the shared UI and API suite
+    # (backend/tests/e2e/, E2E_PROVIDER=zitadel) and the Zitadel suite
+    # (backend/tests/e2e_zitadel/).
     env:
       DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
     steps:
@@ -673,6 +687,17 @@ jobs:
             | jq -er 'to_entries[] | if (.key | test("^VITE_OIDC_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
           eval "$vars"
           cd frontend && VITE_OIDC_TENANT_SCOPE_TEMPLATE= npm run build
+
+      # The internal endpoints' shared secrets, generated per run as in the
+      # Descope E2E job: the shared suite's internal-endpoint tests compute
+      # their headers and HMACs from the same variables.
+      - name: Generate the test stack's shared secrets
+        run: |
+          for name in INTERNAL_IDENTITY_KEY DESCOPE_WEBHOOK_SECRET DESCOPE_FLOW_SYNC_SECRET; do
+            value="$(openssl rand -hex 32)"
+            echo "::add-mask::$value"
+            echo "$name=$value" >> "$GITHUB_ENV"
+          done
 
       - name: Start backend
         # The root's backend_environment without ZITADEL_ADMIN_TOKEN, with

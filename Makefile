@@ -78,25 +78,25 @@ KEYCLOAK_TEST_TARGET_JQ := def setting(name): .[name] // error("backend_environm
 	| to_entries[] | "export \(.key)=\(.value | @sh)"
 
 .PHONY: test-e2e-keycloak
-test-e2e-keycloak: ## run the Keycloak e2e suite (requires keycloak-test with infra/keycloak applied, the backend and the SPA built from its outputs on localhost:3000; see docs/keycloak.md)
+test-e2e-keycloak: ## run the shared UI and API e2e suite and the Keycloak suite against Keycloak (requires keycloak-test with infra/keycloak applied, the backend and the SPA built from its outputs on localhost:3000; see docs/keycloak.md)
 	@outputs="$$(terraform -chdir=infra/keycloak output -json)" || { \
 		echo "test-e2e-keycloak: no outputs; apply infra/keycloak first (docs/keycloak.md)." >&2; \
 		exit 1; \
 	}; \
 	exports="$$(printf '%s' "$$outputs" | jq -er '$(KEYCLOAK_TEST_TARGET_JQ)')" || exit 1; \
 	eval "$$exports"; \
-	cd backend && python -m pytest tests/e2e_keycloak/ -v $(PYTEST_ARGS)
+	cd backend && E2E_PROVIDER=keycloak python -m pytest tests/e2e/ tests/e2e_keycloak/ -v $(PYTEST_ARGS)
 
 # The suite reads the applied root's outputs (test users, client ids) from
 # ZITADEL_TERRAFORM_OUTPUTS. PYTEST_ARGS passes extra pytest options (CI's
 # screenshots and traces).
 .PHONY: test-e2e-zitadel
-test-e2e-zitadel: ## run the Zitadel e2e suite (requires the compose Zitadel with infra/zitadel applied and seeded, the backend and the Zitadel-built SPA on localhost:3000; see docs/zitadel.md)
+test-e2e-zitadel: ## run the shared UI and API e2e suite and the Zitadel suite against Zitadel (requires the compose Zitadel with infra/zitadel applied and seeded, the backend and the Zitadel-built SPA on localhost:3000; see docs/zitadel.md)
 	@outputs="$$(terraform -chdir=infra/zitadel output -json)" || { \
 		echo "test-e2e-zitadel: no outputs; apply infra/zitadel first (docs/zitadel.md)." >&2; \
 		exit 1; \
 	}; \
-	cd backend && ZITADEL_TERRAFORM_OUTPUTS="$$outputs" python -m pytest tests/e2e_zitadel/ -v $(PYTEST_ARGS)
+	cd backend && E2E_PROVIDER=zitadel ZITADEL_TERRAFORM_OUTPUTS="$$outputs" python -m pytest tests/e2e/ tests/e2e_zitadel/ -v $(PYTEST_ARGS)
 
 test-all: lint test-unit test-frontend test-integration ## run all checks
 
