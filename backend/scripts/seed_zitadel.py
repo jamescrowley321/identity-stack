@@ -11,13 +11,15 @@ standard input and writes, idempotently:
   ``viewer`` in ``globex``.
 
 A second run with the same output changes nothing. The seed takes over nothing
-it did not write: it refuses, writing nothing, when ``acme`` or ``globex`` is
-already linked to another organization (``external_org_id`` is shared with the
-other providers), or when a user with the test user's email exists without a
-link to its Zitadel user. After ``make zitadel-reset`` and a new ``terraform
-apply`` the ids are new, so the seed needs a database it has not seeded. The
-``globex`` test user is left for first login to provision, and the third
-organization gets no tenant.
+it did not write: it refuses, writing nothing, when a ``zitadel`` provider row
+exists that differs from the one it writes or is inactive, when ``acme`` or
+``globex`` is already linked to another organization or another tenant holds
+its organization (``external_org_id`` is shared with the other providers), or
+when a user with the test user's email exists without a link to its Zitadel
+user. An ``acme`` or ``globex`` tenant with no organization is linked. After
+``make zitadel-reset`` and a new ``terraform apply`` the ids are new, so the
+seed needs a database it has not seeded. The ``globex`` test user is left for
+first login to provision, and the third organization gets no tenant.
 
 Canonical roles are matched by name among the global roles (``tenant_id`` is
 NULL) and created, without permissions, only when missing.
@@ -142,19 +144,24 @@ async def _ensure_provider(session: AsyncSession, seed: SeedInput, changes: list
         await session.flush()
         changes.append(f"created provider {PROVIDER_NAME!r} (issuer {wanted.issuer_url})")
         return wanted
+    # A row that differs, or was deactivated, is someone else's decision: the seed
+    # neither rewrites nor reactivates it.
     fields = ("type", "issuer_url", "base_url", "capabilities", "active")
     current = {field: getattr(provider, field) for field in fields}
     target = {field: getattr(wanted, field) for field in fields}
     if current != target:
-        for field, value in target.items():
-            setattr(provider, field, value)
-        changes.append(f"updated provider {PROVIDER_NAME!r} from {current} to {target}")
+        raise SeedConflictError(f"provider {PROVIDER_NAME!r} exists as {current}, not {target}")
     return provider
 
 
 async def _ensure_tenants(session: AsyncSession, seed: SeedInput, changes: list[str]) -> dict[str, Tenant]:
     tenants: dict[str, Tenant] = {}
     for name, org_id in sorted(seed.tenants.items()):
+        # external_org_id is not unique: an organization another tenant holds is not the seed's to share.
+        holder_query = select(Tenant.name).where(Tenant.external_org_id == org_id, Tenant.name != name)
+        holder = (await session.execute(holder_query)).scalars().first()
+        if holder is not None:
+            raise SeedConflictError(f"organization {org_id} is already linked to tenant {holder!r}, not {name!r}")
         tenant = (await session.execute(select(Tenant).where(Tenant.name == name))).scalars().first()
         if tenant is None:
             tenant = Tenant(name=name, external_org_id=org_id, status=TenantStatus.active)
@@ -244,7 +251,7 @@ async def apply_seed(session: AsyncSession, seed: SeedInput) -> list[str]:
     """Write the seed in ``session`` and commit. Returns what changed; an empty list on a rerun.
 
     Raises ``SeedConflictError``, having committed nothing, when the store holds a
-    tenant or user the seed would have to take over; the caller rolls back.
+    provider, tenant or user the seed would have to take over; the caller rolls back.
     """
     changes: list[str] = []
     provider = await _ensure_provider(session, seed, changes)
