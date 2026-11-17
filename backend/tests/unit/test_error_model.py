@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from app.errors.identity import (
     Conflict,
+    EmailLinkRefused,
     Forbidden,
     IdentityError,
     NotFound,
@@ -76,7 +77,7 @@ class TestProblemDetailResponse:
 class TestErrorTypeMap:
     def test_all_subclasses_registered(self):
         """Every IdentityError subclass must be in the map."""
-        expected = {NotFound, Conflict, ValidationError, SyncFailed, ProviderError, Forbidden}
+        expected = {NotFound, Conflict, EmailLinkRefused, ValidationError, SyncFailed, ProviderError, Forbidden}
         assert set(_ERROR_TYPE_MAP.keys()) == expected
 
     def test_status_codes(self):
@@ -306,6 +307,13 @@ class TestErrorSanitisation:
         body = json.loads(response.body)
         assert "t-123" not in body["detail"]
         assert body["detail"] == _SANITIZED_DETAIL[Forbidden]
+
+    def test_email_link_refused_detail_is_sanitised(self):
+        """It must not say the email is held: that would tell anyone who asks whose emails exist."""
+        result: Result[dict, IdentityError] = Error(EmailLinkRefused(message="a@acme.test is held"))
+        response = result_to_response(result, _make_request())
+        body = json.loads(response.body)
+        assert (response.status_code, body["detail"]) == (409, "Could not provision identity")
 
     def test_not_found_detail_is_not_sanitised(self):
         """NotFound is safe to pass through — no upstream internals."""

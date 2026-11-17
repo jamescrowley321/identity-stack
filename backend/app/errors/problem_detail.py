@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from app.errors.identity import (
     Conflict,
+    EmailLinkRefused,
     Forbidden,
     IdentityError,
     IdentityErrorRaised,
@@ -54,6 +55,7 @@ class _ErrorMapping:
 _ERROR_TYPE_MAP: dict[type[IdentityError], _ErrorMapping] = {
     NotFound: _ErrorMapping(uri="/errors/not-found", status=404, title="Resource Not Found"),
     Conflict: _ErrorMapping(uri="/errors/conflict", status=409, title="Conflict"),
+    EmailLinkRefused: _ErrorMapping(uri="/errors/conflict", status=409, title="Conflict"),
     ValidationError: _ErrorMapping(uri="/errors/validation", status=422, title="Validation Error"),
     SyncFailed: _ErrorMapping(uri="/errors/sync-failed", status=207, title="Sync Partial Success"),
     ProviderError: _ErrorMapping(uri="/errors/provider-error", status=502, title="Provider Error"),
@@ -65,6 +67,7 @@ _SANITIZED_DETAIL: dict[type[IdentityError], str] = {
     ProviderError: "An upstream provider error occurred. Check server logs for details.",
     SyncFailed: "The local operation succeeded but upstream synchronisation failed.",
     Forbidden: "You do not have permission to perform this action.",
+    EmailLinkRefused: "Could not provision identity",
 }
 
 

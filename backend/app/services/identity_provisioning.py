@@ -21,7 +21,7 @@ from opentelemetry import trace
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.errors.identity import Conflict, Forbidden, IdentityError, NotFound, ValidationError
+from app.errors.identity import Conflict, EmailLinkRefused, Forbidden, IdentityError, NotFound, ValidationError
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.role import Role
 from app.models.identity.tenant import Tenant, TenantStatus
@@ -96,7 +96,12 @@ class IdentityProvisioningService:
         ``external_org_id`` is that organization, in place of the default
         tenant. No such tenant, or more than one, is ``Forbidden`` and nothing
         is written: an organization grants a membership only where a canonical
-        tenant already names it.
+        tenant already names it. Nor is such a login ever linked to an existing
+        canonical user by email: that is ``EmailLinkRefused``, and nothing is
+        written. An organization's administrators can create a user with any
+        email and mark it verified, so on this path a verified email is not
+        proof the login is that user's. An administrator links such a user
+        beforehand (``scripts/seed_zitadel.py`` writes the ``idp_links`` row).
         """
         with tracer.start_as_current_span(
             "IdentityProvisioningService.provision",
@@ -116,9 +121,10 @@ class IdentityProvisioningService:
 
             organization_tenant_id: uuid.UUID | None = None
             if organization_id is not None:
-                organization_tenant_id = await self._organization_tenant_id(organization_id)
-                if organization_tenant_id is None:
-                    return Error(Forbidden("The organization is not linked to exactly one active tenant"))
+                linked = await self.organization_tenant_id(organization_id)
+                if linked.is_error():
+                    return Error(linked.error)
+                organization_tenant_id = linked.ok
 
             # Account-takeover guard: never create or link on an unverified email.
             # An attacker who asserts a victim's (unverified) email must not be
@@ -133,6 +139,8 @@ class IdentityProvisioningService:
             for _ in range(2):
                 try:
                     user = await self._user_repository.get_by_email(email)
+                    if user is not None and organization_tenant_id is not None:
+                        return Error(EmailLinkRefused("The email is held by a canonical user this login may not link"))
                     if user is None:
                         user = User(
                             email=email,
@@ -171,15 +179,19 @@ class IdentityProvisioningService:
                     # Otherwise a bootstrap race on the default tenant/role — retry.
             return Error(Conflict("Could not provision identity after retry; please retry"))
 
-    async def _organization_tenant_id(self, organization_id: str) -> uuid.UUID | None:
-        """The id of the one active tenant linked to ``organization_id``, or ``None``.
+    async def organization_tenant_id(self, organization_id: str) -> Result[uuid.UUID, IdentityError]:
+        """The id of the one active tenant linked to ``organization_id``; ``Forbidden`` when there is none.
 
-        Captured as a plain id: a rollback in the retry loop expires loaded rows.
+        Read-only. ``GET /api/identity`` asks it before fetching UserInfo, so a
+        token of an unlinked organization costs the provider nothing;
+        ``provision`` asks again before it writes.
+        Returned as a plain id: a rollback in the retry loop expires loaded rows.
         """
-        tenants = await self._tenant_repository.list_by_external_org_id(organization_id)
-        if len(tenants) != 1 or tenants[0].status != TenantStatus.active:
-            return None
-        return tenants[0].id
+        with tracer.start_as_current_span("IdentityProvisioningService.organization_tenant_id"):
+            tenants = await self._tenant_repository.list_by_external_org_id(organization_id)
+            if len(tenants) != 1 or tenants[0].status != TenantStatus.active:
+                return Error(Forbidden("The organization is not linked to exactly one active tenant"))
+            return Ok(tenants[0].id)
 
     async def _assign_organization_member(self, user_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
         """Give the user the global default role in the organization's tenant.
