@@ -93,14 +93,15 @@ that synced to Descope sync to Keycloak instead.
 
 | Canonical change | What the adapter does in Keycloak |
 |---|---|
-| A tenant is created (`sync_tenant`) | Creates the organization whose alias is the canonical tenant id, named as the tenant, with its `self_provisioning_domains` as domains. Pushed again, it updates the name and, when given, the domains of the organization it finds by that alias. An update leaves the organization's attributes, the realm admin's `type:<type client>` grant markers, as they are. |
+| A tenant is created (`sync_tenant`) | Creates the organization whose alias is the canonical tenant id, named as the tenant, with its `self_provisioning_domains` as domains. Pushed again, it updates the name of the organization it finds by that alias and, when `self_provisioning_domains` is given, sets its domains to exactly that list (`[]` clears them). An update leaves the organization's attributes, the realm admin's `type:<type client>` grant markers, as they are. Domains that are not a list of names are an error, and nothing is sent. |
 | A tenant is deleted (`delete_tenant`) | Deletes that organization. One that is not there counts as deleted. |
-| A user is created or updated (`sync_user`) | Creates or updates the user whose username is the canonical user id, with the canonical email. |
+| A user is created or updated (`sync_user`) | Creates or updates the user whose username is the canonical user id, with the canonical email. A changed email is set unverified (`emailVerified: false`): the realm links identities across providers by verified email, and the new address has not been verified. |
 | A user is deactivated or activated | Disables (`inactive`) or enables (`active`, `provisioned`) that user. |
 | A user is deleted (`delete_user`) | Deletes that user. One that is not there counts as deleted. |
 | A role is assigned in a tenant (`sync_role_assignment`) | Adds the user to the tenant's organization: holding a role in a tenant is being its member. Already a member counts as added. |
-| A user is removed from a tenant (`remove_user_from_tenant`) | Ends the user's membership of that tenant's organization. Not a member, or no organization, counts as removed. |
-| A role or permission is defined, changed or deleted; one role of several is unassigned | Nothing. Roles and permissions stay canonical, as with Ory; a user keeps the membership while any role remains. |
+| A user is removed from a tenant (`remove_user_from_tenant`) | Ends the user's membership of that tenant's organization, before the profile update, so a refused update still ends it. Not a member, or no organization, counts as removed. |
+| A user's last role in a tenant is unassigned (`delete_role_assignment`) | Ends the user's membership of that tenant's organization. `RoleService` marks the unassignment that leaves no role in the tenant. Not a member, or no organization or user in Keycloak, counts as removed. |
+| A role or permission is defined, changed or deleted; one role of several is unassigned | Nothing. Roles and permissions stay canonical, as with Ory; a user keeps the membership while another role in the tenant remains. |
 
 Every failure comes back to the service as an error, with the HTTP status, and is logged; the
 canonical change stands, as with Descope. Nothing raises. The unit tests replay answers recorded
@@ -116,6 +117,7 @@ What Keycloak does not do, or the adapter does not take on:
 | An organization's name must be unique in the realm. | A second tenant with a name another organization holds is refused (409). |
 | A role assignment is not mirrored to client roles. Client roles are realm-wide and say nothing of an organization (decision 10); the realm admin grants them and the `type:` markers. | The membership is pushed; the grant is not. |
 | A membership can be pushed only once the tenant and the user are both in Keycloak. | Assigning a role in a tenant that was never pushed returns an error. |
+| Deleting a role removes its assignments in the database without telling the adapter which users lost their last role in a tenant. | A user whose only role in a tenant was the deleted role keeps the organization membership until it is ended another way: [identity-stack#610](https://github.com/jamescrowley321/identity-stack/issues/610). |
 
 ## Limits found
 

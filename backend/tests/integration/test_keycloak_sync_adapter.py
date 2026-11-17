@@ -18,6 +18,7 @@ from fastapi import FastAPI
 
 from app import main
 from app.dependencies import identity
+from app.services.adapters.base import LAST_ROLE_IN_TENANT
 from app.services.adapters.keycloak import KeycloakSyncAdapter
 from app.services.keycloak_admin import (
     ADMIN_CLIENT_ID_VARIABLE,
@@ -137,6 +138,27 @@ class TestOrganizations:
         assert find_organization(realm, tenant_id) is None
         assert await sync.delete_tenant(tenant_id=tenant_id) == Ok(None)
 
+    async def test_an_empty_domain_list_clears_the_domains(self, sync, realm, tenant_id):
+        domain = f"{tenant_id.hex}.test"
+        await sync.sync_tenant(
+            tenant_id=tenant_id, data={"name": f"Sync {tenant_id}", "self_provisioning_domains": [domain]}
+        )
+
+        cleared = await sync.sync_tenant(
+            tenant_id=tenant_id, data={"name": f"Sync {tenant_id}", "self_provisioning_domains": []}
+        )
+
+        assert cleared == Ok(None)
+        assert find_organization(realm, tenant_id).get("domains", []) == []
+
+    async def test_a_new_organization_with_no_domains_is_created(self, sync, realm, tenant_id):
+        created = await sync.sync_tenant(
+            tenant_id=tenant_id, data={"name": f"Sync {tenant_id}", "self_provisioning_domains": []}
+        )
+
+        assert created == Ok(None)
+        assert find_organization(realm, tenant_id).get("domains", []) == []
+
     async def test_a_domain_another_organization_holds_is_an_error(self, sync, tenant_id):
         result = await sync.sync_tenant(
             tenant_id=tenant_id, data={"name": f"Sync {tenant_id}", "self_provisioning_domains": ["acme.test"]}
@@ -167,6 +189,21 @@ class TestUsers:
         assert find_user(realm, user_id) is None
         assert await sync.delete_user(user_id=user_id) == Ok(None)
 
+    async def test_a_changed_email_is_no_longer_verified(self, sync, realm, user_id):
+        await sync.sync_user(user_id=user_id, data={"email": email_of(user_id), "status": "active"})
+        user = find_user(realm, user_id)
+        realm.put(f"/users/{user['id']}", json={"emailVerified": True}).raise_for_status()
+
+        assert await sync.sync_user(user_id=user_id, data={"email": email_of(user_id), "status": "active"}) == Ok(None)
+        assert find_user(realm, user_id)["emailVerified"] is True
+
+        renamed = f"renamed-{email_of(user_id)}"
+        assert await sync.sync_user(user_id=user_id, data={"email": renamed, "status": "active"}) == Ok(None)
+        assert {key: find_user(realm, user_id)[key] for key in ("email", "emailVerified")} == {
+            "email": renamed,
+            "emailVerified": False,
+        }
+
     async def test_a_user_who_signed_up_in_keycloak_is_not_taken_over_by_email(self, sync, realm, user_id):
         result = await sync.sync_user(user_id=user_id, data={"email": FIXTURE_EMAIL, "status": "active"})
 
@@ -193,6 +230,37 @@ class TestMembers:
         assert await sync.sync_user(user_id=user_id, data=left) == Ok(None)
         assert members(realm, organization) == []
         assert await sync.sync_user(user_id=user_id, data=left) == Ok(None)
+
+    async def test_removing_the_last_role_in_the_tenant_ends_the_membership(self, sync, realm, tenant_id, user_id):
+        await sync.sync_tenant(tenant_id=tenant_id, data={"name": f"Sync {tenant_id}"})
+        await sync.sync_user(user_id=user_id, data={"email": email_of(user_id), "status": "active"})
+        organization = find_organization(realm, tenant_id)
+        role_id = uuid.uuid4()
+        await sync.sync_role_assignment(user_id=user_id, tenant_id=tenant_id, role_id=role_id)
+        last = {"role_name": "member", LAST_ROLE_IN_TENANT: True}
+
+        removed = await sync.delete_role_assignment(user_id=user_id, tenant_id=tenant_id, role_id=role_id, data=last)
+
+        assert removed == Ok(None)
+        assert members(realm, organization) == []
+        assert await sync.delete_role_assignment(
+            user_id=user_id, tenant_id=tenant_id, role_id=role_id, data=last
+        ) == Ok(None)
+
+    async def test_a_refused_profile_update_still_ends_the_membership(self, sync, realm, tenant_id, user_id):
+        await sync.sync_tenant(tenant_id=tenant_id, data={"name": f"Sync {tenant_id}"})
+        await sync.sync_user(user_id=user_id, data={"email": email_of(user_id), "status": "active"})
+        organization = find_organization(realm, tenant_id)
+        await sync.sync_role_assignment(user_id=user_id, tenant_id=tenant_id, role_id=uuid.uuid4())
+
+        # The fixture user holds this email, so Keycloak refuses the update.
+        left = {"email": FIXTURE_EMAIL, "status": "active", "left_tenant_id": str(tenant_id)}
+        result = await sync.sync_user(user_id=user_id, data=left)
+
+        assert result.is_error()
+        assert result.error.context["status"] == 409
+        assert members(realm, organization) == []
+        assert find_user(realm, user_id)["email"] == email_of(user_id)
 
     async def test_adding_to_a_tenant_not_pushed_is_an_error(self, sync, tenant_id, user_id):
         await sync.sync_user(user_id=user_id, data={"email": email_of(user_id), "status": "active"})

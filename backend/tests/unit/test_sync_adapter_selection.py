@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from expression import Ok
+from fastapi import FastAPI
 
 from app import main
 from app.dependencies import identity
@@ -16,13 +17,18 @@ from app.dependencies.identity import (
     get_tenant_service,
     get_user_service,
 )
+from app.models.identity.assignment import UserTenantRole
+from app.models.identity.role import Role
 from app.models.identity.user import User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
+from app.repositories.permission import PermissionRepository
+from app.repositories.role import RoleRepository
 from app.repositories.user import UserRepository
-from app.services.adapters.base import IdentityProviderAdapter
+from app.services.adapters.base import LAST_ROLE_IN_TENANT, IdentityProviderAdapter
 from app.services.adapters.descope import DescopeSyncAdapter
 from app.services.adapters.keycloak import KeycloakSyncAdapter
-from app.services.keycloak_admin import ADMIN_CREDENTIAL_VARIABLE
+from app.services.keycloak_admin import ADMIN_CLIENT_ID_VARIABLE, ADMIN_CREDENTIAL_VARIABLE, KeycloakAdminApi
+from app.services.role import RoleService
 from app.services.user import UserService
 from tests.helpers.keycloak_admin_recorded import RecordedAdminApi
 from tests.unit.test_keycloak_admin_api import set_settings
@@ -138,6 +144,33 @@ class TestStartup:
         )
         assert built[0].is_closed
 
+    @pytest.mark.parametrize(
+        ("answer", "message"),
+        [
+            (
+                httpx.ConnectError("connection refused"),
+                "Keycloak gave the admin client's credential check no readable answer: "
+                "check KEYCLOAK_ISSUER_URL and that Keycloak is up",
+            ),
+            (
+                httpx.Response(404, json={"errorMessage": "Organizations not enabled for this realm."}),
+                "Keycloak answered the admin client's credential check with status 404: "
+                "check KEYCLOAK_ISSUER_URL names a realm with organizations enabled",
+            ),
+        ],
+        ids=["unreachable", "realm-wide-404"],
+    )
+    async def test_a_failed_check_that_is_not_a_refusal_says_so(self, monkeypatch, answer, message):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        set_settings(monkeypatch)
+        script = [answer] if isinstance(answer, Exception) else ["token", answer]
+        monkeypatch.setattr(main, "outbound_client", recorded_client(RecordedAdminApi(script)))
+
+        with pytest.raises(RuntimeError) as refused:
+            await main._start_sync_provider(FakeApp())
+
+        assert str(refused.value) == message
+
     async def test_a_missing_credential_stops_startup(self, monkeypatch):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
         set_settings(monkeypatch, **{ADMIN_CREDENTIAL_VARIABLE: None})
@@ -169,3 +202,139 @@ class TestLeavingATenant:
         adapter.sync_user.assert_awaited_once_with(
             user_id=user.id, data={"email": "a@b.test", "status": "active", "left_tenant_id": str(tenant_id)}
         )
+
+
+class TestLosingTheLastRole:
+    """RoleService tells the adapter when an unassignment leaves the user no role in the tenant."""
+
+    @staticmethod
+    def roles(remaining: list[UserTenantRole]) -> tuple[RoleService, AsyncMock, AsyncMock, Role]:
+        role = Role(id=uuid.uuid4(), name="editor", description="", tenant_id=None)
+        repo = AsyncMock(spec=RoleRepository)
+        repo.get.return_value = role
+        assignments = AsyncMock(spec=UserTenantRoleRepository)
+        assignments.delete.return_value = True
+        assignments.list_by_user_tenant.return_value = remaining
+        adapter = AsyncMock(spec=IdentityProviderAdapter)
+        adapter.delete_role_assignment.return_value = Ok(None)
+        service = RoleService(
+            repository=repo,
+            permission_repository=AsyncMock(spec=PermissionRepository),
+            assignment_repository=assignments,
+            adapter=adapter,
+            publisher=AsyncMock(),
+        )
+        return service, assignments, adapter, role
+
+    async def test_unassigning_the_only_role_says_it_was_the_last(self):
+        user_id, tenant_id = uuid.uuid4(), uuid.uuid4()
+        service, assignments, adapter, role = self.roles([])
+
+        await service.unassign_role_from_user(user_id=user_id, tenant_id=tenant_id, role_id=role.id)
+
+        assignments.list_by_user_tenant.assert_awaited_once_with(user_id, tenant_id)
+        adapter.delete_role_assignment.assert_awaited_once_with(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            role_id=role.id,
+            data={"role_name": "editor", LAST_ROLE_IN_TENANT: True},
+        )
+
+    async def test_unassigning_one_of_two_roles_sends_what_it_sent_before(self):
+        user_id, tenant_id = uuid.uuid4(), uuid.uuid4()
+        other = UserTenantRole(user_id=user_id, tenant_id=tenant_id, role_id=uuid.uuid4())
+        service, _assignments, adapter, role = self.roles([other])
+
+        await service.unassign_role_from_user(user_id=user_id, tenant_id=tenant_id, role_id=role.id)
+
+        adapter.delete_role_assignment.assert_awaited_once_with(
+            user_id=user_id, tenant_id=tenant_id, role_id=role.id, data={"role_name": "editor"}
+        )
+
+
+class FakeConnection:
+    async def __aenter__(self) -> "FakeConnection":
+        return self
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+    async def execute(self, statement) -> None:
+        return None
+
+
+class FakeEngine:
+    """Answers the lifespan's connectivity check; records its disposal."""
+
+    def __init__(self) -> None:
+        self.disposed = False
+
+    def connect(self) -> "FakeConnection":
+        return FakeConnection()
+
+    async def dispose(self) -> None:
+        self.disposed = True
+
+
+class TestLifespan:
+    """The real lifespan runs the Keycloak credential check before the application serves."""
+
+    @pytest.fixture
+    def started(self, monkeypatch) -> list[httpx.AsyncClient]:
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        monkeypatch.setenv("DESCOPE_PROJECT_ID", "P-local-test")
+        monkeypatch.setenv("DESCOPE_MANAGEMENT_KEY", "local-test-key")
+        monkeypatch.delenv("REDIS_URL", raising=False)
+        monkeypatch.setattr(main, "get_engine", FakeEngine)
+        monkeypatch.setattr(main, "init_telemetry", lambda **_kwargs: None)
+        built: list[httpx.AsyncClient] = []
+        return built
+
+    def build_into(self, monkeypatch, built: list, api: RecordedAdminApi) -> None:
+        def build(*, timeout: float) -> httpx.AsyncClient:
+            built.append(recorded_client(api)(timeout=timeout))
+            return built[-1]
+
+        monkeypatch.setattr(main, "outbound_client", build)
+
+    async def test_a_missing_admin_secret_stops_startup_before_serving(self, monkeypatch, started):
+        set_settings(monkeypatch, **{ADMIN_CREDENTIAL_VARIABLE: None})
+        api = RecordedAdminApi([])
+        self.build_into(monkeypatch, started, api)
+        served = []
+
+        with pytest.raises(RuntimeError) as refused:
+            async with main.lifespan(FastAPI()):
+                served.append(True)
+
+        assert str(refused.value) == "SYNC_PROVIDER is keycloak but KEYCLOAK_ADMIN_CLIENT_SECRET is not set"
+        assert served == []
+        assert api.sent == []
+        assert [client.is_closed for client in started] == [True, True]
+
+    async def test_a_wrong_admin_secret_stops_startup_before_serving(self, monkeypatch, started):
+        set_settings(monkeypatch, **{ADMIN_CREDENTIAL_VARIABLE: "wrong"})
+        api = RecordedAdminApi(["token_wrong_secret"])
+        self.build_into(monkeypatch, started, api)
+        served = []
+
+        with pytest.raises(RuntimeError, match="status 401") as refused:
+            async with main.lifespan(FastAPI()):
+                served.append(True)
+
+        assert served == []
+        assert ADMIN_CLIENT_ID_VARIABLE in str(refused.value)
+        assert [client.is_closed for client in started] == [True, True]
+
+    async def test_a_working_admin_secret_serves_and_closes_on_shutdown(self, monkeypatch, started):
+        set_settings(monkeypatch)
+        api = RecordedAdminApi(["token", "credential_check"])
+        self.build_into(monkeypatch, started, api)
+        app = FastAPI()
+
+        async with main.lifespan(app):
+            assert isinstance(app.state.keycloak_admin, KeycloakAdminApi)
+
+        assert api.script == []
+        assert app.state.keycloak_admin is None
+        assert [client.is_closed for client in started] == [True, True]

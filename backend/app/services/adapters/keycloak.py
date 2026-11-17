@@ -4,20 +4,25 @@ Through ``KeycloakAdminApi`` (the Admin REST API, one service account):
 
 - ``sync_tenant`` creates or updates the tenant's **organization**. Its alias is
   the canonical tenant id, which Keycloak never lets change; its name is the
-  tenant's name, and its domains the tenant's ``self_provisioning_domains`` when
-  given. An update sends only those fields, so the organization's attributes
-  (the realm admin's ``type:<type client>`` grant markers) and, when no domains
-  are given, its domains stay as they are.
+  tenant's name, and its domains exactly the tenant's ``self_provisioning_domains``
+  when that key is given (``[]`` clears them). An update sends only those fields,
+  so the organization's attributes (the realm admin's ``type:<type client>`` grant
+  markers) and, when the key is absent, its domains stay as they are.
 - ``delete_tenant`` deletes that organization; one not there is deleted.
 - ``sync_user`` creates or updates the user whose **username is the canonical
   user id**, with the canonical email, enabled while the status is ``active`` or
-  ``provisioned`` and disabled when ``inactive``. With ``left_tenant_id`` in the
-  data (``UserService.remove_user_from_tenant``) it also ends the user's
-  membership of that tenant's organization.
+  ``provisioned`` and disabled when ``inactive``. A changed email is sent with
+  ``emailVerified: false``: the realm trusts a verified email to link identities
+  across providers, and the new address has not been verified. With
+  ``left_tenant_id`` in the data (``UserService.remove_user_from_tenant``) it
+  first ends the user's membership of that tenant's organization, so a refused
+  profile update cannot keep the user in the tenant.
 - ``delete_user`` deletes that user; one not there is deleted.
 - ``sync_role_assignment`` adds the user to the tenant's organization: holding a
-  role in a tenant is being its member. ``delete_role_assignment`` calls nothing,
-  because another role may still hold the membership.
+  role in a tenant is being its member. ``delete_role_assignment`` ends that
+  membership when ``RoleService`` marks the removed role as the user's last in the
+  tenant (``LAST_ROLE_IN_TENANT``); otherwise another role still holds it and
+  nothing is called.
 - Roles and permissions stay canonical: their methods call nothing, as
   ``OrySyncAdapter``'s do.
 
@@ -38,7 +43,7 @@ from collections.abc import Awaitable, Callable
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
-from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.adapters.base import LAST_ROLE_IN_TENANT, IdentityProviderAdapter, SyncError
 from app.services.keycloak_admin import KeycloakAdminApi, KeycloakAdminError
 
 tracer = trace.get_tracer(__name__)
@@ -73,6 +78,18 @@ def _tenant_uuid(value: object) -> str:
         raise _Refused("left_tenant_id is not a tenant id") from None
 
 
+def _domains(value: object) -> list[dict]:
+    """``self_provisioning_domains`` as Keycloak organization domains. Anything but a list of names is refused."""
+    if not isinstance(value, list) or not all(isinstance(domain, str) and domain for domain in value):
+        raise _Refused("self_provisioning_domains is not a list of domain names")
+    return [{"name": domain} for domain in value]
+
+
+def _same_email(held: object, sent: str) -> bool:
+    """Whether ``sent`` is the address Keycloak holds; Keycloak stores emails in lower case."""
+    return isinstance(held, str) and held.lower() == sent.lower()
+
+
 class KeycloakSyncAdapter(IdentityProviderAdapter):
     """Syncs canonical tenants and users to Keycloak organizations and users. Roles stay canonical."""
 
@@ -90,9 +107,11 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
             return _error("sync_tenant", "Missing required sync data: name is required", context, None)
         alias = str(tenant_id)
         representation: dict = {"name": name, "alias": alias}
-        domains = data.get("self_provisioning_domains")
-        if domains:
-            representation["domains"] = [{"name": domain} for domain in domains]
+        if "self_provisioning_domains" in data:
+            try:
+                representation["domains"] = _domains(data["self_provisioning_domains"])
+            except _Refused as exc:
+                return _error("sync_tenant", str(exc), context, None)
 
         async def push() -> None:
             organization = await self._api.find_organization(alias)
@@ -143,11 +162,15 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
                 # A user created now belongs to no organization, so there is none to leave.
                 await self._api.create_user({"username": username, "email": email, "enabled": _ENABLED[status]})
                 return
-            await self._api.update_user(user["id"], {"email": email, "enabled": _ENABLED[status]})
             if left_alias is not None:
+                # Before the profile update: a refused update must not keep the user in the tenant.
                 organization = await self._api.find_organization(left_alias)
                 if organization is not None:
                     await self._api.remove_member(organization["id"], user["id"])
+            update: dict = {"email": email, "enabled": _ENABLED[status]}
+            if not _same_email(user.get("email"), email):
+                update["emailVerified"] = False
+            await self._api.update_user(user["id"], update)
 
         with tracer.start_as_current_span("keycloak.sync_user") as span:
             span.set_attribute("user.id", username)
@@ -198,8 +221,29 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
         role_id: uuid.UUID,
         data: dict | None = None,
     ) -> Result[None, SyncError]:
-        # Another role may still hold the membership; leaving the tenant goes through sync_user.
-        return Ok(None)
+        """End the user's membership of the tenant's organization when this was their last role there.
+
+        Without ``LAST_ROLE_IN_TENANT: True`` in the data another role still holds
+        the membership, and nothing is called. A tenant or user not in Keycloak, or
+        a user who is not a member, has no membership to end.
+        """
+        if (data or {}).get(LAST_ROLE_IN_TENANT) is not True:
+            return Ok(None)
+        alias, username = str(tenant_id), str(user_id)
+
+        async def push() -> None:
+            organization = await self._api.find_organization(alias)
+            if organization is None:
+                return
+            user = await self._api.find_user(username)
+            if user is None:
+                return
+            await self._api.remove_member(organization["id"], user["id"])
+
+        with tracer.start_as_current_span("keycloak.delete_role_assignment") as span:
+            span.set_attribute("user.id", username)
+            span.set_attribute("tenant.id", alias)
+            return await _run("delete_role_assignment", {"tenant_id": alias, "user_id": username}, push)
 
     async def sync_role(self, *, role_id: uuid.UUID, data: dict) -> Result[None, SyncError]:
         # Roles are canonical-only.
