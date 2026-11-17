@@ -8,10 +8,10 @@ Requires DESCOPE_CLIENT_ID, DESCOPE_CLIENT_SECRET for auth_api_context.
 Requires DESCOPE_MANAGEMENT_KEY for admin_api_context.
 """
 
-import os
-
 import pytest
 from playwright.sync_api import APIRequestContext
+
+from tests.e2e.not_applicable import descope_credentials_missing
 
 # --- Unauthenticated endpoint tests (no credentials needed) ---
 
@@ -89,7 +89,7 @@ class TestUnauthenticatedEndpoints:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("DESCOPE_CLIENT_ID") or not os.environ.get("DESCOPE_CLIENT_SECRET"),
+    descope_credentials_missing("DESCOPE_CLIENT_ID", "DESCOPE_CLIENT_SECRET"),
     reason="DESCOPE_CLIENT_ID/DESCOPE_CLIENT_SECRET not set",
 )
 class TestAuthenticatedEndpoints:
@@ -137,7 +137,7 @@ class TestAuthenticatedEndpoints:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("DESCOPE_MANAGEMENT_KEY"),
+    descope_credentials_missing("DESCOPE_MANAGEMENT_KEY"),
     reason="DESCOPE_MANAGEMENT_KEY not set",
 )
 class TestAdminEndpoints:

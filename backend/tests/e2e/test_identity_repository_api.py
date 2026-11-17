@@ -8,15 +8,15 @@ Requires DESCOPE_MANAGEMENT_KEY env var for admin token.
 """
 
 import contextlib
-import os
 
 import pytest
 from playwright.sync_api import APIRequestContext
 
 from tests.e2e.helpers.api import unique_name
+from tests.e2e.not_applicable import descope_credentials_missing
 
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("DESCOPE_MANAGEMENT_KEY"),
+    descope_credentials_missing("DESCOPE_MANAGEMENT_KEY"),
     reason="DESCOPE_MANAGEMENT_KEY not set",
 )
 
