@@ -101,6 +101,11 @@ tenant with no organization is linked to its organization. After `make zitadel-r
 new, so seed a database the seed has not seeded before. The `globex` test user is left for first
 login to provision; `Unlinked` gets no tenant.
 
+[`backend/tests/fixtures/zitadel/canonical-seed.json`](../../backend/tests/fixtures/zitadel/canonical-seed.json)
+is that output from a real apply, and a unit test reads it with the seed's parser. When a change
+to `outputs.tf` changes the output's shape, record it again with
+`terraform output -json canonical_seed` after an apply.
+
 ## Checking it
 
 `make zitadel-terraform-check` ([`scripts/check-against-compose.sh`](scripts/check-against-compose.sh))
@@ -111,7 +116,7 @@ container, and fails when the instance does not answer. It:
    files git does not ignore;
 2. runs `terraform plan` again and fails unless it is empty;
 3. runs [`scripts/check_instance.py`](scripts/check_instance.py), which reads the instance back:
-   the access-token lifetime; `allow_register` false in the default login policy and in each
+   the access-token lifetime against `access_token_lifetime` in `dev.tfvars`; `allow_register` false in the default login policy and in each
    organization's own policy; the Login V2 register page of every organization shows no form,
    only "registration is disabled"; the project's checks, roles and grants; no user role grant
    in any organization; both applications' settings; the users' organizations, verified emails
@@ -119,7 +124,8 @@ container, and fails when the instance does not answer. It:
    sensitive output or the admin token.
 
 The temporary directory holds generated secrets and is deleted when the check ends. It needs
-`terraform`, `curl` and `python3`. It runs on Linux.
+`terraform`, `curl` and the backend venv (`cd backend && uv sync --locked`), whose `httpx` the
+read-back uses. It runs on Linux.
 
 Two things the check observed about the instance, which it does not paper over:
 

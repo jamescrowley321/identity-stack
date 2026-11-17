@@ -7,18 +7,20 @@
 # organizations by name, so a second run against the same instance fails at
 # apply. The script needs the instance up and healthy and fails when it is not.
 # It never starts, stops or resets a container. Linux and CI only. Run from
-# anywhere in the repo, with terraform, curl and python3, and the bootstrap
+# anywhere in the repo, with terraform, curl, the backend venv and the bootstrap
 # admin's token in TF_VAR_zitadel_access_token (`make zitadel-terraform-check`
 # sets it from `make -s zitadel-admin-pat`).
 set -euo pipefail
 
 repo="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 root="$repo/infra/zitadel"
+python="$repo/backend/.venv/bin/python"
 
 missing=()
-for command in terraform curl python3; do
+for command in terraform curl; do
   command -v "$command" >/dev/null || missing+=("$command")
 done
+[ -x "$python" ] || missing+=("$python (cd backend && uv sync --locked)")
 if [ "${#missing[@]}" -gt 0 ]; then
   printf 'missing prerequisite: %s\n' "${missing[@]}" >&2
   exit 1
@@ -33,6 +35,11 @@ fi
 issuer="$(sed -n 's/^zitadel_url *= *"\(.*\)"$/\1/p' "$root/environments/dev.tfvars")"
 if [ -z "$issuer" ]; then
   echo "environments/dev.tfvars sets no zitadel_url" >&2
+  exit 1
+fi
+lifetime="$(sed -n 's/^access_token_lifetime *= *"\(.*\)"$/\1/p' "$root/environments/dev.tfvars")"
+if [ -z "$lifetime" ]; then
+  echo "environments/dev.tfvars sets no access_token_lifetime" >&2
   exit 1
 fi
 if ! curl -fsS --connect-timeout 5 --max-time 20 -o /dev/null "$issuer/.well-known/openid-configuration"; then
@@ -72,4 +79,4 @@ fi
 echo "terraform plan after apply: no changes"
 
 tf output -json >"$work/outputs.json"
-python3 -I "$root/scripts/check_instance.py" "$work/outputs.json"
+"$python" "$root/scripts/check_instance.py" "$work/outputs.json" "$lifetime"

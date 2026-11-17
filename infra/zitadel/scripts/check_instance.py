@@ -1,13 +1,15 @@
 """Read an applied infra/zitadel root back from the instance and check what the root promises.
 
-Usage: python3 -I check_instance.py <terraform output -json file>
+Usage: python check_instance.py <terraform output -json file> <access_token_lifetime>
 
-The instance's admin token comes from TF_VAR_zitadel_access_token, the variable the
-root itself reads. Standard library only. Exits 1 with every failed check listed.
+The second argument is the access_token_lifetime the root was applied with, as the
+Go duration dev.tfvars sets (15m0s). The instance's admin token comes from
+TF_VAR_zitadel_access_token, the variable the root itself reads. Needs httpx (the
+backend venv). Exits 1 with every failed check listed.
 
 Checks:
 - No non-sensitive output contains a sensitive output's value or the admin token.
-- The instance access-token lifetime is EXPECTED_ACCESS_TOKEN_LIFETIME.
+- The instance access-token lifetime is the one the root was applied with.
 - allow_register is false in the instance default login policy, and every
   organization has its own login policy with allow_register false.
 - Login V2 refuses a registration in every organization: the register page shows
@@ -23,12 +25,13 @@ Checks:
 
 import json
 import os
+import re
 import sys
-import urllib.error
-import urllib.request
 
-# environments/dev.tfvars: access_token_lifetime = "15m0s". Zitadel answers seconds.
-EXPECTED_ACCESS_TOKEN_LIFETIME = "900s"
+import httpx
+
+# A Go duration in hours, minutes and seconds, the form variables.tf accepts.
+GO_DURATION = re.compile(r"^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")
 PROJECT_ROLES = {"owner", "admin", "member", "viewer"}
 TENANT_ORGANIZATIONS = {"acme", "globex"}
 USER_ORGANIZATIONS = TENANT_ORGANIZATIONS | {"unlinked"}
@@ -47,6 +50,15 @@ def check(condition: bool, message: str) -> None:
         failures.append(message)
 
 
+def as_seconds(duration: str) -> str:
+    """Write a Go duration (15m0s) the way Zitadel's settings API answers it (900s)."""
+    match = GO_DURATION.match(duration)
+    if not duration or match is None:
+        raise ValueError(f"{duration!r} is not a Go duration in hours, minutes and seconds")
+    hours, minutes, seconds = (int(part or 0) for part in match.groups())
+    return f"{hours * 3600 + minutes * 60 + seconds}s"
+
+
 class Instance:
     def __init__(self, issuer: str, token: str) -> None:
         self.issuer = issuer
@@ -58,11 +70,11 @@ class Instance:
             headers["Authorization"] = f"Bearer {self.token}"
         if org_id:
             headers["x-zitadel-orgid"] = org_id
-        data = json.dumps(body).encode() if body is not None else None
-        request = urllib.request.Request(f"{self.issuer}{path}", data=data, headers=headers, method=method)
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-            raw = response.read().decode()
-        return raw if not auth else json.loads(raw)
+        response = httpx.request(
+            method, f"{self.issuer}{path}", headers=headers, json=body, timeout=TIMEOUT_SECONDS, follow_redirects=True
+        )
+        response.raise_for_status()
+        return response.text if not auth else response.json()
 
     def get(self, path: str, org_id: str | None = None) -> dict:
         return self._call("GET", path, org_id, None)
@@ -96,9 +108,9 @@ def check_outputs(outputs: dict, token: str) -> None:
         check(not any(secret and secret in text for secret in secrets), f"output {name} contains a secret")
 
 
-def check_settings(instance: Instance, org_ids: dict[str, str]) -> None:
+def check_settings(instance: Instance, org_ids: dict[str, str], expected_lifetime: str) -> None:
     lifetime = instance.get("/admin/v1/settings/oidc")["settings"].get("accessTokenLifetime")
-    check(lifetime == EXPECTED_ACCESS_TOKEN_LIFETIME, f"access-token lifetime is {lifetime}, expected {EXPECTED_ACCESS_TOKEN_LIFETIME}")
+    check(lifetime == expected_lifetime, f"access-token lifetime is {lifetime}, expected {expected_lifetime}")
 
     # A false boolean is left out of the JSON answer, so absent reads as false.
     default = instance.get("/admin/v1/policies/login")["policy"]
@@ -177,18 +189,22 @@ def check_users(instance: Instance, outputs: dict, org_ids: dict[str, str]) -> N
 def main() -> int:
     with open(sys.argv[1]) as handle:
         outputs = json.load(handle)
+    expected_lifetime = as_seconds(sys.argv[2])
     token = os.environ["TF_VAR_zitadel_access_token"]
     instance = Instance(outputs["issuer_url"]["value"], token)
     org_ids = outputs["organization_ids"]["value"]
 
     check_outputs(outputs, token)
     try:
-        check_settings(instance, org_ids)
+        check_settings(instance, org_ids, expected_lifetime)
         check_project(instance, outputs, org_ids)
         check_users(instance, outputs, org_ids)
-    except urllib.error.HTTPError as exc:
-        failures.append(f"the instance answered {exc.code} {exc.reason} to {exc.url}; later checks did not run")
-    except (urllib.error.URLError, TimeoutError) as exc:
+    except httpx.HTTPStatusError as exc:
+        response = exc.response
+        failures.append(
+            f"the instance answered {response.status_code} {response.reason_phrase} to {exc.request.url}; later checks did not run"
+        )
+    except httpx.TransportError as exc:
         failures.append(f"the instance did not answer: {exc}; later checks did not run")
     except (json.JSONDecodeError, KeyError) as exc:
         failures.append(f"the instance's answer is not the expected shape ({exc!r}); later checks did not run")
