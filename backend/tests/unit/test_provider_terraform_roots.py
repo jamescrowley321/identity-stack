@@ -10,7 +10,11 @@ the app does not read, and fails here. The plain-HTTP rule is written once, in
 The roots are read as text: the unit suite runs without Terraform.
 """
 
+import json
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -190,14 +194,38 @@ def test_e2e_job_writes_no_provider_setting_by_hand(root: str) -> None:
     assert sorted(_job_env_names(_e2e_job(root)) & provider_settings) == []
 
 
+def _jq(filter_text: str, document: object, *options: str) -> list[str]:
+    """Lines printed by ``jq <options> <filter>`` over ``document``; jq is required, as in CI."""
+    jq = shutil.which("jq")
+    assert jq is not None, "jq is not on PATH: the CI steps and make targets under test run it"
+    printed = subprocess.run(
+        [jq, *options, filter_text],
+        input=json.dumps(document),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return printed.stdout.splitlines()
+
+
+def _sample_environment(root: str, output: str) -> dict[str, str]:
+    """Every key of the root's output, each with a value naming it."""
+    return {key: f"value of {key}" for key in _map_keys(_block(_root_text(root), "output", output))}
+
+
 @pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
 def test_e2e_backend_reads_backend_environment_without_the_admin_credential(root: str) -> None:
+    """The step's own jq filter, run over every backend_environment key, exports all but the admin credential."""
     run = _step_run(_e2e_job(root), BACKEND_STEP)
-    # The jq filter clauses, up to the pipe after each: the admin credential must be in one.
-    selects = re.findall(r"select\((.*?)\)\s*\|", run)
+    filters = [text for text in re.findall(r"jq -er '([^']*)'", run) if "to_entries" in text]
+    environment = _sample_environment(root, "backend_environment")
+    expected = sorted(key for key in environment if not key.startswith(ADMIN_CREDENTIALS[root]))
 
     assert f"terraform -chdir=infra/{root} output -json backend_environment" in run
-    assert [clause for clause in selects if ADMIN_CREDENTIALS[root] in clause] != []
+    assert len(filters) == 1, f"{BACKEND_STEP} should export through one to_entries jq filter: {filters}"
+    assert sorted(environment) != expected, f"infra/{root} backend_environment has no admin credential to drop"
+    exported = _jq(filters[0], environment, "-er")
+    assert sorted(line.split("=", 1)[0].removeprefix("export ") for line in exported) == expected
 
 
 @pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
@@ -206,3 +234,45 @@ def test_e2e_target_reads_the_outputs(root: str) -> None:
 
     assert recipe is not None
     assert f"terraform -chdir=infra/{root} output -json" in recipe.group(1)
+
+
+@pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
+def test_env_target_prints_both_environments_from_the_outputs(root: str, tmp_path: Path) -> None:
+    """``make <root>-env`` reads ``terraform -chdir=infra/<root> output -json`` and prints both maps."""
+    outputs = {
+        output: {"sensitive": output == "backend_environment", "value": _sample_environment(root, output)}
+        for output in ("backend_environment", "frontend_environment")
+    }
+    expected_call = f"-chdir=infra/{root} output -json"
+    fake_terraform = tmp_path / "terraform"
+    fake_terraform.write_text(
+        "#!/bin/sh\n"
+        f'[ "$*" = "{expected_call}" ] || {{ echo "unexpected terraform $*" >&2; exit 2; }}\n'
+        f"cat <<'JSON'\n{json.dumps(outputs)}\nJSON\n"
+    )
+    fake_terraform.chmod(0o755)
+    make = shutil.which("make")
+    assert make is not None, "make is not on PATH"
+
+    printed = subprocess.run(
+        [make, "-s", "-C", str(REPO), f"{root}-env"],
+        env={**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    sections: dict[str, dict[str, str]] = {}
+    current = ""
+    for line in printed.stdout.splitlines():
+        if line.startswith("# "):
+            current = line.removeprefix("# ")
+            sections[current] = {}
+        elif line:
+            name, value = line.split("=", 1)
+            sections[current][name] = value
+    quoted = {output: {name: f"'{value}'" for name, value in outputs[output]["value"].items()} for output in outputs}
+    assert sections == {
+        "backend/.env": quoted["backend_environment"],
+        "frontend/.env": quoted["frontend_environment"],
+    }

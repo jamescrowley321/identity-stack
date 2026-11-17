@@ -74,6 +74,7 @@ select = ["E", "F", "I", "W", "S", "TID251", "G004", "G010"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106", "TID251"]  # assert, hardcoded passwords OK in tests; house bans cover app/ only
+"tests/unit/test_provider_terraform_roots.py" = ["S603"]  # runs the CI step's jq filter and the make target under test
 "app/knobs.py" = ["TID251"]  # the settings module: the one reader of os.environ
 "app/outbound.py" = ["TID251"]  # the HTTP client helper: the one importer of httpx
 "app/logbook.py" = ["TID251"]  # the logging helper: the one caller of logging.getLogger
