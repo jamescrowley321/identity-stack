@@ -5,7 +5,8 @@ repository that shows it (a test, a recorded fixture, a Terraform root), so no c
 rests on a provider's documentation alone. "Not built" and "Planned" name the issue
 that tracks the gap. A cited file must exist, and a cited ``path::A::b`` must name a
 class or function ``A`` defined at the top of that file and ``b`` defined in ``A``.
-A cited path must stay inside the repository, and only a Python file can define a name.
+A cited path must stay inside the repository, only a Python file can define a name, and a
+span that opens as a ``file.py::`` citation but does not parse as one is reported.
 Every table of an area has one column per provider, and a row where Keycloak and
 Zitadel differ is explained in the gaps section by its issue or its label in bold or code.
 
@@ -51,6 +52,9 @@ ISSUE = re.compile(r"#\d+")
 # A repository path, optionally followed by ``::Name`` parts: no scheme, no
 # leading slash, no placeholder, at least one directory or a file extension.
 PATH = re.compile(r"^(?P<path>[\w.-]+(?:/[\w.-]+)*\.[A-Za-z]\w*|[\w.-]+(?:/[\w.-]+)+/?)(?P<names>(?:::\w+)*)$")
+# A code span that starts as a ``file.py::`` citation; one that PATH does not then
+# read whole (``x.py::A.b``, ``x.py::t[p]``) is malformed, not silently ignored.
+PYTHON_CITATION = re.compile(r"^[\w./-]+\.py::")
 # Where the gaps section names a row on purpose: a code span or a bold run.
 DELIBERATE = re.compile(r"`([^`]+)`|\*\*(.+?)\*\*")
 
@@ -143,6 +147,15 @@ def _paths(text: str) -> list[tuple[str, list[str]]]:
     return found
 
 
+def _malformed(text: str) -> list[str]:
+    """The code spans of ``text`` that open as a ``file.py::`` citation but do not parse as one."""
+    return [
+        f"`{span}` is not a well-formed path::Name citation"
+        for span in CODE_SPAN.findall(text)
+        if PYTHON_CITATION.match(span) and not PATH.match(span)
+    ]
+
+
 DEFINITIONS = (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
 
 
@@ -217,7 +230,8 @@ def test_every_cited_file_exists_and_every_cited_name_is_defined_in_it():
         for path, names in _paths(cell.text)
         for problem in _missing(path, names)
     ]
-    assert missing == []
+    malformed = [f"{cell.where}: {problem}" for cell in _all_cells() for problem in _malformed(cell.text)]
+    assert missing + malformed == []
 
 
 def test_the_planned_provider_is_planned_in_every_cell():
@@ -411,6 +425,19 @@ class TestTheChecksThemselves:
         ]
         assert _matrix_tables(lines) == [[["a", "1", "2", "3", "4", "5"]]]
         assert _misheaded_tables(lines) == ["| Row | Descope | Ory | Keycloak |"]
+
+    @pytest.mark.parametrize(
+        "span",
+        ["x.py::TestA.test_b", "x.py::test_x[param]", "x.py::Test-Name", "backend/x.py::A::", "x.py::"],
+    )
+    def test_a_python_citation_that_does_not_parse_is_reported(self, span):
+        assert _malformed(f"Supported (`backend/tests/unit/test_provider_matrix.py`, `{span}`)") == [
+            f"`{span}` is not a well-formed path::Name citation"
+        ]
+
+    def test_a_well_formed_citation_or_a_plain_value_is_not_malformed(self):
+        text = "Supported (`backend/tests/unit/test_x.py::TestA::test_b`, `x.py`, `GET /api/identity`, `a::b`)"
+        assert _malformed(text) == []
 
     @pytest.mark.parametrize("span", ["v2.2.0", "26.8.2", "1.2"])
     def test_a_version_is_not_a_path(self, span):
