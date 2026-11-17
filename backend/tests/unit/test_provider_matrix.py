@@ -1,0 +1,235 @@
+"""``docs/providers.md``: every cell of the provider matrix is backed by something checkable.
+
+A cell opens with its status. "Supported" and "Not supported" name a file of this
+repository that shows it (a test, a recorded fixture, a Terraform root), so no cell
+rests on a provider's documentation alone. "Not built" and "Planned" name the issue
+that tracks the gap. A cited file must exist, and a cited ``path::name`` must name a
+class or function defined in that file.
+"""
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[3]
+MATRIX = REPO / "docs" / "providers.md"
+
+PROVIDERS = ("Descope", "Ory", "Keycloak", "Zitadel", "Cloudflare Access")
+PLANNED_PROVIDER = "Cloudflare Access"
+SECTIONS = (
+    "Tokens",
+    "Tenancy",
+    "Authorization",
+    "Admin operations",
+    "Flows and protocol features",
+    "Operations",
+    "Test coverage",
+)
+
+SUPPORTED = "Supported"
+NOT_SUPPORTED = "Not supported"
+NOT_BUILT = "Not built"
+NOT_APPLICABLE = "Not applicable"
+PLANNED = "Planned"
+STATUSES = (NOT_SUPPORTED, NOT_BUILT, NOT_APPLICABLE, PLANNED, SUPPORTED)
+NEEDS_A_FILE = (SUPPORTED, NOT_SUPPORTED)
+NEEDS_AN_ISSUE = (NOT_BUILT, PLANNED)
+
+CODE_SPAN = re.compile(r"`([^`]+)`")
+ISSUE = re.compile(r"#\d+")
+# A repository path, optionally followed by ``::Name`` parts: no scheme, no
+# leading slash, no placeholder, at least one directory or a file extension.
+PATH = re.compile(r"^(?P<path>[\w.-]+(?:/[\w.-]+)*\.[\w]+|[\w.-]+(?:/[\w.-]+)+/?)(?P<names>(?:::\w+)*)$")
+
+
+@dataclass(frozen=True)
+class Cell:
+    section: str
+    row: str
+    provider: str
+    text: str
+
+    @property
+    def where(self) -> str:
+        return f"{self.section} / {self.row} / {self.provider}"
+
+    @property
+    def status(self) -> str | None:
+        return next((status for status in STATUSES if self.text.startswith(status)), None)
+
+
+def _cells_of(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _sections(text: str) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            current = sections.setdefault(line[3:].strip(), [])
+        elif current is not None:
+            current.append(line)
+    return sections
+
+
+def _matrix_tables(lines: list[str]) -> list[list[list[str]]]:
+    """The tables of ``lines`` whose header names the providers, as rows of cells, body only."""
+    tables: list[list[list[str]]] = []
+    block: list[str] = []
+    for line in [*lines, ""]:
+        if line.startswith("|"):
+            block.append(line)
+            continue
+        if len(block) > 2 and tuple(_cells_of(block[0])[1:]) == PROVIDERS:
+            tables.append([_cells_of(row) for row in block[2:]])
+        block = []
+    return tables
+
+
+def _matrix() -> dict[str, list[Cell]]:
+    sections = _sections(MATRIX.read_text(encoding="utf-8"))
+    cells: dict[str, list[Cell]] = {}
+    for section in SECTIONS:
+        for table in _matrix_tables(sections.get(section, [])):
+            for row in table:
+                label, *values = row
+                cells.setdefault(section, []).extend(
+                    Cell(section, label, provider, value) for provider, value in zip(PROVIDERS, values, strict=False)
+                )
+                if len(values) != len(PROVIDERS):
+                    cells[section].append(Cell(section, label, "(column count)", ""))
+    return cells
+
+
+def _all_cells() -> list[Cell]:
+    return [cell for section in _matrix().values() for cell in section]
+
+
+def _paths(text: str) -> list[tuple[str, list[str]]]:
+    found = []
+    for span in CODE_SPAN.findall(text):
+        match = PATH.match(span)
+        if match:
+            names = [name for name in match.group("names").split("::") if name]
+            found.append((match.group("path"), names))
+    return found
+
+
+def _missing(path: str, names: list[str]) -> list[str]:
+    target = REPO / path
+    if not target.exists():
+        return [f"{path} does not exist"]
+    if not names:
+        return []
+    source = target.read_text(encoding="utf-8")
+    return [
+        f"{path}::{name} is not defined there"
+        for name in names
+        if not re.search(rf"^\s*(?:async\s+)?(?:def|class)\s+{name}\b", source, re.MULTILINE)
+    ]
+
+
+def test_the_document_exists():
+    assert MATRIX.is_file()
+
+
+@pytest.mark.parametrize("section", SECTIONS)
+def test_every_area_of_the_scope_has_a_table_with_one_column_per_provider(section):
+    assert _matrix().get(section), f"## {section} has no table with the columns {PROVIDERS}"
+
+
+def test_every_row_has_one_cell_per_provider():
+    assert [cell.where for cell in _all_cells() if cell.provider == "(column count)"] == []
+
+
+def test_every_cell_opens_with_its_status():
+    assert [f"{cell.where}: {cell.text!r}" for cell in _all_cells() if cell.status is None] == []
+
+
+def test_a_supported_or_not_supported_cell_names_a_file_of_this_repository():
+    unbacked = [cell.where for cell in _all_cells() if cell.status in NEEDS_A_FILE and not _paths(cell.text)]
+    assert unbacked == []
+
+
+def test_a_not_built_or_planned_cell_names_its_issue():
+    untracked = [cell.where for cell in _all_cells() if cell.status in NEEDS_AN_ISSUE and not ISSUE.search(cell.text)]
+    assert untracked == []
+
+
+def test_every_cited_file_exists_and_every_cited_name_is_defined_in_it():
+    missing = [
+        f"{cell.where}: {problem}"
+        for cell in _all_cells()
+        for path, names in _paths(cell.text)
+        for problem in _missing(path, names)
+    ]
+    assert missing == []
+
+
+def test_the_planned_provider_is_planned_in_every_cell():
+    assert [cell.where for cell in _all_cells() if cell.provider == PLANNED_PROVIDER and cell.status != PLANNED] == []
+
+
+def test_a_gap_between_keycloak_and_zitadel_has_an_issue():
+    rows: dict[tuple[str, str], dict[str, Cell]] = {}
+    for cell in _all_cells():
+        rows.setdefault((cell.section, cell.row), {})[cell.provider] = cell
+    gaps = [
+        f"{section} / {row}"
+        for (section, row), by_provider in rows.items()
+        if {by_provider["Keycloak"].status, by_provider["Zitadel"].status} == {SUPPORTED, NOT_BUILT}
+        and not any(ISSUE.search(by_provider[name].text) for name in ("Keycloak", "Zitadel"))
+    ]
+    assert gaps == []
+
+
+@pytest.mark.parametrize("index", ["README.md", "docs/README.md"])
+def test_the_document_is_linked(index):
+    assert "providers.md" in (REPO / index).read_text(encoding="utf-8")
+
+
+class TestTheChecksThemselves:
+    """The parser finds what a reader of the table sees."""
+
+    def test_a_path_and_its_names_are_read_from_a_code_span(self):
+        assert _paths("Supported: `backend/tests/unit/test_x.py::TestA::test_b`, `GET /api/identity`") == [
+            ("backend/tests/unit/test_x.py", ["TestA", "test_b"])
+        ]
+
+    @pytest.mark.parametrize(
+        "span",
+        ["https://api.descope.com/{pid}", "<KC_HOSTNAME>/realms/<realm>", "/api/identity", "X-Tenant-ID", "RS256"],
+    )
+    def test_a_url_a_route_or_a_value_is_not_a_path(self, span):
+        assert _paths(f"`{span}`") == []
+
+    def test_a_missing_file_and_a_missing_name_are_reported(self):
+        assert _missing("backend/tests/unit/no_such_file.py", []) == [
+            "backend/tests/unit/no_such_file.py does not exist"
+        ]
+        assert _missing("backend/tests/unit/test_provider_matrix.py", ["TestNoSuchClass"]) == [
+            "backend/tests/unit/test_provider_matrix.py::TestNoSuchClass is not defined there"
+        ]
+
+    def test_a_defined_name_is_found(self):
+        assert _missing("backend/tests/unit/test_provider_matrix.py", ["TestTheChecksThemselves", "_missing"]) == []
+
+    def test_a_status_must_open_the_cell(self):
+        assert Cell("s", "r", "p", "Not built (#1)").status == NOT_BUILT
+        assert Cell("s", "r", "p", "Not supported: x").status == NOT_SUPPORTED
+        assert Cell("s", "r", "p", "Works: `x`").status is None
+
+    def test_only_a_table_naming_the_providers_is_read(self):
+        lines = [
+            "| Row | " + " | ".join(PROVIDERS) + " |",
+            "|---|---|---|---|---|---|",
+            "| a | 1 | 2 | 3 | 4 | 5 |",
+            "",
+            "| Other | x |",
+            "|---|---|",
+            "| b | y |",
+        ]
+        assert _matrix_tables(lines) == [[["a", "1", "2", "3", "4", "5"]]]

@@ -1,6 +1,6 @@
 # Identity Stack
 
-A comprehensive reference project demonstrating a provider-independent identity platform — a canonical Postgres identity store with pluggable identity-provider adapters, built on vendor-agnostic libraries (py-identity-model, terraform-provider-descope). Descope is the primary provider; Ory is supported as a second OIDC provider.
+A comprehensive reference project demonstrating a provider-independent identity platform — a canonical Postgres identity store with pluggable identity-provider adapters, built on vendor-agnostic libraries (py-identity-model, terraform-provider-descope). Descope is the default provider; Ory, Keycloak and Zitadel are supported beside it, and Keycloak and Zitadel run locally in Docker. [docs/providers.md](docs/providers.md) compares them feature by feature.
 
 ## Architecture
 
@@ -144,6 +144,7 @@ See [docs/local-development.md](docs/local-development.md) for the test stack (p
 Detailed docs live in [`docs/`](docs/):
 
 - [Architecture](docs/architecture.md) — canonical store, deployment modes, sync flows
+- [Identity providers compared](docs/providers.md) — Descope, Ory, Keycloak and Zitadel side by side, each cell backed by a test, a fixture or an issue
 - [Local development](docs/local-development.md) — the `make` workflow + test stack
 - [Deployment](docs/deployment.md) — standalone vs. gateway + Terraform
 - [Environment variables](docs/environment-variables.md) — full reference with defaults
