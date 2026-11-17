@@ -103,6 +103,8 @@ export default function AccessKeys() {
         // Brief delay before refresh — the Descope search index needs a
         // moment to include the newly created key, otherwise loadKeys()
         // returns stale results and the list appears not to update.
+        // One pending reload at a time, so the cleanup below always holds its timer.
+        clearTimeout(delayedReload.current);
         delayedReload.current = setTimeout(loadKeys, 1500);
       } else {
         const err = await res.json();
