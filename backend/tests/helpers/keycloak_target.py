@@ -22,13 +22,14 @@ tests are collected, so a run never mixes the two realms.
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
 class KeycloakUser:
     username: str
-    password: str
+    # Out of the repr: pytest prints reprs in failed assertions, and Terraform's are real passwords.
+    password: str = field(repr=False)
     # The ``sub`` of every token issued to the user in the target realm.
     id: str
 
@@ -37,7 +38,7 @@ class KeycloakUser:
 class KeycloakTestTarget:
     realm: str
     users: dict[str, KeycloakUser]
-    directory_client_secret: str
+    directory_client_secret: str = field(repr=False)
 
 
 class KeycloakTestTargetMisconfigured(Exception):
