@@ -29,8 +29,13 @@ fi
 # One check at a time: every run builds the same realm in the same container and
 # may stop that container. A lock file of its own, not the compose lock, so the
 # documented `flock <compose lock> make keycloak-terraform-check` cannot deadlock.
-lock="${XDG_CACHE_HOME:-$HOME/.cache}/identity-stack-keycloak-terraform-check.lock"
-mkdir -p "$(dirname "$lock")"
+cache="${XDG_CACHE_HOME:-$HOME/.cache}"
+lock="$cache/identity-stack-keycloak-terraform-check.lock"
+# Every run's working directory (state and generated secrets) lives here, so a
+# later run can find and delete the ones an earlier run kept or was killed with.
+runs="$cache/identity-stack-keycloak-terraform-check"
+mkdir -p "$cache" "$runs"
+chmod 700 "$runs"
 exec 9>"$lock"
 flock 9
 base_url="http://keycloak-test.localhost:18180"
@@ -47,7 +52,8 @@ started=0
 
 # $work holds the state and outputs.json, with the generated user passwords and
 # the directory client secret. It is kept only while the realm it describes may
-# still exist: the destroy failed and keycloak-test is still up.
+# still exist: the destroy failed and keycloak-test is still up. The next run
+# deletes that realm and then every kept directory (delete_leftover_realm).
 cleanup() {
   status=$?
   destroy_failed=0
@@ -66,7 +72,7 @@ cleanup() {
     fi
   fi
   if [ "$destroy_failed" = 1 ] && [ "$stopped" = 0 ]; then
-    echo "destroy failed: realm $terraform_realm is still in keycloak-test; state kept in $work (it holds generated secrets); the next run deletes the realm itself" >&2
+    echo "destroy failed: realm $terraform_realm is still in keycloak-test; state kept in $work (it holds generated secrets); the next run deletes the realm and then this directory" >&2
   elif [ -n "$work" ]; then
     [ "$destroy_failed" = 1 ] && echo "destroy failed, but keycloak-test was stopped with its volumes, so realm $terraform_realm is gone" >&2
     rm -rf "$work"
@@ -77,6 +83,9 @@ trap cleanup EXIT
 
 # Delete the realm this check builds if a run that was killed, or whose destroy
 # failed, left it in a keycloak-test that is still up. Absent (404) is fine.
+# Once the realm is gone, the working directories earlier runs left behind
+# describe nothing and are deleted with their secrets. No other run is using
+# one: this run holds the lock.
 delete_leftover_realm() {
   local token code
   token="$(curl -fsS "$base_url/realms/master/protocol/openid-connect/token" \
@@ -90,12 +99,13 @@ delete_leftover_realm() {
     404) ;;
     *) echo "could not delete leftover realm $terraform_realm (HTTP $code)" >&2; return 1 ;;
   esac
+  find "$runs" -mindepth 1 -maxdepth 1 -name 'run.*' ! -path "$work" -exec rm -rf {} +
 }
 
 # Own working copy and state: never the root's terraform.tfstate. Only the
 # root's .tf files git does not ignore are copied, so a local override.tf or
 # *_override.tf (git-ignored) never changes what the check applies.
-work="$(mktemp -d "${TMPDIR:-/var/tmp}/keycloak-terraform-check.XXXXXX")"
+work="$(mktemp -d "$runs/run.XXXXXX")"
 git -C "$repo" ls-files -z --cached --others --exclude-standard -- ':(glob)infra/keycloak/*.tf' |
   (cd "$repo" && while IFS= read -r -d '' file; do cp "$file" "$work/"; done)
 cp "$root/.terraform.lock.hcl" "$work/"
