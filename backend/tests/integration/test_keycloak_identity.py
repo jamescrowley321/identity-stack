@@ -40,6 +40,7 @@ from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
 from app.services.keycloak_directory import KeycloakDirectory, MemberUnknown
 from scripts.seed_keycloak import keycloak_provider
+from tests.helpers.identity_fixture import IDENTITIES
 from tests.helpers.keycloak import (
     ALICE,
     BOB,
@@ -185,7 +186,7 @@ async def test_a_first_call_provisions_the_user_and_reports_the_tokens_organizat
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["user"]["email"] == "alice@acme.test"
+    assert body["user"]["email"] == IDENTITIES.cases.member.email
     assert body["linked_idps"] == [{"provider_name": "keycloak", "external_sub": ALICE.id}]
     assert body["roles"] == []
     assert body["token_tenant"] == {"tenant_id": ACME, "permissions": [DOCUMENTS_READ]}
@@ -211,7 +212,8 @@ async def test_linking_an_existing_user_adds_no_canonical_role_to_it(registered,
     so a default role written here would be held by the same person's Ory session.
     """
     ory = Provider(name="ory", type=ProviderType.ory, issuer_url="https://ory.example.test", capabilities=["sso"])
-    existing = User(email="alice@acme.test", user_name="alice@acme.test", status=UserStatus.active)
+    email = IDENTITIES.cases.member.email
+    existing = User(email=email, user_name=email, status=UserStatus.active)
     registered.add_all([ory, existing])
     await registered.flush()
     registered.add(IdPLink(user_id=existing.id, provider_id=ory.id, external_sub="ory|alice"))

@@ -40,41 +40,63 @@ locals {
     }
   ]...)
 
-  # Fixture users. Keycloak picks their ids: the provider cannot set one, so
-  # a token's sub differs from the import's fixed ids. Client roles are
-  # "<type client>/<role>" keys of local.client_roles.
-  users = {
-    alice = { email = "alice@acme.test", first_name = "Alice", last_name = "Single-Org", roles = ["member/documents:read", "member/documents:write"] }
-    bob = { email = "bob@globex.test", first_name = "Bob", last_name = "Two-Orgs", roles = [
-      "member/documents:read",
-      "tenant-admin/members:invite", "tenant-admin/members:remove", "tenant-admin/settings:manage",
-    ] }
-    carol = { email = "carol@acme.test", first_name = "Carol", last_name = "No-Role", roles = [] }
-    dave = { email = "dave@acme.test", first_name = "Dave", last_name = "One-Org-Admin", roles = [
-      "tenant-admin/members:invite", "tenant-admin/members:remove", "tenant-admin/settings:manage",
-    ] }
-    erin = { email = "erin@acme.test", first_name = "Erin", last_name = "Write-Only", roles = ["member/documents:write"] }
-    frank = { email = "frank@acme.test", first_name = "Frank", last_name = "Moving-Admin", roles = [
-      "tenant-admin/members:invite", "tenant-admin/members:remove", "tenant-admin/settings:manage",
-    ] }
+  # The test tenants and users (infra/fixtures/test-identities.json): every
+  # tenant is an organization, every user a realm user.
+  fixture = jsondecode(file("${path.module}/../fixtures/test-identities.json"))
+
+  # The client roles ("<type client>/<role>" keys of local.client_roles) a
+  # canonical role in any organization gives a user. Client roles are
+  # realm-wide, so a user holds those of every role they have anywhere.
+  role_client_roles = {
+    owner  = ["member/documents:read", "member/documents:write", "tenant-admin/members:invite", "tenant-admin/members:remove", "tenant-admin/settings:manage"]
+    admin  = ["tenant-admin/members:invite", "tenant-admin/members:remove", "tenant-admin/settings:manage"]
+    member = ["member/documents:read", "member/documents:write"]
+    viewer = ["member/documents:read"]
   }
 
-  # Organizations. `type_holders` is the organization's record of which
-  # members hold an organization-bound type there: attribute
-  # type:<type client> listing their user ids, read by the backend's
-  # directory lookup.
-  organizations = {
-    acme = {
-      name         = "Acme"
-      domain       = "acme.test"
-      members      = ["alice", "bob", "carol", "dave", "erin", "frank"]
-      type_holders = { "tenant-admin" = ["bob", "dave", "frank"] }
+  # Keycloak-only cases (keys of the fixture's `cases`): the case's user holds
+  # exactly these client roles instead.
+  case_client_roles = {
+    # A member whose one client role is documents:write.
+    write_only = ["member/documents:write"]
+  }
+
+  case_users = { for name, roles in local.case_client_roles : local.fixture.cases[name] => roles }
+
+  # The organization-bound type client a canonical role makes its holder hold
+  # in an organization. A role not listed here (a portable type's) needs no
+  # record in the organization.
+  organization_bound_roles = {
+    admin = "tenant-admin"
+  }
+
+  # Fixture users. Keycloak picks their ids: the provider cannot set one, so
+  # a token's sub differs from the import's fixed ids.
+  users = {
+    for username, user in local.fixture.users : username => {
+      email      = "${username}@${local.fixture.tenants[user.home].domain}"
+      first_name = user.first_name
+      last_name  = user.last_name
+      roles = lookup(local.case_users, username, sort(distinct(flatten([
+        for role in values(user.roles) : local.role_client_roles[role] if role != null
+      ]))))
     }
-    globex = {
-      name         = "Globex"
-      domain       = "globex.test"
-      members      = ["bob"]
-      type_holders = {}
+  }
+
+  # Organizations, one per fixture tenant. `type_holders` is the
+  # organization's record of which members hold an organization-bound type
+  # there: attribute type:<type client> listing their user ids, read by the
+  # backend's directory lookup.
+  organizations = {
+    for alias, tenant in local.fixture.tenants : alias => {
+      name    = tenant.name
+      domain  = tenant.domain
+      members = sort([for username, user in local.fixture.users : username if contains(keys(user.roles), alias)])
+      type_holders = {
+        for role, type_client in local.organization_bound_roles : type_client => sort([
+          for username, user in local.fixture.users : username if lookup(user.roles, alias, null) == role
+        ])
+      }
     }
   }
 
@@ -249,6 +271,7 @@ resource "keycloak_organization" "this" {
   attributes = {
     for type_client, holders in each.value.type_holders :
     "type:${type_client}" => join(local.multivalue_separator, [for username in holders : keycloak_user.this[username].id])
+    if length(holders) > 0
   }
 }
 

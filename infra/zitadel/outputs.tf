@@ -28,7 +28,7 @@ output "other_client_id" {
 }
 
 output "organization_ids" {
-  description = "Id of each organization: `platform` owns the project, `acme` and `globex` are tenants, `unlinked` is named by no canonical tenant."
+  description = "Id of each organization: `platform` owns the project; the others are the fixture's tenants (infra/fixtures/test-identities.json), keyed by tenant."
   value = merge(
     { platform = zitadel_org.platform.id },
     { for key, org in zitadel_org.this : key => org.id },
@@ -36,17 +36,17 @@ output "organization_ids" {
 }
 
 output "test_user_ids" {
-  description = "Id (token `sub`) of the human test user in each organization."
+  description = "Id (token `sub`) of each fixture user, keyed by user."
   value       = { for key, user in zitadel_human_user.this : key => user.id }
 }
 
 output "test_user_login_names" {
-  description = "Login name of the human test user in each organization."
+  description = "Login name of each fixture user, keyed by user."
   value       = { for key, user in zitadel_human_user.this : key => user.preferred_login_name }
 }
 
 output "test_user_passwords" {
-  description = "Login password of the human test user in each organization, generated at apply."
+  description = "Login password of each fixture user, keyed by user, generated at apply."
   value       = { for key, password in random_password.user : key => password.result }
   sensitive   = true
 }
@@ -94,17 +94,17 @@ output "backend_environment" {
 }
 
 output "canonical_seed" {
-  description = "What `make zitadel-seed` reads: the issuer, the tenant organizations' ids, and the acme test user it links."
+  description = "What `make zitadel-seed` reads: the issuer, the tenant organizations' ids, and the fixture's two-tenant user it links with their canonical roles."
   value = {
     issuer_url = local.issuer_url
     tenants    = { for key in keys(local.tenant_organizations) : key => zitadel_org.this[key].id }
     linked_user = {
-      external_sub = zitadel_human_user.this["acme"].id
-      email        = zitadel_human_user.this["acme"].email
-      user_name    = zitadel_human_user.this["acme"].user_name
-      given_name   = zitadel_human_user.this["acme"].first_name
-      family_name  = zitadel_human_user.this["acme"].last_name
-      roles        = { acme = "admin", globex = "viewer" }
+      external_sub = zitadel_human_user.this[local.linked_user].id
+      email        = zitadel_human_user.this[local.linked_user].email
+      user_name    = zitadel_human_user.this[local.linked_user].user_name
+      given_name   = zitadel_human_user.this[local.linked_user].first_name
+      family_name  = zitadel_human_user.this[local.linked_user].last_name
+      roles        = local.linked_roles
     }
   }
 }

@@ -61,10 +61,17 @@ Every fixture user's email is imported as verified.
 | `dave` | `da4e0000-0000-4000-8000-000000000004` | `local-only-dave` | `acme` | `tenant-admin`: all three |
 | `erin` | `e4140000-0000-4000-8000-000000000005` | `local-only-erin` | `acme` | `member`: `documents:write` |
 | `frank` | `f4a4c000-0000-4000-8000-000000000006` | `local-only-frank` | `acme` | `tenant-admin`: all three |
+| `grace` | `64ace000-0000-4000-8000-000000000007` | `local-only-grace` | `unlinked` | `member`: both |
 
 `dave` is a tenant admin in exactly one organization, and `erin` is a `member` user without
 `documents:read`. `frank` is another tenant admin of `acme` alone, whom the integration tests
-move to `globex` and back.
+move to `globex` and back. `grace` is the one member of `unlinked`, an organization no canonical
+tenant names.
+
+The users, the organizations and who belongs where are the shared test fixture
+[`infra/fixtures/test-identities.json`](../../infra/fixtures/test-identities.json), which every
+provider's Terraform root builds from; the unit test `tests/unit/test_test_identities.py` fails
+when this import disagrees with it. The ids, passwords and client roles are Keycloak's own.
 
 Organization `acme` carries the attribute `type:tenant-admin` listing `bob`, `dave` and `frank`:
 the organization's record that they hold the `tenant-admin` type there. `globex` marks no one.

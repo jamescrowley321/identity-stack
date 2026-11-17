@@ -65,7 +65,7 @@ fi
 # then every kept directory (delete_leftover_realm).
 cleanup() {
   status=$?
-  if [ "$applied" = 1 ] && ! terraform -chdir="$work" destroy -auto-approve -input=false "${vars[@]}" >/dev/null; then
+  if [ "$applied" = 1 ] && ! terraform -chdir="$tfdir" destroy -auto-approve -input=false "${vars[@]}" >/dev/null; then
     echo "destroy failed: realm $terraform_realm may still be in keycloak-test; state kept in $work (it holds generated secrets); the next run deletes the realm and then this directory" >&2
     exit 1
   fi
@@ -97,28 +97,33 @@ delete_leftover_realm() {
 
 # Own working copy and state: never the root's terraform.tfstate. Only the
 # root's .tf files git does not ignore are copied, so a local override.tf or
-# *_override.tf (git-ignored) never changes what the check applies.
+# *_override.tf (git-ignored) never changes what the check applies. The copy
+# keeps the repo's layout, so the root finds the shared fixture at
+# ../fixtures/test-identities.json as it does in infra/.
 work="$(mktemp -d "$runs/run.XXXXXX")"
+tfdir="$work/keycloak"
+mkdir -p "$tfdir" "$work/fixtures"
 git -C "$repo" ls-files -z --cached --others --exclude-standard -- ':(glob)infra/keycloak/*.tf' |
-  (cd "$repo" && while IFS= read -r -d '' file; do [ -e "$file" ] || continue; cp "$file" "$work/"; done)
-cp "$root/.terraform.lock.hcl" "$work/"
+  (cd "$repo" && while IFS= read -r -d '' file; do [ -e "$file" ] || continue; cp "$file" "$tfdir/"; done)
+cp "$root/.terraform.lock.hcl" "$tfdir/"
+cp "$repo/infra/fixtures/test-identities.json" "$work/fixtures/"
 
 delete_leftover_realm
 
-terraform -chdir="$work" init -input=false >/dev/null
+terraform -chdir="$tfdir" init -input=false >/dev/null
 applied=1
-terraform -chdir="$work" apply -auto-approve -input=false "${vars[@]}"
+terraform -chdir="$tfdir" apply -auto-approve -input=false "${vars[@]}"
 
 echo "--- second plan (must be empty)"
 plan_status=0
-terraform -chdir="$work" plan -detailed-exitcode -input=false "${vars[@]}" || plan_status=$?
+terraform -chdir="$tfdir" plan -detailed-exitcode -input=false "${vars[@]}" || plan_status=$?
 case "$plan_status" in
   0) ;;
   2) echo "second plan is not empty: the root drifts from what it applied" >&2; exit 1 ;;
   *) echo "second plan failed (exit $plan_status)" >&2; exit 1 ;;
 esac
 
-terraform -chdir="$work" output -json >"$work/outputs.json"
+terraform -chdir="$tfdir" output -json >"$work/outputs.json"
 echo "--- comparing with the imported realm"
 PYTHONPATH="$repo/backend" "$python" "$root/scripts/check_realm.py" \
   --base-url "$base_url" \

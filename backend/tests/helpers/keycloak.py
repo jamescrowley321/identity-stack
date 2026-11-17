@@ -26,6 +26,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
+from tests.helpers.identity_fixture import IDENTITIES
 from tests.helpers.keycloak_model import DIRECTORY_CLIENT_ID, DIRECTORY_CLIENT_SECRET
 from tests.helpers.keycloak_target import KeycloakUser, keycloak_test_target
 
@@ -66,16 +67,20 @@ class KeycloakFlowError(Exception):
     """The login flow did not go the way the realm fixture says it should."""
 
 
-ALICE = TARGET.users["alice"]
-BOB = TARGET.users["bob"]
+# The fixture users (infra/fixtures/test-identities.json), by the case each stands on.
+CASES = IDENTITIES.cases
+# A member of ``acme`` alone, with both ``member`` client roles.
+ALICE = TARGET.users[CASES.member.key]
+# In ``acme`` and ``globex``.
+BOB = TARGET.users[CASES.two_tenants.key]
 # In ``acme`` with no client role: her access token carries no ``aud``.
-CAROL = TARGET.users["carol"]
+CAROL = TARGET.users[CASES.no_grant.key]
 # A tenant admin in ``acme`` only.
-DAVE = TARGET.users["dave"]
+DAVE = TARGET.users[CASES.tenant_admin.key]
 # A ``member`` user in ``acme`` whose one client role is ``documents:write``.
-ERIN = TARGET.users["erin"]
+ERIN = TARGET.users[CASES.write_only.key]
 # A tenant admin in ``acme`` only, whom tests move between organizations.
-FRANK = TARGET.users["frank"]
+FRANK = TARGET.users[CASES.moving_admin.key]
 
 
 @dataclass(frozen=True)

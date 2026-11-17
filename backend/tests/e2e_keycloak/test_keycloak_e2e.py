@@ -12,6 +12,7 @@ import pytest
 from playwright.sync_api import Page, Response, expect
 
 from tests.e2e_keycloak.browser_login import BrowserLogin
+from tests.helpers.identity_fixture import IDENTITIES
 from tests.helpers.keycloak import (
     ACME_SCOPE,
     ALICE,
@@ -111,7 +112,7 @@ def test_the_two_organization_member_logs_in_switches_organization_and_logs_out(
 
     # 2. GET /api/identity: the user, the token's tenant and its permissions.
     identity = _identity(api, acme_token)
-    assert identity["user"]["email"] == "bob@globex.test"
+    assert identity["user"]["email"] == IDENTITIES.cases.two_tenants.email
     assert identity["linked_idps"] == [{"provider_name": "keycloak", "external_sub": BOB.id}]
     assert identity["token_tenant"] == {"tenant_id": ACME, "permissions": [DOCUMENTS_READ]}
     assert {m["tenant_id"]: m["tenant_name"] for m in identity["tenant_memberships"]} == {

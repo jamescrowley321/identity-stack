@@ -15,6 +15,7 @@ from scripts.seed_zitadel import (
     parse_seed_input,
     zitadel_provider,
 )
+from tests.helpers.identity_fixture import IDENTITIES
 
 ISSUER = "http://zitadel.localhost:8480"
 ACME_ORG = "399943487992119299"
@@ -70,20 +71,24 @@ def test_the_terraform_output_reads_as_the_seed_input():
 
 
 def test_the_output_a_real_apply_writes_reads_as_the_seed_input():
+    """The linked user is the shared fixture's two-tenant user, with its roles in the canonical tenants."""
     recorded = json.loads(RECORDED_OUTPUT.read_text())
+    linked = IDENTITIES.cases.two_tenants
+    canonical = {key for key, tenant in IDENTITIES.tenants.items() if tenant.canonical}
 
     assert parse_seed_input(recorded) == SeedInput(
         issuer_url=ISSUER,
-        tenants={"acme": "399948686462824451", "globex": "399948686446047235"},
+        tenants={"acme": "400004360244969475", "globex": "400004360211283971"},
         linked_user=LinkedUser(
-            external_sub="399948689885442051",
-            email="acme-user@acme.test",
-            user_name="acme-user",
-            given_name="Acme",
-            family_name="User",
-            roles={"acme": "admin", "globex": "viewer"},
+            external_sub="400004363667390467",
+            email=linked.email,
+            user_name=linked.key,
+            given_name=linked.first_name,
+            family_name=linked.last_name,
+            roles={tenant: role for tenant, role in linked.roles.items() if role is not None and tenant in canonical},
         ),
     )
+    assert set(recorded["tenants"]) == canonical
 
 
 @pytest.mark.parametrize(

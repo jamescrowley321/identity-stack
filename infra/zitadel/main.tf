@@ -16,25 +16,36 @@ locals {
     viewer = "Viewer"
   }
 
-  # Tenant organizations, each granted the project. The seed names a
-  # canonical tenant after each key.
-  tenant_organizations = {
-    acme   = "Acme"
-    globex = "Globex"
+  # The test tenants and users (infra/fixtures/test-identities.json).
+  fixture = jsondecode(file("${path.module}/../fixtures/test-identities.json"))
+
+  # Tenant organizations, each granted the project: the fixture's tenants a
+  # canonical tenant names. The seed names a canonical tenant after each key.
+  tenant_organizations = { for key, tenant in local.fixture.tenants : key => tenant.name if tenant.canonical }
+
+  # Every organization a test user lives in: every fixture tenant, those no
+  # canonical tenant names included.
+  user_organizations = { for key, tenant in local.fixture.tenants : key => tenant.name }
+
+  # One human test user per fixture user, in the organization of their home
+  # tenant, email verified.
+  test_users = {
+    for key, user in local.fixture.users : key => {
+      organization = user.home
+      user_name    = key
+      email        = "${key}@${local.fixture.tenants[user.home].domain}"
+      first_name   = user.first_name
+      last_name    = user.last_name
+    }
   }
 
-  # Every organization a test user lives in: the tenants, plus one no
-  # canonical tenant names.
-  user_organizations = merge(local.tenant_organizations, { unlinked = "Unlinked" })
-
-  # One human test user per organization, email verified.
-  test_users = {
-    for key, name in local.user_organizations : key => {
-      user_name  = "${key}-user"
-      email      = "${key}-user@${key}.test"
-      first_name = name
-      last_name  = "User"
-    }
+  # The user `make zitadel-seed` links to canonical tenants beforehand: the
+  # fixture's user in two tenants, with their canonical role in each tenant a
+  # canonical tenant names. Every other user's first login provisions them.
+  linked_user = local.fixture.cases.two_tenants
+  linked_roles = {
+    for tenant, role in local.fixture.users[local.linked_user].roles : tenant => role
+    if role != null && contains(keys(local.tenant_organizations), tenant)
   }
 
   # Zitadel's check lifetimes on a fresh instance, by length.
@@ -286,7 +297,7 @@ resource "random_password" "user" {
 resource "zitadel_human_user" "this" {
   for_each = local.test_users
 
-  org_id                       = zitadel_org.this[each.key].id
+  org_id                       = zitadel_org.this[each.value.organization].id
   user_name                    = each.value.user_name
   first_name                   = each.value.first_name
   last_name                    = each.value.last_name

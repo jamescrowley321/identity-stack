@@ -16,16 +16,16 @@ directory) and git-ignored: the instance is disposable, and a remote run could n
 | `zitadel_default_login_policy.this` | The instance default login policy: `allow_register = false`, external identity providers off. The other values are a fresh instance's. |
 | `zitadel_default_oidc_settings.this` | Access-token lifetime `var.access_token_lifetime` (15 minutes; Zitadel's default is 12 hours). The ID-token and refresh-token lifetimes are a fresh instance's. |
 | `zitadel_org.platform` | Organization `identity-stack`, which owns the project and the machine user. |
-| `zitadel_org.this` | Tenant organizations `Acme` and `Globex`, and `Unlinked`, which no canonical tenant names. |
+| `zitadel_org.this` | One organization per tenant of the shared fixture ([`../fixtures/test-identities.json`](../fixtures/README.md)): `Acme` and `Globex`, which canonical tenants name, and `Unlinked`, which none does. |
 | `zitadel_login_policy.platform`, `zitadel_login_policy.this` | Each organization's own login policy, the same as the default: `allow_register = false`. |
 | `zitadel_project.this` | Project `identity-stack`: `project_role_check`, `has_project_check` and `project_role_assertion` off. |
 | `zitadel_project_role.this` | Role definitions `owner`, `admin`, `member`, `viewer`. Nobody is granted one. |
-| `zitadel_project_grant.this` | The project granted to `Acme` and `Globex`. |
+| `zitadel_project_grant.this` | The project granted to the organizations canonical tenants name (`Acme`, `Globex`). |
 | `zitadel_application_oidc.spa` | The SPA: user agent, authorization code with PKCE, auth method none, refresh-token grant, JWT access tokens, no roles in the access token or ID token, redirect URI `var.frontend_url`, post-logout redirect `<frontend_url>/login`. Development mode is on while `frontend_url` is plain http, which Zitadel requires for an http redirect URI. |
 | `zitadel_application_oidc.other` | A second application in the same project, for negative tests: the same settings without the refresh-token grant. A human's access token lists every application of the project in `aud`, so a token issued to this one proves audience alone does not identify the SPA. |
 | `zitadel_machine_user.tests` | Machine user `identity-stack-tests` in `identity-stack`: JWT access tokens, a client secret for the client credentials grant. |
 | `zitadel_machine_user.sync`, `zitadel_instance_member.sync`, `zitadel_personal_access_token.sync` | Machine user `identity-stack-sync` in `identity-stack`, the backend's sync adapter (`SYNC_PROVIDER=zitadel`, [`docs/zitadel.md`](../../docs/zitadel.md#admin-adapter)): instance role `IAM_ORG_MANAGER`, the narrowest one that may create an organization (`IAM_USER_MANAGER` may not), and a personal access token. |
-| `zitadel_human_user.this`, `random_password.user` | One test user per organization (`acme-user`, `globex-user`, `unlinked-user`), email `<user>@<org>.test`, verified, with a generated password. |
+| `zitadel_human_user.this`, `random_password.user` | One human user per fixture user (`alice` to `grace`), user name the fixture key, in the organization of the user's home tenant, email `<user>@<home tenant's domain>`, verified, with a generated password. |
 
 The canonical store decides access. No user holds a Zitadel role grant and the project checks
 no role, so no Zitadel role decides anything.
@@ -64,9 +64,9 @@ Variables:
 | `issuer_url` | The issuer, the `iss` of every token. |
 | `project_id` | The project id, in `aud` of a human's access token. |
 | `spa_client_id`, `other_client_id` | Client ids of the two applications. |
-| `organization_ids` | `platform`, `acme`, `globex`, `unlinked`. |
-| `test_user_ids`, `test_user_login_names` | Each test user's id (token `sub`) and login name. |
-| `test_user_passwords` (sensitive) | Each test user's password. |
+| `organization_ids` | `platform` and each fixture tenant (`acme`, `globex`, `unlinked`). |
+| `test_user_ids`, `test_user_login_names` | Each fixture user's id (token `sub`) and login name, keyed by fixture user. |
+| `test_user_passwords` (sensitive) | Each fixture user's password, keyed by fixture user. |
 | `machine_user` | The machine user's id and client id. |
 | `machine_user_client_secret` (sensitive) | Its client secret. |
 | `sync_admin_token` (sensitive) | The sync adapter's personal access token: the backend's `ZITADEL_ADMIN_TOKEN`. |
@@ -88,12 +88,13 @@ DATABASE_URL=postgresql+asyncpg://... make zitadel-seed
 It pipes `terraform output -json canonical_seed` to
 [`backend/scripts/seed_zitadel.py`](../../backend/scripts/seed_zitadel.py), which writes:
 
-- canonical tenants `acme` and `globex`, with `external_org_id` set to their organization ids and
+- a canonical tenant for each fixture tenant marked `canonical` (`acme`, `globex`), with `external_org_id` set to their organization ids and
   `external_org_provider_id` to the `zitadel` provider row;
 - a `providers` row `zitadel` of type `oidc` on the issuer;
-- the `acme` test user, linked (`idp_links`) on its Zitadel user id, with role `admin` in `acme`
-  and `viewer` in `globex`, so the tenant switch has a user in two tenants. The roles are the
-  global canonical roles of those names, created without permissions when missing.
+- the fixture's two-tenant user (`cases.two_tenants`, `bob`), linked (`idp_links`) on its Zitadel
+  user id, with its fixture roles: `admin` in `acme` and `viewer` in `globex`, so the tenant switch
+  has a user in two tenants. The roles are the global canonical roles of those names, created
+  without permissions when missing.
 
 A second run changes nothing. The seed takes over nothing it did not write: it refuses, and
 writes nothing, when a `zitadel` provider row exists that differs from the one it writes or is
@@ -104,8 +105,8 @@ with the test user's email exists without a link to its Zitadel user, or when `a
 `globex` is suspended or the linked user is not active. An active `acme` or `globex` tenant
 with no organization is linked to its organization, and one linked to it for no provider (a
 database seeded before migration 007) gets the `zitadel` provider. After `make zitadel-reset` and a new apply the ids are
-new, so seed a database the seed has not seeded before. The `globex` test user is left for first
-login to provision; `Unlinked` gets no tenant.
+new, so seed a database the seed has not seeded before. Every other fixture user is left for
+first login to provision; `Unlinked` gets no tenant.
 
 [`backend/tests/fixtures/zitadel/canonical-seed.json`](../../backend/tests/fixtures/zitadel/canonical-seed.json)
 is that output from a real apply, and a unit test reads it with the seed's parser. When a change

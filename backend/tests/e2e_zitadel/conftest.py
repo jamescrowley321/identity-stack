@@ -6,7 +6,7 @@ It needs, all running and none of them optional:
   and the applied root's outputs (``terraform -chdir=infra/zitadel output -json``)
   in ``ZITADEL_TERRAFORM_OUTPUTS``; ``make test-e2e-zitadel`` sets it;
 - the application database in ``DATABASE_URL``, migrated and seeded by
-  ``make zitadel-seed`` and not yet used for a first login of the ``globex`` user;
+  ``make zitadel-seed`` and not yet used for a first login of ``NEWCOMER``;
 - the backend on ``E2E_BACKEND_URL`` (default ``http://localhost:8000``) with the
   root's ``backend_environment`` and ``zitadel`` in ``CANONICAL_RBAC_PROVIDERS``
   and ``JIT_ENABLED_PROVIDERS``;
@@ -36,13 +36,15 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from tests.e2e_zitadel.browser_login import BrowserLogin, ZitadelUser
+from tests.helpers.identity_fixture import IDENTITIES
 
 BACKEND_URL = os.environ.get("E2E_BACKEND_URL", "http://localhost:8000")
 FRONTEND_URL = os.environ.get("E2E_FRONTEND_URL", "http://localhost:3000")
 OUTPUTS_VARIABLE = "ZITADEL_TERRAFORM_OUTPUTS"
 _PROBE_TIMEOUT_SECONDS = 10
-# The email domain of the globex test user (infra/zitadel/main.tf).
-GLOBEX_DOMAIN = "globex.test"
+# The fixture user the suite signs in for the first time: the one-tenant member,
+# whose first login the organization claim decides.
+NEWCOMER = IDENTITIES.cases.member
 # The outputs the suite reads as objects keyed by name.
 _MAP_OUTPUTS = ("organization_ids", "test_user_ids", "test_user_login_names", "test_user_passwords")
 
@@ -148,7 +150,7 @@ class Database:
 
 @pytest.fixture(scope="session")
 def database(zitadel: Instance) -> Iterator[Database]:
-    """The application database, with the globex tenant admitting its own email domain.
+    """The application database, with NEWCOMER's home tenant admitting its own email domain.
 
     ``make zitadel-seed`` gives the tenants no email domains, and a first login is
     admitted only for an email in its tenant's domains. No route sets them yet
@@ -159,19 +161,20 @@ def database(zitadel: Instance) -> Iterator[Database]:
     if not url:
         pytest.fail("DATABASE_URL is not set: the suite reads the application database the backend uses")
     database = Database(url)
-    globex = zitadel.organization_ids["globex"]
+    home = zitadel.organization_ids[NEWCOMER.home]
     try:
-        before = database.tenant_domains(globex)
+        before = database.tenant_domains(home)
     except (SQLAlchemyError, OSError) as exc:
         pytest.fail(f"the application database at DATABASE_URL does not answer ({exc!r})")
     if len(before) != 1:
         pytest.fail(
-            f"expected one tenant linked to the globex organization, found {len(before)}: run `make zitadel-seed` first"
+            f"expected one tenant linked to the {NEWCOMER.home} organization, found {len(before)}:"
+            " run `make zitadel-seed` first"
         )
     (original,) = before
-    database.set_tenant_domains(globex, [GLOBEX_DOMAIN])
+    database.set_tenant_domains(home, [IDENTITIES.tenants[NEWCOMER.home].domain])
     yield database
-    database.set_tenant_domains(globex, original)
+    database.set_tenant_domains(home, original)
 
 
 @pytest.fixture(scope="session", autouse=True)

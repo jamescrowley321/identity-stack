@@ -1,10 +1,11 @@
 """The whole Zitadel path, from Chromium, against the shipped SPA and backend.
 
 The instance is the compose Zitadel with ``infra/zitadel`` applied and
-``make zitadel-seed`` run: tenants ``acme`` and ``globex`` linked to their
-organizations, the ``acme`` user linked beforehand as ``admin`` in ``acme`` and
-``viewer`` in ``globex``, the ``globex`` user unknown to the canonical store, and
-the ``unlinked`` user in an organization no tenant names. Each test is one item
+``make zitadel-seed`` run, both from the shared fixture
+(``infra/fixtures/test-identities.json``): the canonical tenants linked to their
+organizations, the fixture's two-tenant user linked beforehand with their roles,
+every other user unknown to the canonical store, and the unlinked-tenant user in
+an organization no tenant names. Each test is one item
 of identity-stack#570's scope; the machine-user token is in
 ``tests/integration_zitadel/test_zitadel_machine_token.py``.
 """
@@ -15,11 +16,14 @@ import pytest
 from playwright.sync_api import Page, Request, expect
 
 from tests.e2e_zitadel.browser_login import LOGIN_NAME_FIELD, PASSWORD_FIELD, BrowserLogin, sign_in
-from tests.e2e_zitadel.conftest import Database, Instance
+from tests.e2e_zitadel.conftest import NEWCOMER, Database, Instance
+from tests.helpers.identity_fixture import IDENTITIES, FixtureUser
 
-ACME = "acme"
-GLOBEX = "globex"
-UNLINKED = "unlinked"
+# Linked by ``make zitadel-seed`` beforehand, with their fixture role in each tenant.
+LINKED = IDENTITIES.cases.two_tenants
+# In an organization no canonical tenant names.
+UNLINKED = IDENTITIES.cases.unlinked_tenant
+TENANT_ORGANIZATIONS = sorted(key for key, tenant in IDENTITIES.tenants.items() if tenant.canonical)
 
 IDENTITY = "/api/identity"
 ADMIN_ROUTE = "/api/access-checks/admin-role"
@@ -48,9 +52,10 @@ _STORED_TOKEN_KEYS = """() => [sessionStorage, localStorage].flatMap((store) =>
 )"""
 
 
-def _email(organization: str) -> str:
-    """The test user's email in ``organization``, as ``infra/zitadel/main.tf`` names it."""
-    return f"{organization}-user@{organization}.test"
+def _tenant_where(user: FixtureUser, role: str) -> str:
+    """The one tenant where the fixture gives ``user`` ``role``."""
+    (tenant,) = [tenant for tenant, held in user.roles.items() if held == role]
+    return tenant
 
 
 def _signed_in_user(page: Page) -> dict:
@@ -94,43 +99,46 @@ def _switch_tenant(page: Page, frontend_url: str, name: str, tenant_id: str) -> 
 # --- 1. First login ----------------------------------------------------------------
 
 
-def test_the_globex_user_first_login_creates_a_member_of_globex_only(
+def test_a_first_login_creates_a_member_of_the_home_tenant_only(
     page: Page, frontend_url: str, api, zitadel: Instance, database: Database
 ):
-    email = _email(GLOBEX)
-    assert database.user_ids_with_email(email) == [], "the globex user exists already: run against a fresh seed"
+    email, home = NEWCOMER.email, NEWCOMER.home
+    assert database.user_ids_with_email(email) == [], f"{NEWCOMER.key} exists already: run against a fresh seed"
 
-    token = _sign_in_to_the_spa(page, frontend_url, zitadel.users[GLOBEX])["access_token"]
+    token = _sign_in_to_the_spa(page, frontend_url, zitadel.users[NEWCOMER.key])["access_token"]
 
     identity = api(token).get(IDENTITY)
     assert identity.status == 200, identity.text()
     body = identity.json()
-    globex = database.tenant_ids()[GLOBEX]
+    tenant_id = database.tenant_ids()[home]
     assert body["user"]["email"] == email
     assert database.user_ids_with_email(email) == [body["user"]["id"]]
-    assert body["tenant_memberships"] == [{"tenant_id": globex, "tenant_name": GLOBEX}]
-    assert body["roles"] == [{"tenant_id": globex, "role_name": "member", "permissions": []}]
-    assert body["linked_idps"] == [{"provider_name": "zitadel", "external_sub": zitadel.user_ids[GLOBEX]}]
-    expect(page.locator("header").get_by_text(GLOBEX, exact=True)).to_be_visible()
+    assert body["tenant_memberships"] == [{"tenant_id": tenant_id, "tenant_name": home}]
+    # The organization claim decides the first grant: `member`, the fixture's role for this user.
+    assert NEWCOMER.roles == {home: "member"}
+    assert body["roles"] == [{"tenant_id": tenant_id, "role_name": "member", "permissions": []}]
+    assert body["linked_idps"] == [{"provider_name": "zitadel", "external_sub": zitadel.user_ids[NEWCOMER.key]}]
+    expect(page.locator("header").get_by_text(home, exact=True)).to_be_visible()
 
 
 # --- 2. Roles and tenant switch ------------------------------------------------------
 
 
-def test_the_acme_user_is_admin_in_acme_and_viewer_after_switching_to_globex(
+def test_the_linked_user_is_admin_in_one_tenant_and_viewer_after_switching_to_the_other(
     page: Page, frontend_url: str, api, zitadel: Instance, database: Database
 ):
-    token = _sign_in_to_the_spa(page, frontend_url, zitadel.users[ACME])["access_token"]
+    admin_in, viewer_in = _tenant_where(LINKED, "admin"), _tenant_where(LINKED, "viewer")
+    token = _sign_in_to_the_spa(page, frontend_url, zitadel.users[LINKED.key])["access_token"]
     tenants = database.tenant_ids()
 
-    _switch_tenant(page, frontend_url, ACME, tenants[ACME])
-    in_acme = api(token, {"X-Tenant-ID": tenants[ACME]})
-    assert _answer(in_acme.get(ADMIN_ROUTE)) == (200, {"roles": ["admin"]})
+    _switch_tenant(page, frontend_url, admin_in, tenants[admin_in])
+    as_admin = api(token, {"X-Tenant-ID": tenants[admin_in]})
+    assert _answer(as_admin.get(ADMIN_ROUTE)) == (200, {"roles": ["admin"]})
 
-    _switch_tenant(page, frontend_url, GLOBEX, tenants[GLOBEX])
-    in_globex = api(token, {"X-Tenant-ID": tenants[GLOBEX]})
-    assert _answer(in_globex.get(ADMIN_ROUTE)) == (403, INSUFFICIENT_PERMISSIONS)
-    assert _answer(in_globex.get(VIEWER_ROUTE)) == (200, {"roles": ["viewer"]})
+    _switch_tenant(page, frontend_url, viewer_in, tenants[viewer_in])
+    as_viewer = api(token, {"X-Tenant-ID": tenants[viewer_in]})
+    assert _answer(as_viewer.get(ADMIN_ROUTE)) == (403, INSUFFICIENT_PERMISSIONS)
+    assert _answer(as_viewer.get(VIEWER_ROUTE)) == (200, {"roles": ["viewer"]})
 
 
 # --- 3. Unmapped organization --------------------------------------------------------
@@ -139,12 +147,11 @@ def test_the_acme_user_is_admin_in_acme_and_viewer_after_switching_to_globex(
 def test_a_user_of_an_organization_no_tenant_names_gets_nothing(
     page: Page, frontend_url: str, api, zitadel: Instance, database: Database
 ):
-    email = _email(UNLINKED)
-
-    token = _sign_in_to_the_spa(page, frontend_url, zitadel.users[UNLINKED])["access_token"]
+    assert not IDENTITIES.tenants[UNLINKED.home].canonical
+    token = _sign_in_to_the_spa(page, frontend_url, zitadel.users[UNLINKED.key])["access_token"]
 
     assert _answer(api(token).get(IDENTITY)) == (403, NOT_LINKED)
-    assert database.user_ids_with_email(email) == []
+    assert database.user_ids_with_email(UNLINKED.email) == []
     expect(page.locator("header").get_by_text("No tenants", exact=True)).to_be_visible()
     page.goto(f"{frontend_url}/settings")
     expect(page.get_by_text("Access Denied", exact=True)).to_be_visible()
@@ -153,7 +160,7 @@ def test_a_user_of_an_organization_no_tenant_names_gets_nothing(
 # --- 4. Self-registration ------------------------------------------------------------
 
 
-@pytest.mark.parametrize("organization", [ACME, GLOBEX])
+@pytest.mark.parametrize("organization", TENANT_ORGANIZATIONS)
 def test_registration_in_a_tenant_organization_is_refused(page: Page, zitadel: Instance, organization):
     page.goto(f"{zitadel.issuer}/ui/v2/login/register?organization={zitadel.organization_ids[organization]}")
 
@@ -165,7 +172,7 @@ def test_registration_in_a_tenant_organization_is_refused(page: Page, zitadel: I
 
 
 def test_a_live_id_token_is_refused(page: Page, frontend_url: str, api, zitadel: Instance):
-    signed_in = _sign_in_to_the_spa(page, frontend_url, zitadel.users[ACME])
+    signed_in = _sign_in_to_the_spa(page, frontend_url, zitadel.users[LINKED.key])
     assert _answer(api(signed_in["access_token"]).get(IDENTITY))[0] == 200
 
     assert _answer(api(signed_in["id_token"]).get(IDENTITY)) == (401, TOKEN_REFUSED)
@@ -175,7 +182,7 @@ def test_a_live_token_from_the_second_application_is_refused(
     new_context, browser_login: BrowserLogin, api, zitadel: Instance
 ):
     tokens = browser_login.authorize(
-        new_context(), zitadel.users[ACME], client_id=zitadel.other_client_id, scope=SPA_SCOPE
+        new_context(), zitadel.users[LINKED.key], client_id=zitadel.other_client_id, scope=SPA_SCOPE
     )
 
     assert _answer(api(tokens.access_token).get(IDENTITY)) == (401, TOKEN_REFUSED)
@@ -187,7 +194,7 @@ def test_a_live_token_from_the_second_application_is_refused(
 def test_logout_drops_the_tokens_and_the_next_sign_in_asks_for_credentials(
     page: Page, frontend_url: str, api, zitadel: Instance, measured
 ):
-    signed_in = _sign_in_to_the_spa(page, frontend_url, zitadel.users[ACME])
+    signed_in = _sign_in_to_the_spa(page, frontend_url, zitadel.users[LINKED.key])
     assert signed_in.get("refresh_token"), "the SPA got no refresh token (offline_access)"
 
     # The user menu's trigger is the header button holding the avatar.
@@ -212,7 +219,7 @@ def test_logout_drops_the_tokens_and_the_next_sign_in_asks_for_credentials(
     if first_page == "accounts":
         # Login V2 keeps the login names it has seen in its own cookie and offers
         # them; choosing one still asks for the password.
-        page.get_by_role("button", name=zitadel.users[ACME].login_name).click()
+        page.get_by_role("button", name=zitadel.users[LINKED.key].login_name).click()
     expect(page.locator(f"{LOGIN_NAME_FIELD}, {PASSWORD_FIELD}")).to_be_visible()
     assert page.url.startswith(zitadel.issuer)
 

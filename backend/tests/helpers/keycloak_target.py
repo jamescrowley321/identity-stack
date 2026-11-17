@@ -24,6 +24,7 @@ tests are collected, so a run never mixes the two realms.
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -51,17 +52,21 @@ IMPORT_REALM = "identity-stack"
 # Local fixture values from the realm import.
 IMPORT_DIRECTORY_CLIENT_SECRET = "local-only-directory-client"
 IMPORT_ADMIN_CLIENT_SECRET = "local-only-admin-client"
-IMPORT_USERS = {
-    user.username: user
-    for user in (
-        KeycloakUser("alice", "local-only-alice", "a11ce000-0000-4000-8000-000000000001"),
-        KeycloakUser("bob", "local-only-bob", "b0b00000-0000-4000-8000-000000000002"),
-        KeycloakUser("carol", "local-only-carol", "ca401000-0000-4000-8000-000000000003"),
-        KeycloakUser("dave", "local-only-dave", "da4e0000-0000-4000-8000-000000000004"),
-        KeycloakUser("erin", "local-only-erin", "e4140000-0000-4000-8000-000000000005"),
-        KeycloakUser("frank", "local-only-frank", "f4a4c000-0000-4000-8000-000000000006"),
-    )
-}
+REALM_IMPORT_PATH = Path(__file__).resolve().parents[3] / "keycloak" / "realm" / "identity-stack-realm.json"
+
+
+def import_users(realm: Mapping) -> dict[str, KeycloakUser]:
+    """The realm import's login users (not service accounts): fixed id and local fixture password."""
+    users = {}
+    for user in realm["users"]:
+        credentials = user.get("credentials", [])
+        passwords = [credential["value"] for credential in credentials if credential["type"] == "password"]
+        if passwords:
+            users[user["username"]] = KeycloakUser(user["username"], passwords[0], user["id"])
+    return users
+
+
+IMPORT_USERS = import_users(json.loads(REALM_IMPORT_PATH.read_text()))
 
 REALM_VARIABLE = "KEYCLOAK_TEST_REALM"
 USER_IDS_VARIABLE = "KEYCLOAK_TEST_USER_IDS"
