@@ -509,6 +509,13 @@ jobs:
           # Local fixture value from keycloak/realm/identity-stack-realm.json.
           KEYCLOAK_DIRECTORY_CLIENT_SECRET: local-only-directory-client
           JIT_ENABLED_PROVIDERS: keycloak
+          # The limiter runs before token validation, so its key is the client
+          # address, shared by every request in this job. At the 60/minute
+          # default, the every-protected-route refusal test would get 429s
+          # instead of 401s. Limiter behaviour is covered by
+          # tests/unit/test_rate_limiting.py.
+          RATE_LIMIT_DEFAULT: 2000/minute
+          RATE_LIMIT_AUTH: 1000/minute
 
       - name: Start frontend (preview)
         run: |
