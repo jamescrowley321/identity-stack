@@ -10,10 +10,14 @@ standard input and writes, idempotently:
   the global canonical roles the output names: ``admin`` in ``acme`` and
   ``viewer`` in ``globex``.
 
-A second run with the same output changes nothing. After ``make zitadel-reset``
-and a new ``terraform apply`` the organization and user ids are new; a run then
-moves the tenants and the link to them. The ``globex`` test user is left for
-first login to provision, and the third organization gets no tenant.
+A second run with the same output changes nothing. The seed takes over nothing
+it did not write: it refuses, writing nothing, when ``acme`` or ``globex`` is
+already linked to another organization (``external_org_id`` is shared with the
+other providers), or when a user with the test user's email exists without a
+link to its Zitadel user. After ``make zitadel-reset`` and a new ``terraform
+apply`` the ids are new, so the seed needs a database it has not seeded. The
+``globex`` test user is left for first login to provision, and the third
+organization gets no tenant.
 
 Canonical roles are matched by name among the global roles (``tenant_id`` is
 NULL) and created, without permissions, only when missing.
@@ -47,6 +51,10 @@ CANONICAL_ROLES = frozenset({"owner", "admin", "member", "viewer"})
 
 class SeedInputError(ValueError):
     """The Terraform output is not a complete, consistent ``canonical_seed``."""
+
+
+class SeedConflictError(RuntimeError):
+    """The canonical store holds a row the seed would have to take over from someone else."""
 
 
 @dataclass(frozen=True)
@@ -152,9 +160,15 @@ async def _ensure_tenants(session: AsyncSession, seed: SeedInput, changes: list[
             tenant = Tenant(name=name, external_org_id=org_id, status=TenantStatus.active)
             session.add(tenant)
             changes.append(f"created tenant {name!r} (organization {org_id})")
-        elif tenant.external_org_id != org_id:
-            changes.append(f"moved tenant {name!r} from organization {tenant.external_org_id} to {org_id}")
+        elif tenant.external_org_id is None:
             tenant.external_org_id = org_id
+            changes.append(f"linked tenant {name!r} to organization {org_id}")
+        elif tenant.external_org_id != org_id:
+            # external_org_id is shared with the other providers' organizations
+            # (migration 004): another id here is not the seed's to move.
+            raise SeedConflictError(
+                f"tenant {name!r} is already linked to organization {tenant.external_org_id}, not {org_id}"
+            )
         tenants[name] = tenant
     await session.flush()
     return tenants
@@ -181,38 +195,27 @@ async def _ensure_user(session: AsyncSession, seed: SeedInput, provider: Provide
     if link is not None:
         return (await session.execute(select(User).where(User.id == link.user_id))).scalars().one()
 
-    user = (await session.execute(select(User).where(User.email == wanted.email))).scalars().first()
-    if user is None:
-        user = User(
-            email=wanted.email,
-            user_name=wanted.user_name,
-            given_name=wanted.given_name,
-            family_name=wanted.family_name,
-            status=UserStatus.active,
+    # An email match proves nothing about who holds the row: linking it would hand
+    # its account, and the grants below, to the Zitadel user.
+    if (await session.execute(select(User).where(User.email == wanted.email))).scalars().first() is not None:
+        raise SeedConflictError(
+            f"a user {wanted.email!r} exists that is not linked to Zitadel user {wanted.external_sub}"
         )
-        session.add(user)
-        await session.flush()
-        changes.append(f"created user {wanted.email!r}")
 
-    existing_query = select(IdPLink).where(IdPLink.user_id == user.id, IdPLink.provider_id == provider.id)
-    existing = (await session.execute(existing_query)).scalars().first()
-    if existing is None:
-        session.add(
-            IdPLink(
-                user_id=user.id,
-                provider_id=provider.id,
-                external_sub=wanted.external_sub,
-                external_email=wanted.email,
-            )
-        )
-        changes.append(f"linked user {wanted.email!r} to Zitadel user {wanted.external_sub}")
-    else:
-        changes.append(
-            f"moved the link of {wanted.email!r} from Zitadel user {existing.external_sub} to {wanted.external_sub}"
-        )
-        existing.external_sub = wanted.external_sub
-        existing.external_email = wanted.email
+    user = User(
+        email=wanted.email,
+        user_name=wanted.user_name,
+        given_name=wanted.given_name,
+        family_name=wanted.family_name,
+        status=UserStatus.active,
+    )
+    session.add(user)
     await session.flush()
+    session.add(
+        IdPLink(user_id=user.id, provider_id=provider.id, external_sub=wanted.external_sub, external_email=wanted.email)
+    )
+    await session.flush()
+    changes.append(f"created user {wanted.email!r}, linked to Zitadel user {wanted.external_sub}")
     return user
 
 
@@ -238,7 +241,11 @@ async def _ensure_assignments(
 
 
 async def apply_seed(session: AsyncSession, seed: SeedInput) -> list[str]:
-    """Write the seed in ``session`` and commit. Returns what changed; an empty list on a rerun."""
+    """Write the seed in ``session`` and commit. Returns what changed; an empty list on a rerun.
+
+    Raises ``SeedConflictError``, having committed nothing, when the store holds a
+    tenant or user the seed would have to take over; the caller rolls back.
+    """
     changes: list[str] = []
     provider = await _ensure_provider(session, seed, changes)
     tenants = await _ensure_tenants(session, seed, changes)
@@ -257,7 +264,12 @@ async def main() -> int:
         return 1
 
     async with get_session_factory()() as session:
-        changes = await apply_seed(session, seed)
+        try:
+            changes = await apply_seed(session, seed)
+        except SeedConflictError as exc:
+            await session.rollback()
+            print(f"ERROR: nothing written: {exc}. Seed a database that has no such row.", file=sys.stderr)
+            return 1
 
     for change in changes:
         print(f"  [changed] {change}")

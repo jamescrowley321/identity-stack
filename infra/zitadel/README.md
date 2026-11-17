@@ -92,9 +92,12 @@ It pipes `terraform output -json canonical_seed` to
   and `viewer` in `globex`, so the tenant switch has a user in two tenants. The roles are the
   global canonical roles of those names, created without permissions when missing.
 
-A second run changes nothing. After `make zitadel-reset` and a new apply the ids are new, and a
-run moves the tenants and the link to them. The `globex` test user is left for first login to
-provision; `Unlinked` gets no tenant.
+A second run changes nothing. The seed takes over nothing it did not write: it refuses, and
+writes nothing, when `acme` or `globex` is already linked to another organization
+(`external_org_id` is shared with the other providers) or when a user with the test user's email
+exists without a link to its Zitadel user. After `make zitadel-reset` and a new apply the ids are
+new, so seed a database the seed has not seeded before. The `globex` test user is left for first
+login to provision; `Unlinked` gets no tenant.
 
 ## Checking it
 

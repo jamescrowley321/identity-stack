@@ -2,6 +2,7 @@
 
 import dataclasses
 
+import pytest
 from sqlmodel import select
 
 from app.models.identity.assignment import UserTenantRole
@@ -9,7 +10,7 @@ from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.role import Role
 from app.models.identity.tenant import Tenant
 from app.models.identity.user import IdPLink, User
-from scripts.seed_zitadel import PROVIDER_NAME, LinkedUser, SeedInput, apply_seed
+from scripts.seed_zitadel import PROVIDER_NAME, LinkedUser, SeedConflictError, SeedInput, apply_seed
 
 ISSUER = "http://zitadel.localhost:8480"
 
@@ -75,7 +76,20 @@ async def test_a_second_run_changes_nothing(db_session):
     assert await _state(db_session) == before == EXPECTED
 
 
-async def test_a_new_instance_moves_the_tenants_and_the_link_to_its_ids(db_session):
+async def _refused(session, seed: SeedInput) -> SeedConflictError:
+    """Run the seed, expect a refusal, and roll back as ``main`` does when it exits uncommitted."""
+    with pytest.raises(SeedConflictError) as refusal:
+        await apply_seed(session, seed)
+    await session.rollback()
+    return refusal.value
+
+
+async def _provider_count(session) -> int:
+    session.expire_all()
+    return len((await session.execute(select(Provider).where(Provider.name == PROVIDER_NAME))).scalars().all())
+
+
+async def test_a_new_instance_is_refused_and_leaves_the_store_as_it_was(db_session):
     await apply_seed(db_session, SEED)
     fresh = dataclasses.replace(
         SEED,
@@ -83,14 +97,66 @@ async def test_a_new_instance_moves_the_tenants_and_the_link_to_its_ids(db_sessi
         linked_user=dataclasses.replace(SEED.linked_user, external_sub="500000000000000003"),
     )
 
-    changes = await apply_seed(db_session, fresh)
+    await _refused(db_session, fresh)
 
-    assert changes
-    assert await _state(db_session) == {
-        **EXPECTED,
-        "tenants": {"acme": "500000000000000001", "globex": "500000000000000002"},
-        "links": {(True, "500000000000000003", "acme-user@acme.test")},
-    }
+    assert await _state(db_session) == EXPECTED
+
+
+async def test_a_tenant_linked_to_another_organization_is_refused_not_moved(db_session):
+    ory_org = "0b6f3c4e-7a52-4c1b-9d0e-2f9a8b7c6d5e"
+    db_session.add(Tenant(name="acme", external_org_id=ory_org))
+    await db_session.commit()
+
+    refusal = await _refused(db_session, SEED)
+
+    assert "acme" in str(refusal)
+    acme = (await db_session.execute(select(Tenant).where(Tenant.name == "acme"))).scalars().one()
+    assert acme.external_org_id == ory_org
+    assert await _provider_count(db_session) == 0
+
+
+async def test_a_tenant_with_no_organization_is_linked_to_its_organization(db_session):
+    db_session.add(Tenant(name="acme"))
+    await db_session.commit()
+
+    await apply_seed(db_session, SEED)
+
+    assert await _state(db_session) == EXPECTED
+
+
+async def test_a_user_linked_by_another_provider_is_refused_not_linked_or_granted(db_session):
+    other = Provider(name="ory-local", type=ProviderType.ory, issuer_url="http://ory.localhost")
+    user = User(email=SEED.linked_user.email, user_name="someone-else")
+    db_session.add_all([other, user])
+    await db_session.flush()
+    user_id, other_id = user.id, other.id
+    db_session.add(IdPLink(user_id=user_id, provider_id=other_id, external_sub="ory-subject"))
+    await db_session.commit()
+
+    refusal = await _refused(db_session, SEED)
+
+    assert SEED.linked_user.email in str(refusal)
+    db_session.expire_all()
+    links = (await db_session.execute(select(IdPLink).where(IdPLink.user_id == user_id))).scalars().all()
+    assert {(link.provider_id, link.external_sub) for link in links} == {(other_id, "ory-subject")}
+    grants = (await db_session.execute(select(UserTenantRole).where(UserTenantRole.user_id == user_id))).scalars()
+    assert grants.all() == []
+
+
+async def test_an_unlinked_user_with_the_same_email_is_refused_not_linked_or_granted(db_session):
+    user = User(email=SEED.linked_user.email, user_name="someone-else")
+    db_session.add(user)
+    await db_session.flush()
+    user_id = user.id
+    await db_session.commit()
+
+    await _refused(db_session, SEED)
+
+    db_session.expire_all()
+    links = (await db_session.execute(select(IdPLink).where(IdPLink.user_id == user_id))).scalars().all()
+    assert links == []
+    grants = (await db_session.execute(select(UserTenantRole).where(UserTenantRole.user_id == user_id))).scalars()
+    assert grants.all() == []
 
 
 async def test_existing_canonical_roles_are_reused_not_duplicated(db_session):
