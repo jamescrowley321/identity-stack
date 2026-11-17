@@ -7,13 +7,15 @@ second pooled connection to take it.
 """
 
 import asyncio
+import inspect
 import uuid
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import exc, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import QueuePool
 
-from app.dependencies.identity import keycloak_organization_lock
+from app.dependencies.identity import ORGANIZATION_LOCK_TIMEOUT_MS, keycloak_organization_lock
 from app.services.adapters.keycloak import LocalDatabaseError
 
 pytestmark = pytest.mark.asyncio
@@ -30,6 +32,12 @@ REQUESTS = POOL_SIZE * 3
 KEYCLOAK_SECONDS = 0.05
 # How long a push waits for the lock in the slow-holder test: far shorter than the pool's checkout timeout.
 LOCK_WAIT_SECONDS = 0.3
+# The production lock wait and pool checkout timeout (SQLAlchemy's default), scaled
+# down together so the ratio between them is the one a deployment runs with.
+DEFAULT_POOL_TIMEOUT_SECONDS = inspect.signature(QueuePool.__init__).parameters["timeout"].default
+SCALED_POOL_TIMEOUT_SECONDS = 3.0
+SCALE = SCALED_POOL_TIMEOUT_SECONDS / DEFAULT_POOL_TIMEOUT_SECONDS
+SCALED_LOCK_WAIT_MS = round(ORGANIZATION_LOCK_TIMEOUT_MS * SCALE)
 
 
 def sessions(async_engine) -> async_sessionmaker[AsyncSession]:
@@ -202,3 +210,64 @@ async def test_a_database_failure_taking_the_lock_is_a_local_database_error(post
                         pass
     finally:
         await engine.dispose()
+
+
+async def _another_route_behind_waiters(postgres_url, monkeypatch, waiters: int) -> int | BaseException:
+    """At the production ratio: a holder keeps the lock, ``waiters`` queue for it, then another route asks for one."""
+    monkeypatch.setattr("app.dependencies.identity.ORGANIZATION_LOCK_TIMEOUT_MS", SCALED_LOCK_WAIT_MS)
+    engine = create_async_engine(
+        postgres_url, pool_size=POOL_SIZE, max_overflow=0, pool_timeout=SCALED_POOL_TIMEOUT_SECONDS
+    )
+    factory = sessions(engine)
+    organization = f"organization-{uuid.uuid4()}"
+    held = asyncio.Event()
+    answered = asyncio.Event()
+
+    async def holder() -> None:
+        async with factory() as session, keycloak_organization_lock(session)(organization):
+            held.set()
+            await answered.wait()
+
+    async def waiter() -> None:
+        async with factory() as session:
+            await session.execute(text("SELECT 1"))
+            async with keycloak_organization_lock(session)(organization):
+                pass
+
+    async def another_route() -> int:
+        async with factory() as session:
+            return (await session.execute(text("SELECT 1"))).scalar_one()
+
+    try:
+        async with asyncio.timeout(SCALED_POOL_TIMEOUT_SECONDS * 4):
+            holding = asyncio.create_task(holder())
+            await held.wait()
+            waiting = [asyncio.create_task(waiter()) for _ in range(waiters)]
+            await asyncio.sleep(SETTLE_SECONDS)
+            try:
+                return await another_route()
+            except exc.TimeoutError as error:
+                return error
+            finally:
+                answered.set()
+                await asyncio.gather(holding, *waiting, return_exceptions=True)
+    finally:
+        await engine.dispose()
+
+
+async def test_at_the_default_ratio_a_route_behind_no_more_lock_requests_than_the_pool_holds_answers(
+    postgres_url, _run_migrations, monkeypatch
+):
+    """The holder and its waiters fill the pool: the waiters give up before the route's checkout times out."""
+    other = await _another_route_behind_waiters(postgres_url, monkeypatch, waiters=POOL_SIZE - 1)
+
+    assert other == 1
+
+
+async def test_at_the_default_ratio_a_route_behind_more_lock_requests_than_the_pool_holds_times_out(
+    postgres_url, _run_migrations, monkeypatch
+):
+    """The documented limit: a second round of waiters takes the freed connections; the route's checkout runs out."""
+    other = await _another_route_behind_waiters(postgres_url, monkeypatch, waiters=POOL_SIZE + 1)
+
+    assert isinstance(other, exc.TimeoutError)

@@ -120,6 +120,11 @@ def organization_lock_timeout() -> int:
     fetch a token and retry after a 401, and httpx's timeout applies per phase),
     so a push behind a holder slower than the limit gives up and fails.
 
+    It frees the pool for other routes only while the requests holding or
+    waiting for one organization's lock are no more than the pool's
+    connections: a route queued behind more of them waits for a connection
+    through two rounds of waiters (2 x 20 s), and its 30 s checkout times out.
+
     Raises ``ProviderConfigurationError`` for a value that is not a number of
     seconds Postgres takes as a limit, 0.001 to 2147483.647 once rounded to the
     millisecond: a limit that cannot be read is not replaced by a guess.
@@ -149,8 +154,9 @@ ORGANIZATION_LOCK_TIMEOUT_MS = organization_lock_timeout()
 def keycloak_organization_lock(session: AsyncSession) -> OrganizationLock:
     """A Postgres advisory lock per Keycloak organization alias, held across workers.
 
-    Taken on the request's session connection, which the request already holds
-    (the IdP link read), so taking it never waits for a second pooled connection.
+    Taken on the request's session connection (checked out again if the
+    service's commit returned it), so a request never holds two pooled
+    connections at once and taking the lock never waits for a second one.
     It is a transaction lock taken in a savepoint of the request's transaction
     and released by rolling that savepoint back, whether the body succeeded or
     raised: rolling back to a savepoint releases the locks taken after it, and
