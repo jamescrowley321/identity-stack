@@ -126,7 +126,7 @@ It copies only the root's `.tf` files git does not ignore into its working direc
 
 It needs `terraform`, `curl`, `jq` and the backend virtual environment
 (`cd backend && uv sync --locked --extra dev`), and checks for each before it does anything.
-The script never starts, stops or removes keycloak-test: `make keycloak-terraform-check` brings
-the container up first, and the script fails when it is not answering. It runs on Linux and in
+Neither the script nor `make keycloak-terraform-check` starts, stops or removes keycloak-test:
+bring it up first with `make test-up-keycloak`; the script fails when it is not answering. It runs on Linux and in
 CI. Two runs against one keycloak-test at the same time are not supported: where several
 sessions share a Docker host, serialise them (for example with `flock`).
