@@ -196,6 +196,10 @@ export function IdentityProvider({
   }, [requestedTenantId]);
   const [verdict, setVerdict] = useState<SwitchVerdict | null>(null);
 
+  // Identity is reloaded when the subject changes, not on token renewal. That
+  // holds for a token-borne tenant only while renewal keeps the token's tenant,
+  // as a refresh-token renewal does (Keycloak keeps the organization). A silent
+  // sign-in renewal asks with the base scope and could change it: #602.
   useEffect(() => {
     // Only fetch when authenticated — avoids an apiFetch /login bounce.
     if (!isAuthenticated) return;

@@ -27,7 +27,9 @@ import {
  *   one tenant while the API acts in another.
  *
  * A tenant sign-in whose token does not name the tenant asked for is reported,
- * and the tenant asked for is not shown as current.
+ * and the tenant asked for is not shown as current. A sign-in request that
+ * fails before leaving the page is reported beside the switch, which keeps
+ * showing the current tenant and can be used again.
  */
 export default function TenantSwitcher() {
   const { currentTenantId, tenants } = useTenants()
@@ -42,12 +44,15 @@ export default function TenantSwitcher() {
 
   const displayName = (t: TenantInfo) => t.name || t.id
 
-  const failedTenantId = tenantSwitchFailure?.requestedTenantId ?? requestFailedFor
-  if (failedTenantId !== null) {
+  const requestSignInAgain = () => {
+    signInAgain().catch((error: unknown) => console.error("Sign-in request failed", error))
+  }
+
+  if (tenantSwitchFailure) {
     return (
       <div role="alert" className="flex items-center gap-2 text-sm text-destructive">
-        <span>Could not switch to {failedTenantId}</span>
-        <Button variant="outline" size="sm" className="h-7" onClick={() => void signInAgain()}>
+        <span>Could not switch to {tenantSwitchFailure.requestedTenantId}</span>
+        <Button variant="outline" size="sm" className="h-7" onClick={requestSignInAgain}>
           Sign in again
         </Button>
       </div>
@@ -61,7 +66,13 @@ export default function TenantSwitcher() {
   const handleSwitch = (tenantId: string) => {
     if (tenantId === currentTenantId) return
     if (tenantSwitch === "sign-in") {
-      signInToTenant(tenantId).catch(() => setRequestFailedFor(tenantId))
+      // A request that fails before the redirect leaves the user signed in
+      // to the current tenant: say so beside the switch, which stays usable.
+      setRequestFailedFor(null)
+      signInToTenant(tenantId).catch((error: unknown) => {
+        console.error(`Tenant sign-in request for ${tenantId} failed`, error)
+        setRequestFailedFor(tenantId)
+      })
       return
     }
     setCurrentTenantId(tenantId)
@@ -76,7 +87,7 @@ export default function TenantSwitcher() {
     return <Badge variant="secondary">{displayName(tenants[0])}</Badge>
   }
 
-  return (
+  const switcher = (
     <Select value={currentTenantId ?? ""} onValueChange={handleSwitch}>
       <SelectTrigger className="h-7 w-auto gap-1 text-xs">
         <SelectValue placeholder="Select tenant..." />
@@ -89,5 +100,16 @@ export default function TenantSwitcher() {
         ))}
       </SelectContent>
     </Select>
+  )
+
+  if (requestFailedFor === null) return switcher
+
+  return (
+    <div className="flex items-center gap-2">
+      {switcher}
+      <span role="alert" className="text-sm text-destructive">
+        Could not switch to {requestFailedFor}
+      </span>
+    </div>
   )
 }
