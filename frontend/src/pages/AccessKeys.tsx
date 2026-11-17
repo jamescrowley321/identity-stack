@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { toast } from "sonner";
 import { useApiClient } from "@/hooks/useApiClient";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -56,17 +56,26 @@ export default function AccessKeys() {
   const [newKeySecret, setNewKeySecret] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
+  // The list reloads when the tenant changes (apiFetch does). Only the latest
+  // load fills it, so an earlier tenant's answer arriving late is dropped, and a
+  // failed load empties it rather than leaving the previous tenant's keys.
+  const latestLoad = useRef(0);
+  const delayedReload = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const loadKeys = useCallback(() => {
+    const load = ++latestLoad.current;
+    const show = (rows: AccessKey[]) => {
+      if (load === latestLoad.current) setKeys(rows);
+    };
     apiFetch("/api/keys")
       .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data?.keys) setKeys(data.keys);
-      })
-      .catch(() => {});
+      .then((data) => show(Array.isArray(data?.keys) ? data.keys : []))
+      .catch(() => show([]));
   }, [apiFetch]);
 
   useEffect(() => {
     loadKeys();
+    // A reload scheduled in the previous tenant would refill the list with its keys.
+    return () => clearTimeout(delayedReload.current);
   }, [loadKeys]);
 
   const handleCreate = useCallback(async () => {
@@ -94,7 +103,7 @@ export default function AccessKeys() {
         // Brief delay before refresh — the Descope search index needs a
         // moment to include the newly created key, otherwise loadKeys()
         // returns stale results and the list appears not to update.
-        setTimeout(loadKeys, 1500);
+        delayedReload.current = setTimeout(loadKeys, 1500);
       } else {
         const err = await res.json();
         toast.error(err.detail || "Failed to create key");
