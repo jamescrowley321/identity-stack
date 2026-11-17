@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from expression import Ok
+from expression import Error, Ok
 from fastapi import FastAPI
 
 from app import main
@@ -26,9 +26,11 @@ from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.permission import PermissionRepository
 from app.repositories.role import RoleRepository
 from app.repositories.user import UserRepository
-from app.services.adapters.base import LAST_ROLE_IN_TENANT, STATUS_CHANGED, IdentityProviderAdapter
+from app.services.adapters.base import LAST_ROLE_IN_TENANT, STATUS_CHANGED, IdentityProviderAdapter, SyncError
 from app.services.adapters.descope import DescopeSyncAdapter
 from app.services.adapters.keycloak import KeycloakSyncAdapter
+from app.services.adapters.noop import NoOpSyncAdapter
+from app.services.adapters.ory import OrySyncAdapter
 from app.services.keycloak_admin import ADMIN_CLIENT_ID_VARIABLE, ADMIN_CREDENTIAL_VARIABLE, KeycloakAdminApi
 from app.services.reconciliation import ReconciliationService
 from app.services.role import RoleService
@@ -401,6 +403,142 @@ class TestLosingTheLastRole:
         adapter.delete_role_assignment.assert_awaited_once_with(
             user_id=user_id, tenant_id=tenant_id, role_id=role.id, data={"role_name": "editor"}
         )
+
+
+class TestDeletingARole:
+    """Deleting a role ends the memberships it was the last role of, for an adapter that keeps memberships."""
+
+    @staticmethod
+    def roles(
+        holders: list[UserTenantRole], remaining: dict[tuple[uuid.UUID, uuid.UUID], list[UserTenantRole]]
+    ) -> tuple[RoleService, AsyncMock, AsyncMock, Role, list[str]]:
+        role = Role(id=uuid.uuid4(), name="editor", description="", tenant_id=None)
+        calls: list[str] = []
+        repo = AsyncMock(spec=RoleRepository)
+        repo.get.return_value = role
+        repo.delete.side_effect = lambda *_args: calls.append("delete") or True
+        repo.commit.side_effect = lambda: calls.append("commit")
+        assignments = AsyncMock(spec=UserTenantRoleRepository)
+
+        async def held(*_args) -> list[UserTenantRole]:
+            calls.append("holders")
+            return holders
+
+        async def left(user_id: uuid.UUID, tenant_id: uuid.UUID) -> list[UserTenantRole]:
+            calls.append("count")
+            return remaining[(user_id, tenant_id)]
+
+        assignments.list_by_role.side_effect = held
+        assignments.list_by_user_tenant.side_effect = left
+        adapter = AsyncMock(spec=IdentityProviderAdapter)
+        adapter.ends_memberships = True
+        adapter.delete_role.return_value = Ok(None)
+        adapter.delete_role_assignment.return_value = Ok(None)
+        service = RoleService(
+            repository=repo,
+            permission_repository=AsyncMock(spec=PermissionRepository),
+            assignment_repository=assignments,
+            adapter=adapter,
+            publisher=AsyncMock(),
+        )
+        return service, assignments, adapter, role, calls
+
+    async def test_a_user_whose_last_role_it_was_leaves_and_one_with_another_role_stays(self):
+        alone, kept, tenant_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        role_id = uuid.uuid4()
+        holders = [
+            UserTenantRole(user_id=alone, tenant_id=tenant_id, role_id=role_id),
+            UserTenantRole(user_id=kept, tenant_id=tenant_id, role_id=role_id),
+        ]
+        remaining = {
+            (alone, tenant_id): [],
+            (kept, tenant_id): [UserTenantRole(user_id=kept, tenant_id=tenant_id, role_id=uuid.uuid4())],
+        }
+        service, assignments, adapter, role, _calls = self.roles(holders, remaining)
+
+        result = await service.delete_role(role_id=role.id)
+
+        assert result == Ok({"status": "deleted", "name": "editor"})
+        assignments.list_by_role.assert_awaited_once_with(role.id)
+        adapter.delete_role.assert_awaited_once_with(role_id=role.id)
+        adapter.delete_role_assignment.assert_awaited_once_with(
+            user_id=alone,
+            tenant_id=tenant_id,
+            role_id=role.id,
+            data={"role_name": "editor", LAST_ROLE_IN_TENANT: True},
+        )
+
+    async def test_the_holders_are_read_before_the_delete_and_counted_after_the_commit(self):
+        """The delete cascades to the assignments: read after it, there are none left to name the holders."""
+        user_id, tenant_id = uuid.uuid4(), uuid.uuid4()
+        holders = [UserTenantRole(user_id=user_id, tenant_id=tenant_id, role_id=uuid.uuid4())]
+        service, _assignments, adapter, role, calls = self.roles(holders, {(user_id, tenant_id): []})
+
+        await service.delete_role(role_id=role.id)
+
+        assert calls == ["holders", "delete", "commit", "count"]
+        adapter.delete_role_assignment.assert_awaited_once()
+
+    async def test_one_membership_per_user_and_tenant_whatever_the_rows(self):
+        user_id, first, second = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        role_id = uuid.uuid4()
+        holders = [
+            UserTenantRole(user_id=user_id, tenant_id=first, role_id=role_id),
+            UserTenantRole(user_id=user_id, tenant_id=second, role_id=role_id),
+        ]
+        service, _assignments, adapter, role, _calls = self.roles(
+            holders, {(user_id, first): [], (user_id, second): []}
+        )
+
+        await service.delete_role(role_id=role.id)
+
+        ended = {call.kwargs["tenant_id"]: call.kwargs for call in adapter.delete_role_assignment.await_args_list}
+        assert ended == {
+            tenant_id: {
+                "user_id": user_id,
+                "tenant_id": tenant_id,
+                "role_id": role.id,
+                "data": {"role_name": "editor", LAST_ROLE_IN_TENANT: True},
+            }
+            for tenant_id in (first, second)
+        }
+
+    async def test_a_failed_membership_push_is_logged_and_the_delete_still_succeeds(self, caplog):
+        user_id, tenant_id = uuid.uuid4(), uuid.uuid4()
+        holders = [UserTenantRole(user_id=user_id, tenant_id=tenant_id, role_id=uuid.uuid4())]
+        service, _assignments, adapter, role, _calls = self.roles(holders, {(user_id, tenant_id): []})
+        adapter.delete_role_assignment.return_value = Error(
+            SyncError(message="USER_NOT_IN_KEYCLOAK", operation="delete_role_assignment")
+        )
+
+        with caplog.at_level("WARNING", logger="app.services.role"):
+            result = await service.delete_role(role_id=role.id)
+
+        assert result == Ok({"status": "deleted", "name": "editor"})
+        warnings = [record for record in caplog.records if record.name == "app.services.role"]
+        assert [record.levelname for record in warnings] == ["WARNING"]
+
+    async def test_an_adapter_that_keeps_no_memberships_is_sent_what_it_was_sent_before(self):
+        """Descope and Ory: the role delete alone, no holder read and no assignment push."""
+        service, assignments, adapter, role, _calls = self.roles([], {})
+        adapter.ends_memberships = False
+
+        await service.delete_role(role_id=role.id)
+
+        adapter.delete_role.assert_awaited_once_with(role_id=role.id)
+        assignments.list_by_role.assert_not_awaited()
+        adapter.delete_role_assignment.assert_not_awaited()
+
+    def test_only_the_keycloak_adapter_keeps_memberships(self):
+        adapters = [IdentityProviderAdapter, DescopeSyncAdapter, OrySyncAdapter, NoOpSyncAdapter, KeycloakSyncAdapter]
+
+        assert {adapter.__name__: adapter.ends_memberships for adapter in adapters} == {
+            "IdentityProviderAdapter": False,
+            "DescopeSyncAdapter": False,
+            "OrySyncAdapter": False,
+            "NoOpSyncAdapter": False,
+            "KeycloakSyncAdapter": True,
+        }
 
 
 class FakeConnection:

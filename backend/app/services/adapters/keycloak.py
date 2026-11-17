@@ -24,13 +24,16 @@ Through ``KeycloakAdminApi`` (the Admin REST API, one service account):
   Keycloak lacks is not created, and is an error: ``USER_NOT_IN_KEYCLOAK``), so a refused
   profile update cannot keep the user in the tenant, and then pushes only a
   changed email: leaving a tenant does not send ``enabled``, so it cannot undo a
-  realm admin's disable. A status sync (activate, deactivate) does send it.
+  realm admin's disable. A status sync (activate, deactivate) does send it, and,
+  like leaving a tenant, does not create a user Keycloak lacks
+  (``USER_NOT_IN_KEYCLOAK``).
 - ``delete_user`` deletes that user; one not there is deleted.
 - ``sync_role_assignment`` adds the user to the tenant's organization: holding a
   role in a tenant is being its member. ``delete_role_assignment`` ends that
   membership when ``RoleService`` marks the removed role as the user's last in the
   tenant (``LAST_ROLE_IN_TENANT``); otherwise another role still holds it and
-  nothing is called.
+  nothing is called. ``ends_memberships`` is set, so ``RoleService.delete_role``
+  also sends that for each user the deleted role was the last role of.
 - Roles and permissions stay canonical: their methods call nothing, as
   ``OrySyncAdapter``'s do.
 
@@ -47,6 +50,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from typing import ClassVar
 
 from expression import Error, Ok, Result
 from opentelemetry import trace
@@ -56,10 +60,11 @@ from app.services.keycloak_admin import KeycloakAdminApi, KeycloakAdminError
 
 tracer = trace.get_tracer(__name__)
 
-# A membership removal found no Keycloak user under the canonical id. A user the
-# adapter did not create (login-page sign-up, JIT-linked) may hold the membership
-# under another username, so it is reported, not counted as done.
-USER_NOT_IN_KEYCLOAK = "the user is not in Keycloak under the canonical user id: no membership was ended"
+# A membership removal or status change found no Keycloak user under the canonical
+# id. A user the adapter did not create (login-page sign-up, JIT-linked) may hold
+# the membership or the account under another username, so it is reported, not
+# counted as done, and no account is created for it.
+USER_NOT_IN_KEYCLOAK = "the user is not in Keycloak under the canonical user id: nothing was changed"
 
 # Canonical user status -> Keycloak ``enabled``.
 _ENABLED: dict[str, bool] = {"active": True, "provisioned": True, "inactive": False}
@@ -117,6 +122,8 @@ def _same_email(held: object, sent: str) -> bool:
 
 class KeycloakSyncAdapter(IdentityProviderAdapter):
     """Syncs canonical tenants and users to Keycloak organizations and users. Roles stay canonical."""
+
+    ends_memberships: ClassVar[bool] = True
 
     def __init__(self, api: KeycloakAdminApi) -> None:
         self._api = api
@@ -186,8 +193,9 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
 
         async def push() -> None:
             user = await self._api.find_user(username)
-            if user is None and left_alias is not None:
-                # Offboarding never provisions an account.
+            if user is None and (left_alias is not None or status_changed):
+                # Offboarding and a status change never provision an account: a
+                # disabled account beside the user's real one would disable nothing.
                 raise _Refused(USER_NOT_IN_KEYCLOAK)
             if user is None:
                 await self._api.create_user({"username": username, "email": email, "enabled": _ENABLED[status]})
