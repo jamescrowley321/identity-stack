@@ -115,9 +115,10 @@ _LOCK_TIMEOUT_MS_BOUNDS = (1, 2_147_483_647)
 def organization_lock_timeout() -> int:
     """``KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS`` in whole milliseconds: a push's wait for an organization's lock.
 
-    The default, 20 s, outlasts a holder's worst case (three Keycloak admin
-    calls of at most ``keycloak_admin.ADMIN_TIMEOUT_SECONDS`` each) and ends
-    before SQLAlchemy's 30 s pool checkout timeout.
+    The default, 20 s, ends before SQLAlchemy's 30 s pool checkout timeout. It
+    does not bound how long a holder keeps the lock (a holder's admin calls can
+    fetch a token and retry after a 401, and httpx's timeout applies per phase),
+    so a push behind a holder slower than the limit gives up and fails.
 
     Raises ``ProviderConfigurationError`` for a value that is not a number of
     seconds Postgres takes as a limit, 0.001 to 2147483.647 once rounded to the
@@ -129,7 +130,9 @@ def organization_lock_timeout() -> int:
     except ValueError:
         seconds = math.nan
     lowest, highest = _LOCK_TIMEOUT_MS_BOUNDS
-    milliseconds = round(seconds * 1000) if math.isfinite(seconds) else None
+    # Bounded in seconds before scaling: a finite value such as 1e306 would scale to inf.
+    in_range = math.isfinite(seconds) and abs(seconds) <= highest
+    milliseconds = round(seconds * 1000) if in_range else None
     if milliseconds is None or not lowest <= milliseconds <= highest:
         raise ProviderConfigurationError(
             "KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS must be a number of seconds"
@@ -183,6 +186,11 @@ def keycloak_organization_lock(session: AsyncSession) -> OrganizationLock:
         except _DATABASE_FAILURES as exc:
             await _release(savepoint, alias)
             raise LocalDatabaseError(_failed("the organization lock", exc)) from exc
+        except BaseException:
+            # A cancellation (a client disconnect, an outer timeout) mid-wait:
+            # leave no savepoint holding lock_timeout or the lock.
+            await _release(savepoint, alias)
+            raise
         try:
             yield
         finally:

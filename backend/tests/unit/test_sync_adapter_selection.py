@@ -1,5 +1,6 @@
 """Which sync adapter the services get, how startup opens it, and what leaving a tenant sends it."""
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -33,7 +34,6 @@ from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.permission import PermissionRepository
 from app.repositories.role import RoleRepository
 from app.repositories.user import UserRepository
-from app.services import keycloak_admin
 from app.services.adapters.base import (
     CHANGED_IN_TENANT,
     LAST_ROLE_IN_TENANT,
@@ -168,6 +168,21 @@ class TestSelection:
         session.rollback.assert_not_awaited()
         session.commit.assert_not_awaited()
 
+    @pytest.mark.parametrize("failing_statement", [1, 2], ids=["set_config", "pg_advisory_xact_lock"])
+    async def test_a_lock_acquisition_cancelled_mid_wait_releases_its_savepoint(self, failing_statement):
+        """A client disconnect or an outer timeout leaves no savepoint holding lock_timeout or the lock."""
+        session, savepoint = savepoint_session()
+        session.execute.side_effect = [None] * (failing_statement - 1) + [asyncio.CancelledError()]
+        body = []
+
+        with pytest.raises(asyncio.CancelledError):
+            async with identity.keycloak_organization_lock(session)("organization"):
+                body.append("entered")
+
+        assert body == []
+        savepoint.rollback.assert_awaited_once_with()
+        session.rollback.assert_not_awaited()
+
     async def test_a_savepoint_the_database_cannot_open_is_a_local_database_error(self):
         session, _savepoint = savepoint_session()
         session.begin_nested.side_effect = OperationalError("SAVEPOINT", {}, ConnectionResetError("connection reset"))
@@ -251,13 +266,12 @@ class TestOrganizationLockTimeout:
 
         assert identity.organization_lock_timeout() == 20_000
 
-    def test_the_default_outlasts_a_holder_and_ends_before_the_pool_checkout(self, monkeypatch):
-        """A holder makes three admin calls under the lock; a waiter gives up before SQLAlchemy's 30 s pool timeout."""
+    def test_the_default_ends_before_the_pool_checkout(self, monkeypatch):
+        """A waiter gives up before SQLAlchemy's 30 s pool timeout would fail other routes' checkouts."""
         monkeypatch.delenv("KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS", raising=False)
-        holder_worst_case_ms = 3 * keycloak_admin.ADMIN_TIMEOUT_SECONDS * 1000
         pool_checkout_ms = QueuePool(lambda: None).timeout() * 1000
 
-        assert holder_worst_case_ms < identity.organization_lock_timeout() < pool_checkout_ms
+        assert identity.organization_lock_timeout() < pool_checkout_ms
 
     @pytest.mark.parametrize(
         ("raw", "milliseconds"),
@@ -268,7 +282,9 @@ class TestOrganizationLockTimeout:
 
         assert identity.organization_lock_timeout() == milliseconds
 
-    @pytest.mark.parametrize("raw", ["0", "-1", "nan", "inf", "ten", "", "0.0001", "0.0004", "2147483.648", "1e7"])
+    @pytest.mark.parametrize(
+        "raw", ["0", "-1", "nan", "inf", "ten", "", "0.0001", "0.0004", "2147483.648", "1e7", "1e306", "-1e306"]
+    )
     def test_a_value_postgres_reads_as_no_limit_or_refuses_stops_startup(self, monkeypatch, raw):
         """0 ms is no lock_timeout at all; above 2147483647 ms Postgres refuses set_config on every push."""
         monkeypatch.setenv("KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS", raw)
