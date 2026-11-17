@@ -48,16 +48,16 @@ through that module, so a refused URL fails at `terraform plan` before the provi
 
 | Output | What |
 |---|---|
-| `backend_environment` (sensitive) | A map whose keys are exactly the backend environment variables for the provider ([`docs/environment-variables.md`](../docs/environment-variables.md)), service-account secrets included: it alone configures the backend for that provider. Sensitive for those secrets. |
+| `backend_environment` (sensitive) | A map whose keys are exactly the backend environment variables for the provider ([`docs/environment-variables.md`](../docs/environment-variables.md)), service-account secrets included: it alone configures the backend for that provider. Sensitive for those secrets. They include the admin adapter's credential, which writes to the provider (`KEYCLOAK_ADMIN_CLIENT_SECRET`: `manage-users`, `manage-organizations`; `ZITADEL_ADMIN_TOKEN`: `IAM_ORG_MANAGER`). A backend that does not sync to the provider (`SYNC_PROVIDER` names another) needs neither: the e2e jobs leave them out. |
 | `frontend_environment` | The same for the SPA: the `VITE_OIDC_*` variables of one build. |
 | `test_credentials` (sensitive) | What tests log in with: `users`, each fixture user's password keyed by fixture user, and `clients`, each test-only client's secret keyed by client id (empty when a root has none). |
 
 `make keycloak-env` and `make zitadel-env` print the two environment maps of the applied root in
 `.env` form, under `# backend/.env` and `# frontend/.env`. Values are single-quoted, so a shell
 can source the lines too. The roots' check scripts, the Keycloak integration run against the
-Terraform realm (`make keycloak-terraform-integration`) and the Zitadel integration and e2e
-set-up read these outputs. The Keycloak e2e job runs against the realm the compose import
-ships, which no Terraform root describes in state. `tests/unit/test_provider_terraform_roots.py` fails when a root
+Terraform realm (`make keycloak-terraform-integration`) and the Keycloak and Zitadel e2e set-up
+(the CI jobs, `make test-e2e-keycloak`, `make test-e2e-zitadel`) and Zitadel integration set-up
+read these outputs. `tests/unit/test_provider_terraform_roots.py` fails when a root
 lacks one of them or a variable, when a key of an environment map is not in the matching table
 of `docs/environment-variables.md`, or when a root writes its own plain-HTTP rule.
 

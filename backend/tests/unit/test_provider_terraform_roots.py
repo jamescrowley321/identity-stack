@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parents[3]
 INFRA = REPO / "infra"
@@ -139,3 +140,69 @@ def test_shared_module_holds_the_plain_http_rule() -> None:
     text = "\n".join(path.read_text() for path in sorted(URL_MODULE.glob("*.tf")))
 
     assert LOOPBACK_MARKER in text
+
+
+# --- The e2e set-up reads the outputs ---------------------------------------------
+
+CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
+MAKEFILE = REPO / "Makefile"
+# The CI job and the make target that run each root's e2e suite.
+E2E_JOBS = {"keycloak": "e2e-keycloak", "zitadel": "e2e-zitadel"}
+E2E_TARGETS = {"keycloak": "test-e2e-keycloak", "zitadel": "test-e2e-zitadel"}
+# The admin adapter's credential in backend_environment: it writes to the provider, and the e2e
+# backends do not sync to it.
+ADMIN_CREDENTIALS = {"keycloak": "KEYCLOAK_ADMIN_CLIENT_", "zitadel": "ZITADEL_ADMIN_TOKEN"}
+BACKEND_STEP = "Start backend"
+
+
+def _e2e_job(root: str) -> dict:
+    return yaml.safe_load(CI_WORKFLOW.read_text())["jobs"][E2E_JOBS[root]]
+
+
+def _job_env_names(job: dict) -> set[str]:
+    names = set(job.get("env", {}))
+    for step in job["steps"]:
+        names |= set(step.get("env", {}))
+    return names
+
+
+def _step_run(job: dict, name: str) -> str:
+    runs = {step["name"]: step.get("run", "") for step in job["steps"] if "name" in step}
+    return runs[name]
+
+
+@pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
+def test_e2e_job_applies_the_root(root: str) -> None:
+    runs = "\n".join(step.get("run", "") for step in _e2e_job(root)["steps"])
+
+    assert f"terraform -chdir=infra/{root} apply" in runs
+
+
+@pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
+def test_e2e_job_writes_no_provider_setting_by_hand(root: str) -> None:
+    """The provider's backend and VITE_OIDC_* settings come from the outputs, not the job."""
+    provider_settings = {
+        name
+        for name in _documented(DOC_SECTIONS["backend_environment"]) | _documented(DOC_SECTIONS["frontend_environment"])
+        if name.startswith((LOCAL_ROOTS[root], "VITE_OIDC_"))
+    }
+
+    assert sorted(_job_env_names(_e2e_job(root)) & provider_settings) == []
+
+
+@pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
+def test_e2e_backend_reads_backend_environment_without_the_admin_credential(root: str) -> None:
+    run = _step_run(_e2e_job(root), BACKEND_STEP)
+    # The jq filter clauses, up to the pipe after each: the admin credential must be in one.
+    selects = re.findall(r"select\((.*?)\)\s*\|", run)
+
+    assert f"terraform -chdir=infra/{root} output -json backend_environment" in run
+    assert [clause for clause in selects if ADMIN_CREDENTIALS[root] in clause] != []
+
+
+@pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
+def test_e2e_target_reads_the_outputs(root: str) -> None:
+    recipe = re.search(rf"^{E2E_TARGETS[root]}:.*\n((?:\t.*\n)+)", MAKEFILE.read_text(), re.MULTILINE)
+
+    assert recipe is not None
+    assert f"terraform -chdir=infra/{root} output -json" in recipe.group(1)
