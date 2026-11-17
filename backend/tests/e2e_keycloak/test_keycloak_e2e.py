@@ -1,8 +1,10 @@
 """The whole Keycloak path, from Chromium, against the shipped SPA and backend.
 
-The realm is the ``keycloak-test`` import (``keycloak/fixtures/README.md``). The
-backend runs from ``app.main`` with the realm's token model: ``member`` portable
-with ``documents:read`` only, ``tenant-admin`` organization-bound. Each case is
+The realm is the one ``infra/keycloak/`` builds in ``keycloak-test``, with the
+users and organizations of ``keycloak/fixtures/README.md``; ``make
+test-e2e-keycloak`` points the suite at it from the root's outputs. The backend
+runs from ``app.main`` with the realm's token model: ``member`` portable with
+``documents:read`` only, ``tenant-admin`` organization-bound. Each case is
 one item of identity-stack#562's scope.
 """
 

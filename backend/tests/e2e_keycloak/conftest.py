@@ -2,11 +2,14 @@
 
 It needs, all running and none of them optional:
 
-- ``keycloak-test`` (``make test-up-keycloak``), its issuer pinned to loopback;
+- ``keycloak-test`` (``make test-up-keycloak``), its issuer pinned to loopback,
+  with ``infra/keycloak/`` applied to it; ``make test-e2e-keycloak`` sets the
+  ``KEYCLOAK_TEST_*`` variables (``tests/helpers/keycloak_target.py``) from the
+  root's outputs;
 - the backend on ``E2E_BACKEND_URL`` (default ``http://localhost:8000``),
-  configured for the realm as ``docs/local-development.md`` says, with the
-  ``keycloak`` provider row seeded and ``JIT_ENABLED_PROVIDERS`` naming it;
-- the SPA, built with ``VITE_OIDC_*`` for ``member-app``, on
+  configured from the root's ``backend_environment``, with the ``keycloak``
+  provider row seeded and ``JIT_ENABLED_PROVIDERS`` naming it;
+- the SPA, built from the root's ``frontend_environment`` for ``member-app``, on
   ``http://localhost:3000``: the only origin the realm's app clients redirect to.
 
 When any of them does not answer, every test fails: the suite never skips.

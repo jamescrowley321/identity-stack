@@ -61,9 +61,28 @@ test-frontend: ## run frontend unit tests
 test-e2e: ## run e2e tests (requires running frontend + backend)
 	cd backend && python -m pytest tests/e2e/ -v
 
+# The suite logs in to the realm the applied infra/keycloak root built: its
+# base URL and name from KEYCLOAK_ISSUER_URL, the users' ids and passwords and
+# the service accounts' secrets from the outputs (tests/helpers/keycloak_target.py).
+# PYTEST_ARGS passes extra pytest options (CI's screenshots and traces).
+KEYCLOAK_TEST_TARGET_JQ := (.backend_environment.value // error("no backend_environment output: apply infra/keycloak first")) as $$backend \
+	| ($$backend.KEYCLOAK_ISSUER_URL | capture("^(?<base>.+)/realms/(?<realm>[^/]+)$$")) as $$issuer \
+	| { KEYCLOAK_TEST_BASE_URL: $$issuer.base, KEYCLOAK_TEST_REALM: $$issuer.realm, \
+		KEYCLOAK_TEST_USER_IDS: (.user_ids.value | tojson), \
+		KEYCLOAK_TEST_USER_PASSWORDS: (.test_credentials.value.users | tojson), \
+		KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET: $$backend.KEYCLOAK_DIRECTORY_CLIENT_SECRET, \
+		KEYCLOAK_TEST_ADMIN_CLIENT_SECRET: $$backend.KEYCLOAK_ADMIN_CLIENT_SECRET } \
+	| to_entries[] | "export \(.key)=\(.value | @sh)"
+
 .PHONY: test-e2e-keycloak
-test-e2e-keycloak: ## run the Keycloak e2e suite (requires keycloak-test, the backend and the Keycloak-built SPA on localhost:3000; see docs/keycloak.md)
-	cd backend && python -m pytest tests/e2e_keycloak/ -v
+test-e2e-keycloak: ## run the Keycloak e2e suite (requires keycloak-test with infra/keycloak applied, the backend and the SPA built from its outputs on localhost:3000; see docs/keycloak.md)
+	@outputs="$$(terraform -chdir=infra/keycloak output -json)" || { \
+		echo "test-e2e-keycloak: no outputs; apply infra/keycloak first (docs/keycloak.md)." >&2; \
+		exit 1; \
+	}; \
+	exports="$$(printf '%s' "$$outputs" | jq -er '$(KEYCLOAK_TEST_TARGET_JQ)')" || exit 1; \
+	eval "$$exports"; \
+	cd backend && python -m pytest tests/e2e_keycloak/ -v $(PYTEST_ARGS)
 
 # The suite reads the applied root's outputs (test users, client ids) from
 # ZITADEL_TERRAFORM_OUTPUTS. PYTEST_ARGS passes extra pytest options (CI's

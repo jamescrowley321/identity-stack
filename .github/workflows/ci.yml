@@ -446,14 +446,14 @@ jobs:
     name: E2E Tests (Keycloak)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # No credential: the realm is the keycloak-test import, so this runs on
-    # every pull request, forks and Dependabot included. The Descope E2E job
-    # above needs secrets and serves its own SPA on localhost:3000, the only
-    # origin the realm's app clients redirect to, so the Keycloak suite has a
-    # job of its own (backend/tests/e2e_keycloak/).
+    # This job uses no repository secrets. infra/keycloak is applied to
+    # keycloak-test with the compose bootstrap admin, so this runs on every
+    # pull request, forks and Dependabot included. The Descope E2E job above
+    # needs secrets and serves its own SPA on localhost:3000, the only origin
+    # the realm's app clients redirect to, so the Keycloak suite has a job of
+    # its own (backend/tests/e2e_keycloak/).
     env:
       DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
-      KEYCLOAK_ISSUER_URL: http://keycloak-test.localhost:18180/realms/identity-stack
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -465,19 +465,16 @@ jobs:
 
       - uses: ./.github/actions/setup-backend
 
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.2"
+          terraform_wrapper: false
+
       - name: Install Playwright browsers
         run: playwright install --with-deps chromium
 
       - name: Install frontend dependencies
         run: cd frontend && npm ci
-
-      - name: Build frontend for the realm's member-app
-        run: cd frontend && npm run build
-        env:
-          VITE_OIDC_AUTHORITY: ${{ env.KEYCLOAK_ISSUER_URL }}
-          VITE_OIDC_CLIENT_ID: member-app
-          VITE_OIDC_SCOPE: "openid profile email organization:acme"
-          VITE_OIDC_TENANT_SCOPE_TEMPLATE: "openid profile email organization:{tenant}"
 
       - name: Start test stack (postgres + redis + hydra + keycloak)
         # The Keycloak issuer is a fixed *.localhost name; pin it to loopback
@@ -486,17 +483,54 @@ jobs:
           echo "127.0.0.1 keycloak-test.localhost" | sudo tee -a /etc/hosts
           make test-up-keycloak
 
-      - name: Apply database schema
-        run: cd backend && python -m alembic upgrade head
+      - name: Apply infra/keycloak
+        # A realm beside the compose import, built by the root. Local state in
+        # infra/keycloak, which the later steps read the outputs from. The
+        # provider logs in as the compose bootstrap admin (docker-compose.test.yml).
+        run: |
+          terraform -chdir=infra/keycloak init -input=false
+          terraform -chdir=infra/keycloak apply -auto-approve -input=false \
+            -var issuer_url=http://keycloak-test.localhost:18180/realms/identity-stack-terraform
+        env:
+          KEYCLOAK_USER: admin
+          KEYCLOAK_PASSWORD: admin
 
-      - name: Register the Keycloak provider
-        run: cd backend && python -m scripts.seed_keycloak
+      - name: Build frontend for the realm's member-app
+        # The root's frontend_environment. The suite starts bob in acme, so the
+        # build asks for that organization by name, and the tenant switch asks
+        # for the one picked, instead of letting Keycloak ask him which one.
+        run: |
+          # Captured first: `eval "$(...)"` would drop a terraform or jq failure.
+          set -o pipefail
+          vars="$(terraform -chdir=infra/keycloak output -json frontend_environment \
+            | jq -er 'to_entries[] | if (.key | test("^VITE_OIDC_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
+          eval "$vars"
+          cd frontend && VITE_OIDC_SCOPE="openid profile email organization:acme" \
+            VITE_OIDC_TENANT_SCOPE_TEMPLATE="openid profile email organization:{tenant}" npm run build
+
+      - name: Apply database schema and register the Keycloak provider
+        run: |
+          set -o pipefail
+          KEYCLOAK_ISSUER_URL="$(terraform -chdir=infra/keycloak output -json backend_environment | jq -er .KEYCLOAK_ISSUER_URL)"
+          export KEYCLOAK_ISSUER_URL
+          cd backend
+          python -m alembic upgrade head
+          python -m scripts.seed_keycloak
 
       - name: Start backend
-        # Configured for the realm as docs/local-development.md says. Descope is
-        # left unconfigured: these tests present Keycloak tokens only. The log
-        # goes to a file: the backend outlives this step.
+        # The root's backend_environment without the admin client: this backend
+        # does not sync to Keycloak (SYNC_PROVIDER stays descope), so it gets no
+        # credential that writes to the realm. The directory client's secret is
+        # masked in the job log. Descope is left unconfigured: these tests present
+        # Keycloak tokens only. The log goes to a file: the backend outlives this step.
         run: |
+          # Captured first: `eval "$(...)"` would drop a terraform or jq failure.
+          set -o pipefail
+          environment="$(terraform -chdir=infra/keycloak output -json backend_environment)"
+          echo "::add-mask::$(printf '%s' "$environment" | jq -er .KEYCLOAK_DIRECTORY_CLIENT_SECRET)"
+          vars="$(printf '%s' "$environment" \
+            | jq -er 'to_entries[] | select(.key | startswith("KEYCLOAK_ADMIN_CLIENT_") | not) | if (.key | test("^KEYCLOAK_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
+          eval "$vars"
           cd backend
           uvicorn app.main:app --host 127.0.0.1 --port 8000 > "$RUNNER_TEMP/backend.log" 2>&1 &
           curl -fsS --retry 30 --retry-connrefused --retry-delay 1 -o /dev/null http://localhost:8000/api/health
@@ -504,15 +538,6 @@ jobs:
           DESCOPE_PROJECT_ID: ""
           DESCOPE_MANAGEMENT_KEY: ""
           REDIS_URL: redis://localhost:16379/0
-          KEYCLOAK_AUDIENCES: member,tenant-admin
-          KEYCLOAK_APP_CLIENTS: member=member-app,tenant-admin=tenant-admin-app
-          KEYCLOAK_PORTABLE_TYPES: member
-          KEYCLOAK_ORGANIZATION_BOUND_TYPES: tenant-admin
-          KEYCLOAK_PORTABLE_PERMISSIONS: member=documents:read
-          KEYCLOAK_REQUIRE_HTTPS: "false"
-          KEYCLOAK_DIRECTORY_CLIENT_ID: identity-stack-directory
-          # Local fixture value from keycloak/realm/identity-stack-realm.json.
-          KEYCLOAK_DIRECTORY_CLIENT_SECRET: local-only-directory-client
           JIT_ENABLED_PROVIDERS: keycloak
           # The limiter runs before token validation, so its key is the client
           # address, shared by every request in this job. At the 60/minute
@@ -530,12 +555,11 @@ jobs:
 
       - name: Run Keycloak E2E tests
         # The suite's session fixture fails every test, never skips, when
-        # keycloak-test, the backend or the SPA does not answer.
+        # keycloak-test, the backend or the SPA does not answer. The target
+        # reads the realm, user ids and passwords from the root's outputs.
         run: >-
-          cd backend && python -m pytest tests/e2e_keycloak/ -v
-          --screenshot=only-on-failure
-          --tracing=retain-on-failure
-          --output="$RUNNER_TEMP/playwright"
+          make test-e2e-keycloak
+          PYTEST_ARGS='--screenshot=only-on-failure --tracing=retain-on-failure --output=${{ runner.temp }}/playwright'
         env:
           E2E_BACKEND_URL: "http://localhost:8000"
 
@@ -650,14 +674,17 @@ jobs:
           cd frontend && VITE_OIDC_TENANT_SCOPE_TEMPLATE= npm run build
 
       - name: Start backend
-        # The root's backend_environment, with canonical authorization and first
-        # login for zitadel. Descope is left unconfigured: these tests present
-        # Zitadel tokens only. The log goes to a file: the backend outlives this step.
+        # The root's backend_environment without ZITADEL_ADMIN_TOKEN, with
+        # canonical authorization and first login for zitadel. This backend does
+        # not sync to Zitadel (SYNC_PROVIDER stays descope), so it gets no
+        # credential that writes to the instance. Descope is left unconfigured:
+        # these tests present Zitadel tokens only. The log goes to a file: the
+        # backend outlives this step.
         run: |
           # Captured first: `eval "$(...)"` would drop a terraform or jq failure.
           set -o pipefail
           vars="$(terraform -chdir=infra/zitadel output -json backend_environment \
-            | jq -er 'to_entries[] | if (.key | test("^ZITADEL_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
+            | jq -er 'to_entries[] | select(.key != "ZITADEL_ADMIN_TOKEN") | if (.key | test("^ZITADEL_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
           eval "$vars"
           cd backend
           uvicorn app.main:app --host 127.0.0.1 --port 8000 > "$RUNNER_TEMP/backend.log" 2>&1 &
