@@ -68,12 +68,18 @@ export function useApiClient() {
 
       const url = apiUrl(path);
 
+      // Headers reads every form a caller may pass (object, entry list,
+      // Headers) and matches names without regard to case, so deleting from it
+      // drops a tenant or authorization header the caller gave in any case.
+      const callerHeaders = new Headers(options.headers);
+      if (tenantId !== null) callerHeaders.delete(TENANT_SELECTOR_HEADER);
+      callerHeaders.delete("Authorization");
       const tenantHeader: Record<string, string> =
         tenantId === null ? {} : { [TENANT_SELECTOR_HEADER]: tenantId };
       const makeRequest = (t: string) =>
         fetch(url, {
           ...options,
-          headers: { ...options.headers, ...tenantHeader, Authorization: `Bearer ${t}` },
+          headers: { ...Object.fromEntries(callerHeaders), ...tenantHeader, Authorization: `Bearer ${t}` },
         });
 
       const response = await makeRequest(token);

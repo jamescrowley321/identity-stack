@@ -15,9 +15,12 @@ vi.mock("react-router-dom", () => ({
   useNavigate: () => mockNavigate,
 }));
 
-/** Every request the hook sent, keyed by attempt, with its headers as a plain object. */
+/**
+ * Every request the hook sent, in order, with its headers as a plain object.
+ * Header names are case-insensitive, so they are compared lower-cased.
+ */
 function sentHeaders(fetchMock: ReturnType<typeof vi.fn>): Record<string, string>[] {
-  return fetchMock.mock.calls.map(([, init]) => ({ ...((init as RequestInit).headers as Record<string, string>) }));
+  return fetchMock.mock.calls.map(([, init]) => Object.fromEntries(new Headers((init as RequestInit).headers)));
 }
 
 function withTenant(tenantId: string | null) {
@@ -45,7 +48,7 @@ describe("useApiClient tenant selector", () => {
 
     expect(TENANT_SELECTOR_HEADER).toBe("X-Tenant-ID");
     expect(sentHeaders(fetchMock)).toEqual([
-      { "Content-Type": "application/json", "X-Tenant-ID": "tenant-acme", Authorization: "Bearer token-a" },
+      { "content-type": "application/json", "x-tenant-id": "tenant-acme", authorization: "Bearer token-a" },
     ]);
   });
 
@@ -56,17 +59,34 @@ describe("useApiClient tenant selector", () => {
     const { result } = renderHook(() => useApiClient(), { wrapper: withTenant(null) });
     await result.current.apiFetch("/api/identity");
 
-    expect(sentHeaders(fetchMock)).toEqual([{ Authorization: "Bearer token-a" }]);
+    expect(sentHeaders(fetchMock)).toEqual([{ authorization: "Bearer token-a" }]);
   });
 
-  it("the selected tenant wins over a header the caller set", async () => {
+  it.each([
+    ["the same case", { "X-Tenant-ID": "tenant-globex" }],
+    ["lower case", { "x-tenant-id": "tenant-globex" }],
+    ["a Headers instance", new Headers({ "x-tenant-id": "tenant-globex" })],
+    ["an entry list", [["x-tenant-id", "tenant-globex"]] as [string, string][]],
+  ])("the selected tenant wins over a header the caller set in %s", async (_form, headers: HeadersInit) => {
     mockUseAuth.mockReturnValue({ user: { access_token: "token-a" }, signinSilent: vi.fn(), removeUser: vi.fn() });
     fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
 
     const { result } = renderHook(() => useApiClient(), { wrapper: withTenant("tenant-acme") });
-    await result.current.apiFetch("/api/roles", { headers: { "X-Tenant-ID": "tenant-globex" } });
+    await result.current.apiFetch("/api/roles", { headers });
 
-    expect(sentHeaders(fetchMock)).toEqual([{ "X-Tenant-ID": "tenant-acme", Authorization: "Bearer token-a" }]);
+    expect(sentHeaders(fetchMock)).toEqual([{ "x-tenant-id": "tenant-acme", authorization: "Bearer token-a" }]);
+  });
+
+  it("keeps the caller's other headers when they come as a Headers instance", async () => {
+    mockUseAuth.mockReturnValue({ user: { access_token: "token-a" }, signinSilent: vi.fn(), removeUser: vi.fn() });
+    fetchMock.mockResolvedValue(new Response("ok", { status: 200 }));
+
+    const { result } = renderHook(() => useApiClient(), { wrapper: withTenant("tenant-acme") });
+    await result.current.apiFetch("/api/roles", { headers: new Headers({ "Content-Type": "application/json" }) });
+
+    expect(sentHeaders(fetchMock)).toEqual([
+      { "content-type": "application/json", "x-tenant-id": "tenant-acme", authorization: "Bearer token-a" },
+    ]);
   });
 
   it("keeps the tenant header on the retry after a silent renewal", async () => {
@@ -83,8 +103,8 @@ describe("useApiClient tenant selector", () => {
     await result.current.apiFetch("/api/roles");
 
     expect(sentHeaders(fetchMock)).toEqual([
-      { "X-Tenant-ID": "tenant-acme", Authorization: "Bearer stale" },
-      { "X-Tenant-ID": "tenant-acme", Authorization: "Bearer fresh" },
+      { "x-tenant-id": "tenant-acme", authorization: "Bearer stale" },
+      { "x-tenant-id": "tenant-acme", authorization: "Bearer fresh" },
     ]);
   });
 
@@ -106,6 +126,6 @@ describe("useApiClient tenant selector", () => {
     expect(result.current.apiFetch).not.toBe(before);
     await result.current.apiFetch("/api/roles");
 
-    expect(sentHeaders(fetchMock)).toEqual([{ "X-Tenant-ID": "tenant-globex", Authorization: "Bearer token-a" }]);
+    expect(sentHeaders(fetchMock)).toEqual([{ "x-tenant-id": "tenant-globex", authorization: "Bearer token-a" }]);
   });
 });
