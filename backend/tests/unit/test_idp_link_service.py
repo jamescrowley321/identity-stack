@@ -11,13 +11,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.errors.identity import Conflict, NotFound
-from app.models.identity.user import IdPLink
+from app.errors.identity import Conflict, NotFound, ValidationError
+from app.models.identity.user import LINK_ORIGIN, LINKED_AT_SIGN_IN, IdPLink
 from app.repositories.base import RepositoryConflictError
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
 from app.repositories.user import UserRepository
-from app.services.idp_link import IdPLinkService
+from app.services.idp_link import RESERVED_LINK_METADATA, IdPLinkService
 
 
 def _make_idp_link(**overrides) -> IdPLink:
@@ -227,3 +227,25 @@ class TestDeleteIdPLink:
         assert isinstance(result.error, NotFound)
         repo.delete.assert_not_awaited()
         repo.commit.assert_not_awaited()
+
+
+@pytest.mark.anyio
+class TestLinkOrigin:
+    """Only a sign-in records that a link was made at sign-in: a provider adapter follows only such links."""
+
+    @pytest.mark.parametrize("origin", [LINKED_AT_SIGN_IN, "admin"])
+    async def test_a_link_claiming_an_origin_is_refused_and_nothing_is_written(self, origin):
+        service, repo, user_repo, provider_repo = _build_service()
+        user_repo.get.return_value = AsyncMock()
+        provider_repo.get.return_value = AsyncMock()
+
+        result = await service.create_idp_link(
+            user_id=uuid.uuid4(),
+            provider_id=uuid.uuid4(),
+            external_sub="victim-account-id",
+            metadata={LINK_ORIGIN: origin},
+        )
+
+        assert result.is_error()
+        assert result.error == ValidationError(message=RESERVED_LINK_METADATA)
+        repo.create.assert_not_awaited()

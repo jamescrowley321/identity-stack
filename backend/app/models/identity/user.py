@@ -52,6 +52,15 @@ class User(SQLModel, table=True):
     )
 
 
+# ``IdPLink.metadata_`` key recording how a link was made, and its value for a
+# link made from a validated sign-in (just-in-time provisioning). The admin route
+# may not set the key (``IdPLinkService.create_idp_link``), so only a sign-in can.
+# A provider adapter that writes to the linked account follows only such links:
+# an admin-made link names whatever account the admin typed in.
+LINK_ORIGIN = "linked_by"
+LINKED_AT_SIGN_IN = "sign_in"
+
+
 class IdPLink(SQLModel, table=True):
     """Links a canonical user to an external identity provider identity.
 

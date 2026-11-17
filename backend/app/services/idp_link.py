@@ -12,9 +12,9 @@ import uuid
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
-from app.errors.identity import Conflict, IdentityError, NotFound
+from app.errors.identity import Conflict, IdentityError, NotFound, ValidationError
 from app.logbook import logbook
-from app.models.identity.user import IdPLink
+from app.models.identity.user import LINK_ORIGIN, IdPLink
 from app.repositories.base import RepositoryConflictError
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
@@ -22,6 +22,10 @@ from app.repositories.user import UserRepository
 
 logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
+
+
+# Only a sign-in records a link's origin: a link made here claims none.
+RESERVED_LINK_METADATA = f"metadata key '{LINK_ORIGIN}' is set only by sign-in"
 
 
 class IdPLinkService:
@@ -58,6 +62,9 @@ class IdPLinkService:
         with tracer.start_as_current_span("IdPLinkService.create_idp_link") as span:
             span.set_attribute("user.id", str(user_id))
             span.set_attribute("provider.id", str(provider_id))
+
+            if metadata is not None and LINK_ORIGIN in metadata:
+                return Error(ValidationError(message=RESERVED_LINK_METADATA))
 
             user = await self._user_repository.get(user_id)
             if user is None:

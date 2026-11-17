@@ -16,7 +16,7 @@ from opentelemetry import trace
 
 from app.domain import access
 from app.errors.access import identity_error
-from app.errors.identity import Conflict, IdentityError
+from app.errors.identity import Conflict, Forbidden, IdentityError
 from app.logbook import logbook
 from app.repositories.assignment import UserTenantRoleRepository, assignment_from_row, assignment_to_row
 from app.repositories.base import RepositoryConflictError
@@ -31,6 +31,7 @@ from app.services.adapters.base import (
     SyncError,
 )
 from app.services.cache_invalidation import CacheInvalidationPublisher
+from app.services.memberships import restore_memberships
 
 logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
@@ -44,6 +45,13 @@ _INVALIDATIONS: dict[type[access.AccessEvent], str] = {
     access.RoleAssigned: "assign",
     access.RoleUnassigned: "unassign",
 }
+
+
+# An adapter that keeps memberships (Keycloak organizations) makes a role
+# assignment a provider membership: it is given only to a user who already holds
+# a role in the tenant. The first membership comes from sign-in provisioning, as
+# #592 has it for every provider.
+NOT_A_MEMBER_OF_THE_TENANT = "The user is not a member of the tenant: a role is assigned only to a member"
 
 
 def _now() -> datetime:
@@ -246,6 +254,11 @@ class RoleService:
             span.set_attribute("user.id", str(user_id))
             span.set_attribute("tenant.id", str(tenant_id))
             span.set_attribute("role.id", str(role_id))
+
+            if self._adapter.ends_memberships is True and not await self._assignment_repository.list_by_user_tenant(
+                user_id, tenant_id
+            ):
+                return Error(Forbidden(message=NOT_A_MEMBER_OF_THE_TENANT))
 
             row = await self._repository.get(role_id)
             held_row = None if row is None else await self._assignment_repository.get(user_id, tenant_id, role_id)
@@ -466,7 +479,7 @@ class RoleService:
                 self._log_revocation_failure(pushed, user_id, tenant_id)
                 payload[PROVIDER_SYNC] = PROVIDER_SYNC_FAILED
             else:
-                await self._restore_reassigned([(user_id, tenant_id)])
+                await restore_memberships(self._assignment_repository, self._adapter, [(user_id, tenant_id)])
             return Ok(payload)
 
     async def _end_memberships(
@@ -505,30 +518,8 @@ class RoleService:
                         skipped_tenant,
                     )
                 break
-        await self._restore_reassigned(ended)
+        await restore_memberships(self._assignment_repository, self._adapter, ended)
         return succeeded
-
-    async def _restore_reassigned(self, ended: list[tuple[uuid.UUID, uuid.UUID]]) -> None:
-        """Add back the memberships just ended whose user was given a role in the tenant meanwhile.
-
-        A role assigned while the membership was ending pushed its membership
-        before the removal reached the provider, so the removal undid it. Counted
-        after every removal, a role assigned later pushes its own membership.
-        """
-        if not ended:
-            return
-        restored: set[tuple[uuid.UUID, uuid.UUID]] = set()
-        for row in await self._assignment_repository.list_by_user_tenants(ended):
-            if (row.user_id, row.tenant_id) in restored:
-                continue
-            restored.add((row.user_id, row.tenant_id))
-            self._log_sync_failure(
-                await self._adapter.sync_role_assignment(
-                    user_id=row.user_id, tenant_id=row.tenant_id, role_id=row.role_id
-                ),
-                row.role_id,
-                "restore_membership",
-            )
 
     @staticmethod
     def _log_revocation_failure(result: Result[None, SyncError], user_id: uuid.UUID, tenant_id: uuid.UUID) -> None:

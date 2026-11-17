@@ -26,7 +26,7 @@ from app.logbook import logbook
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.role import Role
 from app.models.identity.tenant import Tenant, TenantStatus
-from app.models.identity.user import IdPLink, User, UserStatus
+from app.models.identity.user import LINK_ORIGIN, LINKED_AT_SIGN_IN, IdPLink, User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
@@ -186,6 +186,7 @@ class IdentityProvisioningService:
                             provider_id=provider_id,
                             external_sub=sub,
                             external_email=email,
+                            metadata_={LINK_ORIGIN: LINKED_AT_SIGN_IN},
                         )
                     )
                     await self._session.flush()

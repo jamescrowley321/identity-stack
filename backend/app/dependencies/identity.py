@@ -14,16 +14,17 @@ AC-4.3.1: get_identity_resolution_service() for identity resolution with Redis c
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, Request
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from starlette.datastructures import State
 
 from app.errors.identity import Conflict, IdentityErrorRaised
 from app.knobs import knob
-from app.models.database import get_async_session
+from app.models.database import get_async_session, get_engine
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.permission import PermissionRepository
@@ -35,7 +36,7 @@ from app.repositories.user import UserRepository
 from app.services.adapters.base import IdentityProviderAdapter
 from app.services.adapters.descope import DescopeSyncAdapter
 from app.services.adapters.keycloak import PROVIDER_NAME as KEYCLOAK_PROVIDER_NAME
-from app.services.adapters.keycloak import KeycloakSyncAdapter, LinkedSubject
+from app.services.adapters.keycloak import KeycloakSyncAdapter, LinkedSubject, OrganizationLock
 from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
 from app.services.idp_link import IdPLinkService
@@ -62,9 +63,33 @@ def keycloak_linked_subject(session: AsyncSession) -> LinkedSubject:
     links = IdPLinkRepository(session)
 
     async def linked_subject(user_id: uuid.UUID) -> str | None:
-        return await links.external_sub_of(user_id, KEYCLOAK_PROVIDER_NAME)
+        return await links.signed_in_sub_of(user_id, KEYCLOAK_PROVIDER_NAME)
 
     return linked_subject
+
+
+# Namespaces the advisory-lock key of a Keycloak organization (hashed with its alias).
+_ORGANIZATION_LOCK_NAMESPACE = "keycloak-organization:"
+
+
+def keycloak_organization_lock(engine: Callable[[], AsyncEngine] = get_engine) -> OrganizationLock:
+    """A Postgres advisory lock per Keycloak organization alias, held across workers.
+
+    Taken on a connection of its own, not the request's session: the adapter runs
+    after the service committed, and the lock's transaction ends (commits nothing)
+    when the adapter's write does.
+    """
+
+    @asynccontextmanager
+    async def organization_lock(alias: str) -> AsyncIterator[None]:
+        async with engine().begin() as connection:
+            await connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": _ORGANIZATION_LOCK_NAMESPACE + alias},
+            )
+            yield
+
+    return organization_lock
 
 
 # One entry per provider: how its adapter is built from the application state and
@@ -72,7 +97,9 @@ def keycloak_linked_subject(session: AsyncSession) -> LinkedSubject:
 SYNC_ADAPTERS: dict[str, Callable[[State, AsyncSession], IdentityProviderAdapter]] = {
     "descope": lambda state, _session: DescopeSyncAdapter(client=state.descope_client),
     "keycloak": lambda state, session: KeycloakSyncAdapter(
-        state.keycloak_admin, linked_subject=keycloak_linked_subject(session)
+        state.keycloak_admin,
+        linked_subject=keycloak_linked_subject(session),
+        organization_lock=keycloak_organization_lock(),
     ),
 }
 

@@ -444,6 +444,19 @@ class TestLinkedAccounts:
         }
         assert find_user(realm, user_id) is None
 
+    async def test_a_profile_update_of_a_linked_user_creates_no_second_account(
+        self, environment, realm, user_id, linked_account
+    ):
+        async with httpx.AsyncClient(timeout=ADMIN_TIMEOUT_SECONDS) as http:
+            sync = KeycloakSyncAdapter(
+                await connect_keycloak_admin(http), linked_subject=linked_to(linked_account["id"])
+            )
+            updated = await sync.sync_user(user_id=user_id, data={"email": email_of(user_id), "status": "active"})
+
+        account = realm.get(f"/users/{linked_account['id']}").json()
+        assert (updated, find_user(realm, user_id)) == (Ok(None), None)
+        assert account["email"] == linked_account["email"]
+
 
 class TestDeletingARole:
     """RoleService over Postgres and the compose Keycloak: a role delete ends the memberships it held alone."""
