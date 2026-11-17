@@ -15,7 +15,7 @@ import pytest
 from expression import Ok
 
 from app.services.adapters.base import LAST_ROLE_IN_TENANT as LAST_ROLE
-from app.services.adapters.base import SyncError
+from app.services.adapters.base import STATUS_CHANGED, SyncError
 from app.services.adapters.keycloak import USER_NOT_IN_KEYCLOAK, KeycloakSyncAdapter
 from tests.helpers.keycloak_admin_recorded import (
     ADMIN_CLIENT_ID,
@@ -245,13 +245,25 @@ class TestSyncUser:
         ]
 
     @pytest.mark.parametrize(("status", "enabled"), [("active", True), ("provisioned", True), ("inactive", False)])
-    async def test_updates_email_and_enabled_of_the_user_it_finds(self, status, enabled):
+    async def test_a_status_change_sets_enabled_of_the_user_it_finds(self, status, enabled):
         api = RecordedAdminApi(["token", "user_find", "user_update"])
+
+        result = await adapter(api).sync_user(
+            user_id=USER, data={"email": RECORDED_EMAIL, "status": status, STATUS_CHANGED: True}
+        )
+
+        assert result == Ok(None)
+        assert api.sent[2] == Sent("PUT", USER_PATH, {}, {"email": RECORDED_EMAIL, "enabled": enabled}, BEARER)
+
+    @pytest.mark.parametrize("status", ["active", "provisioned", "inactive"])
+    async def test_a_profile_update_with_the_same_email_sends_nothing(self, status):
+        """Without a status change ``enabled`` is not sent, so a realm admin's disable stands."""
+        api = RecordedAdminApi(["token", "user_find"])
 
         result = await adapter(api).sync_user(user_id=USER, data={"email": RECORDED_EMAIL, "status": status})
 
         assert result == Ok(None)
-        assert api.sent[2] == Sent("PUT", USER_PATH, {}, {"email": RECORDED_EMAIL, "enabled": enabled}, BEARER)
+        assert api.calls()[1:] == [("GET", USERS)]
 
     async def test_a_changed_email_is_no_longer_verified(self):
         """The realm's verified email links identities across providers (#559): a new address starts unverified."""
@@ -261,14 +273,16 @@ class TestSyncUser:
 
         assert result == Ok(None)
         assert api.sent[2] == Sent(
-            "PUT", USER_PATH, {}, {"email": "renamed@recorded.test", "emailVerified": False, "enabled": True}, BEARER
+            "PUT", USER_PATH, {}, {"email": "renamed@recorded.test", "emailVerified": False}, BEARER
         )
 
     async def test_the_same_email_in_other_letter_case_keeps_its_verification(self):
         """Keycloak stores emails in lower case, so this is the address it holds."""
         api = RecordedAdminApi(["token", "user_find", "user_update"])
 
-        await adapter(api).sync_user(user_id=USER, data={"email": RECORDED_EMAIL.upper(), "status": "active"})
+        await adapter(api).sync_user(
+            user_id=USER, data={"email": RECORDED_EMAIL.upper(), "status": "active", STATUS_CHANGED: True}
+        )
 
         assert api.sent[2].body == {"email": RECORDED_EMAIL.upper(), "enabled": True}
 

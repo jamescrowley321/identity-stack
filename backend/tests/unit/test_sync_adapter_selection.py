@@ -26,7 +26,7 @@ from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.permission import PermissionRepository
 from app.repositories.role import RoleRepository
 from app.repositories.user import UserRepository
-from app.services.adapters.base import LAST_ROLE_IN_TENANT, IdentityProviderAdapter
+from app.services.adapters.base import LAST_ROLE_IN_TENANT, STATUS_CHANGED, IdentityProviderAdapter
 from app.services.adapters.descope import DescopeSyncAdapter
 from app.services.adapters.keycloak import KeycloakSyncAdapter
 from app.services.keycloak_admin import ADMIN_CLIENT_ID_VARIABLE, ADMIN_CREDENTIAL_VARIABLE, KeycloakAdminApi
@@ -262,6 +262,48 @@ class TestLeavingATenant:
         )
 
 
+class TestStatusChanges:
+    """Only activate and deactivate say the status changed, so a profile update leaves an IdP-side disable."""
+
+    @staticmethod
+    def users(status: UserStatus) -> tuple[UserService, AsyncMock, User, uuid.UUID]:
+        user = User(id=uuid.uuid4(), email="a@b.test", user_name="a", status=status)
+        repo = AsyncMock(spec=UserRepository)
+        repo.get.return_value = user
+        repo.get_by_email.return_value = None
+        repo.exists_in_tenant.return_value = True
+        repo.update.side_effect = lambda changed: changed
+        adapter = AsyncMock(spec=IdentityProviderAdapter)
+        adapter.sync_user.return_value = Ok(None)
+        service = UserService(repository=repo, adapter=adapter, publisher=AsyncMock())
+        return service, adapter, user, uuid.uuid4()
+
+    async def test_a_profile_update_does_not_say_the_status_changed(self):
+        service, adapter, user, tenant_id = self.users(UserStatus.active)
+
+        await service.update_user(tenant_id=tenant_id, user_id=user.id, given_name="Ada")
+
+        adapter.sync_user.assert_awaited_once_with(user_id=user.id, data={"email": "a@b.test", "status": "active"})
+
+    async def test_deactivating_says_the_status_changed(self):
+        service, adapter, user, tenant_id = self.users(UserStatus.active)
+
+        await service.deactivate_user(tenant_id=tenant_id, user_id=user.id)
+
+        adapter.sync_user.assert_awaited_once_with(
+            user_id=user.id, data={"email": "a@b.test", "status": "inactive", STATUS_CHANGED: True}
+        )
+
+    async def test_activating_says_the_status_changed(self):
+        service, adapter, user, tenant_id = self.users(UserStatus.inactive)
+
+        await service.activate_user(tenant_id=tenant_id, user_id=user.id)
+
+        adapter.sync_user.assert_awaited_once_with(
+            user_id=user.id, data={"email": "a@b.test", "status": "active", STATUS_CHANGED: True}
+        )
+
+
 class TestLosingTheLastRole:
     """RoleService tells the adapter when an unassignment leaves the user no role in the tenant."""
 
@@ -320,6 +362,34 @@ class TestLosingTheLastRole:
             role_id=role.id,
             data={"role_name": "editor", LAST_ROLE_IN_TENANT: True},
         )
+
+    async def test_a_failed_count_still_invalidates_the_revoked_role(self):
+        """The unassignment is committed: its cached permissions go before the count can fail."""
+        user_id, tenant_id = uuid.uuid4(), uuid.uuid4()
+        role = Role(id=uuid.uuid4(), name="editor", description="", tenant_id=None)
+        repo = AsyncMock(spec=RoleRepository)
+        repo.get.return_value = role
+        assignments = AsyncMock(spec=UserTenantRoleRepository)
+        assignments.delete.return_value = True
+        assignments.list_by_user_tenant.side_effect = ConnectionError("database went away")
+        publisher = AsyncMock()
+        adapter = AsyncMock(spec=IdentityProviderAdapter)
+        service = RoleService(
+            repository=repo,
+            permission_repository=AsyncMock(spec=PermissionRepository),
+            assignment_repository=assignments,
+            adapter=adapter,
+            publisher=publisher,
+        )
+
+        with pytest.raises(ConnectionError):
+            await service.unassign_role_from_user(user_id=user_id, tenant_id=tenant_id, role_id=role.id)
+
+        assignments.commit.assert_awaited_once_with()
+        publisher.publish.assert_awaited_once()
+        assert publisher.publish.await_args.kwargs["entity_id"] == role.id
+        assert publisher.publish.await_args.kwargs["tenant_id"] == tenant_id
+        adapter.delete_role_assignment.assert_not_awaited()
 
     async def test_unassigning_one_of_two_roles_sends_what_it_sent_before(self):
         user_id, tenant_id = uuid.uuid4(), uuid.uuid4()

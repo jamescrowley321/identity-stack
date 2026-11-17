@@ -18,7 +18,7 @@ from fastapi import FastAPI
 
 from app import main
 from app.dependencies import identity
-from app.services.adapters.base import LAST_ROLE_IN_TENANT
+from app.services.adapters.base import LAST_ROLE_IN_TENANT, STATUS_CHANGED
 from app.services.adapters.keycloak import USER_NOT_IN_KEYCLOAK, KeycloakSyncAdapter
 from app.services.keycloak_admin import (
     ADMIN_CLIENT_ID_VARIABLE,
@@ -190,19 +190,34 @@ class TestUsers:
         assert (user["username"], user["email"], user["enabled"]) == (str(user_id), email_of(user_id), True)
 
         renamed = f"renamed-{email_of(user_id)}"
-        assert await sync.sync_user(user_id=user_id, data={"email": renamed, "status": "inactive"}) == Ok(None)
+        deactivate = {"email": renamed, "status": "inactive", STATUS_CHANGED: True}
+        assert await sync.sync_user(user_id=user_id, data=deactivate) == Ok(None)
         assert {key: find_user(realm, user_id)[key] for key in ("id", "email", "enabled")} == {
             "id": user["id"],
             "email": renamed,
             "enabled": False,
         }
 
-        assert await sync.sync_user(user_id=user_id, data={"email": renamed, "status": "active"}) == Ok(None)
+        activate = {"email": renamed, "status": "active", STATUS_CHANGED: True}
+        assert await sync.sync_user(user_id=user_id, data=activate) == Ok(None)
         assert find_user(realm, user_id)["enabled"] is True
 
         assert await sync.delete_user(user_id=user_id) == Ok(None)
         assert find_user(realm, user_id) is None
         assert await sync.delete_user(user_id=user_id) == Ok(None)
+
+    async def test_a_profile_update_keeps_a_realm_disabled_account_disabled(self, sync, realm, user_id):
+        await sync.sync_user(user_id=user_id, data={"email": email_of(user_id), "status": "active"})
+        realm.put(f"/users/{find_user(realm, user_id)['id']}", json={"enabled": False}).raise_for_status()
+
+        renamed = f"renamed-{email_of(user_id)}"
+        for email in (email_of(user_id), renamed):
+            assert await sync.sync_user(user_id=user_id, data={"email": email, "status": "active"}) == Ok(None)
+
+        assert {key: find_user(realm, user_id)[key] for key in ("email", "enabled")} == {
+            "email": renamed,
+            "enabled": False,
+        }
 
     async def test_a_changed_email_is_no_longer_verified(self, sync, realm, user_id):
         await sync.sync_user(user_id=user_id, data={"email": email_of(user_id), "status": "active"})
