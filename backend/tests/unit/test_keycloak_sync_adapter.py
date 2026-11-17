@@ -18,7 +18,7 @@ from expression import Ok
 
 from app.services.adapters.base import LAST_ROLE_IN_TENANT as LAST_ROLE
 from app.services.adapters.base import STATUS_CHANGED, UNANSWERED, SyncError
-from app.services.adapters.keycloak import USER_NOT_IN_KEYCLOAK, KeycloakSyncAdapter
+from app.services.adapters.keycloak import USER_NOT_IN_KEYCLOAK, KeycloakSyncAdapter, LocalDatabaseError
 from tests.helpers.keycloak_admin_recorded import (
     ADMIN_CLIENT_ID,
     ADMIN_CLIENT_SECRET,
@@ -860,6 +860,93 @@ class TestOrganizationWritesAreSerialized:
         [(alias, entered, left)] = held
         assert alias == TENANT_ID
         assert api.calls()[entered:left] == [("GET", ORGANIZATION), ("PUT", ORGANIZATION), ("DELETE", MEMBER)]
+
+
+# What the wiring raises when the service's own database fails (dependencies/identity.py).
+DATABASE_FAILURE = "the organization lock failed in the service's database: TimeoutError"
+
+
+@asynccontextmanager
+async def failing_lock(_alias: str) -> AsyncIterator[None]:
+    raise LocalDatabaseError(DATABASE_FAILURE)
+    yield  # pragma: no cover - never reached; makes this an async generator
+
+
+async def failing_link(_user_id: uuid.UUID) -> str | None:
+    raise LocalDatabaseError(DATABASE_FAILURE)
+
+
+class TestTheServicesDatabaseFailing:
+    """The push runs after the service committed: a failure of its own database is a SyncError, never raised."""
+
+    async def test_a_lock_that_cannot_be_taken_ending_a_membership_is_a_sync_error(self):
+        api = RecordedAdminApi(["token", "organization_find", "user_find"])
+
+        error = refused(
+            await KeycloakSyncAdapter(api.api(), organization_lock=failing_lock).delete_role_assignment(
+                user_id=USER, tenant_id=TENANT, role_id=ROLE, data={LAST_ROLE: True}
+            ),
+            "delete_role_assignment",
+            None,
+        )
+
+        assert error.message == DATABASE_FAILURE
+        assert error.context == {"tenant_id": TENANT_ID, "user_id": USER_ID, "status": None}
+        assert [sent for sent in api.sent if sent.method in ("PUT", "DELETE")] == []
+
+    async def test_a_lock_that_cannot_be_taken_leaving_a_tenant_is_a_sync_error(self):
+        api = RecordedAdminApi(["token", "user_find", "organization_find"])
+
+        error = refused(
+            await KeycloakSyncAdapter(api.api(), organization_lock=failing_lock).sync_user(
+                user_id=USER, data={"email": RECORDED_EMAIL, "status": "active", "left_tenant_id": TENANT_ID}
+            ),
+            "sync_user",
+            None,
+        )
+
+        assert error.message == DATABASE_FAILURE
+
+    async def test_a_lock_that_cannot_be_taken_updating_a_tenant_is_a_sync_error(self):
+        api = RecordedAdminApi([])
+
+        error = refused(
+            await KeycloakSyncAdapter(api.api(), organization_lock=failing_lock).sync_tenant(
+                tenant_id=TENANT, data={"name": "Recorded Co Renamed"}
+            ),
+            "sync_tenant",
+            None,
+        )
+
+        assert error.message == DATABASE_FAILURE
+        assert api.sent == []
+
+    async def test_an_idp_link_that_cannot_be_read_is_a_sync_error(self):
+        api = RecordedAdminApi(["token", "organization_find"])
+
+        error = refused(
+            await KeycloakSyncAdapter(api.api(), linked_subject=failing_link).delete_role_assignment(
+                user_id=USER, tenant_id=TENANT, role_id=ROLE, data={LAST_ROLE: True}
+            ),
+            "delete_role_assignment",
+            None,
+        )
+
+        assert error.message == DATABASE_FAILURE
+
+    async def test_the_provider_was_asked_nothing_so_the_failure_is_not_unanswered(self):
+        """delete_role stops its pushes only at a provider that gave no answer; this one is told and the rest go on."""
+        api = RecordedAdminApi(["token", "organization_find", "user_find"])
+
+        error = refused(
+            await KeycloakSyncAdapter(api.api(), organization_lock=failing_lock).delete_role_assignment(
+                user_id=USER, tenant_id=TENANT, role_id=ROLE, data={LAST_ROLE: True}
+            ),
+            "delete_role_assignment",
+            None,
+        )
+
+        assert UNANSWERED not in error.context
 
 
 class TestUpstreamFailures:

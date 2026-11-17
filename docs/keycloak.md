@@ -111,7 +111,9 @@ the canonical model with Descope, so with `SYNC_PROVIDER=keycloak` it is refused
 | A role or permission is defined or changed, a permission is deleted; one role of several is unassigned | Nothing. Roles and permissions stay canonical, as with Ory; a user keeps the membership while another role in the tenant remains. |
 
 Every failure comes back to the service as an error, with the HTTP status, and is logged; the
-canonical change stands, as with Descope. Nothing raises. A push that takes access away (ending a
+canonical change stands, as with Descope. Nothing raises. A failure of the service's own database
+during a push (taking or releasing the organization lock, reading the user's IdP link) is such an
+error too, with no status: Keycloak was not asked, so `delete_role` goes on to the next user. A push that takes access away (ending a
 membership, a deactivation) and fails is logged as an `ERROR` beginning `IdP revocation failed`,
 and the service's answer carries `"provider_sync": "failed"`: Keycloak still grants what the
 canonical change took away until the push is made again (identity-stack#612). `DELETE
@@ -143,7 +145,10 @@ of every `type:<type client>` grant marker, dropping a marker left with no membe
 stay. Keycloak takes an organization's attributes only whole, so the organization is sent back as
 read. The read, that write and the removal run under a Postgres advisory lock on the organization's
 alias, as does a tenant update (also sent back as read), so two such writes from any backend worker
-never interleave and the later never undoes the earlier. A realm admin's edit in Keycloak takes no
+never interleave and the later never undoes the earlier. The lock is taken on the connection the
+request's database session already holds and released by ending that session's transaction (it holds
+only reads: the push runs after the service committed), so a request never waits for a second pooled
+connection and any number of concurrent membership endings cannot exhaust the pool. A realm admin's edit in Keycloak takes no
 such lock: one made between the adapter's read and its write is overwritten. A later membership therefore starts with no grant a realm admin gave the earlier one. Markers
 go first: should the removal then fail, the member is left without the grant rather than with it.
 When `RoleService` or `UserService` finds, after the removal, that the user was given a role in the tenant meanwhile
@@ -158,7 +163,7 @@ What Keycloak does not do, or the adapter does not take on:
 | A Keycloak user who signed up through the login page and has no `keycloak` IdP link, such as the realm's fixture users, has another username and is not taken over by email. | Keycloak refuses to create a second user with the same email (409); the adapter returns that error. A membership or status change for such a user is an error, logged and told as above: the adapter cannot find their account, so a membership they hold stays until a realm admin ends it. |
 | The adapter treats any Keycloak user whose username equals a canonical user id as its own. | A realm must not let users choose their username where it can hold a canonical id: keep self-registration and brokered first login from setting usernames, and keep users from editing theirs (`editUsernameAllowed` off, and no user-profile permission letting the user edit `username`). The compose realm has registration off, no identity providers and `editUsernameAllowed` at Keycloak's default, off. |
 | The admin client's `manage-organizations` can write organization attributes, the `type:<type client>` grant markers the directory lookup trusts. | The adapter writes them only to take an ending member out, but its secret grants as much as a realm admin's over organizations: keep it like one. |
-| The organization lock is a Postgres advisory lock. | `SYNC_PROVIDER=keycloak` needs `DATABASE_URL` on Postgres; on another database every push that reads and writes back an organization fails. |
+| The organization lock is a Postgres advisory lock. | `SYNC_PROVIDER=keycloak` needs `DATABASE_URL` on Postgres; on another database every push that reads and writes back an organization fails, and is told as above. |
 | A push that fails leaves Keycloak behind the canonical model; nothing retries it. | A failed membership removal keeps the user in the organization, and a failed deactivation keeps the account enabled; both are told as above. Retrying or reconciling them is [identity-stack#612](https://github.com/jamescrowley321/identity-stack/issues/612). |
 | An organization's alias cannot change in Keycloak. | The alias is the canonical tenant id, which does not change either. |
 | An organization's domains must be valid domain names, each held by one organization in the realm. Keycloak's domains route a login to an organization's identity provider; they do not add users to it the way Descope's self-provisioning domains do. | A domain Keycloak refuses (400) is an error, and the organization keeps its name and domains. |

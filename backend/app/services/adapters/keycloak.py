@@ -59,8 +59,9 @@ holds is refused by Keycloak (409) and returned as an error.
 
 Every Keycloak failure is ``Error(SyncError)`` with ``context["status"]``, the HTTP
 status or ``None``, and ``context[UNANSWERED]`` when Keycloak gave no readable
-answer. Only a failure of ``linked_subject`` or ``organization_lock`` (the
-service's own database) raises.
+answer. A failure of ``linked_subject`` or ``organization_lock`` (the service's
+own database), raised as ``LocalDatabaseError``, is ``Error(SyncError)`` with
+status ``None`` and not ``UNANSWERED``: Keycloak was not asked.
 """
 
 from __future__ import annotations
@@ -138,6 +139,17 @@ class _Refused(Exception):
     """A push the adapter refuses before or between calls. Internal: becomes ``Error(SyncError)``."""
 
 
+class LocalDatabaseError(Exception):
+    """The service's own database failed under a push: ``organization_lock`` or ``linked_subject``.
+
+    Raised by what ``dependencies/identity.py`` wires, in place of the database
+    driver's or the pool's exception, so the adapter need not know them. Becomes
+    ``Error(SyncError)`` with status ``None``: the push runs after the canonical
+    change committed, so it is told, not raised. Keycloak was not asked, so it is
+    not ``UNANSWERED``.
+    """
+
+
 def _error(operation: str, message: str, context: dict, status: int | None) -> Error[None, SyncError]:
     return Error(SyncError(message=message, operation=operation, context={**context, "status": status}))
 
@@ -148,7 +160,7 @@ async def _run(operation: str, context: dict, push: Callable[[], Awaitable[None]
     except KeycloakAdminError as exc:
         unanswered = {UNANSWERED: True} if exc.status is None else {}
         return _error(operation, str(exc), {**context, **unanswered}, exc.status)
-    except _Refused as exc:
+    except (_Refused, LocalDatabaseError) as exc:
         return _error(operation, str(exc), context, None)
     return Ok(None)
 
