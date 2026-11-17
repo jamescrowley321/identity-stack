@@ -34,7 +34,7 @@ Two limits, both observed:
 
 ## Bootstrap
 
-First start creates everything below from `ZITADEL_FIRSTINSTANCE_*` settings. Anything else inside the instance belongs to Terraform.
+First start creates everything below from `ZITADEL_FIRSTINSTANCE_*` settings. Anything else inside the instance belongs to Terraform: [`infra/zitadel/`](../infra/zitadel/README.md) declares the organizations, the project and its applications, the test users, registration off and the 15-minute access-token lifetime, and `make zitadel-seed` links the tenant organizations to canonical tenants.
 
 | What | Value |
 |------|-------|
