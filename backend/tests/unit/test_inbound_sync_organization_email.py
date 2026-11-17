@@ -45,5 +45,5 @@ async def test_a_flow_sync_does_not_link_a_user_holding_an_organizations_email(c
     user_repo.commit.assert_not_awaited()
     refusals = [r.getMessage() for r in caplog.records if r.name == "app.services.inbound_sync"]
     assert len(refusals) == 1, refusals
-    assert str(holder_id) in refusals[0] and "descope" in refusals[0]
+    assert str(holder_id) in refusals[0] and "descope" in refusals[0] and "descope-user-1" in refusals[0]
     assert EMAIL not in refusals[0]
