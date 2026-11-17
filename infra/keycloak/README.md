@@ -64,6 +64,17 @@ cd ../.. && make -s keycloak-env    # backend/.env and frontend/.env lines
 terraform -chdir=infra/keycloak output -json test_credentials
 ```
 
+The root has one local state, so it manages one Keycloak at a time. Changing `issuer_url` to
+another instance (for example `keycloak-test`, which the end-to-end suite uses, see
+[`docs/keycloak.md`](../../docs/keycloak.md#running-the-end-to-end-suite-locally)) replaces the
+realm in state with one on the new instance and leaves the first instance's realm unmanaged:
+the next apply against it then fails because the realm already exists. Before switching, destroy
+what the state holds, with the `issuer_url` it was applied with:
+
+```bash
+terraform -chdir=infra/keycloak destroy    # add -var issuer_url=... if the apply had one
+```
+
 Variables (all have defaults for the compose `keycloak` service). `issuer_url` and
 `frontend_url` are the variables every local provider root shares
 ([`../PROVIDERS.md`](../PROVIDERS.md#common-variables-and-outputs-of-the-local-provider-roots)):
