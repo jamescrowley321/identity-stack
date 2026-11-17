@@ -43,8 +43,11 @@ from app.services.keycloak_admin import (
     ADMIN_CREDENTIAL_VARIABLE,
     ADMIN_TIMEOUT_SECONDS,
     ISSUER_VARIABLE,
+    REALM_MANAGEMENT_CLIENT,
+    REQUIRED_ROLES,
     KeycloakAdminError,
     KeycloakAdminNotConfigured,
+    KeycloakAdminRolesMissing,
     connect_keycloak_admin,
 )
 from app.telemetry import init_telemetry, shutdown_telemetry
@@ -87,7 +90,8 @@ async def _start_sync_provider(app: FastAPI) -> OutboundClient | None:
     """Open what the configured sync adapter needs, or stop startup.
 
     ``SYNC_PROVIDER=keycloak`` builds the Keycloak admin client's one HTTP client
-    and checks its credential against the realm before any request is served.
+    and checks its credential, and the roles of its service account, against the
+    realm before any request is served.
     Returns that HTTP client for the lifespan to close, or ``None``.
     """
     provider = identity_dependencies.SYNC_PROVIDER
@@ -103,6 +107,13 @@ async def _start_sync_provider(app: FastAPI) -> OutboundClient | None:
     except KeycloakAdminNotConfigured as exc:
         await http.aclose()
         raise RuntimeError(f"SYNC_PROVIDER is keycloak but {exc}") from exc
+    except KeycloakAdminRolesMissing as exc:
+        await http.aclose()
+        raise RuntimeError(
+            f"The Keycloak admin client's service account lacks {REALM_MANAGEMENT_CLIENT} roles "
+            f"{sorted(exc.missing)}: grant it {sorted(REQUIRED_ROLES)} or name another client "
+            f"in {ADMIN_CLIENT_ID_VARIABLE}"
+        ) from exc
     except KeycloakAdminError as exc:
         await http.aclose()
         raise RuntimeError(_admin_check_failure(exc.status)) from exc
@@ -215,14 +226,15 @@ async def lifespan(app: FastAPI):
                         await http_client.aclose()
                     except Exception:
                         logger.warning("HTTP client close failed", exc_info=True)
-                    try:
-                        app.state.keycloak_admin = None
-                        if sync_http_client is not None:
-                            await sync_http_client.aclose()
-                    except Exception:
-                        logger.warning("Sync provider HTTP client close failed", exc_info=True)
                     finally:
-                        await engine.dispose()
+                        try:
+                            app.state.keycloak_admin = None
+                            if sync_http_client is not None:
+                                await sync_http_client.aclose()
+                        except Exception:
+                            logger.warning("Sync provider HTTP client close failed", exc_info=True)
+                        finally:
+                            await engine.dispose()
 
 
 app = FastAPI(title="Descope SaaS Starter API", docs_url=None, redoc_url="/redoc", lifespan=lifespan)

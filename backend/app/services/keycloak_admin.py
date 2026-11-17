@@ -9,7 +9,8 @@ else is needed.
 The HTTP client is the process's one client for these calls: ``main.lifespan``
 builds it with ``KEYCLOAK_ADMIN_TIMEOUT_SECONDS`` and closes it (conventions §4,
 §6). Startup checks the credential (``connect_keycloak_admin``), so a missing or
-refused one stops the application instead of failing the first write.
+refused one, or one whose service account lacks a required role, stops the
+application instead of failing the first write.
 
 Every failure raises ``KeycloakAdminError`` with the HTTP status (``None`` for no
 response or an unreadable one). A 404 is read as "not there" only where its body
@@ -53,6 +54,12 @@ USER_NOT_FOUND_ANSWER = {"error": "User not found"}
 NOT_A_MEMBER_ANSWER = {"error": "HTTP 404 Not Found"}
 ALREADY_A_MEMBER_ANSWER = {"errorMessage": "User is already a member of the organization."}
 
+# The client holding the realm's admin roles, and the ones every write below needs.
+REALM_MANAGEMENT_CLIENT = "realm-management"
+REQUIRED_ROLES = frozenset({"manage-users", "manage-organizations"})
+# Keycloak names a client's service account this, in lower case like every username.
+_SERVICE_ACCOUNT_PREFIX = "service-account-"
+
 
 class KeycloakAdminNotConfigured(ValueError):
     """A setting the admin client needs is missing or names no realm. No call was made."""
@@ -67,6 +74,18 @@ class KeycloakAdminError(Exception):
     def __init__(self, reason: str, *, status: int | None = None) -> None:
         super().__init__(reason)
         self.status = status
+
+
+class KeycloakAdminRolesMissing(KeycloakAdminError):
+    """The service account Keycloak accepted does not hold every ``realm-management`` role the adapter writes with.
+
+    ``missing`` names the roles it lacks. Raised at startup, so a read-only
+    credential stops the application instead of failing the first write.
+    """
+
+    def __init__(self, missing: frozenset[str]) -> None:
+        super().__init__(f"service account lacks realm-management roles {sorted(missing)}", status=403)
+        self.missing = missing
 
 
 class _TokenRefused(Exception):
@@ -118,6 +137,7 @@ async def connect_keycloak_admin(http: OutboundClient) -> KeycloakAdminApi:
     """The admin client on ``http``, once its credential has been checked against the realm.
 
     Raises ``KeycloakAdminNotConfigured`` before any call for a missing setting,
+    ``KeycloakAdminRolesMissing`` when the service account lacks a required role,
     and ``KeycloakAdminError`` when Keycloak refuses the credential or cannot be asked.
     """
     with tracer.start_as_current_span("keycloak_admin.connect_keycloak_admin"):
@@ -246,9 +266,40 @@ class KeycloakAdminApi:
         return matches[0] if matches else None
 
     async def check_credentials(self) -> None:
-        """Take a token and make one Admin API read with it. Raises ``KeycloakAdminError`` on any failure."""
+        """Take a token, read the Admin API with it, and confirm the service account holds ``REQUIRED_ROLES``.
+
+        The token carries no roles (the client has only the ``kc-admin-api``
+        scope), so the roles are read from the service account's own role
+        mappings: its direct ones name the ``realm-management`` client, and that
+        client's effective (composite) roles must include every required one.
+        Raises ``KeycloakAdminRolesMissing`` when they do not, ``KeycloakAdminError``
+        on any other failure.
+        """
         with tracer.start_as_current_span("KeycloakAdminApi.check_credentials"):
             await self._expect("GET", "/organizations", ok=frozenset({200}), params={"first": "0", "max": "1"})
+            held = await self._realm_management_roles()
+            missing = REQUIRED_ROLES - held
+            if missing:
+                logger.warning("keycloak admin: the service account lacks realm-management roles %s", sorted(missing))
+                raise KeycloakAdminRolesMissing(frozenset(missing))
+
+    async def _realm_management_roles(self) -> frozenset[str]:
+        """The ``realm-management`` roles the service account holds, composites expanded. Unreadable: none."""
+        account = await self.find_user(f"{_SERVICE_ACCOUNT_PREFIX}{self.settings.client_id}".lower())
+        if account is None:
+            return frozenset()
+        mappings_path = f"/users/{quote(account['id'], safe='')}/role-mappings"
+        mappings = _body(await self._expect("GET", mappings_path, ok=frozenset({200})))
+        client_mappings = mappings.get("clientMappings") if isinstance(mappings, dict) else None
+        client = client_mappings.get(REALM_MANAGEMENT_CLIENT) if isinstance(client_mappings, dict) else None
+        client_id = client.get("id") if isinstance(client, dict) else None
+        if not isinstance(client_id, str):
+            return frozenset()
+        roles_path = f"{mappings_path}/clients/{quote(client_id, safe='')}/composite"
+        roles = _body(await self._expect("GET", roles_path, ok=frozenset({200})))
+        if not isinstance(roles, list):
+            raise KeycloakAdminError("admin API answer unreadable")
+        return frozenset(role["name"] for role in roles if isinstance(role, dict) and isinstance(role.get("name"), str))
 
     async def find_organization(self, alias: str) -> dict | None:
         """The organization with exactly this alias, or ``None``."""
@@ -260,7 +311,8 @@ class KeycloakAdminApi:
             await self._expect("POST", "/organizations", ok=frozenset({201}), json=representation)
 
     async def update_organization(self, organization_id: str, representation: dict) -> None:
-        """Replace the fields given; Keycloak keeps the attributes and domains a representation leaves out."""
+        """Replace the organization. Keycloak keeps the attributes and domains a representation leaves out
+        and resets ``enabled``, ``description`` and ``redirectUrl``: send those as found."""
         with tracer.start_as_current_span("KeycloakAdminApi.update_organization"):
             await self._expect(
                 "PUT", f"/organizations/{quote(organization_id, safe='')}", ok=frozenset({204}), json=representation

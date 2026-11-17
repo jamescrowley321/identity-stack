@@ -16,8 +16,11 @@ URL-encoded into the path.
 **Grant markers.** Client roles are realm-wide, so a user's membership does not
 show in which organization those roles were granted. An organization records it
 in an attribute per user type: ``type:<type client>`` lists the ids of the
-members who hold that type there. Only a realm admin can write an organization
-attribute; this service account cannot.
+members who hold that type there. This service account cannot write an
+organization attribute. A realm admin can, and so can any client holding
+``manage-organizations``, such as the Keycloak admin adapter's
+(``KEYCLOAK_ADMIN_CLIENT_ID``): that adapter never sends attributes, but its
+secret can write these markers and is as sensitive as a realm admin's.
 
 A well-formed id the realm does not know (404: the user was deleted while
 their token still lives) raises ``MemberUnknown``: such a user belongs to no

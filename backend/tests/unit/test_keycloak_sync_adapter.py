@@ -48,6 +48,8 @@ FIND_ORGANIZATION = {"q": f"alias:{TENANT_ID}", "exact": "true"}
 FIND_USER = {"username": USER_ID, "exact": "true"}
 # A 404 Keycloak answers for a realm-wide fault, not for an absent object (probed on 26.8.2).
 LEFT = {"email": "renamed@recorded.test", "status": "active"}
+# The organization as the recorded search found it (responses.json "organization_find").
+FOUND_ORGANIZATION = RECORDED["organization_find"]["body"][0]
 # The email the recorded user holds (responses.json "user_find").
 RECORDED_EMAIL = RECORDED["user_find"]["body"][0]["email"]
 
@@ -111,17 +113,49 @@ class TestSyncTenant:
             "PUT",
             ORGANIZATION,
             {},
-            {"name": "Recorded Co Renamed", "alias": TENANT_ID, "domains": [{"name": "recorded.test"}]},
+            {**FOUND_ORGANIZATION, "name": "Recorded Co Renamed", "domains": [{"name": "recorded.test"}]},
             BEARER,
         )
 
     async def test_an_update_without_domains_leaves_the_organizations_domains_and_attributes(self):
-        """Keycloak keeps what a PUT leaves out, so the realm admin's ``type:`` markers survive."""
+        """Keycloak keeps the attributes a PUT leaves out, so the realm admin's ``type:`` markers survive."""
         api = RecordedAdminApi(["token", "organization_find", "organization_update"])
 
         await adapter(api).sync_tenant(tenant_id=TENANT, data={"name": "Recorded Co Renamed"})
 
-        assert api.sent[2].body == {"name": "Recorded Co Renamed", "alias": TENANT_ID}
+        assert api.sent[2].body == {**FOUND_ORGANIZATION, "name": "Recorded Co Renamed"}
+
+    async def test_an_update_keeps_the_fields_the_adapter_does_not_own(self):
+        """Keycloak resets ``enabled``, ``description`` and ``redirectUrl`` a PUT leaves out (probed on 26.8.2).
+
+        The organization as found is sent back with only name, alias and domains
+        replaced, so one a realm admin disabled stays disabled. Its attributes
+        are never sent: Keycloak keeps them.
+        """
+        found = {
+            "id": ORGANIZATION_ID,
+            "name": "Recorded Co",
+            "alias": TENANT_ID,
+            "enabled": False,
+            "description": "Kept by the realm admin",
+            "redirectUrl": "http://localhost:3000/welcome",
+            "domains": [{"name": "kept.test", "verified": True, "autoRedirect": False}],
+            "attributes": {"type:tenant-admin": ["someone"]},
+        }
+        api = RecordedAdminApi(["token", httpx.Response(200, json=[found]), "organization_update"])
+
+        result = await adapter(api).sync_tenant(tenant_id=TENANT, data={"name": "Recorded Co Renamed"})
+
+        assert result == Ok(None)
+        assert api.sent[2].body == {
+            "id": ORGANIZATION_ID,
+            "name": "Recorded Co Renamed",
+            "alias": TENANT_ID,
+            "enabled": False,
+            "description": "Kept by the realm admin",
+            "redirectUrl": "http://localhost:3000/welcome",
+            "domains": [{"name": "kept.test", "verified": True, "autoRedirect": False}],
+        }
 
     async def test_an_empty_domain_list_clears_the_organizations_domains(self):
         """``[]`` is "no self-provisioning domains", not "leave them": Keycloak drops the old ones."""
@@ -132,7 +166,7 @@ class TestSyncTenant:
         )
 
         assert result == Ok(None)
-        assert api.sent[2].body == {"name": "Recorded Co Renamed", "alias": TENANT_ID, "domains": []}
+        assert api.sent[2].body == {**FOUND_ORGANIZATION, "name": "Recorded Co Renamed", "domains": []}
 
     @pytest.mark.parametrize("domains", ["acme.test", None, ["acme.test", 7], [""], {"acme.test": True}])
     async def test_domains_that_are_not_a_list_of_names_are_an_error_without_a_call(self, domains):
@@ -335,6 +369,25 @@ class TestMembers:
         assert result == Ok(None)
         assert api.calls()[1:] == [("GET", USERS), ("GET", ORGANIZATIONS), ("DELETE", MEMBER), ("PUT", USER_PATH)]
         assert api.sent[2] == find_organization()
+
+    async def test_leaving_a_tenant_does_not_push_enabled(self):
+        """Offboarding must not undo a realm admin's disable: only a changed email is pushed."""
+        api = RecordedAdminApi(["token", "user_find", "organization_find", "member_remove", "user_update"])
+
+        result = await adapter(api).sync_user(user_id=USER, data={**LEFT, "left_tenant_id": TENANT_ID})
+
+        assert result == Ok(None)
+        assert api.sent[4].body == {"email": LEFT["email"], "emailVerified": False}
+
+    async def test_leaving_a_tenant_with_the_same_email_sends_no_profile_update(self):
+        api = RecordedAdminApi(["token", "user_find", "organization_find", "member_remove"])
+
+        result = await adapter(api).sync_user(
+            user_id=USER, data={"email": RECORDED_EMAIL, "status": "active", "left_tenant_id": TENANT_ID}
+        )
+
+        assert result == Ok(None)
+        assert api.calls()[1:] == [("GET", USERS), ("GET", ORGANIZATIONS), ("DELETE", MEMBER)]
 
     async def test_a_refused_profile_update_still_ends_the_membership(self):
         """The membership is what authorizes the user for the tenant: it ends before the profile is pushed."""
