@@ -15,6 +15,7 @@ All methods return Result[T, IdentityError] and never raise for domain errors.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 
 from expression import Error, Ok, Result
 from opentelemetry import trace
@@ -39,6 +40,20 @@ logger = logbook(__name__)
 
 DEFAULT_TENANT_NAME = "default"
 DEFAULT_ROLE_NAME = "member"
+
+
+@dataclass(frozen=True)
+class _OrganizationTenant:
+    """The organization's tenant, as plain values: a rollback in ``provision``'s retry loop expires loaded rows."""
+
+    id: uuid.UUID
+    domains: frozenset[str]
+
+
+def _domain_admitted(email: str, domains: frozenset[str]) -> bool:
+    """Whether ``email``'s domain, whole and compared without case, is one of ``domains``."""
+    local, at, domain = email.rpartition("@")
+    return bool(local and at and domain.lower() in domains)
 
 
 class IdentityProvisioningService:
@@ -99,12 +114,17 @@ class IdentityProvisioningService:
         (``external_org_provider_id``), in place of the default tenant. No
         such tenant, or more than one, is ``Forbidden`` and nothing
         is written: an organization grants a membership only where a canonical
-        tenant already names it. Nor is such a login ever linked to an existing
-        canonical user by email: that is ``EmailLinkRefused``, and nothing is
-        written. An organization's administrators can create a user with any
-        email and mark it verified, so on this path a verified email is not
-        proof the login is that user's. An administrator links such a user
-        beforehand (``scripts/seed_zitadel.py`` writes the ``idp_links`` row).
+        tenant already names it. An organization's administrators can create a
+        user with any email and mark it verified, so on this path a verified
+        email is not proof the login is that user's. Such a login creates a user
+        only for an email whose domain is one of that tenant's ``domains``
+        (whole, compared without case; a tenant with none admits no first
+        login), and is never linked to an existing canonical user by email.
+        Either refusal is ``Forbidden`` too, the answer an unlinked organization
+        gets, so the login learns nothing about who holds the email, and
+        nothing is written. An administrator links such a user beforehand
+        (``scripts/seed_zitadel.py`` writes the ``idp_links`` row): an existing
+        link is found before any email is read.
 
         The user such a login creates is marked ``email_from_organization``,
         and no later first login, of any provider, links to it by email either:
@@ -113,8 +133,9 @@ class IdentityProvisioningService:
         that person's own first login elsewhere would join the
         administrator's account. A login that finds, by email, the user a
         concurrent login for its own subject just created gets that user.
-        Each ``EmailLinkRefused`` is logged at warning with the id of the user
-        holding the email, never the email, so an operator can find it.
+        Each refusal for an email is logged at warning with the id of the user
+        holding the email, or of the tenant whose domains it is outside, never
+        the email, so an operator can find it.
         """
         with tracer.start_as_current_span(
             "IdentityProvisioningService.provision",
@@ -132,12 +153,13 @@ class IdentityProvisioningService:
             if existing is not None:
                 return Ok(existing.user_id)
 
-            organization_tenant_id: uuid.UUID | None = None
+            organization_tenant: _OrganizationTenant | None = None
             if organization_id is not None:
-                linked = await self._organization_tenant_id(provider_id, organization_id)
+                linked = await self._organization_tenant(provider_id, organization_id)
                 if linked.is_error():
                     return Error(linked.error)
-                organization_tenant_id = linked.ok
+                organization_tenant = linked.ok
+            organization_tenant_id = organization_tenant.id if organization_tenant is not None else None
 
             # Account-takeover guard: never create or link on an unverified email.
             # An attacker who asserts a victim's (unverified) email must not be
@@ -146,6 +168,14 @@ class IdentityProvisioningService:
                 return Error(ValidationError("A verified email is required for just-in-time provisioning"))
             if not email_verified:
                 return Error(ValidationError("email_verified must be true for just-in-time provisioning"))
+            if organization_tenant is not None and not _domain_admitted(email, organization_tenant.domains):
+                logger.warning(
+                    "first login refused: provider %s subject %s has an email outside the domains of tenant %s",
+                    provider_name,
+                    sub,
+                    organization_tenant.id,
+                )
+                return Error(Forbidden("The email is outside the domains of the organization's tenant"))
 
             # Retry once to absorb a first-login bootstrap race between two distinct
             # new subjects on the shared default tenant/role (unique names).
@@ -167,6 +197,10 @@ class IdentityProvisioningService:
                             organization_tenant_id is not None,
                             user.email_from_organization,
                         )
+                        if organization_tenant_id is not None:
+                            # The answer an unlinked organization gets: the
+                            # organization's administrators chose this email.
+                            return Error(Forbidden("The email is held by a canonical user this login may not link"))
                         return Error(EmailLinkRefused("The email is held by a canonical user this login may not link"))
                     if user is None:
                         user = User(
@@ -226,16 +260,16 @@ class IdentityProvisioningService:
             provider = await self._provider_repository.get_by_name(provider_name)
             if provider is None:
                 return Error(NotFound(f"Provider '{provider_name}' not found"))
-            return await self._organization_tenant_id(provider.id, organization_id)
+            return (await self._organization_tenant(provider.id, organization_id)).map(lambda tenant: tenant.id)
 
-    async def _organization_tenant_id(
+    async def _organization_tenant(
         self, provider_id: uuid.UUID, organization_id: str
-    ) -> Result[uuid.UUID, IdentityError]:
-        """Returned as a plain id: a rollback in ``provision``'s retry loop expires loaded rows."""
+    ) -> Result[_OrganizationTenant, IdentityError]:
         tenants = await self._tenant_repository.list_by_external_org_id(provider_id, organization_id)
         if len(tenants) != 1 or tenants[0].status != TenantStatus.active:
             return Error(Forbidden("The organization is not linked to exactly one active tenant"))
-        return Ok(tenants[0].id)
+        domains = frozenset(domain.lower() for domain in tenants[0].domains if isinstance(domain, str))
+        return Ok(_OrganizationTenant(id=tenants[0].id, domains=domains))
 
     async def _assign_organization_member(self, user_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
         """Give the user the global default role in the organization's tenant.
