@@ -250,7 +250,9 @@ async def canonical_identity(
         if provisioned.is_error():
             err = provisioned.error
             if isinstance(err, Forbidden):
-                # The organization is linked to no single active tenant.
+                # The organization is linked to no single active tenant, or its
+                # login was refused for its email (outside the tenant's domains,
+                # or held): one answer, so the email's holder is not disclosed.
                 raise HTTPException(status_code=403, detail=ORGANIZATION_NOT_LINKED)
             if isinstance(err, ValidationError):
                 # Missing/unverified email in the token — a client-side problem.
@@ -258,10 +260,9 @@ async def canonical_identity(
             if isinstance(err, NotFound):
                 # The provider isn't registered server-side — misconfiguration.
                 raise HTTPException(status_code=500, detail=PROVIDER_NOT_CONFIGURED)
-            # EmailLinkRefused (logged by provisioning with the holder's id) and
-            # every other conflict get the same body. The body names no cause, but
-            # a 409 where a new email gets 200 still tells the caller the email is
-            # held: an organization administrator who chose it learns that much.
+            # EmailLinkRefused (another provider's first login with an email an
+            # organization's login holds, logged by provisioning with the holder's
+            # id) and every other conflict get the same body, naming no cause.
             raise HTTPException(status_code=409, detail=PROVISIONING_FAILED)
         result = await resolver.resolve(provider=provider_name, sub=sub)
 

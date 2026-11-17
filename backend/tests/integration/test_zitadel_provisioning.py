@@ -3,7 +3,8 @@
 The tenants and the user come from the ``canonical_seed`` output recorded from a
 real ``terraform apply`` (``tests/fixtures/zitadel/canonical-seed.json``): ``acme``
 and ``globex`` are linked to their organizations through ``external_org_id``, for
-the ``zitadel`` provider (``external_org_provider_id``).
+the ``zitadel`` provider (``external_org_provider_id``). Each tenant lists the email
+domains its organization's first logins may hold (``domains``).
 """
 
 import json
@@ -11,6 +12,7 @@ import logging
 import uuid
 from pathlib import Path
 
+import pytest
 from sqlmodel import func, select
 
 from app.errors.identity import EmailLinkRefused, Forbidden, NotFound, ValidationError
@@ -34,6 +36,7 @@ GLOBEX_ORG = SEED["tenants"]["globex"]
 UNMAPPED_ORG = "399948686400000000"
 SUB = "399948690000000001"
 EMAIL = "globex-user@globex.test"
+DOMAINS = {"acme": ["acme.test"], "globex": ["globex.test"]}
 PROVIDER = "zitadel"
 MEMBER = "member"
 
@@ -50,15 +53,28 @@ def _service(session) -> IdentityProvisioningService:
     )
 
 
-async def _seeded(session, *, globex_status: TenantStatus = TenantStatus.active) -> uuid.UUID:
-    """The provider row and the two linked tenants, as ``scripts/seed_zitadel.py`` writes them. The provider's id."""
+async def _seeded(
+    session, *, globex_status: TenantStatus = TenantStatus.active, domains: dict[str, list[str]] = DOMAINS
+) -> uuid.UUID:
+    """The provider row and the two linked tenants, as ``scripts/seed_zitadel.py`` writes them, with ``domains``.
+
+    The provider's id.
+    """
     provider = Provider(name=PROVIDER, type=ProviderType.oidc, issuer_url=ISSUER, base_url=ISSUER, capabilities=["sso"])
     session.add(provider)
     await session.flush()
     provider_id = provider.id
-    session.add(Tenant(name="acme", external_org_id=ACME_ORG, external_org_provider_id=provider_id))
     session.add(
-        Tenant(name="globex", external_org_id=GLOBEX_ORG, external_org_provider_id=provider_id, status=globex_status)
+        Tenant(name="acme", domains=domains["acme"], external_org_id=ACME_ORG, external_org_provider_id=provider_id)
+    )
+    session.add(
+        Tenant(
+            name="globex",
+            domains=domains["globex"],
+            external_org_id=GLOBEX_ORG,
+            external_org_provider_id=provider_id,
+            status=globex_status,
+        )
     )
     await session.flush()
     return provider_id
@@ -134,7 +150,7 @@ async def test_an_existing_global_member_role_is_reused(db_session):
     await db_session.flush()
     before = await _count(db_session, Role)
 
-    result = await _provision(db_session, ACME_ORG)
+    result = await _provision(db_session, ACME_ORG, email="acme-member@acme.test")
 
     assert result.is_ok(), result
     assert await _count(db_session, Role) == before
@@ -252,7 +268,9 @@ class TestAnEmailAlreadyHeldIsNeverLinked:
 
     So an organization's first login never takes over the canonical user who
     already holds that email, whatever tenant or provider that user came from:
-    linking it would hand them that user's roles in every tenant.
+    linking it would hand them that user's roles in every tenant. The refusal is
+    ``Forbidden``, the answer an unlinked organization gets, so the login does
+    not learn that the email is held.
     """
 
     async def _acme_admin(self, session) -> uuid.UUID:
@@ -272,7 +290,7 @@ class TestAnEmailAlreadyHeldIsNeverLinked:
         result = await _provision(session, organization_id)
 
         assert result.is_error()
-        assert type(result.error) is EmailLinkRefused
+        assert type(result.error) is Forbidden
         assert await _written(session) == before
         assert await IdPLinkRepository(session).get_by_provider_name_and_sub(PROVIDER, SUB) is None
 
@@ -297,7 +315,7 @@ class TestAnEmailAlreadyHeldIsNeverLinked:
         assert EMAIL not in refusals[0]
 
     async def test_a_login_in_the_users_own_organization_is_refused_too(self, db_session):
-        await _seeded(db_session)
+        await _seeded(db_session, domains={**DOMAINS, "acme": ["globex.test"]})
         await self._acme_admin(db_session)
 
         await self._refused(db_session, ACME_ORG)
@@ -308,6 +326,97 @@ class TestAnEmailAlreadyHeldIsNeverLinked:
         await db_session.flush()
 
         await self._refused(db_session, GLOBEX_ORG)
+
+
+class TestAnOrganizationLoginOutsideItsTenantsDomains:
+    """An organization's administrators can create a user with any email, someone else's included.
+
+    So an organization's first login creates a user only for an email in one of
+    its tenant's ``domains``: otherwise an administrator of globex could take
+    ``ceo@acme.test`` and refuse the real holder's first login through every
+    other provider. Outside them the login gets ``Forbidden``, as an unlinked
+    organization does, and nothing is written, so it learns nothing about the
+    email either.
+    """
+
+    async def _refused(self, session, **changes) -> None:
+        before = await _written(session)
+
+        result = await _provision(session, GLOBEX_ORG, **changes)
+
+        assert result.is_error()
+        assert type(result.error) is Forbidden
+        assert await _written(session) == before
+        assert await IdPLinkRepository(session).get_by_provider_name_and_sub(PROVIDER, SUB) is None
+
+    async def test_another_tenants_domain_is_refused(self, db_session):
+        await _seeded(db_session)
+
+        await self._refused(db_session, email="ceo@acme.test")
+
+    async def test_an_email_no_canonical_user_holds_is_refused_too(self, db_session):
+        """Refused before any lookup by email: held or not, the answer is the same."""
+        await _seeded(db_session)
+
+        await self._refused(db_session, email="nobody@elsewhere.test")
+
+        assert await UserRepository(db_session).get_by_email("nobody@elsewhere.test") is None
+
+    async def test_an_email_held_outside_the_domains_gets_the_same_answer(self, db_session):
+        await _seeded(db_session)
+        db_session.add(User(email="ceo@acme.test", user_name="ceo@acme.test"))
+        await db_session.flush()
+
+        await self._refused(db_session, email="ceo@acme.test")
+
+    @pytest.mark.parametrize(
+        "email",
+        ["user@sub.globex.test", "user@evilglobex.test", "user@globex.test.evil.test", "globex.test", "@globex.test"],
+    )
+    async def test_a_domain_is_matched_whole(self, db_session, email):
+        await _seeded(db_session)
+
+        await self._refused(db_session, email=email)
+
+    async def test_a_tenant_with_no_domains_admits_no_first_login(self, db_session):
+        await _seeded(db_session, domains={**DOMAINS, "globex": []})
+
+        await self._refused(db_session)
+
+    async def test_the_domain_is_compared_without_case(self, db_session):
+        await _seeded(db_session, domains={**DOMAINS, "globex": ["Globex.TEST"]})
+
+        result = await _provision(db_session, GLOBEX_ORG, email="Globex-User@GLOBEX.test")
+
+        assert result.is_ok(), result
+        assert await _memberships(db_session, result.ok) == {("globex", MEMBER, True)}
+
+    async def test_the_refusal_logs_the_tenant_not_the_email(self, db_session, caplog):
+        await _seeded(db_session)
+        globex = await TenantRepository(db_session).get_by_name("globex")
+        globex_id = globex.id
+
+        with caplog.at_level(logging.WARNING, logger="app.services.identity_provisioning"):
+            await self._refused(db_session, email="ceo@acme.test")
+
+        refusals = [r.getMessage() for r in caplog.records if r.name == "app.services.identity_provisioning"]
+        assert len(refusals) == 1, refusals
+        assert str(globex_id) in refusals[0] and PROVIDER in refusals[0] and SUB in refusals[0]
+        assert "ceo@acme.test" not in refusals[0]
+
+    async def test_a_user_linked_beforehand_signs_in_whatever_the_domains(self, db_session):
+        """The link is found before any email is read: an administrator's ``idp_links`` row still admits its user."""
+        provider_id = await _seeded(db_session, domains={"acme": [], "globex": []})
+        user = User(email="ceo@acme.test", user_name="ceo@acme.test")
+        db_session.add(user)
+        await db_session.flush()
+        user_id = user.id
+        db_session.add(IdPLink(user_id=user_id, provider_id=provider_id, external_sub=SUB))
+        await db_session.flush()
+
+        result = await _provision(db_session, GLOBEX_ORG, email="ceo@acme.test")
+
+        assert result.is_ok() and result.ok == user_id, result
 
 
 class TestAnOrganizationsEmailIsNeverLinkedFromAnotherProvider:
