@@ -29,7 +29,12 @@ if [ -z "${TF_VAR_zitadel_access_token:-}" ]; then
   exit 1
 fi
 
-issuer="http://zitadel.localhost:8480"
+# The instance the root targets, from the one place it is set.
+issuer="$(sed -n 's/^zitadel_url *= *"\(.*\)"$/\1/p' "$root/environments/dev.tfvars")"
+if [ -z "$issuer" ]; then
+  echo "environments/dev.tfvars sets no zitadel_url" >&2
+  exit 1
+fi
 if ! curl -fsS --connect-timeout 5 --max-time 20 -o /dev/null "$issuer/.well-known/openid-configuration"; then
   echo "the local Zitadel is not answering at $issuer: run 'make zitadel-reset' first" >&2
   exit 1
