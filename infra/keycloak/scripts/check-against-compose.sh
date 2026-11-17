@@ -40,7 +40,7 @@ vars=(-var "keycloak_url=$base_url" -var "realm=$terraform_realm")
 work=""
 applied=0
 
-if ! curl -fsS -o /dev/null "$base_url/realms/$import_realm/.well-known/openid-configuration"; then
+if ! curl -fsS --connect-timeout 5 --max-time 20 -o /dev/null "$base_url/realms/$import_realm/.well-known/openid-configuration"; then
   echo "keycloak-test is not answering at $base_url with realm $import_realm: run 'make test-up-keycloak' first" >&2
   exit 1
 fi
@@ -67,11 +67,11 @@ trap cleanup EXIT
 # same time are not supported.
 delete_leftover_realm() {
   local token code
-  token="$(curl -fsS "$base_url/realms/master/protocol/openid-connect/token" \
+  token="$(curl -fsS --connect-timeout 5 --max-time 20 "$base_url/realms/master/protocol/openid-connect/token" \
     --data-urlencode grant_type=password --data-urlencode client_id=admin-cli \
     --data-urlencode "username=$KEYCLOAK_USER" --data-urlencode "password=$KEYCLOAK_PASSWORD" |
     jq -er .access_token)"
-  code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
+  code="$(curl -sS --connect-timeout 5 --max-time 20 -o /dev/null -w '%{http_code}' -X DELETE \
     -H "Authorization: Bearer $token" "$base_url/admin/realms/$terraform_realm")"
   case "$code" in
     204) echo "--- deleted realm $terraform_realm left by an earlier run" ;;
