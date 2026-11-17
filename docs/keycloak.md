@@ -57,6 +57,13 @@ step below takes its settings from that root's outputs
 up (`make test-up-keycloak`) and `keycloak-test.localhost` resolving to loopback, from the
 repository root:
 
+`infra/keycloak/` has one local state. If it holds the development apply against the compose
+`keycloak` ([`infra/keycloak/README.md`](../infra/keycloak/README.md#run-it)), run
+`terraform -chdir=infra/keycloak destroy` first; otherwise the apply below moves the state to
+`keycloak-test` and the next development apply fails because its realm already exists. Destroy
+this one the same way, with the same `-var issuer_url`, before going back. `make keycloak-env`
+and `make test-e2e-keycloak` read whichever instance was applied last.
+
 ```bash
 KEYCLOAK_USER=admin KEYCLOAK_PASSWORD=admin terraform -chdir=infra/keycloak apply \
   -var issuer_url=http://keycloak-test.localhost:18180/realms/identity-stack-terraform
