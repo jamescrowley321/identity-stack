@@ -184,3 +184,63 @@ class TestSignedInTokens:
 
         with pytest.raises(pytest.fail.Exception, match="no exp claim"):
             tokens.get(providers.MEMBER, sign_in)
+
+
+class TestAFailedSignInIsNotRetried:
+    """A principal whose sign-in failed fails every later test at once, as the session fixtures did."""
+
+    @staticmethod
+    def _failing(calls: list[str]):
+        def sign_in() -> str:
+            calls.append("sign_in")
+            raise RuntimeError("Token request failed: invalid_client")
+
+        return sign_in
+
+    def test_descope_signs_in_once_across_two_calls(self, monkeypatch):
+        descope = providers.DescopeProvider(UNREACHABLE, UNREACHABLE)
+        calls: list[str] = []
+        monkeypatch.setattr(descope, "_new_token", lambda principal: self._failing(calls)())
+
+        with pytest.raises(RuntimeError, match="invalid_client") as first:
+            descope.access_token(providers.ADMIN, None)
+        with pytest.raises(providers.EarlierSignInFailed, match="admin principal failed earlier") as second:
+            descope.access_token(providers.ADMIN, None)
+
+        assert calls == ["sign_in"]
+        assert second.value.__cause__ is first.value
+
+    def test_descope_principals_fail_apart(self, monkeypatch):
+        descope = providers.DescopeProvider(UNREACHABLE, UNREACHABLE)
+        token = _jwt({"exp": 2_000_000_000})
+
+        def new_token(principal: str) -> str:
+            if principal == providers.ADMIN:
+                raise RuntimeError("Access key creation returned no cleartext")
+            return token
+
+        monkeypatch.setattr(descope, "_new_token", new_token)
+
+        with pytest.raises(RuntimeError, match="no cleartext"):
+            descope.access_token(providers.ADMIN, None)
+
+        assert descope.access_token(providers.MEMBER, None) == token
+
+    def test_a_descope_skip_is_not_recorded(self, monkeypatch):
+        descope = providers.DescopeProvider(UNREACHABLE, UNREACHABLE)
+        monkeypatch.delenv("DESCOPE_MANAGEMENT_KEY", raising=False)
+
+        for _ in range(2):
+            with pytest.raises(pytest.skip.Exception, match="DESCOPE_MANAGEMENT_KEY not set"):
+                descope.access_token(providers.ADMIN, None)
+
+    def test_signed_in_tokens_sign_in_once_across_two_calls(self):
+        tokens = providers.SignedInTokens(clock=lambda: 1_000.0)
+        calls: list[str] = []
+
+        with pytest.raises(RuntimeError, match="invalid_client"):
+            tokens.get(providers.MEMBER, self._failing(calls))
+        with pytest.raises(providers.EarlierSignInFailed, match="member principal failed earlier"):
+            tokens.get(providers.MEMBER, self._failing(calls))
+
+        assert calls == ["sign_in"]
