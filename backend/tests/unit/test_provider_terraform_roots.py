@@ -276,3 +276,153 @@ def test_env_target_prints_both_environments_from_the_outputs(root: str, tmp_pat
         "backend/.env": quoted["backend_environment"],
         "frontend/.env": quoted["frontend_environment"],
     }
+
+
+def _realm_issuer_pattern() -> str:
+    """``local.realm_issuer`` of infra/keycloak: the regex that splits issuer_url into base URL and realm."""
+    found = re.search(r'^\s*realm_issuer\s*=\s*"([^"]*)"', _root_text("keycloak"), re.MULTILINE)
+    assert found is not None, "infra/keycloak has no local.realm_issuer"
+    return found.group(1)
+
+
+KEYCLOAK_DEFAULT_ISSUER = "http://keycloak.localhost:8180/realms/identity-stack-terraform"
+
+
+def test_keycloak_issuer_splits_into_base_url_and_realm() -> None:
+    assert re.fullmatch(_realm_issuer_pattern(), KEYCLOAK_DEFAULT_ISSUER).groups() == (
+        "http://keycloak.localhost:8180",
+        "identity-stack-terraform",
+    )
+
+
+@pytest.mark.parametrize(
+    "issuer_url",
+    [
+        "http://keycloak.localhost:8180//realms/identity-stack-terraform",
+        "http://keycloak.localhost:8180/auth//realms/identity-stack-terraform",
+        "http://keycloak.localhost:8180/realms/",
+        "http://keycloak.localhost:8180/realms/a/b",
+    ],
+)
+def test_keycloak_issuer_with_a_base_url_ending_in_a_slash_is_refused(issuer_url: str) -> None:
+    """Keycloak's iss never holds ``//realms/``: such an issuer_url would never match a token."""
+    assert re.fullmatch(_realm_issuer_pattern(), issuer_url) is None
+
+
+# test-e2e-keycloak's suite settings, as the fake python below prints them.
+KEYCLOAK_TEST_SETTINGS = (
+    "KEYCLOAK_TEST_BASE_URL",
+    "KEYCLOAK_TEST_REALM",
+    "KEYCLOAK_TEST_USER_IDS",
+    "KEYCLOAK_TEST_USER_PASSWORDS",
+    "KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET",
+    "KEYCLOAK_TEST_ADMIN_CLIENT_SECRET",
+)
+
+
+def _keycloak_outputs() -> dict:
+    backend = _sample_environment("keycloak", "backend_environment")
+    backend["KEYCLOAK_ISSUER_URL"] = KEYCLOAK_DEFAULT_ISSUER
+    backend["KEYCLOAK_DIRECTORY_CLIENT_SECRET"] = "directory 'secret'"
+    backend["KEYCLOAK_ADMIN_CLIENT_SECRET"] = "admin $secret"
+    return {
+        "backend_environment": {"sensitive": True, "value": backend},
+        "test_credentials": {"sensitive": True, "value": {"users": {"alice": "pw 'a'"}, "clients": {}}},
+        "user_ids": {"sensitive": False, "value": {"alice": "id-a"}},
+    }
+
+
+def _run_e2e_keycloak_target(outputs: dict, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    """``make test-e2e-keycloak`` with a fake terraform answering ``outputs`` and a fake python printing settings."""
+    expected_call = "-chdir=infra/keycloak output -json"
+    fake_terraform = tmp_path / "terraform"
+    fake_terraform.write_text(
+        "#!/bin/sh\n"
+        f'[ "$*" = "{expected_call}" ] || {{ echo "unexpected terraform $*" >&2; exit 2; }}\n'
+        f"cat <<'JSON'\n{json.dumps(outputs)}\nJSON\n"
+    )
+    fake_python = tmp_path / "python"
+    fake_python.write_text(
+        "#!/bin/sh\n" + "".join(f"printf '%s\\0%s\\0' {name} \"${name}\"\n" for name in KEYCLOAK_TEST_SETTINGS)
+    )
+    for fake in (fake_terraform, fake_python):
+        fake.chmod(0o755)
+    make = shutil.which("make")
+    assert make is not None, "make is not on PATH"
+    environment = {name: value for name, value in os.environ.items() if not name.startswith("KEYCLOAK_TEST_")}
+    return subprocess.run(
+        [make, "-s", "-C", str(REPO), "test-e2e-keycloak"],
+        env={**environment, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_e2e_keycloak_target_gives_the_suite_the_applied_realm(tmp_path: Path) -> None:
+    outputs = _keycloak_outputs()
+
+    ran = _run_e2e_keycloak_target(outputs, tmp_path)
+
+    assert ran.returncode == 0, ran.stderr
+    fields = ran.stdout.split("\0")[:-1]
+    settings = dict(zip(fields[::2], fields[1::2], strict=True))
+    assert settings == {
+        "KEYCLOAK_TEST_BASE_URL": "http://keycloak.localhost:8180",
+        "KEYCLOAK_TEST_REALM": "identity-stack-terraform",
+        "KEYCLOAK_TEST_USER_IDS": json.dumps({"alice": "id-a"}, separators=(",", ":")),
+        "KEYCLOAK_TEST_USER_PASSWORDS": json.dumps({"alice": "pw 'a'"}, separators=(",", ":")),
+        "KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET": "directory 'secret'",
+        "KEYCLOAK_TEST_ADMIN_CLIENT_SECRET": "admin $secret",
+    }
+
+
+def _without(path: tuple[str, ...]):
+    def change(outputs: dict) -> None:
+        *parents, last = path
+        node = outputs
+        for key in parents:
+            node = node[key]
+        del node[last]
+
+    return change
+
+
+def _issuer(value: str):
+    def change(outputs: dict) -> None:
+        outputs["backend_environment"]["value"]["KEYCLOAK_ISSUER_URL"] = value
+
+    return change
+
+
+@pytest.mark.parametrize(
+    ("change", "named"),
+    [
+        (_without(("backend_environment",)), "backend_environment"),
+        (_issuer("http://keycloak.localhost:8180/identity-stack-terraform"), "KEYCLOAK_ISSUER_URL"),
+        (_issuer("http://keycloak.localhost:8180//realms/identity-stack-terraform"), "KEYCLOAK_ISSUER_URL"),
+        (
+            _without(("backend_environment", "value", "KEYCLOAK_DIRECTORY_CLIENT_SECRET")),
+            "KEYCLOAK_DIRECTORY_CLIENT_SECRET",
+        ),
+        (_without(("backend_environment", "value", "KEYCLOAK_ADMIN_CLIENT_SECRET")), "KEYCLOAK_ADMIN_CLIENT_SECRET"),
+        (_without(("user_ids",)), "user_ids"),
+        (_without(("test_credentials", "value", "users")), "test_credentials"),
+    ],
+    ids=["no-backend", "issuer-without-realm", "issuer-double-slash", "no-directory", "no-admin", "no-ids", "no-users"],
+)
+def test_e2e_keycloak_target_refuses_outputs_it_cannot_read(change, named: str, tmp_path: Path) -> None:
+    """A missing output or setting fails the target naming it, before the suite runs with a ``null``."""
+    outputs = _keycloak_outputs()
+    change(outputs)
+
+    ran = _run_e2e_keycloak_target(outputs, tmp_path)
+
+    assert ran.returncode != 0
+    assert ran.stdout == ""
+    assert named in ran.stderr
+
+
+def test_ci_masks_only_values_it_captured_first() -> None:
+    """``echo "::add-mask::$(...)"`` drops the command's failure: the step would go on with nothing masked."""
+    assert re.findall(r"::add-mask::\$\(.*", CI_WORKFLOW.read_text()) == []
