@@ -65,6 +65,17 @@ test-e2e: ## run e2e tests (requires running frontend + backend)
 test-e2e-keycloak: ## run the Keycloak e2e suite (requires keycloak-test, the backend and the Keycloak-built SPA on localhost:3000; see docs/keycloak.md)
 	cd backend && python -m pytest tests/e2e_keycloak/ -v
 
+# The suite reads the applied root's outputs (test users, client ids) from
+# ZITADEL_TERRAFORM_OUTPUTS. PYTEST_ARGS passes extra pytest options (CI's
+# screenshots and traces).
+.PHONY: test-e2e-zitadel
+test-e2e-zitadel: ## run the Zitadel e2e suite (requires the compose Zitadel with infra/zitadel applied and seeded, the backend and the Zitadel-built SPA on localhost:3000; see docs/zitadel.md)
+	@outputs="$$(terraform -chdir=infra/zitadel output -json)" || { \
+		echo "test-e2e-zitadel: no outputs; apply infra/zitadel first (docs/zitadel.md)." >&2; \
+		exit 1; \
+	}; \
+	cd backend && ZITADEL_TERRAFORM_OUTPUTS="$$outputs" python -m pytest tests/e2e_zitadel/ -v $(PYTEST_ARGS)
+
 test-all: lint test-unit test-frontend test-integration ## run all checks
 
 security: ## run security scans (pip-audit, npm audit)
