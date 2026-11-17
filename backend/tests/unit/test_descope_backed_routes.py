@@ -181,6 +181,14 @@ SELF_SCOPED_ROLE_ROUTES: dict[tuple[str, str], str] = {
     ("DELETE", "/api/users/{user_id}/idp-links/{link_id}"): (
         "_require_user_in_tenant holds the user to the token's dct (#590)"
     ),
+    ("GET", "/api/access-checks/admin-role"): (
+        "answers back the roles require_role resolved in the request's tenant: the handler calls no provider "
+        "and reads no table"
+    ),
+    ("GET", "/api/access-checks/viewer-role"): (
+        "answers back the roles require_role resolved in the request's tenant: the handler calls no provider "
+        "and reads no table"
+    ),
 }
 
 
