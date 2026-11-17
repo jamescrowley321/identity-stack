@@ -11,6 +11,13 @@ interface ImportMetaEnv {
   readonly VITE_OIDC_CLIENT_ID?: string;
   readonly VITE_OIDC_SCOPE?: string;
   readonly VITE_OIDC_REDIRECT_URI?: string;
+  /**
+   * The whole scope of a sign-in to one tenant, with `{tenant}` where the
+   * tenant id goes. Set it for a provider that keeps the tenant in the token
+   * (`/api/identity` sends `token_tenant`): choosing a tenant then signs in
+   * again with this scope. Unset, such a provider's tenant cannot be switched.
+   */
+  readonly VITE_OIDC_TENANT_SCOPE_TEMPLATE?: string;
 
   readonly VITE_DESCOPE_PROJECT_ID?: string;
   readonly VITE_DESCOPE_BASE_URL?: string;
