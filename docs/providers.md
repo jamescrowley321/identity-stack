@@ -25,7 +25,9 @@ hosted provider offers, the cell says **Not built** and names the issue. Paths a
 repository root; `file::Name` names a test class or function in that file.
 `backend/tests/unit/test_provider_matrix.py` fails when a cell has no status, a Supported or Not
 supported cell names no file, a Not built or Planned cell names no issue, or a cited file or name
-does not exist.
+does not exist. It checks that a citation exists, not that it shows what the cell says: a cell that
+cites a whole file passes whatever it claims, so whether the cited file backs the claim is for the
+reader and the reviewer.
 
 Versions recorded: Keycloak `quay.io/keycloak/keycloak:26.8.2`, Zitadel `v4.20.3`, Ory Hydra
 `oryd/hydra:v2.2.0` (the local stand-in for Ory Network).
@@ -125,7 +127,7 @@ Where one of the two self-hosted providers does something the other does not, th
 - **Built for one only**, with an issue for the other: Zitadel tenant update and delete (#645) and
   email change (#646), which the Keycloak adapter pushes.
 - **By design**: Keycloak authorizes from the token (client roles, Organizations) and Zitadel from
-  the canonical store, so Keycloak has no `require_role` and Zitadel pushes no tenant memberships
+  the canonical store, so Keycloak has no `require_role` and Zitadel pushes no tenant membership
   ([ADR-0010](adr/0010-keycloak-token-model.md), [zitadel.md](zitadel.md#admin-adapter)).
 - **The provider does not offer it**: DPoP, mutual TLS, PAR and token exchange are advertised by
   Keycloak and not by Zitadel. identity-stack uses none of them yet (#639, #640, #544).
