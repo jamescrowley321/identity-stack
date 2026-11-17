@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type { ReactNode } from "react";
@@ -82,6 +83,29 @@ export interface TenantSwitchFailure {
 /** What a sign-in to one tenant carries through the redirect (`User.state`). */
 interface TenantSignInState {
   requestedTenantId: string;
+}
+
+/** A `GET /api/identity` answer other than 2xx; `status` is its HTTP status. */
+class IdentityFetchError extends Error {
+  readonly status: number;
+
+  constructor(status: number) {
+    super(`identity fetch failed: ${status}`);
+    this.name = "IdentityFetchError";
+    this.status = status;
+  }
+}
+
+/** The API refused the caller (401/403), as opposed to failing to answer. */
+function isRefusal(error: Error | null): boolean {
+  return error instanceof IdentityFetchError && (error.status === 401 || error.status === 403);
+}
+
+/** The verdict on one tenant sign-in, fixed by the first identity result that settles it. */
+interface SwitchVerdict {
+  subject: string | null;
+  requestedTenantId: string;
+  failed: boolean;
 }
 
 function requestedTenantOf(state: unknown): string | null {
@@ -163,12 +187,36 @@ export function IdentityProvider({
   const [selectedTenantId, setSelectedTenantId] = useState<string | null>(() =>
     readStoredTenantId(),
   );
+  // The tenant the current sign-in asked for (none for an ordinary sign-in),
+  // read by the fetch below without making it a reason to refetch.
+  const requestedTenantId = requestedTenantOf(auth.user?.state);
+  const requestedTenantRef = useRef(requestedTenantId);
+  useEffect(() => {
+    requestedTenantRef.current = requestedTenantId;
+  }, [requestedTenantId]);
+  const [verdict, setVerdict] = useState<SwitchVerdict | null>(null);
 
   useEffect(() => {
     // Only fetch when authenticated — avoids an apiFetch /login bounce.
     if (!isAuthenticated) return;
 
     let cancelled = false;
+
+    // A tenant sign-in is judged on the first identity result that settles it:
+    // identity loaded (its token names the tenant asked for, or another or
+    // none) or identity refused (401/403). Any other failure (5xx, network)
+    // settles nothing. Once settled the verdict stands: User.state keeps the
+    // tenant asked for for the whole session, so a later load is not judged
+    // as the sign-in again.
+    const settle = (failed: boolean) => {
+      const requested = requestedTenantRef.current;
+      if (requested === null) return;
+      setVerdict((prev) =>
+        prev !== null && prev.subject === subject && prev.requestedTenantId === requested
+          ? prev
+          : { subject, requestedTenantId: requested, failed },
+      );
+    };
 
     const loadIdentity = async () => {
       // Drop any prior subject's identity/error before the new fetch resolves,
@@ -178,19 +226,22 @@ export function IdentityProvider({
       setFetchLoading(true);
       try {
         const res = await apiFetch("/api/identity");
-        if (!res.ok) throw new Error(`identity fetch failed: ${res.status}`);
+        if (!res.ok) throw new IdentityFetchError(res.status);
         const data = (await res.json()) as CanonicalIdentity;
         if (!cancelled) {
           setFetchedIdentity(data);
           setFetchedSubject(subject);
           setFetchError(null);
+          settle(data.token_tenant?.tenant_id !== requestedTenantRef.current);
         }
       } catch (err: unknown) {
         if (cancelled) return;
         // Fail-closed — drop identity so no roles/tenants are surfaced.
         setFetchedIdentity(null);
         setFetchedSubject(subject);
-        setFetchError(err instanceof Error ? err : new Error(String(err)));
+        const failure = err instanceof Error ? err : new Error(String(err));
+        setFetchError(failure);
+        if (isRefusal(failure)) settle(true);
       } finally {
         if (!cancelled) setFetchLoading(false);
       }
@@ -258,16 +309,18 @@ export function IdentityProvider({
 
   const signInAgain = useCallback(() => signinRedirect(), [signinRedirect]);
 
-  // A tenant sign-in's token is checked once identity has resolved: a token
-  // naming no tenant (identity refused) or another tenant is a failure.
-  // The provider may answer a sign-in for a tenant the user does not belong to
-  // with such a token instead of an error.
-  const requestedTenantId = requestedTenantOf(auth.user?.state);
-  const tenantSwitchFailure = useMemo<TenantSwitchFailure | null>(() => {
-    if (requestedTenantId === null || loading) return null;
-    if (tokenTenantId === requestedTenantId) return null;
-    return { requestedTenantId };
-  }, [requestedTenantId, loading, tokenTenantId]);
+  // The provider may answer a sign-in for a tenant the user does not belong
+  // to with a token naming another tenant or none, instead of an error.
+  const failedSwitch =
+    verdict !== null &&
+    verdict.failed &&
+    verdict.subject === subject &&
+    verdict.requestedTenantId === requestedTenantId &&
+    !loading;
+  const tenantSwitchFailure = useMemo<TenantSwitchFailure | null>(
+    () => (failedSwitch && requestedTenantId !== null ? { requestedTenantId } : null),
+    [failedSwitch, requestedTenantId],
+  );
 
   const value = useMemo<IdentityContextValue>(
     () => ({

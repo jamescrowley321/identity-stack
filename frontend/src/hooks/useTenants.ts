@@ -18,7 +18,8 @@ export interface TenantInfo {
  *   (defaulting to the first membership).
  * - `tenants`: every tenant the user belongs to. `tenant_memberships` is the
  *   source of id + display name; roles and permissions are aggregated across
- *   all of that tenant's role assignments (permissions de-duped).
+ *   all of that tenant's role assignments (permissions de-duped). A tenant
+ *   that comes from the token is always listed, with the token's permissions.
  */
 export function useTenants() {
   const { identity, currentTenantId } = useIdentityContext();
@@ -54,6 +55,17 @@ export function useTenants() {
         ],
       };
     });
+
+    // The API acts in the token's tenant even if the memberships do not list
+    // it, so it is listed, with the token's permissions and no roles.
+    if (tokenTenant !== null && !tenants.some((t) => t.id === tokenTenant.tenant_id)) {
+      tenants.push({
+        id: tokenTenant.tenant_id,
+        name: tokenTenant.tenant_id,
+        roles: [],
+        permissions: [...new Set(tokenTenant.permissions ?? [])],
+      });
+    }
 
     return { currentTenantId, tenants };
   }, [identity, currentTenantId]);

@@ -65,6 +65,7 @@ function Consumer() {
   return (
     <div>
       <span data-testid="loading">{String(ctx.loading)}</span>
+      <span data-testid="error">{ctx.error ? ctx.error.message : "none"}</span>
       <span data-testid="current-tenant">{ctx.currentTenantId ?? "null"}</span>
       <span data-testid="tenant-switch">{ctx.tenantSwitch}</span>
       <span data-testid="switch-failure">
@@ -208,6 +209,53 @@ describe("IdentityProvider with a tenant that comes from the token", () => {
     await loaded();
 
     expect(screen.getByTestId("switch-failure")).toHaveTextContent("acme");
+    expect(screen.getByTestId("current-tenant")).toHaveTextContent("null");
+  });
+
+  it.each([500, 403])(
+    "judges a tenant sign-in once: a later identity load answered %i is no failed switch",
+    async (status) => {
+      const user = { profile: { sub: "kc-carol" }, state: { requestedTenantId: "globex" } };
+      mockUseAuth.mockReturnValue(authWith({ user }));
+      mockApiFetch.mockResolvedValueOnce(okResponse(tokenTenantIdentity));
+
+      const tree = () => (
+        <IdentityProvider tenantScopeTemplate={TEMPLATE}>
+          <Consumer />
+        </IdentityProvider>
+      );
+      const { rerender } = render(tree());
+      await loaded();
+      expect(screen.getByTestId("switch-failure")).toHaveTextContent("none");
+
+      // The session drops and comes back (same user, same User.state); this load fails.
+      mockUseAuth.mockReturnValue(authWith({ user, isAuthenticated: false }));
+      rerender(tree());
+      mockApiFetch.mockResolvedValueOnce(new Response("{}", { status }));
+      mockUseAuth.mockReturnValue(authWith({ user }));
+      rerender(tree());
+      await waitFor(() => expect(screen.getByTestId("error")).toHaveTextContent(`identity fetch failed: ${status}`));
+
+      expect(mockApiFetch).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId("switch-failure")).toHaveTextContent("none");
+    },
+  );
+
+  it("reports no failed switch when the identity load fails without a refusal", async () => {
+    mockUseAuth.mockReturnValue(
+      authWith({ user: { profile: { sub: "kc-carol" }, state: { requestedTenantId: "acme" } } }),
+    );
+    mockApiFetch.mockResolvedValue(new Response("{}", { status: 502 }));
+
+    render(
+      <IdentityProvider tenantScopeTemplate={TEMPLATE}>
+        <Consumer />
+      </IdentityProvider>,
+    );
+    await loaded();
+
+    expect(screen.getByTestId("error")).toHaveTextContent("identity fetch failed: 502");
+    expect(screen.getByTestId("switch-failure")).toHaveTextContent("none");
     expect(screen.getByTestId("current-tenant")).toHaveTextContent("null");
   });
 
