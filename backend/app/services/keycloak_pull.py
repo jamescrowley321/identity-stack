@@ -11,9 +11,10 @@ and applies each event, oldest first across both stores, through
   its events commit together, so a restart resumes from the last commit and
   applies nothing twice. Each event is applied in a savepoint: one that cannot be
   applied is rolled back alone, recorded as a ``failed`` sync event, and passed.
-- **Keycloak unavailable.** When the realm cannot be read (no answer, a 5xx, a
-  refused token, a rate limit), the batch is rolled back and the poll stops;
-  the next poll reads the same events again.
+- **Keycloak unavailable.** When the realm cannot be asked (no answer or no
+  token, a 5xx, a refused token, a rate limit) while an event is read, the events
+  before it commit and the poll stops; the next poll reads that event again. When
+  the event stores themselves cannot be read, nothing of the batch is applied.
 - **The cursor.** Keycloak records event times in milliseconds and two events
   can share one, and an event can be committed a little after a later one. A
   poll therefore reads from ``OVERLAP_MS`` before the cursor and passes the
@@ -39,7 +40,7 @@ from app.repositories.provider import ProviderRepository
 from app.services.adapters.keycloak import PROVIDER_NAME
 from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.inbound_sync import InboundSyncService
-from app.services.keycloak_admin import EventStream, KeycloakAdminApi, KeycloakAdminError
+from app.services.keycloak_admin import EventStream, KeycloakAdminApi, KeycloakAdminError, KeycloakAdminUnavailable
 from app.services.keycloak_events import Ignored, KeycloakEventReader, RealmSnapshot
 
 if TYPE_CHECKING:
@@ -52,12 +53,19 @@ tracer = trace.get_tracer(__name__)
 # cursor's millisecond or were committed after a later one.
 OVERLAP_MS = 5_000
 
-# Keycloak answers that mean "ask again later", not "this event cannot be read".
-_RETRY_STATUSES = frozenset({401, 403, 408, 429})
+# Keycloak answers that mean "ask again later", not "this event cannot be read". A 403
+# is the service account lacking a grant: asking again does not help.
+_RETRY_STATUSES = frozenset({401, 408, 429})
 
 
 def _transient(exc: KeycloakAdminError) -> bool:
-    return exc.status is None or exc.status >= 500 or exc.status in _RETRY_STATUSES
+    """Whether asking again later may work: no answer or no token, a 5xx, or a refusal of the moment.
+
+    An answer Keycloak gave but that cannot be read is about the event, not the moment.
+    """
+    if isinstance(exc, KeycloakAdminUnavailable):
+        return True
+    return exc.status is not None and (exc.status >= 500 or exc.status in _RETRY_STATUSES)
 
 
 @dataclass
@@ -164,10 +172,16 @@ class KeycloakPullService:
             await self._session.rollback()
             return Ok(False)
         invalidations: list[dict] = []
+        unavailable: KeycloakAdminError | None = None
         for event, stream in batch.events:
-            await self._apply(stream, event, snapshot, provider.id, stats, invalidations)
+            try:
+                await self._apply(stream, event, snapshot, provider.id, stats, invalidations)
+            except KeycloakAdminError as exc:
+                # Keycloak cannot be asked now: keep what is applied, and read this event again next poll.
+                unavailable = exc
+                break
             cursors[stream]._advance(event)
-        if not batch.more:
+        if unavailable is None and not batch.more:
             await self._reader.refresh(snapshot)
 
         state.admin_cursor = cursors[EventStream.ADMIN].time
@@ -179,13 +193,23 @@ class KeycloakPullService:
         await self._states.update(state)
         await self._states.commit()
         await self._publish(invalidations)
+        if unavailable is not None:
+            raise unavailable
         return Ok(batch.more)
 
     async def _start(self, stats: dict[str, int]) -> None:
         """The first poll of a realm: the cursors at the newest events, nothing applied."""
         cursors = {}
         for stream in EventStream:
-            newest = await self._api.events(stream, date_from=0, first=0, max_results=self._page_size, newest=True)
+            # Newest first, a page at a time, until an event older than the overlap window.
+            newest: list[dict] = []
+            while True:
+                page = await self._api.events(
+                    stream, date_from=0, first=len(newest), max_results=self._page_size, newest=True
+                )
+                newest.extend(page)
+                if len(page) < self._page_size or page[-1]["time"] < newest[0]["time"] - OVERLAP_MS:
+                    break
             time = newest[0]["time"] if newest else 0
             cursors[stream] = (
                 time,
@@ -263,9 +287,16 @@ class KeycloakPullService:
             return
         change_name = type(reading.change).__name__
         savepoint = await self._session.begin_nested()
-        result = await self._inbound.apply_keycloak_change(
-            reading.change, provider_id=provider_id, keycloak_event_id=event_id
-        )
+        try:
+            result = await self._inbound.apply_keycloak_change(
+                reading.change, provider_id=provider_id, keycloak_event_id=event_id
+            )
+        except Exception as exc:
+            # One event the database refuses must not hold every later one back. A rollback
+            # that fails too (the connection is gone) raises, and the whole batch is retried.
+            await savepoint.rollback()
+            await self._fail(provider_id, event_id, change_name, type(exc).__name__, stats)
+            return
         if result.is_error():
             await savepoint.rollback()
             await self._fail(provider_id, event_id, change_name, result.error.message, stats)
@@ -284,7 +315,18 @@ class KeycloakPullService:
         )
 
     async def _publish(self, invalidations: list[dict]) -> None:
-        """After the commit: each user's cached identity, and everything when a tenant, role or permission changed."""
+        """After the commit: each user's cached identity, and everything when a tenant, role or permission changed.
+
+        Authorization never reads the cache (conventions §18), so a lost invalidation
+        leaves only the identity read path stale until the cache's TTL: it is logged,
+        and the committed batch stands.
+        """
+        try:
+            await self._invalidate(invalidations)
+        except Exception:
+            logger.warning("Keycloak pull: a cache invalidation failed after the commit", exc_info=True)
+
+    async def _invalidate(self, invalidations: list[dict]) -> None:
         users = {entry["entity_id"]: entry["operation"] for entry in invalidations if entry["entity_type"] == "user"}
         for user_id, operation in users.items():
             await self._publisher.publish(entity_type="user", entity_id=user_id, operation=operation)

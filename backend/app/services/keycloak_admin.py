@@ -100,6 +100,10 @@ class KeycloakAdminError(Exception):
         self.status = status
 
 
+class KeycloakAdminUnavailable(KeycloakAdminError):
+    """Keycloak could not be asked: no answer, or no service-account token. Asking again later may work."""
+
+
 class KeycloakAdminRolesMissing(KeycloakAdminError):
     """The service account Keycloak accepted does not hold every ``realm-management`` role the adapter writes with.
 
@@ -227,18 +231,18 @@ class KeycloakAdminApi:
         except UpstreamStatusError as exc:
             status = exc.response.status_code
             logger.warning("keycloak admin: the service-account grant answered %s", status)
-            raise KeycloakAdminError("service-account grant refused", status=status) from exc
+            raise KeycloakAdminUnavailable("service-account grant refused", status=status) from exc
         except UpstreamTransportError as exc:
             logger.warning("keycloak admin: no answer from the grant endpoint (%s)", type(exc).__name__)
-            raise KeycloakAdminError("token endpoint unreachable") from exc
+            raise KeycloakAdminUnavailable("token endpoint unreachable") from exc
         except ValueError as exc:
             logger.warning("keycloak admin: the grant endpoint answered something that is not JSON")
-            raise KeycloakAdminError("token endpoint answer unreadable") from exc
+            raise KeycloakAdminUnavailable("token endpoint answer unreadable") from exc
         value = body.get("access_token") if isinstance(body, dict) else None
         lifetime = body.get("expires_in") if isinstance(body, dict) else None
         if not isinstance(value, str) or not value:
             logger.warning("keycloak admin: the grant endpoint answered with no access token")
-            raise KeycloakAdminError("token endpoint answer has no access token")
+            raise KeycloakAdminUnavailable("token endpoint answer has no access token")
         if isinstance(lifetime, (int, float)) and not isinstance(lifetime, bool):
             self._token.update(value=value, renew_at=time.monotonic() + float(lifetime) - _TOKEN_MARGIN_SECONDS)
         return value
@@ -260,7 +264,7 @@ class KeycloakAdminApi:
                 )
             except UpstreamTransportError as exc:
                 logger.warning("keycloak admin: %s %s did not answer (%s)", method, path, type(exc).__name__)
-                raise KeycloakAdminError("admin API unreachable") from exc
+                raise KeycloakAdminUnavailable("admin API unreachable") from exc
             if response.status_code == 401:
                 raise _TokenRefused
             return response

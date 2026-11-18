@@ -18,11 +18,11 @@ def test_defaults():
 
 
 def test_set_values(monkeypatch):
-    monkeypatch.setenv("KEYCLOAK_PULL_EVENTS", "false")
+    monkeypatch.setenv("KEYCLOAK_PULL_EVENTS", "yes")
     monkeypatch.setenv("KEYCLOAK_PULL_INTERVAL_SECONDS", "2.5")
     monkeypatch.setenv("KEYCLOAK_PULL_PAGE_SIZE", "1000")
 
-    assert keycloak_pull_settings() == KeycloakPullSettings(enabled=False, interval_seconds=2.5, page_size=1000)
+    assert keycloak_pull_settings() == KeycloakPullSettings(enabled=True, interval_seconds=2.5, page_size=1000)
 
 
 @pytest.mark.parametrize(
@@ -43,3 +43,10 @@ def test_a_value_out_of_range_is_refused_by_name(monkeypatch, name, value):
 
     with pytest.raises(KeycloakPullNotConfigured, match=name):
         keycloak_pull_settings()
+
+
+def test_with_the_pull_off_the_other_settings_are_not_read(monkeypatch):
+    monkeypatch.setenv("KEYCLOAK_PULL_EVENTS", "false")
+    monkeypatch.setenv("KEYCLOAK_PULL_PAGE_SIZE", "not a number")
+
+    assert keycloak_pull_settings().enabled is False

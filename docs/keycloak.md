@@ -225,7 +225,7 @@ the application's lifespan). The compose realm keeps both stores 7 days.
 |---|---|
 | Organization updated (admin event `UPDATE ORGANIZATION`) | The tenant linked to its alias (`external_org_id`, `keycloak` provider) takes its name, domains and status (`enabled` → `active`, disabled → `suspended`). |
 | Organization deleted | That tenant is suspended, not deleted: its roles and records stay. |
-| User updated (`UPDATE USER`; user events `UPDATE_PROFILE`, `UPDATE_EMAIL`) | The canonical user takes the email, given and family names the event carries; after a user's own profile change, the account's email only once Keycloak has verified it. `enabled` is taken only when the event records a change of it (`details.updated_enabled`): disabled → `inactive`, enabled → `active` for an `inactive` user (a `provisioned` one stays). |
+| User updated (`UPDATE USER`; user events `UPDATE_PROFILE`, `UPDATE_EMAIL`, `VERIFY_EMAIL`) | The canonical user takes the email, given and family names the event carries; after a user's own profile change, the account's email only once Keycloak has verified it. A canonical user whose email the pull changed is marked `email_from_organization`: Keycloak chose that email, so no first login of any provider links to the user by it (conventions §28). `enabled` is taken only when the event records a change of it (`details.updated_enabled`): disabled → `inactive`, enabled → `active` for an `inactive` user (a `provisioned` one stays). |
 | User deleted (`DELETE USER`; `DELETE_ACCOUNT`), or disabled by a permanent lockout | The canonical user is deactivated, as for Descope's `user.deleted`. |
 | Organization member added | The user holds the default role `member` in the tenant, unless they already hold a role there: a canonical membership is a role in the tenant. |
 | Organization member removed | Every role of the user in the tenant is removed. |
@@ -235,7 +235,8 @@ the application's lifespan). The compose realm keeps both stores 7 days.
 
 A user is the canonical user their `keycloak` IdP link names (the account id), else, for an account
 the adapter created, the canonical user whose id is its username and who is linked to no other
-account. Creating a user or an organization in Keycloak changes nothing canonical: a user is
+account. The username is read that way only for an administrator's change (an admin event), never for
+a user's own event: a username is not proof of who an account belongs to. Creating a user or an organization in Keycloak changes nothing canonical: a user is
 provisioned at first sign-in, and a tenant is made on the canonical side. Everything else Keycloak
 records (logins, clients, realm roles, credentials, groups themselves) is passed.
 
@@ -248,7 +249,7 @@ organization no tenant is linked to, an account no canonical user is) is logged,
 
 **Order and the cursor.** The cursor of each store, the ids of the events it has applied in the last
 5 seconds before it, and the aliases and client role names of the realm (an event deleting one names
-only its Keycloak id) are one row of `keycloak_pull_state`, keyed by the issuer. A batch of at most
+only its Keycloak id; kept until that delete is read) are one row of `keycloak_pull_state`, keyed by the issuer. A batch of at most
 `KEYCLOAK_PULL_PAGE_SIZE` (100) events of each store is applied in one transaction, which commits the
 canonical changes, their `sync_events` and the advanced cursor together: a restart, or a crash
 mid-batch, resumes from the last commit and applies no event twice. The poll reads from 5 seconds
@@ -262,10 +263,14 @@ newest events: what happened before the pull was enabled is reconciliation's
 it.
 
 **Failures.** A change the canonical model refuses (a name or email another row holds, no `member`
-role) is rolled back alone (a savepoint), recorded as a `failed` sync event and passed. When Keycloak
-cannot be read (no answer, a 5xx, 401, 403, 408 or 429) the batch is rolled back and the poll stops;
-the next one reads the same events. Any other refusal while reading an event is recorded as `failed`
-and passed.
+role), or that the database refuses outright, is rolled back alone (a savepoint), recorded as a
+`failed` sync event and passed. When Keycloak cannot be asked while an event is read (no answer, no
+service-account token, a 5xx, 401, 408 or 429), the events before it commit with their cursor and the
+poll stops; the next one reads that event again. Any other refusal (a 403 is a grant the service
+account lacks), or an answer that cannot be read, is recorded as `failed` and passed. When the event
+stores themselves cannot be read, the poll stops and applies nothing. A client role renamed keeps its
+kind (a permission stays a permission), and a rename that would move a tenant's role to another tenant
+is skipped.
 
 **Revocation.** Authorization reads the canonical model on every request (conventions §18), so a
 user disabled, deleted or removed from an organization in Keycloak is refused (403) on the first

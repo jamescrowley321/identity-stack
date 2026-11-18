@@ -513,7 +513,7 @@ class InboundSyncService:
             link = await self._link_repo.get_by_provider_and_sub(provider_id=provider_id, external_sub=account.id)
             if link is not None:
                 return await self._user_repo.get(link.user_id)
-        if account.username is None:
+        if account.username is None or not account.admin_named:
             return None
         try:
             user_id = uuid_mod.UUID(account.username)
@@ -590,14 +590,18 @@ class InboundSyncService:
             return Ok(_skipped("user", change.account.id or "", "no canonical user is linked to the account"))
         changed = False
         if change.email is not None and user.email.lower() != change.email.lower():
+            # Read before any write: the read flushes, and the new email may be another user's.
+            link = (
+                await self._link_repo.get_by_provider_and_sub(provider_id=provider_id, external_sub=change.account.id)
+                if change.account.id is not None
+                else None
+            )
             user.email = change.email
+            # Keycloak, not the person, chose it: no first login links to this user by it (conventions §28).
+            user.email_from_organization = True
             changed = True
-            if change.account.id is not None:
-                link = await self._link_repo.get_by_provider_and_sub(
-                    provider_id=provider_id, external_sub=change.account.id
-                )
-                if link is not None:
-                    link.external_email = change.email
+            if link is not None:
+                link.external_email = change.email
         for field, value in (("given_name", change.given_name), ("family_name", change.family_name)):
             if value is not None and getattr(user, field) != value:
                 setattr(user, field, value)
@@ -695,8 +699,15 @@ class InboundSyncService:
         It is found by what the client role was (``previous``), else by what it
         is now, so a change already applied is not applied again.
         """
-        is_permission = change.current.is_permission
+        # What the client role was decides what it is: a rename does not turn a permission into a role.
+        is_permission = (change.previous or change.current).is_permission
         subject_type = "permission" if is_permission else "role"
+        if (
+            not is_permission
+            and change.previous is not None
+            and _role_scope(change.previous.name)[1] != _role_scope(change.name)[1]
+        ):
+            return Ok(_skipped("role", change.name, "a rename cannot move a role to another tenant"))
         find = self._keycloak_permission if is_permission else self._keycloak_role
         found = await find(repos, change.previous) if change.previous is not None else None
         if found is None:

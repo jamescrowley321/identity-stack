@@ -53,10 +53,16 @@ class Ignored(enum.StrEnum):
 
 @dataclass(frozen=True)
 class KeycloakAccount:
-    """A Keycloak user: its id, and its username when the event or the realm gives it."""
+    """A Keycloak user: its id, and its username when the event or the realm gives it.
+
+    ``admin_named`` is true when a realm administrator's change names the account:
+    only then may a username that is a canonical user id stand for that user. A
+    user's own event never does, whatever username the account carries.
+    """
 
     id: str | None
     username: str | None
+    admin_named: bool = True
 
 
 @dataclass(frozen=True)
@@ -236,7 +242,7 @@ def _enabled(details: object) -> bool | None:
 
 
 # User events that change what the canonical model holds of a user.
-_PROFILE_EVENTS = frozenset({"UPDATE_PROFILE", "UPDATE_EMAIL"})
+_PROFILE_EVENTS = frozenset({"UPDATE_PROFILE", "UPDATE_EMAIL", "VERIFY_EMAIL"})
 _DELETE_EVENTS = frozenset({"DELETE_ACCOUNT"})
 _DISABLE_EVENTS = frozenset({"USER_DISABLED_BY_PERMANENT_LOCKOUT"})
 # The admin events whose objects the snapshot keeps.
@@ -261,15 +267,19 @@ class KeycloakEventReader:
             return await self._admin_event(event, snapshot)
 
     async def refresh(self, snapshot: RealmSnapshot) -> None:
-        """Read the organizations' aliases and the API client's roles afresh from the realm."""
+        """Add the realm's organizations' aliases and the API client's roles, as they are now, to the snapshot."""
         with tracer.start_as_current_span("KeycloakEventReader.refresh"):
             organizations = await self._api.list_organizations()
             roles = await self._api.client_roles()
+            # Merged, never replaced: one deleted since the last event read keeps its entry
+            # until its delete event is read, which needs it.
             snapshot.organizations = {
-                entry["id"]: entry["alias"] for entry in organizations if isinstance(entry.get("alias"), str)
+                **snapshot.organizations,
+                **{entry["id"]: entry["alias"] for entry in organizations if isinstance(entry.get("alias"), str)},
             }
             snapshot.client_roles = {
-                entry["id"]: _role_record(entry) for entry in roles if isinstance(entry.get("name"), str)
+                **snapshot.client_roles,
+                **{entry["id"]: _role_record(entry) for entry in roles if isinstance(entry.get("name"), str)},
             }
 
     # --- user events --------------------------------------------------------------
@@ -284,7 +294,7 @@ class KeycloakEventReader:
             return Reading(ignored=Ignored.NOT_MAPPED)
         if user_id is None:
             return Reading(ignored=Ignored.UNREADABLE)
-        account = KeycloakAccount(id=user_id, username=_string(details.get("username")))
+        account = KeycloakAccount(id=user_id, username=_string(details.get("username")), admin_named=False)
         if kind in _DELETE_EVENTS:
             return Reading(change=UserDeleted(account))
         if kind in _DISABLE_EVENTS:
@@ -298,7 +308,7 @@ class KeycloakEventReader:
         verified = user.get("emailVerified") is True
         return Reading(
             change=UserUpdated(
-                KeycloakAccount(id=user_id, username=_string(user.get("username"))),
+                KeycloakAccount(id=user_id, username=_string(user.get("username")), admin_named=False),
                 email=_string(user.get("email")) if verified else None,
                 given_name=_string(user.get("firstName")),
                 family_name=_string(user.get("lastName")),

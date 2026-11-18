@@ -37,6 +37,8 @@ logger = logbook(__name__)
 ENABLED_VARIABLE = "KEYCLOAK_PULL_EVENTS"
 INTERVAL_VARIABLE = "KEYCLOAK_PULL_INTERVAL_SECONDS"
 PAGE_SIZE_VARIABLE = "KEYCLOAK_PULL_PAGE_SIZE"
+DEFAULT_INTERVAL_SECONDS = 10.0
+DEFAULT_PAGE_SIZE = 100
 # Keycloak answers at most this many events a page whatever is asked.
 MAX_PAGE_SIZE = 1000
 
@@ -53,7 +55,14 @@ class KeycloakPullSettings:
 
 
 def keycloak_pull_settings() -> KeycloakPullSettings:
-    """Read the pull's settings. Raises ``KeycloakPullNotConfigured`` for an interval or page size out of range."""
+    """Read the pull's settings. Raises ``KeycloakPullNotConfigured`` for an interval or page size out of range.
+
+    With the pull off, the interval and the page size are not read: nothing uses them.
+    """
+    if not knob_flag("KEYCLOAK_PULL_EVENTS", "true"):
+        return KeycloakPullSettings(
+            enabled=False, interval_seconds=DEFAULT_INTERVAL_SECONDS, page_size=DEFAULT_PAGE_SIZE
+        )
     raw_interval = knob("KEYCLOAK_PULL_INTERVAL_SECONDS", "10")
     raw_page_size = knob("KEYCLOAK_PULL_PAGE_SIZE", "100")
     try:
@@ -68,9 +77,7 @@ def keycloak_pull_settings() -> KeycloakPullSettings:
         page_size = 0
     if not 1 <= page_size <= MAX_PAGE_SIZE:
         raise KeycloakPullNotConfigured(f"{PAGE_SIZE_VARIABLE} must be a whole number from 1 to {MAX_PAGE_SIZE}")
-    return KeycloakPullSettings(
-        enabled=knob_flag("KEYCLOAK_PULL_EVENTS", "true"), interval_seconds=interval, page_size=page_size
-    )
+    return KeycloakPullSettings(enabled=True, interval_seconds=interval, page_size=page_size)
 
 
 def build_keycloak_pull_service(

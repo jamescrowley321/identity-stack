@@ -16,7 +16,7 @@ import pytest
 from expression import Error, Ok
 
 from app.errors.identity import Conflict, NotFound, ProviderError
-from app.services.keycloak_admin import EventStream, KeycloakAdminError, KeycloakAdminSettings
+from app.services.keycloak_admin import EventStream, KeycloakAdminError, KeycloakAdminSettings, KeycloakAdminUnavailable
 from app.services.keycloak_events import (
     ClientRoleDeleted,
     ClientRoleSaved,
@@ -230,6 +230,13 @@ def service(
     )
 
 
+def _raise(error):
+    async def answer(*_args, **_kwargs):
+        raise error
+
+    return answer
+
+
 def _async(value):
     async def answer(*_args, **_kwargs):
         return value
@@ -377,17 +384,84 @@ class TestFailures:
         assert session.savepoints == ["rollback", "commit"]
         assert (stats["failed"], stats["applied"], states.committed["admin_cursor"]) == (1, 1, START + 2)
 
-    @pytest.mark.parametrize("status", [None, 500, 503, 401, 429])
-    async def test_keycloak_unavailable_stops_the_poll_without_moving_the_cursor(self, status):
-        realm = FakeRealm(failure=KeycloakAdminError("down", status=status))
-        realm.admin = [org_update(START + 1)]
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            KeycloakAdminUnavailable("no answer"),
+            KeycloakAdminUnavailable("no token", status=400),
+            KeycloakAdminError("down", status=500),
+            KeycloakAdminError("down", status=503),
+            KeycloakAdminError("token refused", status=401),
+            KeycloakAdminError("rate limited", status=429),
+        ],
+        ids=["no answer", "no token", "500", "503", "401", "429"],
+    )
+    async def test_keycloak_unavailable_keeps_what_is_applied_and_stops_at_the_event(self, failure):
+        realm = FakeRealm(failure=failure)
+        realm.admin = [org_update(START + 1), org_update(START + 3)]
         realm.user = [user_event(START + 2, "UPDATE_PROFILE")]
+        inbound, states = FakeInbound(), FakeStates(committed=started())
+
+        result = await service(realm, inbound, states).poll()
+
+        assert isinstance(result.error, ProviderError)
+        assert [type(change).__name__ for change in inbound.applied] == ["TenantUpdated"]
+        assert (states.committed["admin_cursor"], states.committed["user_cursor"], inbound.failures) == (
+            START + 1,
+            START,
+            [],
+        )
+
+    async def test_unreadable_event_stores_apply_nothing(self):
+        realm = FakeRealm(admin=[org_update(START + 1)])
+        realm.events = _raise(KeycloakAdminUnavailable("no answer"))
         inbound, session, states = FakeInbound(), FakeSession(), FakeStates(committed=started())
 
         result = await service(realm, inbound, states, session).poll()
 
         assert isinstance(result.error, ProviderError)
-        assert (states.commits, states.committed["admin_cursor"], session.rollbacks) == (0, START, 1)
+        assert (inbound.applied, states.commits, session.rollbacks) == ([], 0, 1)
+
+    @pytest.mark.parametrize(
+        "failure",
+        [KeycloakAdminError("admin API answer unreadable"), KeycloakAdminError("forbidden", status=403)],
+        ids=["an unreadable answer", "a grant the service account lacks"],
+    )
+    async def test_an_answer_about_the_event_is_recorded_and_passed(self, failure):
+        refused = user_event(START + 1, "UPDATE_PROFILE")
+        realm = FakeRealm(failure=failure, admin=[org_update(START + 2)], user=[refused])
+        inbound, states = FakeInbound(), FakeStates(committed=started())
+
+        stats = (await service(realm, inbound, states).poll()).ok
+
+        assert (inbound.failures, stats["failed"], states.committed["user_cursor"]) == (
+            [(refused["id"], "unread")],
+            1,
+            START + 1,
+        )
+
+    async def test_a_change_the_database_refuses_outright_is_rolled_back_recorded_and_passed(self):
+        broken, next_one = org_update(START + 1, name="Broken"), org_update(START + 2, name="Next")
+        realm = FakeRealm(admin=[broken, next_one])
+        inbound, session, states = FakeInbound(), FakeSession(), FakeStates(committed=started())
+        apply = inbound.apply_keycloak_change
+
+        async def raising(change, *, provider_id, keycloak_event_id):
+            if keycloak_event_id == broken["id"]:
+                raise RuntimeError("integrity")
+            return await apply(change, provider_id=provider_id, keycloak_event_id=keycloak_event_id)
+
+        inbound.apply_keycloak_change = raising
+
+        stats = (await service(realm, inbound, states, session).poll()).ok
+
+        assert inbound.failures == [(broken["id"], "TenantUpdated")]
+        assert [change.name for change in inbound.applied] == ["Next"]
+        assert (session.savepoints, stats["failed"], states.committed["admin_cursor"]) == (
+            ["rollback", "commit"],
+            1,
+            START + 2,
+        )
 
     async def test_an_event_keycloak_refuses_to_explain_is_recorded_and_passed(self):
         refused = user_event(START + 1, "UPDATE_PROFILE")
@@ -566,3 +640,26 @@ class TestASelfServiceProfileChange:
         reading, _ = await read(user_event(START, "UPDATE_PROFILE", "u1"), realm=realm)
 
         assert (reading.change.email, reading.change.given_name) == (email, "N")
+
+
+class TestTheSnapshot:
+    async def test_a_refresh_keeps_an_entry_deleted_since_the_last_event_read(self):
+        """The realm read after a poll may already lack what a later-read event deletes."""
+        realm = FakeRealm()
+        realm.list_organizations = _async([])
+        realm.client_roles = _async([])
+        snapshot = RealmSnapshot(organizations={"org-1": "acme"})
+
+        await KeycloakEventReader(realm).refresh(snapshot)
+        reading, _ = await read(admin_event(START, "ORGANIZATION", "DELETE", "organizations/org-1"), snapshot)
+
+        assert reading.change == TenantDeleted(alias="acme")
+
+
+class TestAUserEvent:
+    async def test_names_the_account_by_its_id_alone(self):
+        realm = FakeRealm(users={"u1": {"id": "u1", "username": str(uuid.uuid4()), "emailVerified": True}})
+
+        reading, _ = await read(user_event(START, "UPDATE_PROFILE", "u1"), realm=realm)
+
+        assert reading.change.account.admin_named is False

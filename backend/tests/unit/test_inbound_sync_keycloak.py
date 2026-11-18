@@ -214,3 +214,58 @@ async def test_a_permission_renamed_is_found_by_what_it_was():
 
     assert held.name == "documents:list"
     canonical.permissions.create.assert_not_called()
+
+
+async def test_an_email_the_pull_changes_is_not_trusted_for_linking():
+    canonical = Canonical()
+
+    await canonical.apply(UserUpdated(ACCOUNT, email="bob@new.test"))
+
+    assert (canonical.user.email, canonical.user.email_from_organization) == ("bob@new.test", True)
+
+
+async def test_a_users_own_event_never_finds_a_user_by_username():
+    """Only an administrator's change may name a canonical user by an account's username."""
+    canonical = Canonical()
+    canonical.links.get_by_provider_and_sub.return_value = None
+    canonical.links.get_by_user.return_value = []
+    own = KeycloakAccount(id="kc-other", username=str(canonical.user.id), admin_named=False)
+
+    result = await canonical.apply(UserUpdated(own, enabled=False))
+
+    assert (result.ok["status"], canonical.user.status) == ("skipped", UserStatus.active)
+
+
+async def test_a_permission_renamed_to_a_role_shaped_name_stays_a_permission():
+    canonical = Canonical()
+    held = Permission(id=uuid.uuid4(), name="docs:read", description="")
+    canonical.permissions.get_by_name.side_effect = lambda name: held if name == "docs:read" else None
+
+    await canonical.apply(
+        ClientRoleSaved(
+            name="docs-reader",
+            description=None,
+            previous=ClientRoleRef("docs:read", None, None, True),
+            current=ClientRoleRef("docs-reader", None, None, False),
+        )
+    )
+
+    assert held.name == "docs-reader"
+    canonical.roles.create.assert_not_called()
+
+
+async def test_a_rename_that_moves_a_role_to_another_tenant_is_skipped():
+    canonical = Canonical()
+    first, second = uuid.uuid4(), uuid.uuid4()
+
+    result = await canonical.apply(
+        ClientRoleSaved(
+            name=f"editor@{second}",
+            description=None,
+            previous=ClientRoleRef(f"editor@{first}", None, None, False),
+            current=ClientRoleRef(f"editor@{second}", None, None, False),
+        )
+    )
+
+    assert result.ok["status"] == "skipped"
+    canonical.roles.update.assert_not_called()
