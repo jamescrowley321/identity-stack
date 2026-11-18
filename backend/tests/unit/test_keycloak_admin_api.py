@@ -398,3 +398,13 @@ class TestIdempotentWrites:
 
         assert found == organizations
         assert [sent.query["first"] for sent in api.sent[1:]] == [str(index) for index in range(len(organizations) + 1)]
+
+    async def test_a_list_whose_paging_is_ignored_is_an_error_not_an_endless_loop(self, monkeypatch):
+        monkeypatch.setattr(keycloak_admin, "PAGE_SIZE", 1)
+        same_page = RECORDED["organizations_list"]["body"][:1]
+        api = RecordedAdminApi(["token", httpx.Response(200, json=same_page), httpx.Response(200, json=same_page)])
+
+        with pytest.raises(KeycloakAdminError) as refused:
+            await api.api().list_organizations()
+
+        assert refused.value.status == 200

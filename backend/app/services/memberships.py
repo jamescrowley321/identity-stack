@@ -28,18 +28,17 @@ async def restore_memberships(
 ) -> None:
     """Add back each just-ended (user, tenant) membership whose user holds a role in the tenant again.
 
-    One query for every pair; one membership push per pair that holds a role. A
-    failed push is logged as every sync failure is.
+    One query for every pair; one push per assignment held, which adds the
+    membership and the assignment's group back. A failed push is logged as every
+    sync failure is.
     """
     with tracer.start_as_current_span("memberships.restore_memberships") as span:
         span.set_attribute("memberships.ended", len(ended))
         if not ended:
             return
-        restored: set[tuple[uuid.UUID, uuid.UUID]] = set()
         for row in await assignments.list_by_user_tenants(ended):
-            if (row.user_id, row.tenant_id) in restored:
-                continue
-            restored.add((row.user_id, row.tenant_id))
+            # Every assignment, not one per membership: ending the membership
+            # also ended the user's role groups in the organization (Keycloak).
             pushed = await adapter.sync_role_assignment(
                 user_id=row.user_id, tenant_id=row.tenant_id, role_id=row.role_id
             )

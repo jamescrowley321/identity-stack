@@ -322,6 +322,18 @@ class TestLeavingATenantWithAMembership:
             user_id=user.id, tenant_id=tenant_id, role_id=given.role_id
         )
 
+    async def test_every_role_given_while_leaving_is_pushed_back(self):
+        """Ending the membership ended its role groups too: each assignment is pushed, not one per membership."""
+        service, adapter, assignments, user, tenant_id = self.users(ends_memberships=True)
+        given = [UserTenantRole(user_id=user.id, tenant_id=tenant_id, role_id=uuid.uuid4()) for _ in range(2)]
+        assignments.list_by_user_tenants.return_value = given
+
+        await service.remove_user_from_tenant(tenant_id=tenant_id, user_id=user.id)
+
+        assert [call.kwargs for call in adapter.sync_role_assignment.await_args_list] == [
+            {"user_id": user.id, "tenant_id": tenant_id, "role_id": row.role_id} for row in given
+        ]
+
     async def test_no_role_since_leaves_the_membership_ended(self):
         service, adapter, assignments, user, tenant_id = self.users(ends_memberships=True)
 

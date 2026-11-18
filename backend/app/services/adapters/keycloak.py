@@ -121,6 +121,7 @@ class Refusal(enum.StrEnum):
     PERMISSION_NOT_IN_KEYCLOAK = "a permission of the role has no client role in Keycloak: push it first"
     NAME_HELD_BY_ANOTHER = "a client role or group of that name stands for another canonical entity"
     DUPLICATE_CANONICAL_ID = "several client roles or groups carry the same canonical id"
+    GROUP_NOT_SHOWN = "Keycloak does not show the organization group it was asked to create"
     LINK_REFUSED = "the canonical link could not be written"
 
 
@@ -149,6 +150,10 @@ class KeycloakLinks(Protocol):
 
     async def link_organization(self, tenant_id: uuid.UUID, alias: str) -> None:
         """Record the organization ``alias`` as the tenant's (``external_org_id``, ``keycloak`` provider)."""
+        ...
+
+    async def role(self, role_id: uuid.UUID) -> tuple[str, uuid.UUID | None] | None:
+        """The canonical role's name and its tenant (``None`` for a global role), or ``None`` when it is gone."""
         ...
 
 
@@ -298,8 +303,17 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
     async def _organization(self, tenant_id: uuid.UUID) -> dict | None:
         return await self._api.find_organization(await self._alias(tenant_id))
 
-    async def _role(self, role_id: uuid.UUID, names: list[str]) -> dict | None:
-        return _find(await self._api.client_roles(), ROLE_ATTRIBUTE, str(role_id), names)
+    async def _role(self, role_id: uuid.UUID) -> dict | None:
+        """The role's client role: the one carrying its id, else the unstamped one of its name and scope.
+
+        The name and scope are the canonical role's own (``KeycloakLinks.role``),
+        so a tenant's role never falls back to a global role of the same name.
+        """
+        return _find(await self._api.client_roles(), ROLE_ATTRIBUTE, str(role_id), await self._role_names(role_id))
+
+    async def _role_names(self, role_id: uuid.UUID) -> list[str]:
+        canonical = await self._links.role(role_id)
+        return [] if canonical is None else [role_client_name(canonical[0], canonical[1])]
 
     async def _group(self, organization_id: str, role_id: uuid.UUID, names: list[str]) -> dict | None:
         return _find(await self._api.organization_groups(organization_id), ROLE_ATTRIBUTE, str(role_id), names)
@@ -565,7 +579,15 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
             roles = await self._api.client_roles()
             found = _find(roles, ROLE_ATTRIBUTE, str(role_id), names)
             if found is not None and found.get("name") != client_name:
-                # Groups first: until the client role is renamed, a retry still finds them by its old name.
+                if not _carries(found, ROLE_ATTRIBUTE, str(role_id)):
+                    # Stamped first, under its old name: a retry after a partial rename finds it by id.
+                    stamped = {**found, "attributes": _stamp(found, ROLE_ATTRIBUTE, str(role_id))}
+                    await self._api.update_role(
+                        found["id"],
+                        {key: stamped[key] for key in ("name", "attributes")}
+                        | {"description": found.get("description", "")},
+                    )
+                # Groups next: until the client role is renamed, a retry still finds them by its old name.
                 await self._rename_groups(role_id, found["name"], client_name, data.get("tenant_id"))
             await self._ensure_client_role(found, ROLE_ATTRIBUTE, str(role_id), client_name, data)
             if isinstance(permission_names, list):
@@ -643,11 +665,9 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
     ) -> Result[None, SyncError]:
         """Make the user a member of the tenant's organization and of the role's group there.
 
-        The tenant, the user and the role must have been pushed already. Expected
-        data keys: role_name (optional), for a role whose client role carries no
-        canonical id.
+        The tenant, the user and the role must have been pushed already. No data
+        key is read: the role's name and scope come from the canonical store.
         """
-        names = [name for name in [(data or {}).get("role_name")] if isinstance(name, str) and name]
 
         async def push() -> None:
             organization = await self._organization(tenant_id)
@@ -656,7 +676,7 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
             user = await self._account(user_id)
             if user is None:
                 raise _Refused(Refusal.USER_NOT_IN_KEYCLOAK)
-            role = await self._role(role_id, names)
+            role = await self._role(role_id)
             if role is None:
                 raise _Refused(Refusal.ROLE_NOT_IN_KEYCLOAK)
             await self._api.add_member(organization["id"], user["id"])
@@ -675,15 +695,23 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
         group = await self._group(organization_id, role_id, [name])
         attributes = {ROLE_ATTRIBUTE: [str(role_id)]}
         if group is None:
-            await self._api.create_organization_group(organization_id, {"name": name, "attributes": attributes})
+            try:
+                await self._api.create_organization_group(organization_id, {"name": name, "attributes": attributes})
+            except KeycloakAdminError as exc:
+                # A concurrent assignment of the same role created it first: found below.
+                if exc.status != 409:
+                    raise
         elif not _carries(group, ROLE_ATTRIBUTE, str(role_id)) or group.get("name") != name:
             stamped = {"name": name, "attributes": _stamp(group, ROLE_ATTRIBUTE, str(role_id))}
             await self._api.update_organization_group(organization_id, group["id"], stamped)
         else:
             return group
-        group = await self._group(organization_id, role_id, [])
+        group = await self._group(organization_id, role_id, [name])
         if group is None:
-            raise KeycloakAdminError("admin API does not show the group it created")
+            raise _Refused(Refusal.GROUP_NOT_SHOWN)
+        if not _carries(group, ROLE_ATTRIBUTE, str(role_id)):
+            stamped = {"name": name, "attributes": _stamp(group, ROLE_ATTRIBUTE, str(role_id))}
+            await self._api.update_organization_group(organization_id, group["id"], stamped)
         return group
 
     async def delete_role_assignment(
@@ -702,7 +730,6 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
         (``Refusal.USER_NOT_IN_KEYCLOAK``).
         """
         data = data or {}
-        names = [name for name in [data.get("role_name")] if isinstance(name, str) and name]
 
         async def push() -> None:
             organization = await self._organization(tenant_id)
@@ -714,8 +741,9 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
             if data.get(LAST_ROLE_IN_TENANT) is True:
                 await self._api.remove_member(organization["id"], user["id"])
                 return
-            role = _find(await self._api.client_roles(), ROLE_ATTRIBUTE, str(role_id), names)
-            group = await self._group(organization["id"], role_id, [role["name"]] if role is not None else names)
+            role = await self._role(role_id)
+            names = [role["name"]] if role is not None else await self._role_names(role_id)
+            group = await self._group(organization["id"], role_id, names)
             if group is not None:
                 await self._api.remove_group_member(organization["id"], group["id"], user["id"])
 

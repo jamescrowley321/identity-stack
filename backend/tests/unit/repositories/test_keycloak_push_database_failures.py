@@ -16,15 +16,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.dependencies.keycloak_sync import RepositoryKeycloakLinks
 from app.models.identity.assignment import UserTenantRole
+from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.role import Role
 from app.models.identity.tenant import Tenant
-from app.models.identity.user import User, UserStatus
+from app.models.identity.user import IdPLink, User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
+from app.repositories.provider import ProviderRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 from app.services.adapters.base import PROVIDER_SYNC, PROVIDER_SYNC_FAILED
-from app.services.adapters.keycloak import KeycloakSyncAdapter
+from app.services.adapters.keycloak import PROVIDER_NAME, KeycloakSyncAdapter, LinkRefused
 from app.services.memberships import restore_memberships
 from app.services.user import UserService
 
@@ -142,3 +144,53 @@ async def test_a_tenant_link_read_that_fails_is_a_sync_error_and_leaves_the_requ
         {"tenant_id": str(tenant_id), "status": None},
         (users[0].email, 1),
     )
+
+
+@pytest.fixture
+async def keycloak_provider(async_engine):
+    """The ``keycloak`` provider row, created for the test when the database has none; removed if created."""
+    async with sessions(async_engine)() as setup:
+        existing = await ProviderRepository(setup).get_by_name(PROVIDER_NAME)
+        if existing is not None:
+            yield existing
+            return
+        provider = Provider(name=PROVIDER_NAME, type=ProviderType.oidc)
+        setup.add(provider)
+        await setup.commit()
+    yield provider
+    async with sessions(async_engine)() as cleanup:
+        await cleanup.execute(delete(IdPLink).where(IdPLink.provider_id == provider.id))
+        await cleanup.execute(delete(Provider).where(Provider.id == provider.id))
+        await cleanup.commit()
+
+
+async def test_a_link_a_sign_in_wrote_meanwhile_counts_as_written_or_is_refused(
+    async_engine, members, keycloak_provider, monkeypatch
+):
+    """The insert loses a race with a sign-in: the same link is written, another one refuses the push."""
+    _tenant, _role, users = members
+    first, second = users
+    sub = f"keycloak-{uuid.uuid4()}"
+    async with sessions(async_engine)() as setup:
+        setup.add(IdPLink(user_id=first.id, provider_id=keycloak_provider.id, external_sub=sub, external_email="x"))
+        await setup.commit()
+    real = IdPLinkRepository.get_by_provider_and_sub
+    asked: list[str] = []
+
+    async def missed_once(self, provider_id: uuid.UUID, external_sub: str) -> IdPLink | None:
+        # The check before the insert does not see the sign-in's link yet.
+        asked.append(external_sub)
+        return None if len(asked) == 1 else await real(self, provider_id, external_sub)
+
+    try:
+        monkeypatch.setattr(IdPLinkRepository, "get_by_provider_and_sub", missed_once)
+        async with sessions(async_engine)() as session:
+            await RepositoryKeycloakLinks(session).link_user(first.id, sub, "x")
+        asked.clear()
+        async with sessions(async_engine)() as session:
+            with pytest.raises(LinkRefused):
+                await RepositoryKeycloakLinks(session).link_user(second.id, sub, "x")
+    finally:
+        async with sessions(async_engine)() as cleanup:
+            await cleanup.execute(delete(IdPLink).where(IdPLink.external_sub == sub))
+            await cleanup.commit()

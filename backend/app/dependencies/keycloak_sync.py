@@ -16,8 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logbook import logbook
 from app.models.identity.user import LINK_ORIGIN, LINKED_BY_BACKEND, IdPLink
+from app.repositories.base import RepositoryConflictError
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
+from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
 from app.services.adapters.keycloak import (
     PROVIDER_NAME,
@@ -57,6 +59,7 @@ class RepositoryKeycloakLinks(KeycloakLinks):
         self._providers = ProviderRepository(session)
         self._tenants = TenantRepository(session)
         self._idp_links = IdPLinkRepository(session)
+        self._roles = RoleRepository(session)
 
     async def _read(self, what: str, read: Callable[[], Awaitable[T]]) -> T:
         try:
@@ -102,6 +105,13 @@ class RepositoryKeycloakLinks(KeycloakLinks):
 
         return await self._read("the tenant link read", read)
 
+    async def role(self, role_id: uuid.UUID) -> tuple[str, uuid.UUID | None] | None:
+        async def read() -> tuple[str, uuid.UUID | None] | None:
+            row = await self._roles.get(role_id)
+            return None if row is None else (row.name, row.tenant_id)
+
+        return await self._read("the role read", read)
+
     async def link_organization(self, tenant_id: uuid.UUID, alias: str) -> None:
         """Record ``alias`` as the tenant's organization. A tenant linked to anything else is refused."""
         try:
@@ -119,6 +129,9 @@ class RepositoryKeycloakLinks(KeycloakLinks):
             tenant.external_org_provider_id = provider_id
             await self._tenants.update(tenant)
             await self._tenants.commit()
+        except RepositoryConflictError as exc:
+            await self._rollback()
+            raise LinkRefused(f"tenant {tenant_id} could not be linked: another write conflicts") from exc
         except DATABASE_FAILURES as exc:
             await self._rollback()
             raise LocalDatabaseError(failed("the tenant link write", exc)) from exc
@@ -144,6 +157,15 @@ class RepositoryKeycloakLinks(KeycloakLinks):
                 )
             )
             await self._idp_links.commit()
+        except RepositoryConflictError as exc:
+            # A sign-in or a concurrent push wrote a link first: the same one counts as written.
+            await self._rollback()
+            existing = await self._read(
+                "the IdP link read", lambda: self._idp_links.get_by_provider_and_sub(provider_id, sub)
+            )
+            if existing is not None and existing.user_id == user_id:
+                return
+            raise LinkRefused("the user or the Keycloak account already has another link") from exc
         except DATABASE_FAILURES as exc:
             await self._rollback()
             raise LocalDatabaseError(failed("the IdP link write", exc)) from exc

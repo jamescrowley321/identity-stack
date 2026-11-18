@@ -58,6 +58,8 @@ ROLE_DATA = {"name": "recorded-role", "description": "Recorded role", "tenant_id
 PERMISSION_DATA = {"name": "recorded:read", "description": "Recorded"}
 # Keycloak's answer to a write of a role other than the recorded one (role_update and role_delete name that one).
 NO_CONTENT = httpx.Response(204)
+# A 404 for a create of the group, so a test can stop after reading what the create sent.
+NOT_FOUND_AFTER = httpx.Response(404, json={"errorMessage": "Organization not found."})
 # The organization as one listing and one group listing would answer it, for flows across organizations.
 ONE_ORGANIZATION = httpx.Response(200, json=[{"id": ORGANIZATION_ID, "alias": TENANT_ID, "name": "Recorded Co"}])
 
@@ -426,6 +428,25 @@ class TestRoles:
             ),
         ]
 
+    async def test_a_rename_of_an_unstamped_client_role_stamps_it_first(self):
+        """A rename that fails part way is found by the role's id on the next push, with no previous_name."""
+        imported = CLIENT_ROLES["admin"]
+        api = RecordedAdminApi(["token", "api_client_find", "client_roles", NO_CONTENT, httpx.ConnectError("lost")])
+
+        result = await adapter(api).sync_role(
+            role_id=ROLE, data={"name": "administrator", "previous_name": "admin", "tenant_id": None}
+        )
+
+        assert result.error.context[UNANSWERED] is True
+        assert (api.sent[3].path, api.sent[3].body) == (
+            admin_path(f"/roles-by-id/{imported['id']}"),
+            {
+                "name": "admin",
+                "attributes": {ROLE_ATTRIBUTE: [ROLE_ID]},
+                "description": imported.get("description", ""),
+            },
+        )
+
     async def test_delete_deletes_the_roles_groups_then_its_client_role(self):
         api = RecordedAdminApi(
             [
@@ -485,6 +506,45 @@ class TestRoleAssignments:
             admin_path(f"/organizations/{ORGANIZATION_ID}/members"),
             f"{GROUPS}/{GROUP['id']}/members/{KEYCLOAK_USER_ID}",
         ]
+
+    async def test_an_unstamped_client_role_is_found_by_the_canonical_roles_own_name(self):
+        """The realm import's ``admin`` carries no id: a global ``admin`` finds it by name."""
+        api = RecordedAdminApi(
+            [*self.ASSIGN[:4], "client_roles", "member_add_again", "organization_groups_none", NOT_FOUND_AFTER]
+        )
+        links = Links(roles={ROLE: ("admin", None)})
+
+        result = await adapter(api, links).sync_role_assignment(user_id=USER, tenant_id=TENANT, role_id=ROLE)
+
+        # The group named after the found client role is created for the role.
+        assert api.sent[7].body == {"name": "admin", "attributes": {ROLE_ATTRIBUTE: [ROLE_ID]}}
+        refused(result, "sync_role_assignment", status=404)
+
+    async def test_a_tenants_role_never_falls_back_to_a_global_role_of_its_name(self):
+        api = RecordedAdminApi([*self.ASSIGN[:4], "client_roles"])
+        links = Links(roles={ROLE: ("admin", TENANT)})
+
+        result = await adapter(api, links).sync_role_assignment(user_id=USER, tenant_id=TENANT, role_id=ROLE)
+
+        refused(result, "sync_role_assignment", Refusal.ROLE_NOT_IN_KEYCLOAK)
+        assert writes(api) == []
+
+    async def test_a_group_a_concurrent_assignment_created_first_is_used(self):
+        api = RecordedAdminApi(
+            [
+                *self.ASSIGN,
+                "member_add_again",
+                "organization_groups_none",
+                "organization_group_create_taken",
+                "organization_groups",
+                "group_member_add",
+            ]
+        )
+
+        result = await adapter(api).sync_role_assignment(user_id=USER, tenant_id=TENANT, role_id=ROLE)
+
+        assert result == Ok(None)
+        assert api.sent[-1].path == f"{GROUPS}/{GROUP['id']}/members/{KEYCLOAK_USER_ID}"
 
     async def test_a_role_keycloak_lacks_is_refused_and_nothing_is_added(self):
         api = RecordedAdminApi(["token", "organization_find", "user_find", "api_client_find", "client_roles"])

@@ -130,7 +130,10 @@ changes: the services that synced to Descope sync to Keycloak instead. Reconcili
 
 A client role or group is found by the canonical id it carries, else by its name when it carries
 none: the realm import's permissions, roles and groups carry none, and the first push adopts them
-(stamps the id). One of that name that carries another canonical id is refused. Nothing the adapter
+(stamps the id; a rename stamps the client role before it renames anything). For a role assignment
+that name is the canonical role's own, with its scope, read from the canonical store, so a tenant's
+own role never falls back to a global role of the same name. One of that name that carries another
+canonical id is refused. A group a concurrent assignment created first is used, not refused. Nothing the adapter
 does maps a client role to a user or a group: the realm check `nothing_grants_api_roles` holds, and
 a token issued after any push carries no `resource_access` or `realm_access`.
 
@@ -143,7 +146,8 @@ provider. `RoleService` marks the unassignment that leaves no role in the tenant
 left after its commit, and when a role is deleted it locks the role's row, reads who holds it, and
 after its commit ends the membership of each user the role was the last of. When `RoleService` or
 `UserService` finds, after a membership ended, that the user was given a role in the tenant
-meanwhile, it adds the membership back.
+meanwhile, it pushes each of those assignments again, which adds back the membership and the
+role groups the ending took the user out of.
 
 Every push is idempotent. It reads what Keycloak holds first and writes only what differs, and the
 answers Keycloak gives a write already made (a member already added or not there, a group or role

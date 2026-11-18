@@ -528,7 +528,7 @@ class KeycloakAdminApi:
         if self._api_client is None:
             client = await self._find_api_client()
             if client is None:
-                raise KeycloakAdminError("admin API does not show the API client")
+                raise KeycloakApiClientNotManaged(self.settings.api_client_id, REQUIRED_API_CLIENT_ACCESS, found=False)
             self._api_client = client["id"]
         return f"/clients/{quote(self._api_client, safe='')}"
 
@@ -580,10 +580,16 @@ class KeycloakAdminApi:
     async def _all(self, path: str, params: dict) -> list[dict]:
         """Every object of a paged list, ``PAGE_SIZE`` at a time."""
         found: list[dict] = []
+        seen: set[str] = set()
         while True:
             page_params = {**params, "first": str(len(found)), "max": str(PAGE_SIZE)}
             response = await self._expect("GET", path, ok=frozenset({200}), params=page_params)
             page = _objects(response, path)
+            if page and all(entry["id"] in seen for entry in page):
+                # Keycloak answered the same page again: it ignores the paging, and the loop would not end.
+                logger.warning("keycloak admin: GET %s repeated a page", path)
+                raise KeycloakAdminError("admin API ignores paging", status=response.status_code)
+            seen.update(entry["id"] for entry in page)
             found.extend(page)
             if len(page) < PAGE_SIZE:
                 return found

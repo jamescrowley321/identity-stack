@@ -12,6 +12,7 @@ class MemoryKeycloakLinks:
     elsewhere: set[uuid.UUID] = field(default_factory=set)
     subjects: dict[uuid.UUID, str] = field(default_factory=dict)
     linked_users: dict[uuid.UUID, tuple[str, str]] = field(default_factory=dict)
+    roles: dict[uuid.UUID, tuple[str, uuid.UUID | None]] = field(default_factory=dict)
     failure: Exception | None = None
 
     def _fail(self) -> None:
@@ -41,3 +42,7 @@ class MemoryKeycloakLinks:
     async def link_organization(self, tenant_id: uuid.UUID, alias: str) -> None:
         self._fail()
         self.aliases[tenant_id] = alias
+
+    async def role(self, role_id: uuid.UUID) -> tuple[str, uuid.UUID | None] | None:
+        self._fail()
+        return self.roles.get(role_id)
