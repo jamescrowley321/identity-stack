@@ -13,8 +13,11 @@ output of ``infra/keycloak``, narrowed to the tenants a canonical tenant names;
 ``make keycloak-seed`` does both) and links each tenant: it creates the tenant
 when missing, and sets ``external_org_id`` to the alias on an existing tenant
 that is linked to nothing. It refuses, writing nothing, a tenant linked to
-another organization or for another provider, an alias another tenant holds,
-and a tenant that is not active.
+another organization or for another provider, an unlinked tenant that has
+``domains``, an alias another tenant holds, and a tenant that is not active.
+It writes no ``domains``: a first login is admitted only for an email in its
+tenant's domains, so until an operator writes them only users linked
+beforehand sign in, as with ``scripts/seed_zitadel.py``.
 
 The row's type is ``oidc``. ``ProviderType`` has no ``keycloak`` member, and
 Keycloak is used here as a standard OIDC provider, so no enum migration is
@@ -72,14 +75,21 @@ def parse_organizations(raw: object) -> dict[str, str]:
 def link_tenant(tenant: Tenant | None, name: str, alias: str, provider_id: uuid_mod.UUID) -> Tenant:
     """The tenant ``name`` linked to the organization ``alias`` of the provider ``provider_id``.
 
-    A missing tenant is created; one linked to nothing gets the link. One linked
-    elsewhere, or not active, raises ``OrganizationLinkConflict``.
+    A missing tenant is created, with no ``domains``; one linked to nothing gets
+    the link. One linked elsewhere, one with ``domains`` it would be linked with
+    (they would admit its organization's first logins, and were chosen for
+    another purpose), or one not active raises ``OrganizationLinkConflict``.
     """
     if tenant is None:
         return Tenant(
             name=name, external_org_id=alias, external_org_provider_id=provider_id, status=TenantStatus.active
         )
     if tenant.external_org_id is None and tenant.external_org_provider_id is None:
+        if tenant.domains:
+            raise OrganizationLinkConflict(
+                f"tenant {name!r} has domains, which would admit its organization's first logins; "
+                "clear tenants.domains or link another tenant"
+            )
         tenant.external_org_id = alias
         tenant.external_org_provider_id = provider_id
     elif (tenant.external_org_id, tenant.external_org_provider_id) != (alias, provider_id):
@@ -89,8 +99,8 @@ def link_tenant(tenant: Tenant | None, name: str, alias: str, provider_id: uuid_
     return tenant
 
 
-async def link_organizations(*, provider_id: uuid_mod.UUID, organizations: dict[str, str]) -> None:
-    """Link each tenant to its organization alias in one transaction: a refusal writes nothing."""
+async def link_organizations(*, provider_id: uuid_mod.UUID, organizations: dict[str, str], dry_run: bool) -> None:
+    """Link each tenant to its organization alias in one transaction: a refusal, or a dry run, writes nothing."""
     async with get_session_factory()() as session:
         for name, alias in sorted(organizations.items()):
             holders = (
@@ -101,8 +111,11 @@ async def link_organizations(*, provider_id: uuid_mod.UUID, organizations: dict[
                 raise OrganizationLinkConflict(f"organization {alias!r} is already linked to tenant {holder!r}")
             tenant = (await session.execute(select(Tenant).where(Tenant.name == name))).scalars().first()
             session.add(link_tenant(tenant, name, alias, provider_id))
-            print(f"  [linked] tenant {name!r} to organization {alias!r}")
-        await session.commit()
+            print(f"  [{'dry-run' if dry_run else 'linked'}] tenant {name!r} to organization {alias!r}")
+        if dry_run:
+            await session.rollback()
+        else:
+            await session.commit()
 
 
 def _require_env(key: str) -> str:
@@ -189,10 +202,12 @@ async def main() -> None:
         print("ERROR: Failed to ensure Keycloak provider", file=sys.stderr)
         sys.exit(1)
 
-    if organizations and provider_id is not None:
+    if organizations and provider_id is None:
+        print("2. [dry-run] Would link tenants to organizations once the provider exists:", sorted(organizations))
+    elif organizations and provider_id is not None:
         print("2. Linking tenants to organizations...")
         try:
-            await link_organizations(provider_id=provider_id, organizations=organizations)
+            await link_organizations(provider_id=provider_id, organizations=organizations, dry_run=args.dry_run)
         except OrganizationLinkConflict as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             sys.exit(1)

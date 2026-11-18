@@ -97,3 +97,12 @@ class TestLinkingATenant:
 
         with pytest.raises(OrganizationLinkConflict, match="suspended"):
             link_tenant(existing, "acme", "acme", KEYCLOAK_ROW)
+
+    def test_an_unlinked_tenant_with_domains_is_refused(self):
+        existing = Tenant(name="acme", status=TenantStatus.active, domains=["acme.test"])
+
+        with pytest.raises(OrganizationLinkConflict, match="domains"):
+            link_tenant(existing, "acme", "acme", KEYCLOAK_ROW)
+
+    def test_a_created_tenant_has_no_domains(self):
+        assert not link_tenant(None, "acme", "acme", KEYCLOAK_ROW).domains
