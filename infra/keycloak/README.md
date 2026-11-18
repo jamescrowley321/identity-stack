@@ -40,8 +40,14 @@ the provider uses (`KEYCLOAK_USER`, `KEYCLOAK_PASSWORD`):
   Organization API only, and the provider has no resource for their members. Each
   `terraform_data.role_assignment` adds its user with
   `PUT /admin/realms/{realm}/organizations/{id}/groups/{group}/members/{user}` when created and
-  removes it on destroy. Unlike the other resources, it does not see a member added or removed by
-  hand: `make keycloak-terraform-check` does.
+  removes it on destroy. A changed user, group or organization id replaces it, so the membership
+  is set again. Unlike the other resources, it does not see a member added or removed by hand:
+  `make keycloak-terraform-check` does. A user replaced in an apply (`-replace`, or deleted by
+  hand) also leaves their organization, which `keycloak_organization_memberships` restores only
+  on the next plan, so the first apply fails on that user's assignment (400, not a member of the
+  organization) and a second apply completes it.
+- **Secrets on the command line.** The admin password and the Admin API token reach `curl` on
+  stdin (`--data-urlencode password@-`, `-H @-`), never as arguments another process could read.
 - **The admin-permissions client's id.** The provider's `keycloak_openid_client` data source also
   reads a client's secret, which Keycloak 26.8 refuses for `admin-permissions` (403), so
   `data.external.admin_permissions_client` reads the id from the realm (`adminPermissionsClient`).

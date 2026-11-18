@@ -102,11 +102,13 @@ locals {
   events_expiration_seconds = 604800
 
   # Sets $token to an Admin API token of the bootstrap admin the provider logs
-  # in as (KEYCLOAK_USER, KEYCLOAK_PASSWORD from the environment).
+  # in as (KEYCLOAK_USER, KEYCLOAK_PASSWORD from the environment). The password
+  # and the token go to curl on stdin (printf is a shell builtin), never as an
+  # argument another process could read from /proc/<pid>/cmdline.
   admin_token_command = <<-EOT
-    token="$(curl -fsS --max-time 20 "${local.keycloak_url}/realms/master/protocol/openid-connect/token" \
+    token="$(printf '%s' "$KEYCLOAK_PASSWORD" | curl -fsS --max-time 20 "${local.keycloak_url}/realms/master/protocol/openid-connect/token" \
       --data-urlencode grant_type=password --data-urlencode client_id=admin-cli \
-      --data-urlencode "username=$KEYCLOAK_USER" --data-urlencode "password=$KEYCLOAK_PASSWORD" | jq -er .access_token)"
+      --data-urlencode "username=$KEYCLOAK_USER" --data-urlencode password@- | jq -er .access_token)"
   EOT
 
   # Adds the user in $ASSIGNMENT to the organization's group, through the
@@ -115,7 +117,7 @@ locals {
     set -euo pipefail
     a() { jq -r --arg k "$1" '.[$k]' <<<"$ASSIGNMENT"; }
     ${local.admin_token_command}
-    curl -fsS --max-time 20 -o /dev/null -X PUT -H "Authorization: Bearer $token" \
+    printf 'Authorization: Bearer %s\n' "$token" | curl -fsS --max-time 20 -o /dev/null -X PUT -H @- \
       "$(a keycloak_url)/admin/realms/$(a realm)/organizations/$(a organization_id)/groups/$(a group_id)/members/$(a user_id)"
   EOT
 }
@@ -320,6 +322,19 @@ resource "keycloak_organization_memberships" "this" {
 # One group per organization and canonical role, owned by the organization.
 # No role mapping on any of them: membership records an assignment and grants
 # nothing.
+locals {
+  # Where each role assignment lives: the ids the Organization API call names.
+  role_assignment_targets = {
+    for key, assignment in local.role_assignments : key => {
+      keycloak_url    = local.keycloak_url
+      realm           = keycloak_realm.this.realm
+      organization_id = keycloak_organization.this[assignment.alias].id
+      group_id        = keycloak_group.role["${assignment.alias}/${assignment.role}"].id
+      user_id         = keycloak_user.this[assignment.username].id
+    }
+  }
+}
+
 resource "keycloak_group" "role" {
   for_each = local.role_groups
 
@@ -337,13 +352,12 @@ resource "keycloak_group" "role" {
 resource "terraform_data" "role_assignment" {
   for_each = local.role_assignments
 
-  input = {
-    keycloak_url    = local.keycloak_url
-    realm           = keycloak_realm.this.realm
-    organization_id = keycloak_organization.this[each.value.alias].id
-    group_id        = keycloak_group.role["${each.value.alias}/${each.value.role}"].id
-    user_id         = keycloak_user.this[each.value.username].id
-  }
+  # A changed id (a recreated user, group or organization) replaces the
+  # resource, so the create provisioner runs again; an in-place update of
+  # `input` would run no provisioner and lose the membership. `input` carries
+  # the same ids to the destroy provisioner (self.input).
+  triggers_replace = local.role_assignment_targets[each.key]
+  input            = local.role_assignment_targets[each.key]
 
   provisioner "local-exec" {
     interpreter = ["bash", "-c"]
@@ -357,10 +371,11 @@ resource "terraform_data" "role_assignment" {
     command     = <<-EOT
       set -euo pipefail
       a() { jq -r --arg k "$1" '.[$k]' <<<"$ASSIGNMENT"; }
-      token="$(curl -fsS --max-time 20 "$(a keycloak_url)/realms/master/protocol/openid-connect/token" \
+      # The password and the token reach curl on stdin, as in local.admin_token_command.
+      token="$(printf '%s' "$KEYCLOAK_PASSWORD" | curl -fsS --max-time 20 "$(a keycloak_url)/realms/master/protocol/openid-connect/token" \
         --data-urlencode grant_type=password --data-urlencode client_id=admin-cli \
-        --data-urlencode "username=$KEYCLOAK_USER" --data-urlencode "password=$KEYCLOAK_PASSWORD" | jq -er .access_token)"
-      code="$(curl -sS --max-time 20 -o /dev/null -w '%%{http_code}' -X DELETE -H "Authorization: Bearer $token" \
+        --data-urlencode "username=$KEYCLOAK_USER" --data-urlencode password@- | jq -er .access_token)"
+      code="$(printf 'Authorization: Bearer %s\n' "$token" | curl -sS --max-time 20 -o /dev/null -w '%%{http_code}' -X DELETE -H @- \
         "$(a keycloak_url)/admin/realms/$(a realm)/organizations/$(a organization_id)/groups/$(a group_id)/members/$(a user_id)")"
       # 404: the realm, organization, group or membership is already gone.
       case "$code" in 204|404) ;; *) echo "removing the role assignment answered HTTP $code" >&2; exit 1 ;; esac
@@ -384,7 +399,7 @@ data "external" "admin_permissions_client" {
     query="$(cat)"
     q() { jq -r --arg k "$1" '.[$k]' <<<"$query"; }
     ${local.admin_token_command}
-    curl -fsS --max-time 20 -H "Authorization: Bearer $token" "$(q keycloak_url)/admin/realms/$(q realm)" |
+    printf 'Authorization: Bearer %s\n' "$token" | curl -fsS --max-time 20 -H @- "$(q keycloak_url)/admin/realms/$(q realm)" |
       jq -ce '{id: .adminPermissionsClient.id}'
   EOT
   ]

@@ -333,8 +333,10 @@ def _client_roles(http: httpx.Client, user_id: str) -> dict[str, list[str]]:
     return {name: sorted(role["name"] for role in mapping["mappings"]) for name, mapping in mappings.items()}
 
 
-def _audiences(claims: dict) -> list[str]:
-    aud = claims.get("aud", [])
+def _audiences(aud: object) -> list[str]:
+    """A token's ``aud`` as a list: Keycloak writes one audience as a string; absent is none."""
+    if aud == ABSENT:
+        return []
     return [aud] if isinstance(aud, str) else list(aud)
 
 
@@ -372,7 +374,7 @@ def token_binding(label: str, shapes: dict) -> list[str]:
     for key, shape in shapes.items():
         access = key.endswith(": access token")
         spa = f" via {SPA_CLIENT} " in key
-        audiences = [shape["aud"]] if isinstance(shape["aud"], str) else shape["aud"]
+        audiences = _audiences(shape["aud"])
         expected_typ = "Bearer" if access else "ID"
         if shape["typ"] != expected_typ:
             found.append(f"{label} {key}: typ {shape['typ']!r}, expected {expected_typ!r}")
