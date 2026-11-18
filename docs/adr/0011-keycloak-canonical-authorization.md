@@ -65,3 +65,14 @@ assignments. The recorded tokens (`keycloak/fixtures/`) carry no `resource_acces
   identity-stack#661). Deactivating the canonical user refuses them at once (403).
 - A deployment that enables Keycloak must seed the tenants' organization links
   (`make keycloak-seed`) before a first sign-in can succeed.
+- Links the previous model wrote are now grants. Its first sign-in linked a Keycloak
+  identity to an existing canonical user by verified email (`idp_links` rows of the
+  `keycloak` provider with `metadata` `{"linked_by": "sign_in"}`). That was harmless while
+  grants came from the token; now such a link hands its Keycloak user every canonical role
+  of the linked user. Keycloak was opt-in and ran only locally, so no migration ships: before
+  `keycloak` is listed in `CANONICAL_RBAC_PROVIDERS` on a database the previous path wrote
+  to, those rows are deleted and the users sign in again to be provisioned under the
+  organization rules ([keycloak.md](../keycloak.md#upgrading-from-the-token-authorized-model)).
+- `get_tenant_claims` and `require_admin_role` refuse every principal that is not
+  Descope-managed, so a `tenants` or top-level `roles` claim on a Keycloak, Ory or Zitadel
+  token grants nothing on the routes that read them (identity-stack#596).

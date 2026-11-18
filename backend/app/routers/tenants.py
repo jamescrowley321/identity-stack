@@ -4,10 +4,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.dependencies.auth import get_claims
 from app.dependencies.descope import require_descope_principal
 from app.dependencies.identity import get_tenant_service
-from app.dependencies.tenant import get_tenant_claims, get_tenant_id
+from app.dependencies.tenant import get_descope_claims, get_tenant_claims, get_tenant_id
 from app.errors.problem_detail import result_to_response
 from app.logbook import logbook
 from app.models.database import get_async_session
@@ -20,8 +19,11 @@ logger = logbook(__name__)
 router = APIRouter(tags=["Tenants"])
 
 
-def require_admin_role(claims: dict = Depends(get_claims)) -> dict:
-    """Require the caller to have an 'admin' or 'owner' project-level role."""
+def require_admin_role(claims: dict = Depends(get_descope_claims)) -> dict:
+    """Require the caller to have an 'admin' or 'owner' project-level role in its Descope ``roles`` claim.
+
+    A principal of a provider that is not Descope-managed is refused (403) before the claim is read.
+    """
     roles: list[str] = claims.get("roles", [])
     if not any(r in roles for r in ("admin", "owner")):
         raise HTTPException(status_code=403, detail="Admin or owner role required")

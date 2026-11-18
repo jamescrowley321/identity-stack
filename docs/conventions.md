@@ -390,17 +390,23 @@ configuration at startup (`refuse_canonical_descope_managed`).
   It checks relations in Descope's FGA store, which is keyed on Descope tenant ids, so it
   serves Descope principals only.
 - Exception: `get_tenant_claims` returns the Descope `tenants` claim as it is, for the
-  routes that list a Descope principal's memberships. Every provider's token is read for
-  the claim (#597).
+  routes that list a Descope principal's memberships (`GET /api/tenants`, the
+  `/api/tenants/{tenant_id}/resources` routes, `GET /api/roles/me`). It reads the claim
+  through `get_descope_claims`, which refuses (403, `DESCOPE_CLAIMS_ONLY`) every principal
+  whose provider is not `descope_managed`, whatever its token carries: a provider mapper
+  that put a `tenants` claim on Ory, Zitadel or Keycloak tokens would otherwise grant
+  membership of any tenant it names.
 - Exception: `POST /api/tenants` is gated by `require_admin_role`
-  (`routers/tenants.py`), which reads a top-level `roles` claim itself, for every
-  provider, and takes no tenant (#596).
+  (`routers/tenants.py`), which reads a top-level `roles` claim itself and takes no
+  tenant. It takes the claims from `get_descope_claims`, so only a Descope principal is
+  decided from that claim; every other provider's is refused (403) (#596).
 - Exception: `GET /api/profile` carries no guard, because every provider's session loads
   it. The handler asks Descope for a Descope principal only (`is_descope_principal`) and
   answers anyone else with the empty profile, without a call. `PATCH /api/profile` carries
   the guard.
-- Exception: `GET /api/tenants` takes no tenant from `get_tenant_id`, carries no guard and
-  answers a principal of another provider as it did before the resolver (#590).
+- Exception: `GET /api/tenants` takes no tenant from `get_tenant_id` and carries no guard
+  of its own; `get_tenant_claims` refuses a principal of another provider (403). A canonical
+  principal's tenants are in `GET /api/identity` (#590).
 - Exception: the role and permission definitions and the FGA schema belong to no tenant
   and are gated by `require_role`, which answers for one tenant. A Descope principal who
   holds the role in their current tenant is served there, as before the resolver (#593).
@@ -409,7 +415,9 @@ configuration at startup (`refuse_canonical_descope_managed`).
   answers 404 without one (#590).
 
 *Enforcement:* review, plus tests (`test_tenant_resolution.py`, `test_rbac_dependencies.py`,
-`test_tenant_dependencies.py`, and `test_descope_backed_routes.py`, which walks every route
+`test_tenant_dependencies.py`, `test_descope_claim_routes.py`, which sends Keycloak, Ory
+and Zitadel tokens with forged `tenants` and `roles` claims to every route that reads them,
+and `test_descope_backed_routes.py`, which walks every route
 of the application against its registers, calls each guarded route as a canonical
 principal, and calls each `require_global_role` route as an operator of one of several
 tenants who names it). `test_keycloak_canonical_authorization.py` shows a Keycloak

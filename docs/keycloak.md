@@ -200,6 +200,28 @@ What Keycloak does not do, or the adapter does not take on:
 | A role assignment is not mirrored to client roles. Client roles are realm-wide and say nothing of an organization (decision 10); the realm admin grants them and the `type:` markers. | The membership is pushed; the grant is not. Ending a membership takes the user out of the organization's `type:` markers, but leaves the user's client roles: the realm admin owns them and removes them. |
 | A membership can be pushed only once the tenant and the user are both in Keycloak. | Assigning a role in a tenant that was never pushed returns an error. |
 
+## Upgrading from the token-authorized model
+
+The model before [ADR-0011](adr/0011-keycloak-canonical-authorization.md) read a Keycloak
+principal's grants from its token, and its first sign-in (with `keycloak` in
+`JIT_ENABLED_PROVIDERS`) linked the Keycloak identity to any existing canonical user with the
+same verified email. Under the canonical model such a link gives its Keycloak user every
+canonical role of the linked user. Before listing `keycloak` in `CANONICAL_RBAC_PROVIDERS` on
+a database that model wrote to, delete the links its sign-ins made, then let those users sign
+in again: each is provisioned under the organization rules, or refused.
+
+```sql
+DELETE FROM idp_links
+WHERE provider_id = (SELECT id FROM providers WHERE name = 'keycloak')
+  AND metadata->>'linked_by' = 'sign_in';
+```
+
+Run it with `psql "$DATABASE_URL"` (the URL without the `+asyncpg` driver suffix), with the
+backend stopped or before it starts with the new setting. Links an operator or a seed wrote
+(`linked_by` `backend`, or no origin) are kept: they name the user they were meant for. A
+canonical user the old path created for a Keycloak identity keeps its rows and any role an
+operator gave it; deactivate it if it should not sign in again.
+
 ## Limits found
 
 | Limit | Where it shows | Follow-up |
