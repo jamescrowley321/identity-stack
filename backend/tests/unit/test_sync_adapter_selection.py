@@ -1,18 +1,12 @@
 """Which sync adapter the services get, how startup opens it, and what leaving a tenant sends it."""
 
-import asyncio
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 from expression import Error, Ok
 from fastapi import FastAPI
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.exc import TimeoutError as SqlAlchemyTimeoutError
-from sqlalchemy.pool import QueuePool
 
 from app import main
 from app.dependencies import identity
@@ -24,13 +18,12 @@ from app.dependencies.identity import (
     get_tenant_service,
     get_user_service,
 )
+from app.dependencies.keycloak_sync import RepositoryKeycloakLinks
 from app.errors.identity import Conflict, Forbidden, IdentityErrorRaised
-from app.middleware.providers import ProviderConfigurationError
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.role import Role
 from app.models.identity.user import User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
-from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.permission import PermissionRepository
 from app.repositories.role import RoleRepository
 from app.repositories.user import UserRepository
@@ -53,14 +46,12 @@ from app.services.keycloak_admin import (
     ADMIN_CLIENT_ID_VARIABLE,
     ADMIN_CREDENTIAL_VARIABLE,
     KeycloakAdminApi,
-    KeycloakAdminError,
 )
 from app.services.reconciliation import ReconciliationService
 from app.services.role import NOT_A_MEMBER_OF_THE_TENANT, RoleService
 from app.services.user import UserService
 from tests.helpers.keycloak_admin_recorded import (
-    DIRECTORY_CLIENT_ID,
-    DIRECTORY_CLIENT_SECRET,
+    RECORDED,
     ROLE_CHECK,
     TENANT_ID,
     RecordedAdminApi,
@@ -109,218 +100,14 @@ class TestSelection:
         assert type(service._adapter) is KeycloakSyncAdapter
         assert service._adapter._api is keycloak_admin
 
-    async def test_the_keycloak_adapter_reads_the_users_keycloak_link_in_the_requests_session(self, monkeypatch):
+    async def test_the_keycloak_adapter_reads_its_links_in_the_requests_session(self, monkeypatch):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
-        session, savepoint = savepoint_session()
-        user_id = uuid.uuid4()
-        asked = []
-
-        async def signed_in_sub_of(self, user: uuid.UUID, provider_name: str) -> str | None:
-            asked.append((self._session, user, provider_name))
-            return "keycloak-account-id"
-
-        monkeypatch.setattr(IdPLinkRepository, "signed_in_sub_of", signed_in_sub_of)
-
-        service = await get_role_service(request=mock_request(keycloak_admin=object()), session=session)
-
-        assert await service._adapter._linked_subject(user_id) == "keycloak-account-id"
-        assert asked == [(session, user_id, "keycloak")]
-        savepoint.rollback.assert_not_awaited()
-
-    async def test_the_keycloak_adapter_serializes_organization_writes_through_the_database(self, monkeypatch):
-        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
-        lock = object()
-        given = []
-        monkeypatch.setattr(identity, "keycloak_organization_lock", lambda session: given.append(session) or lock)
         session = AsyncMock()
 
         service = await get_role_service(request=mock_request(keycloak_admin=object()), session=session)
 
-        assert service._adapter._organization_lock is lock
-        assert given == [session]
-
-    async def test_an_idp_link_the_database_cannot_read_is_a_local_database_error(self, monkeypatch):
-        """Typed, so the adapter returns it as a SyncError; only the read's savepoint is rolled back."""
-        session, savepoint = savepoint_session()
-
-        async def signed_in_sub_of(self, user: uuid.UUID, provider_name: str) -> str | None:
-            raise OperationalError("SELECT", {}, ConnectionResetError("connection reset"))
-
-        monkeypatch.setattr(IdPLinkRepository, "signed_in_sub_of", signed_in_sub_of)
-
-        with pytest.raises(LocalDatabaseError) as failed:
-            await identity.keycloak_linked_subject(session)(uuid.uuid4())
-
-        assert str(failed.value) == "the IdP link read failed in the service's database: OperationalError"
-        savepoint.rollback.assert_awaited_once_with()
-        session.rollback.assert_not_awaited()
-
-    async def test_a_lock_the_database_cannot_take_is_a_local_database_error(self):
-        session, savepoint = savepoint_session()
-        session.execute.side_effect = SqlAlchemyTimeoutError("QueuePool limit reached")
-
-        with pytest.raises(LocalDatabaseError) as failed:
-            async with identity.keycloak_organization_lock(session)("organization"):
-                pass
-
-        assert str(failed.value) == "the organization lock failed in the service's database: TimeoutError"
-        savepoint.rollback.assert_awaited_once_with()
-        session.rollback.assert_not_awaited()
-        session.commit.assert_not_awaited()
-
-    @pytest.mark.parametrize("failing_statement", [1, 2], ids=["set_config", "pg_advisory_xact_lock"])
-    async def test_a_lock_acquisition_cancelled_mid_wait_releases_its_savepoint(self, failing_statement):
-        """A client disconnect or an outer timeout leaves no savepoint holding lock_timeout or the lock."""
-        session, savepoint = savepoint_session()
-        session.execute.side_effect = [None] * (failing_statement - 1) + [asyncio.CancelledError()]
-        body = []
-
-        with pytest.raises(asyncio.CancelledError):
-            async with identity.keycloak_organization_lock(session)("organization"):
-                body.append("entered")
-
-        assert body == []
-        savepoint.rollback.assert_awaited_once_with()
-        session.rollback.assert_not_awaited()
-
-    async def test_a_savepoint_the_database_cannot_open_is_a_local_database_error(self):
-        session, _savepoint = savepoint_session()
-        session.begin_nested.side_effect = OperationalError("SAVEPOINT", {}, ConnectionResetError("connection reset"))
-
-        with pytest.raises(LocalDatabaseError) as failed:
-            async with identity.keycloak_organization_lock(session)("organization"):
-                pass
-
-        assert str(failed.value) == "the organization lock failed in the service's database: OperationalError"
-        session.execute.assert_not_awaited()
-
-    async def test_a_lock_the_database_cannot_release_after_the_body_succeeded_leaves_the_push_succeeded(self, caplog):
-        """The body's Keycloak work was done: a release failure is logged, not told as a failed push."""
-        session, savepoint = savepoint_session()
-        savepoint.rollback.side_effect = OperationalError("ROLLBACK", {}, ConnectionResetError("connection reset"))
-        body = []
-
-        async with identity.keycloak_organization_lock(session)("organization"):
-            body.append("done")
-
-        logged = [record.getMessage() for record in caplog.records if record.name == "app.dependencies.identity"]
-        assert (body, logged) == (
-            ["done"],
-            [
-                "Keycloak organization lock for organization not released before the request's transaction "
-                "ends: OperationalError"
-            ],
-        )
-        session.rollback.assert_not_awaited()
-
-    async def test_a_lock_the_database_cannot_release_after_the_body_raised_keeps_the_bodys_error(self):
-        """An unanswering Keycloak stays UNANSWERED, so delete_role still stops at it."""
-        session, savepoint = savepoint_session()
-        savepoint.rollback.side_effect = OperationalError("ROLLBACK", {}, ConnectionResetError("connection reset"))
-        api = AsyncMock()
-        api.find_organization.return_value = None
-        api.create_organization.side_effect = KeycloakAdminError("no answer")
-        adapter = KeycloakSyncAdapter(api, organization_lock=identity.keycloak_organization_lock(session))
-
-        result = await adapter.sync_tenant(tenant_id=uuid.UUID(int=1), data={"name": "organization"})
-
-        assert result == Error(
-            SyncError(
-                message="no answer",
-                operation="sync_tenant",
-                context={"tenant_id": str(uuid.UUID(int=1)), UNANSWERED: True, "status": None},
-            )
-        )
-
-    async def test_the_lock_is_taken_and_released_in_a_savepoint_of_the_requests_session(self):
-        session, savepoint = savepoint_session()
-        body = []
-
-        async with identity.keycloak_organization_lock(session)("organization"):
-            body.append((session.execute.await_count, savepoint.rollback.await_count))
-
-        assert body == [(2, 0)]
-        savepoint.rollback.assert_awaited_once_with()
-        session.commit.assert_not_awaited()
-        session.rollback.assert_not_awaited()
-
-    async def test_a_body_that_raises_still_releases_the_lock_and_its_error_is_kept(self):
-        session, savepoint = savepoint_session()
-
-        with pytest.raises(LookupError):
-            async with identity.keycloak_organization_lock(session)("organization"):
-                raise LookupError("the body failed")
-
-        savepoint.rollback.assert_awaited_once_with()
-
-
-class TestOrganizationLockTimeout:
-    """KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS: a push's wait for an organization's lock, in whole ms."""
-
-    REFUSED = (
-        "KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS must be a number of seconds from 0.001 to 2147483.647, not {raw!r}"
-    )
-
-    def test_the_default_is_twenty_seconds(self, monkeypatch):
-        monkeypatch.delenv("KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS", raising=False)
-
-        assert identity.organization_lock_timeout() == 20_000
-
-    def test_the_default_ends_before_the_pool_checkout(self, monkeypatch):
-        """A waiter gives up before SQLAlchemy's 30 s pool timeout would fail other routes' checkouts."""
-        monkeypatch.delenv("KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS", raising=False)
-        pool_checkout_ms = QueuePool(lambda: None).timeout() * 1000
-
-        assert identity.organization_lock_timeout() < pool_checkout_ms
-
-    @pytest.mark.parametrize(
-        ("raw", "milliseconds"),
-        [("2.5", 2500), ("0.001", 1), ("2147483.647", 2_147_483_647)],
-    )
-    def test_seconds_are_read_as_whole_milliseconds(self, monkeypatch, raw, milliseconds):
-        monkeypatch.setenv("KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS", raw)
-
-        assert identity.organization_lock_timeout() == milliseconds
-
-    @pytest.mark.parametrize(
-        "raw", ["0", "-1", "nan", "inf", "ten", "", "0.0001", "0.0004", "2147483.648", "1e7", "1e306", "-1e306"]
-    )
-    def test_a_value_postgres_reads_as_no_limit_or_refuses_stops_startup(self, monkeypatch, raw):
-        """0 ms is no lock_timeout at all; above 2147483647 ms Postgres refuses set_config on every push."""
-        monkeypatch.setenv("KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS", raw)
-
-        with pytest.raises(ProviderConfigurationError) as refused:
-            identity.organization_lock_timeout()
-
-        assert str(refused.value) == self.REFUSED.format(raw=raw)
-
-
-class _Savepoint:
-    """Stands in for AsyncSession.begin_nested(): awaitable, and an async context manager that rolls back on error."""
-
-    def __init__(self) -> None:
-        self.rollback = AsyncMock()
-
-    def __await__(self):
-        return self._opened().__await__()
-
-    async def _opened(self) -> "_Savepoint":
-        return self
-
-    async def __aenter__(self) -> "_Savepoint":
-        return self
-
-    async def __aexit__(self, kind, value, traceback) -> bool:
-        if kind is not None:
-            await self.rollback()
-        return False
-
-
-def savepoint_session() -> tuple[AsyncMock, _Savepoint]:
-    session = AsyncMock()
-    savepoint = _Savepoint()
-    session.begin_nested = MagicMock(return_value=savepoint)
-    return session, savepoint
+        assert type(service._adapter._links) is RepositoryKeycloakLinks
+        assert service._adapter._links._session is session
 
 
 def recorded_client(api: RecordedAdminApi):
@@ -437,18 +224,9 @@ class TestStartup:
 
     async def test_a_credential_without_the_write_roles_stops_startup_and_closes_the_client(self, monkeypatch):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
-        set_settings(
-            monkeypatch,
-            **{ADMIN_CLIENT_ID_VARIABLE: DIRECTORY_CLIENT_ID, ADMIN_CREDENTIAL_VARIABLE: DIRECTORY_CLIENT_SECRET},
-        )
-        api = RecordedAdminApi(
-            [
-                "directory_token",
-                "directory_credential_check",
-                "directory_service_account_find",
-                "directory_service_account_role_mappings",
-            ]
-        )
+        set_settings(monkeypatch)
+        held = [role for role in RECORDED["service_account_roles"]["body"] if role["name"] == "manage-users"]
+        api = RecordedAdminApi(["token", *ROLE_CHECK[:3], httpx.Response(200, json=held)])
         built = []
 
         def build(*, timeout: float) -> httpx.AsyncClient:
@@ -462,11 +240,27 @@ class TestStartup:
 
         assert str(refused.value) == (
             "The Keycloak admin client's service account lacks realm-management roles "
-            "['manage-organizations', 'manage-users']: grant it ['manage-organizations', 'manage-users'] "
+            "['manage-organizations', 'query-clients', 'view-events']: grant it "
+            "['manage-organizations', 'manage-users', 'query-clients', 'view-events'] "
             "directly (roles reached through a group or a composite realm role are not read) "
             "or name another client in KEYCLOAK_ADMIN_CLIENT_ID"
         )
         assert built[0].is_closed
+
+    async def test_a_credential_that_cannot_manage_the_api_client_stops_startup(self, monkeypatch):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        set_settings(monkeypatch)
+        api = RecordedAdminApi(["token", *ROLE_CHECK[:-1], "api_client_find_none"])
+        monkeypatch.setattr(main, "outbound_client", recorded_client(api))
+
+        with pytest.raises(RuntimeError) as refused:
+            await main._start_sync_provider(FakeApp())
+
+        assert str(refused.value) == (
+            "The Keycloak admin client's service account cannot find the API client named by KEYCLOAK_AUDIENCE: "
+            "grant it query-clients and the fine-grained permissions view, manage and map-roles-composite on "
+            "that client (keycloak/fixtures/README.md)"
+        )
 
     async def test_a_missing_credential_stops_startup(self, monkeypatch):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
@@ -915,7 +709,7 @@ class TestDeletingARole:
             {(alone, tenant_id), (kept, tenant_id)},
             {(alone, tenant_id)},
         ]
-        adapter.delete_role.assert_awaited_once_with(role_id=role.id)
+        adapter.delete_role.assert_awaited_once_with(role_id=role.id, data={"name": "editor", "tenant_id": None})
         adapter.delete_role_assignment.assert_awaited_once_with(
             user_id=alone,
             tenant_id=tenant_id,
@@ -1022,20 +816,19 @@ class TestDeletingARole:
         logged = [record for record in caplog.records if record.name == "app.services.role"]
         assert [record.levelname for record in logged] == ["ERROR"]
 
-    async def test_a_lock_the_database_cannot_take_leaves_no_membership_unlogged(self, caplog):
+    async def test_a_database_failure_under_the_pushes_leaves_no_membership_unlogged(self, caplog):
         """The real adapter: each failed push is a SyncError, so every holder is tried and logged, nothing raises."""
         tenant_id, role_id = uuid.UUID(TENANT_ID), uuid.uuid4()
         users = sorted(uuid.uuid4() for _ in range(2))
         holders = [UserTenantRole(user_id=user_id, tenant_id=tenant_id, role_id=role_id) for user_id in users]
         service, assignments, _adapter, role, _calls = self.roles(holders, {})
-        api = RecordedAdminApi(["token", "organization_find", "user_find", "organization_find", "user_find"])
-
-        @asynccontextmanager
-        async def unavailable(_alias: str) -> AsyncIterator[None]:
-            raise LocalDatabaseError("the organization lock failed in the service's database: TimeoutError")
-            yield  # pragma: no cover - never reached; makes this an async generator
-
-        service._adapter = KeycloakSyncAdapter(api.api(), organization_lock=unavailable)
+        # The role's own delete finds Keycloak unreachable; the membership pushes fail on the database first.
+        api = RecordedAdminApi([httpx.ConnectError("connection refused")])
+        links = AsyncMock()
+        links.organization_alias.side_effect = LocalDatabaseError(
+            "the tenant link read failed in the service's database: TimeoutError"
+        )
+        service._adapter = KeycloakSyncAdapter(api.api(), links)
 
         with caplog.at_level("ERROR", logger="app.services.role"):
             result = await service.delete_role(role_id=role.id)
@@ -1055,7 +848,7 @@ class TestDeletingARole:
 
         await service.delete_role(role_id=role.id)
 
-        adapter.delete_role.assert_awaited_once_with(role_id=role.id)
+        adapter.delete_role.assert_awaited_once_with(role_id=role.id, data={"name": "editor", "tenant_id": None})
         service._repository.lock.assert_not_awaited()
         assignments.list_by_role.assert_not_awaited()
         adapter.delete_role_assignment.assert_not_awaited()

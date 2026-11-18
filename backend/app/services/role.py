@@ -69,6 +69,11 @@ def _role_payload(role: access.Role) -> dict:
     }
 
 
+def _scope(role: access.Role) -> dict:
+    """The sync data that says whose role it is: ``tenant_id`` a tenant's own, ``None`` a global one."""
+    return {"tenant_id": None if role.tenant_id is None else str(role.tenant_id)}
+
+
 class RoleService:
     """Application service for Role operations.
 
@@ -157,7 +162,7 @@ class RoleService:
 
             await self._invalidate(created, role.id, created.tenant_id)
 
-            sync_data: dict = {"name": role.name.value, "description": role.description}
+            sync_data: dict = {"name": role.name.value, "description": role.description, **_scope(role)}
             if names:
                 sync_data["permission_names"] = list(names)
             self._log_sync_failure(
@@ -229,6 +234,7 @@ class RoleService:
                     data={
                         "name": role.name.value,
                         "description": role.description,
+                        **_scope(role),
                         "permission_names": permission_names,
                     },
                 ),
@@ -351,6 +357,7 @@ class RoleService:
             if decision.is_error():
                 return Error(identity_error(decision.error))
             decided, updated = decision.ok
+            previous_name = current.name.value
 
             apply_role(decided, row)
             try:
@@ -363,7 +370,10 @@ class RoleService:
 
             await self._invalidate(updated, role.id, role.tenant_id)
 
-            sync_data: dict = {"name": role.name.value, "description": role.description}
+            sync_data: dict = {"name": role.name.value, "description": role.description, **_scope(role)}
+            if previous_name != role.name.value:
+                # A provider that keys roles by name (Keycloak client roles) renames the one it holds.
+                sync_data["previous_name"] = previous_name
             if permission_names is not None:
                 sync_data["permission_names"] = permission_names
             self._log_sync_failure(
@@ -410,7 +420,13 @@ class RoleService:
             await self._invalidate(deleted, role_id, deleted.tenant_id)
 
             self._log_sync_failure(
-                await self._adapter.delete_role(role_id=role_id),
+                await self._adapter.delete_role(
+                    role_id=role_id,
+                    data={
+                        "name": deleted.name,
+                        "tenant_id": None if deleted.tenant_id is None else str(deleted.tenant_id),
+                    },
+                ),
                 role_id,
                 "delete_role",
             )

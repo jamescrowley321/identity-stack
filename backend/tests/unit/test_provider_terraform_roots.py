@@ -32,7 +32,7 @@ KNOB_READERS = frozenset({"knob", "knob_flag", "knob_set", "required_knob"})
 # Settings the backend reads for a root's provider that the root does not set: tuning
 # knobs with a default, which an operator sets only to change it.
 NOT_FROM_THE_ROOT = {
-    "keycloak": {"KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS"},
+    "keycloak": set(),
     "zitadel": {"ZITADEL_ADMIN_TIMEOUT_SECONDS", "ZITADEL_POST_LOGOUT_REDIRECT_URI"},
 }
 URL_MODULE = INFRA / "modules" / "provider-urls"

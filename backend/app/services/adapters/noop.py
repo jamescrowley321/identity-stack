@@ -50,10 +50,10 @@ class NoOpSyncAdapter(IdentityProviderAdapter):
     async def delete_user(self, *, user_id: uuid.UUID) -> Result[None, SyncError]:
         return Ok(None)
 
-    async def delete_role(self, *, role_id: uuid.UUID) -> Result[None, SyncError]:
+    async def delete_role(self, *, role_id: uuid.UUID, data: dict | None = None) -> Result[None, SyncError]:
         return Ok(None)
 
-    async def delete_permission(self, *, permission_id: uuid.UUID) -> Result[None, SyncError]:
+    async def delete_permission(self, *, permission_id: uuid.UUID, data: dict | None = None) -> Result[None, SyncError]:
         return Ok(None)
 
     async def delete_tenant(self, *, tenant_id: uuid.UUID) -> Result[None, SyncError]:

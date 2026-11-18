@@ -228,9 +228,10 @@ class TestWithoutTheCanonicalListing:
 
 APP_DIR = Path(__file__).resolve().parents[2] / "app"
 # ``dependencies/identity.py`` picks the sync adapter by ``SYNC_PROVIDER`` and names
-# each adapter, Keycloak's among them: it pushes canonical changes out and decides
-# no request's access.
-NOT_AUTHORIZATION = {"dependencies/identity.py"}
+# each adapter, Keycloak's among them, and ``dependencies/keycloak_sync.py`` wires
+# that adapter's canonical links: they push canonical changes out and decide no
+# request's access.
+NOT_AUTHORIZATION = {"dependencies/identity.py", "dependencies/keycloak_sync.py"}
 
 
 def _code_mentions(tree: ast.AST) -> list[str]:

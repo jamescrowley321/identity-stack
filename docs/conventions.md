@@ -435,8 +435,8 @@ either. They **SHOULD** construct a repository, as `routers/idp_links.py` does.
 
 - Exception: `routers/tenants.py`, which reads and writes the demo `TenantResource` table.
 - Exception: `routers/documents.py`, which reads and writes the demo `Document` table.
-- Exception: `dependencies/identity.py`, which takes the reconciliation advisory lock and the
-  Keycloak organization lock (`pg_advisory_xact_lock`).
+- Exception: `dependencies/identity.py`, which takes the reconciliation advisory lock
+  (`pg_advisory_xact_lock`).
 - Exception: `main.py`, whose lifespan runs `SELECT 1` to check the database connection
   before it accepts requests.
 

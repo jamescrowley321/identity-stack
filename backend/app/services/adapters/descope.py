@@ -239,13 +239,13 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
             span.set_attribute("user.id", str(user_id))
             return Ok(None)
 
-    async def delete_role(self, *, role_id: uuid.UUID) -> Result[None, SyncError]:
+    async def delete_role(self, *, role_id: uuid.UUID, data: dict | None = None) -> Result[None, SyncError]:
         """Delete role from Descope. Placeholder."""
         with tracer.start_as_current_span("descope.delete_role") as span:
             span.set_attribute("role.id", str(role_id))
             return Ok(None)
 
-    async def delete_permission(self, *, permission_id: uuid.UUID) -> Result[None, SyncError]:
+    async def delete_permission(self, *, permission_id: uuid.UUID, data: dict | None = None) -> Result[None, SyncError]:
         """Delete permission from Descope. Placeholder."""
         with tracer.start_as_current_span("descope.delete_permission") as span:
             span.set_attribute("permission.id", str(permission_id))

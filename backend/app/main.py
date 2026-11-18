@@ -43,12 +43,14 @@ from app.services.keycloak_admin import (
     ADMIN_CLIENT_ID_VARIABLE,
     ADMIN_CREDENTIAL_VARIABLE,
     ADMIN_TIMEOUT_SECONDS,
+    API_CLIENT_VARIABLE,
     ISSUER_VARIABLE,
     REALM_MANAGEMENT_CLIENT,
     REQUIRED_ROLES,
     KeycloakAdminError,
     KeycloakAdminNotConfigured,
     KeycloakAdminRolesMissing,
+    KeycloakApiClientNotManaged,
     connect_keycloak_admin,
 )
 from app.telemetry import init_telemetry, shutdown_telemetry
@@ -91,8 +93,8 @@ async def _start_sync_provider(app: FastAPI) -> OutboundClient | None:
     """Open what the configured sync adapter needs, or stop startup.
 
     ``SYNC_PROVIDER=keycloak`` builds the Keycloak admin client's one HTTP client
-    and checks its credential, and the roles of its service account, against the
-    realm before any request is served. ``SYNC_PROVIDER=zitadel`` reads the Zitadel
+    and checks its credential, the roles of its service account and its access to
+    the API client against the realm before any request is served. ``SYNC_PROVIDER=zitadel`` reads the Zitadel
     adapter's settings (``app.state.zitadel_admin``); an incomplete configuration
     raises ``ZitadelSyncNotConfigured``. That adapter opens a client per operation.
     Returns the Keycloak HTTP client for the lifespan to close, or ``None``.
@@ -119,10 +121,17 @@ async def _start_sync_provider(app: FastAPI) -> OutboundClient | None:
             f"or a composite realm role are not read) or name another client "
             f"in {ADMIN_CLIENT_ID_VARIABLE}"
         ) from exc
+    except KeycloakApiClientNotManaged as exc:
+        await http.aclose()
+        raise RuntimeError(
+            f"The Keycloak admin client's service account {'cannot manage' if exc.found else 'cannot find'} "
+            f"the API client named by {API_CLIENT_VARIABLE}: grant it query-clients and the fine-grained "
+            f"permissions view, manage and map-roles-composite on that client (keycloak/fixtures/README.md)"
+        ) from exc
     except KeycloakAdminError as exc:
         await http.aclose()
         raise RuntimeError(_admin_check_failure(exc.status)) from exc
-    logger.info("Keycloak admin client connected: canonical tenants and users sync to Keycloak")
+    logger.info("Keycloak admin client connected: canonical identities, roles and assignments sync to Keycloak")
     return http
 
 

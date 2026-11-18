@@ -1,12 +1,11 @@
 """A Keycloak push whose own database work fails, on a real request session (Postgres).
 
 The push runs after the service committed, then the service reads the rows it
-loaded before the push. A failed IdP link read or organization lock must leave
+loaded before the push. A failed IdP link or tenant link read must leave
 those rows loaded and the session usable: the committed change answers with
 ``provider_sync: failed`` (or logs), it does not raise.
 """
 
-import asyncio
 import logging
 import uuid
 from unittest.mock import AsyncMock
@@ -15,13 +14,14 @@ import pytest
 from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.dependencies.identity import keycloak_linked_subject, keycloak_organization_lock
+from app.dependencies.keycloak_sync import RepositoryKeycloakLinks
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.role import Role
 from app.models.identity.tenant import Tenant
 from app.models.identity.user import User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
+from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 from app.services.adapters.base import PROVIDER_SYNC, PROVIDER_SYNC_FAILED
 from app.services.adapters.keycloak import KeycloakSyncAdapter
@@ -44,11 +44,7 @@ async def failing_read(self, user_id: uuid.UUID, provider_name: str) -> str | No
 def adapter(session: AsyncSession) -> KeycloakSyncAdapter:
     api = AsyncMock()
     api.find_organization.return_value = {"id": "organization-id"}
-    return KeycloakSyncAdapter(
-        api,
-        linked_subject=keycloak_linked_subject(session),
-        organization_lock=keycloak_organization_lock(session),
-    )
+    return KeycloakSyncAdapter(api, RepositoryKeycloakLinks(session))
 
 
 @pytest.fixture
@@ -122,21 +118,19 @@ async def test_restoring_memberships_whose_idp_link_reads_fail_logs_each_and_doe
     assert logged == [expected, expected]
 
 
-async def test_a_lock_not_taken_in_time_is_a_sync_error_and_leaves_the_requests_rows_loaded(
+async def failing_tenant_read(self, tenant_id: uuid.UUID) -> Tenant | None:
+    await self._session.execute(text("SELECT * FROM no_such_table"))
+    return None
+
+
+async def test_a_tenant_link_read_that_fails_is_a_sync_error_and_leaves_the_requests_rows_loaded(
     async_engine, members, monkeypatch
 ):
-    """Another request holds the organization's lock past the wait limit; the rows read before stay readable."""
     _tenant, _role, users = members
-    monkeypatch.setattr("app.dependencies.identity.ORGANIZATION_LOCK_TIMEOUT_MS", 200)
+    monkeypatch.setattr(TenantRepository, "get", failing_tenant_read)
     tenant_id = uuid.uuid4()
-    factory = sessions(async_engine)
 
-    async with (
-        asyncio.timeout(5),
-        factory() as holder,
-        keycloak_organization_lock(holder)(str(tenant_id)),
-        factory() as session,
-    ):
+    async with sessions(async_engine)() as session:
         user = await UserRepository(session).get(users[0].id)
         await session.commit()
         result = await adapter(session).sync_tenant(tenant_id=tenant_id, data={"name": "organization"})
@@ -144,7 +138,7 @@ async def test_a_lock_not_taken_in_time_is_a_sync_error_and_leaves_the_requests_
 
     assert result.is_error()
     assert (result.error.message, result.error.context, read_after) == (
-        "the organization lock failed in the service's database: DBAPIError",
+        "the tenant link read failed in the service's database: ProgrammingError",
         {"tenant_id": str(tenant_id), "status": None},
         (users[0].email, 1),
     )

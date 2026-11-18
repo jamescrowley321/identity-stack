@@ -7,6 +7,397 @@
     "status": 401,
     "url": "{base}/admin/realms/identity-stack/organizations?first=0&max=1"
   },
+  "api_client_find": {
+    "body": [
+      {
+        "access": {
+          "configure": true,
+          "manage": true,
+          "view": true
+        },
+        "alwaysDisplayInConsole": false,
+        "attributes": {
+          "post.logout.redirect.uris": "+",
+          "realm_client": "false"
+        },
+        "authenticationFlowBindingOverrides": {},
+        "bearerOnly": false,
+        "clientAuthenticatorType": "client-secret",
+        "clientId": "identity-stack-api",
+        "consentRequired": false,
+        "defaultClientScopes": [
+          "web-origins",
+          "acr",
+          "roles",
+          "profile",
+          "basic",
+          "email"
+        ],
+        "directAccessGrantsEnabled": false,
+        "enabled": true,
+        "frontchannelLogout": false,
+        "fullScopeAllowed": false,
+        "id": "27213994-6373-4d04-bb68-c1b78352610c",
+        "implicitFlowEnabled": false,
+        "name": "The identity-stack API: its id is the access token audience; its client roles are the canonical permissions and roles",
+        "nodeReRegistrationTimeout": -1,
+        "notBefore": 0,
+        "optionalClientScopes": [
+          "address",
+          "phone",
+          "organization",
+          "offline_access",
+          "microprofile-jwt"
+        ],
+        "protocol": "openid-connect",
+        "publicClient": false,
+        "redirectUris": [],
+        "serviceAccountsEnabled": false,
+        "standardFlowEnabled": false,
+        "surrogateAuthRequired": false,
+        "webOrigins": []
+      }
+    ],
+    "method": "GET",
+    "status": 200,
+    "url": "{base}/admin/realms/identity-stack/clients?clientId=identity-stack-api"
+  },
+  "api_client_find_none": {
+    "body": [],
+    "method": "GET",
+    "status": 200,
+    "url": "{base}/admin/realms/identity-stack/clients?clientId=no-such-client"
+  },
+  "client_role_create_permission": {
+    "body": null,
+    "location": "{base}/admin/realms/identity-stack/clients/27213994-6373-4d04-bb68-c1b78352610c/roles/recorded:read",
+    "method": "POST",
+    "status": 201,
+    "url": "{base}/admin/realms/identity-stack/clients/27213994-6373-4d04-bb68-c1b78352610c/roles"
+  },
+  "client_role_create_role": {
+    "body": null,
+    "location": "{base}/admin/realms/identity-stack/clients/27213994-6373-4d04-bb68-c1b78352610c/roles/recorded-role",
+    "method": "POST",
+    "status": 201,
+    "url": "{base}/admin/realms/identity-stack/clients/27213994-6373-4d04-bb68-c1b78352610c/roles"
+  },
+  "client_role_create_taken": {
+    "body": {
+      "errorMessage": "Role with name recorded-role already exists"
+    },
+    "method": "POST",
+    "status": 409,
+    "url": "{base}/admin/realms/identity-stack/clients/27213994-6373-4d04-bb68-c1b78352610c/roles"
+  },
+  "client_roles": {
+    "body": [
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "07670f45-8be6-4cfd-8c52-d431c193b07b",
+        "name": "projects:delete"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": true,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "a1ccc5f0-e3b7-43f0-beba-54d6bf9dde47",
+        "name": "member"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "313a9c24-5642-430d-bc46-ddf87f629883",
+        "name": "settings:manage"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": true,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "e939a462-4c84-4aee-aab0-9f3cb3c52615",
+        "name": "viewer"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": true,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "9fc0c46e-c973-44c3-8c18-25125fb66e2e",
+        "name": "admin"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "1675c433-2635-4106-a17a-81dca4e263b3",
+        "name": "documents:read"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "77f9b0da-8885-4fbf-a02e-03c08f8d55d0",
+        "name": "members:remove"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "c92ce85e-9585-4a1b-8ee8-bae354b76ff4",
+        "name": "documents:write"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "38ce7a92-5fb6-49e3-a377-78d7cc1ef76e",
+        "name": "billing:manage"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "e8a6616e-c18f-48e3-8c57-d60ea56416f5",
+        "name": "documents:delete"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "2b821911-30bb-40ea-bdde-2a060287b0d1",
+        "name": "projects:update"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "781a04bf-4662-4676-82c0-e11a3bbd3bc1",
+        "name": "members:update_role"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": true,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "8220040c-c307-43dd-a4c6-46af41e13dc9",
+        "name": "owner"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "be0ccef7-73ca-4998-a9f7-866192b5c05b",
+        "name": "projects:create"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "7d3b9edf-685d-4631-a08c-f7db4c2e94fb",
+        "name": "members:invite"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "27cbd846-3a55-43a1-8800-657e154e0f63",
+        "name": "projects:read"
+      }
+    ],
+    "method": "GET",
+    "status": 200,
+    "url": "{base}/admin/realms/identity-stack/clients/27213994-6373-4d04-bb68-c1b78352610c/roles?briefRepresentation=false"
+  },
+  "client_roles_created": {
+    "body": [
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "07670f45-8be6-4cfd-8c52-d431c193b07b",
+        "name": "projects:delete"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": true,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "a1ccc5f0-e3b7-43f0-beba-54d6bf9dde47",
+        "name": "member"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "313a9c24-5642-430d-bc46-ddf87f629883",
+        "name": "settings:manage"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": true,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "e939a462-4c84-4aee-aab0-9f3cb3c52615",
+        "name": "viewer"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": true,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "9fc0c46e-c973-44c3-8c18-25125fb66e2e",
+        "name": "admin"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "1675c433-2635-4106-a17a-81dca4e263b3",
+        "name": "documents:read"
+      },
+      {
+        "attributes": {
+          "identity-stack.permission-id": [
+            "9e400000-0000-4000-8000-000000000586"
+          ]
+        },
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "description": "Recorded",
+        "id": "0589ae7c-699e-4ba1-b2b0-f62537a534e1",
+        "name": "recorded:read"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "77f9b0da-8885-4fbf-a02e-03c08f8d55d0",
+        "name": "members:remove"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "c92ce85e-9585-4a1b-8ee8-bae354b76ff4",
+        "name": "documents:write"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "38ce7a92-5fb6-49e3-a377-78d7cc1ef76e",
+        "name": "billing:manage"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "e8a6616e-c18f-48e3-8c57-d60ea56416f5",
+        "name": "documents:delete"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "2b821911-30bb-40ea-bdde-2a060287b0d1",
+        "name": "projects:update"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "781a04bf-4662-4676-82c0-e11a3bbd3bc1",
+        "name": "members:update_role"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": true,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "8220040c-c307-43dd-a4c6-46af41e13dc9",
+        "name": "owner"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "be0ccef7-73ca-4998-a9f7-866192b5c05b",
+        "name": "projects:create"
+      },
+      {
+        "attributes": {
+          "identity-stack.role-id": [
+            "40e00000-0000-4000-8000-000000000586"
+          ]
+        },
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "description": "Recorded role",
+        "id": "e547e544-4e54-49aa-b97b-224a5abc7959",
+        "name": "recorded-role"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "7d3b9edf-685d-4631-a08c-f7db4c2e94fb",
+        "name": "members:invite"
+      },
+      {
+        "attributes": {},
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "id": "27cbd846-3a55-43a1-8800-657e154e0f63",
+        "name": "projects:read"
+      }
+    ],
+    "method": "GET",
+    "status": 200,
+    "url": "{base}/admin/realms/identity-stack/clients/27213994-6373-4d04-bb68-c1b78352610c/roles?briefRepresentation=false"
+  },
+  "composites_add": {
+    "body": null,
+    "method": "POST",
+    "status": 204,
+    "url": "{base}/admin/realms/identity-stack/roles-by-id/e547e544-4e54-49aa-b97b-224a5abc7959/composites"
+  },
+  "composites_remove": {
+    "body": null,
+    "method": "DELETE",
+    "status": 204,
+    "url": "{base}/admin/realms/identity-stack/roles-by-id/e547e544-4e54-49aa-b97b-224a5abc7959/composites"
+  },
   "credential_check": {
     "body": [
       {
@@ -19,7 +410,7 @@
           }
         ],
         "enabled": true,
-        "id": "bc5734ee-4632-446f-8dc8-35bbf0d4b527",
+        "id": "f7d06aa1-f045-487e-80f5-49c940e3dbec",
         "name": "Acme"
       }
     ],
@@ -27,72 +418,40 @@
     "status": 200,
     "url": "{base}/admin/realms/identity-stack/organizations?first=0&max=1"
   },
-  "directory_credential_check": {
-    "body": [
-      {
-        "alias": "acme",
-        "domains": [
-          {
-            "autoRedirect": false,
-            "name": "acme.test",
-            "verified": false
-          }
-        ],
-        "enabled": true,
-        "id": "bc5734ee-4632-446f-8dc8-35bbf0d4b527",
-        "name": "Acme"
-      }
-    ],
-    "method": "GET",
-    "status": 200,
-    "url": "{base}/admin/realms/identity-stack/organizations?first=0&max=1"
+  "group_member_add": {
+    "body": null,
+    "method": "PUT",
+    "status": 204,
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1/groups/fb419a24-5ec1-47c9-8b9c-56fa127b7720/members/c74ed09b-71f9-4618-b5a0-55bf0104264d"
   },
-  "directory_service_account_find": {
-    "body": [
-      {
-        "access": {
-          "manage": false
-        },
-        "createdTimestamp": 1794899450503,
-        "disableableCredentialTypes": [],
-        "emailVerified": false,
-        "enabled": true,
-        "id": "f6d8397c-f1a9-4c20-ad1e-2ee1350f387c",
-        "notBefore": 0,
-        "requiredActions": [],
-        "totp": false,
-        "username": "service-account-identity-stack-directory"
-      }
-    ],
-    "method": "GET",
-    "status": 200,
-    "url": "{base}/admin/realms/identity-stack/users?username=service-account-identity-stack-directory&exact=true"
-  },
-  "directory_service_account_role_mappings": {
-    "body": {},
-    "method": "GET",
-    "status": 200,
-    "url": "{base}/admin/realms/identity-stack/users/f6d8397c-f1a9-4c20-ad1e-2ee1350f387c/role-mappings"
-  },
-  "directory_token": {
+  "group_member_add_again": {
     "body": {
-      "access_token": "recorded-directory-token",
-      "expires_in": 300,
-      "not-before-policy": 0,
-      "refresh_expires_in": 0,
-      "scope": "kc-admin-api",
-      "token_type": "Bearer"
+      "errorMessage": "User is already a member of the group"
     },
-    "method": "POST",
-    "status": 200,
-    "url": "{base}/realms/identity-stack/protocol/openid-connect/token"
+    "method": "PUT",
+    "status": 409,
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1/groups/fb419a24-5ec1-47c9-8b9c-56fa127b7720/members/c74ed09b-71f9-4618-b5a0-55bf0104264d"
+  },
+  "group_member_remove": {
+    "body": null,
+    "method": "DELETE",
+    "status": 204,
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1/groups/fb419a24-5ec1-47c9-8b9c-56fa127b7720/members/c74ed09b-71f9-4618-b5a0-55bf0104264d"
+  },
+  "group_member_remove_again": {
+    "body": {
+      "errorMessage": "User not a member"
+    },
+    "method": "DELETE",
+    "status": 400,
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1/groups/fb419a24-5ec1-47c9-8b9c-56fa127b7720/members/c74ed09b-71f9-4618-b5a0-55bf0104264d"
   },
   "member_add": {
     "body": null,
-    "location": "{base}/admin/realms/identity-stack/organizations/49825999-d1c8-41ee-a4a8-f3590a592959/members/c0b53945-7a52-4072-b076-dfdacf5d9700",
+    "location": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1/members/c74ed09b-71f9-4618-b5a0-55bf0104264d",
     "method": "POST",
     "status": 201,
-    "url": "{base}/admin/realms/identity-stack/organizations/49825999-d1c8-41ee-a4a8-f3590a592959/members"
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1/members"
   },
   "member_add_again": {
     "body": {
@@ -100,7 +459,7 @@
     },
     "method": "POST",
     "status": 409,
-    "url": "{base}/admin/realms/identity-stack/organizations/49825999-d1c8-41ee-a4a8-f3590a592959/members"
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1/members"
   },
   "member_add_unknown_organization": {
     "body": {
@@ -108,13 +467,47 @@
     },
     "method": "POST",
     "status": 404,
-    "url": "{base}/admin/realms/identity-stack/organizations/49825999-d1c8-41ee-a4a8-f3590a592959/members"
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1/members"
+  },
+  "member_organizations": {
+    "body": [
+      {
+        "alias": "7e5a0000-0000-4000-8000-000000000586",
+        "domains": [
+          {
+            "autoRedirect": false,
+            "name": "recorded.test",
+            "verified": false
+          }
+        ],
+        "enabled": true,
+        "id": "03f48696-4309-4f5a-9cae-0a3f174d55c1",
+        "name": "Recorded Co Renamed"
+      }
+    ],
+    "method": "GET",
+    "status": 200,
+    "url": "{base}/admin/realms/identity-stack/organizations/members/c74ed09b-71f9-4618-b5a0-55bf0104264d/organizations"
+  },
+  "member_organizations_none": {
+    "body": [],
+    "method": "GET",
+    "status": 200,
+    "url": "{base}/admin/realms/identity-stack/organizations/members/c74ed09b-71f9-4618-b5a0-55bf0104264d/organizations"
+  },
+  "member_organizations_unknown_user": {
+    "body": {
+      "error": "HTTP 404 Not Found"
+    },
+    "method": "GET",
+    "status": 404,
+    "url": "{base}/admin/realms/identity-stack/organizations/members/c74ed09b-71f9-4618-b5a0-55bf0104264d/organizations"
   },
   "member_remove": {
     "body": null,
     "method": "DELETE",
     "status": 204,
-    "url": "{base}/admin/realms/identity-stack/organizations/49825999-d1c8-41ee-a4a8-f3590a592959/members/c0b53945-7a52-4072-b076-dfdacf5d9700"
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1/members/c74ed09b-71f9-4618-b5a0-55bf0104264d"
   },
   "member_remove_again": {
     "body": {
@@ -122,21 +515,13 @@
     },
     "method": "DELETE",
     "status": 404,
-    "url": "{base}/admin/realms/identity-stack/organizations/49825999-d1c8-41ee-a4a8-f3590a592959/members/c0b53945-7a52-4072-b076-dfdacf5d9700"
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1/members/c74ed09b-71f9-4618-b5a0-55bf0104264d"
   },
   "organization_create": {
     "body": null,
-    "location": "{base}/admin/realms/identity-stack/organizations/49825999-d1c8-41ee-a4a8-f3590a592959",
+    "location": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1",
     "method": "POST",
     "status": 201,
-    "url": "{base}/admin/realms/identity-stack/organizations"
-  },
-  "organization_create_forbidden": {
-    "body": {
-      "error": "HTTP 403 Forbidden"
-    },
-    "method": "POST",
-    "status": 403,
     "url": "{base}/admin/realms/identity-stack/organizations"
   },
   "organization_create_name_taken": {
@@ -151,7 +536,7 @@
     "body": null,
     "method": "DELETE",
     "status": 204,
-    "url": "{base}/admin/realms/identity-stack/organizations/49825999-d1c8-41ee-a4a8-f3590a592959"
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1"
   },
   "organization_delete_again": {
     "body": {
@@ -159,14 +544,14 @@
     },
     "method": "DELETE",
     "status": 404,
-    "url": "{base}/admin/realms/identity-stack/organizations/49825999-d1c8-41ee-a4a8-f3590a592959"
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1"
   },
   "organization_find": {
     "body": [
       {
         "alias": "7e5a0000-0000-4000-8000-000000000586",
         "enabled": true,
-        "id": "49825999-d1c8-41ee-a4a8-f3590a592959",
+        "id": "03f48696-4309-4f5a-9cae-0a3f174d55c1",
         "name": "Recorded Co"
       }
     ],
@@ -183,14 +568,7 @@
   "organization_get": {
     "body": {
       "alias": "7e5a0000-0000-4000-8000-000000000586",
-      "attributes": {
-        "note": [
-          "kept"
-        ],
-        "type:tenant-admin": [
-          "another-member"
-        ]
-      },
+      "attributes": {},
       "domains": [
         {
           "autoRedirect": false,
@@ -199,60 +577,86 @@
         }
       ],
       "enabled": true,
-      "id": "49825999-d1c8-41ee-a4a8-f3590a592959",
+      "id": "03f48696-4309-4f5a-9cae-0a3f174d55c1",
       "name": "Recorded Co Renamed"
     },
     "method": "GET",
     "status": 200,
-    "url": "{base}/admin/realms/identity-stack/organizations/49825999-d1c8-41ee-a4a8-f3590a592959"
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1"
   },
-  "organization_get_marked": {
+  "organization_group_create": {
     "body": {
-      "alias": "7e5a0000-0000-4000-8000-000000000586",
-      "attributes": {
-        "note": [
-          "kept"
-        ],
-        "type:tenant-admin": [
-          "c0b53945-7a52-4072-b076-dfdacf5d9700",
-          "another-member"
-        ],
-        "type:viewer": [
-          "c0b53945-7a52-4072-b076-dfdacf5d9700"
-        ]
-      },
-      "domains": [
-        {
-          "autoRedirect": false,
-          "name": "recorded.test",
-          "verified": false
-        }
-      ],
-      "enabled": true,
-      "id": "49825999-d1c8-41ee-a4a8-f3590a592959",
-      "name": "Recorded Co Renamed"
+      "id": "fb419a24-5ec1-47c9-8b9c-56fa127b7720",
+      "name": "recorded-role",
+      "parentId": "409b16c9-7d06-4bde-9c0a-58662f52b1ec",
+      "path": "/recorded-role",
+      "subGroups": []
     },
+    "location": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1/groups/fb419a24-5ec1-47c9-8b9c-56fa127b7720",
+    "method": "POST",
+    "status": 201,
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1/groups"
+  },
+  "organization_group_create_taken": {
+    "body": {
+      "errorMessage": "Group with the given name already exists."
+    },
+    "method": "POST",
+    "status": 409,
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1/groups"
+  },
+  "organization_group_delete": {
+    "body": null,
+    "method": "DELETE",
+    "status": 204,
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1/groups/fb419a24-5ec1-47c9-8b9c-56fa127b7720"
+  },
+  "organization_group_delete_again": {
+    "body": {
+      "errorMessage": "Group does not exist"
+    },
+    "method": "DELETE",
+    "status": 404,
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1/groups/fb419a24-5ec1-47c9-8b9c-56fa127b7720"
+  },
+  "organization_group_update": {
+    "body": null,
+    "method": "PUT",
+    "status": 204,
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1/groups/fb419a24-5ec1-47c9-8b9c-56fa127b7720"
+  },
+  "organization_groups": {
+    "body": [
+      {
+        "attributes": {
+          "identity-stack.role-id": [
+            "40e00000-0000-4000-8000-000000000586"
+          ]
+        },
+        "clientRoles": {},
+        "id": "fb419a24-5ec1-47c9-8b9c-56fa127b7720",
+        "name": "recorded-role",
+        "parentId": "409b16c9-7d06-4bde-9c0a-58662f52b1ec",
+        "path": "/recorded-role",
+        "realmRoles": [],
+        "subGroups": []
+      }
+    ],
     "method": "GET",
     "status": 200,
-    "url": "{base}/admin/realms/identity-stack/organizations/49825999-d1c8-41ee-a4a8-f3590a592959"
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1/groups?briefRepresentation=false&first=0&max=100"
   },
-  "organization_mark": {
-    "body": null,
-    "method": "PUT",
-    "status": 204,
-    "url": "{base}/admin/realms/identity-stack/organizations/49825999-d1c8-41ee-a4a8-f3590a592959"
-  },
-  "organization_trim": {
-    "body": null,
-    "method": "PUT",
-    "status": 204,
-    "url": "{base}/admin/realms/identity-stack/organizations/49825999-d1c8-41ee-a4a8-f3590a592959"
+  "organization_groups_none": {
+    "body": [],
+    "method": "GET",
+    "status": 200,
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1/groups?briefRepresentation=false&first=0&max=100"
   },
   "organization_update": {
     "body": null,
     "method": "PUT",
     "status": 204,
-    "url": "{base}/admin/realms/identity-stack/organizations/49825999-d1c8-41ee-a4a8-f3590a592959"
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1"
   },
   "organization_update_domain_taken": {
     "body": {
@@ -260,7 +664,113 @@
     },
     "method": "PUT",
     "status": 400,
-    "url": "{base}/admin/realms/identity-stack/organizations/49825999-d1c8-41ee-a4a8-f3590a592959"
+    "url": "{base}/admin/realms/identity-stack/organizations/03f48696-4309-4f5a-9cae-0a3f174d55c1"
+  },
+  "organizations_list": {
+    "body": [
+      {
+        "alias": "acme",
+        "domains": [
+          {
+            "autoRedirect": false,
+            "name": "acme.test",
+            "verified": false
+          }
+        ],
+        "enabled": true,
+        "id": "f7d06aa1-f045-487e-80f5-49c940e3dbec",
+        "name": "Acme"
+      },
+      {
+        "alias": "globex",
+        "domains": [
+          {
+            "autoRedirect": false,
+            "name": "globex.test",
+            "verified": false
+          }
+        ],
+        "enabled": true,
+        "id": "184d8083-335e-449b-96fa-31d1f1af9e4b",
+        "name": "Globex"
+      },
+      {
+        "alias": "7e5a0000-0000-4000-8000-000000000586",
+        "domains": [
+          {
+            "autoRedirect": false,
+            "name": "recorded.test",
+            "verified": false
+          }
+        ],
+        "enabled": true,
+        "id": "03f48696-4309-4f5a-9cae-0a3f174d55c1",
+        "name": "Recorded Co Renamed"
+      },
+      {
+        "alias": "unlinked",
+        "domains": [
+          {
+            "autoRedirect": false,
+            "name": "unlinked.test",
+            "verified": false
+          }
+        ],
+        "enabled": true,
+        "id": "fa8259ee-3660-4c36-9a3d-980e0437e6e5",
+        "name": "Unlinked"
+      }
+    ],
+    "method": "GET",
+    "status": 200,
+    "url": "{base}/admin/realms/identity-stack/organizations?briefRepresentation=true&first=0&max=100"
+  },
+  "other_client_find": {
+    "body": [],
+    "method": "GET",
+    "status": 200,
+    "url": "{base}/admin/realms/identity-stack/clients?clientId=identity-stack-spa"
+  },
+  "role_composites": {
+    "body": [
+      {
+        "clientRole": true,
+        "composite": false,
+        "containerId": "27213994-6373-4d04-bb68-c1b78352610c",
+        "description": "Recorded",
+        "id": "0589ae7c-699e-4ba1-b2b0-f62537a534e1",
+        "name": "recorded:read"
+      }
+    ],
+    "method": "GET",
+    "status": 200,
+    "url": "{base}/admin/realms/identity-stack/roles-by-id/e547e544-4e54-49aa-b97b-224a5abc7959/composites"
+  },
+  "role_composites_none": {
+    "body": [],
+    "method": "GET",
+    "status": 200,
+    "url": "{base}/admin/realms/identity-stack/roles-by-id/e547e544-4e54-49aa-b97b-224a5abc7959/composites"
+  },
+  "role_delete": {
+    "body": null,
+    "method": "DELETE",
+    "status": 204,
+    "url": "{base}/admin/realms/identity-stack/roles-by-id/e547e544-4e54-49aa-b97b-224a5abc7959"
+  },
+  "role_delete_again": {
+    "body": {
+      "error": "Could not find role with id"
+    },
+    "method": "DELETE",
+    "status": 404,
+    "url": "{base}/admin/realms/identity-stack/roles-by-id/e547e544-4e54-49aa-b97b-224a5abc7959"
+  },
+  "role_update": {
+    "body": null,
+    "method": "PUT",
+    "status": 204,
+    "url": "{base}/admin/realms/identity-stack/roles-by-id/e547e544-4e54-49aa-b97b-224a5abc7959"
   },
   "service_account_find": {
     "body": [
@@ -268,11 +778,11 @@
         "access": {
           "manage": true
         },
-        "createdTimestamp": 1794899450506,
+        "createdTimestamp": 1795035852451,
         "disableableCredentialTypes": [],
         "emailVerified": false,
         "enabled": true,
-        "id": "f3feefdb-8ae3-4bba-85b1-0d3607ff16e0",
+        "id": "db651888-46b8-49d9-b208-d2fb3b2f0a74",
         "notBefore": 0,
         "requiredActions": [],
         "totp": false,
@@ -288,22 +798,38 @@
       "clientMappings": {
         "realm-management": {
           "client": "realm-management",
-          "id": "bbc59f75-e106-4a0d-8ec6-4fad6dd4a2d1",
+          "id": "3472d841-3e86-4fb5-96d3-239b92079f07",
           "mappings": [
             {
               "clientRole": true,
               "composite": false,
-              "containerId": "bbc59f75-e106-4a0d-8ec6-4fad6dd4a2d1",
+              "containerId": "3472d841-3e86-4fb5-96d3-239b92079f07",
               "description": "${role_manage-organizations}",
-              "id": "37a3f5ec-db49-4871-b3d8-317dcca34be9",
+              "id": "0e2bf689-25b0-4c50-9245-4709b9b105ab",
               "name": "manage-organizations"
             },
             {
               "clientRole": true,
               "composite": false,
-              "containerId": "bbc59f75-e106-4a0d-8ec6-4fad6dd4a2d1",
+              "containerId": "3472d841-3e86-4fb5-96d3-239b92079f07",
+              "description": "${role_view-events}",
+              "id": "033dc1d5-ba5b-42a3-991c-f15fb40f2b4d",
+              "name": "view-events"
+            },
+            {
+              "clientRole": true,
+              "composite": false,
+              "containerId": "3472d841-3e86-4fb5-96d3-239b92079f07",
+              "description": "${role_query-clients}",
+              "id": "b16e0419-914d-4a38-b77a-60d17e46af34",
+              "name": "query-clients"
+            },
+            {
+              "clientRole": true,
+              "composite": false,
+              "containerId": "3472d841-3e86-4fb5-96d3-239b92079f07",
               "description": "${role_manage-users}",
-              "id": "43d68c45-915b-4b28-b7c6-a68fcca3a9cc",
+              "id": "4589defc-6f68-429d-9aaa-3df5c0c95309",
               "name": "manage-users"
             }
           ]
@@ -312,30 +838,46 @@
     },
     "method": "GET",
     "status": 200,
-    "url": "{base}/admin/realms/identity-stack/users/f3feefdb-8ae3-4bba-85b1-0d3607ff16e0/role-mappings"
+    "url": "{base}/admin/realms/identity-stack/users/db651888-46b8-49d9-b208-d2fb3b2f0a74/role-mappings"
   },
   "service_account_roles": {
     "body": [
       {
         "clientRole": true,
         "composite": false,
-        "containerId": "bbc59f75-e106-4a0d-8ec6-4fad6dd4a2d1",
+        "containerId": "3472d841-3e86-4fb5-96d3-239b92079f07",
         "description": "${role_manage-organizations}",
-        "id": "37a3f5ec-db49-4871-b3d8-317dcca34be9",
+        "id": "0e2bf689-25b0-4c50-9245-4709b9b105ab",
         "name": "manage-organizations"
       },
       {
         "clientRole": true,
         "composite": false,
-        "containerId": "bbc59f75-e106-4a0d-8ec6-4fad6dd4a2d1",
+        "containerId": "3472d841-3e86-4fb5-96d3-239b92079f07",
+        "description": "${role_view-events}",
+        "id": "033dc1d5-ba5b-42a3-991c-f15fb40f2b4d",
+        "name": "view-events"
+      },
+      {
+        "clientRole": true,
+        "composite": false,
+        "containerId": "3472d841-3e86-4fb5-96d3-239b92079f07",
+        "description": "${role_query-clients}",
+        "id": "b16e0419-914d-4a38-b77a-60d17e46af34",
+        "name": "query-clients"
+      },
+      {
+        "clientRole": true,
+        "composite": false,
+        "containerId": "3472d841-3e86-4fb5-96d3-239b92079f07",
         "description": "${role_manage-users}",
-        "id": "43d68c45-915b-4b28-b7c6-a68fcca3a9cc",
+        "id": "4589defc-6f68-429d-9aaa-3df5c0c95309",
         "name": "manage-users"
       }
     ],
     "method": "GET",
     "status": 200,
-    "url": "{base}/admin/realms/identity-stack/users/f3feefdb-8ae3-4bba-85b1-0d3607ff16e0/role-mappings/clients/bbc59f75-e106-4a0d-8ec6-4fad6dd4a2d1/composite"
+    "url": "{base}/admin/realms/identity-stack/users/db651888-46b8-49d9-b208-d2fb3b2f0a74/role-mappings/clients/3472d841-3e86-4fb5-96d3-239b92079f07/composite"
   },
   "token": {
     "body": {
@@ -370,7 +912,7 @@
   },
   "user_create": {
     "body": null,
-    "location": "{base}/admin/realms/identity-stack/users/c0b53945-7a52-4072-b076-dfdacf5d9700",
+    "location": "{base}/admin/realms/identity-stack/users/c74ed09b-71f9-4618-b5a0-55bf0104264d",
     "method": "POST",
     "status": 201,
     "url": "{base}/admin/realms/identity-stack/users"
@@ -387,7 +929,7 @@
     "body": null,
     "method": "DELETE",
     "status": 204,
-    "url": "{base}/admin/realms/identity-stack/users/c0b53945-7a52-4072-b076-dfdacf5d9700"
+    "url": "{base}/admin/realms/identity-stack/users/c74ed09b-71f9-4618-b5a0-55bf0104264d"
   },
   "user_delete_again": {
     "body": {
@@ -395,7 +937,7 @@
     },
     "method": "DELETE",
     "status": 404,
-    "url": "{base}/admin/realms/identity-stack/users/c0b53945-7a52-4072-b076-dfdacf5d9700"
+    "url": "{base}/admin/realms/identity-stack/users/c74ed09b-71f9-4618-b5a0-55bf0104264d"
   },
   "user_find": {
     "body": [
@@ -403,12 +945,12 @@
         "access": {
           "manage": true
         },
-        "createdTimestamp": 1794899453254,
+        "createdTimestamp": 1795036315303,
         "disableableCredentialTypes": [],
         "email": "recorded@recorded.test",
         "emailVerified": false,
         "enabled": true,
-        "id": "c0b53945-7a52-4072-b076-dfdacf5d9700",
+        "id": "c74ed09b-71f9-4618-b5a0-55bf0104264d",
         "notBefore": 0,
         "requiredActions": [],
         "totp": false,
@@ -436,12 +978,12 @@
         "resetPassword": true,
         "view": true
       },
-      "createdTimestamp": 1794899453254,
+      "createdTimestamp": 1795036315303,
       "disableableCredentialTypes": [],
       "email": "recorded@recorded.test",
       "emailVerified": false,
       "enabled": true,
-      "id": "c0b53945-7a52-4072-b076-dfdacf5d9700",
+      "id": "c74ed09b-71f9-4618-b5a0-55bf0104264d",
       "notBefore": 0,
       "requiredActions": [],
       "totp": false,
@@ -449,7 +991,7 @@
     },
     "method": "GET",
     "status": 200,
-    "url": "{base}/admin/realms/identity-stack/users/c0b53945-7a52-4072-b076-dfdacf5d9700"
+    "url": "{base}/admin/realms/identity-stack/users/c74ed09b-71f9-4618-b5a0-55bf0104264d"
   },
   "user_get_none": {
     "body": {
@@ -457,12 +999,12 @@
     },
     "method": "GET",
     "status": 404,
-    "url": "{base}/admin/realms/identity-stack/users/c0b53945-7a52-4072-b076-dfdacf5d9700"
+    "url": "{base}/admin/realms/identity-stack/users/c74ed09b-71f9-4618-b5a0-55bf0104264d"
   },
   "user_update": {
     "body": null,
     "method": "PUT",
     "status": 204,
-    "url": "{base}/admin/realms/identity-stack/users/c0b53945-7a52-4072-b076-dfdacf5d9700"
+    "url": "{base}/admin/realms/identity-stack/users/c74ed09b-71f9-4618-b5a0-55bf0104264d"
   }
 }
