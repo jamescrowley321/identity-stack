@@ -235,6 +235,19 @@ def _role_record(entry: dict) -> dict:
     }
 
 
+def client_role_ref(entry: dict) -> ClientRoleRef:
+    """An API client role as the Admin API lists it (``name`` and ``attributes``), as a ``ClientRoleRef``."""
+    with tracer.start_as_current_span("keycloak_events.client_role_ref"):
+        record = _role_record(entry)
+        return _ref(record["name"], record["role_id"], record["permission_id"])
+
+
+def role_attribute(entry: dict) -> str | None:
+    """The canonical role id a client role or an organization group carries, if one."""
+    with tracer.start_as_current_span("keycloak_events.role_attribute"):
+        return _attribute(entry, ROLE_ATTRIBUTE)
+
+
 def _enabled(details: object) -> bool | None:
     """``enabled`` as an admin event's details record a change of it, else ``None`` (unchanged)."""
     value = details.get("updated_enabled") if isinstance(details, dict) else None

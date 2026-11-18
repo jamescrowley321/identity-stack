@@ -23,6 +23,10 @@ class KeycloakPullStateRepository(BaseRepository[KeycloakPullState]):
         result = await self._session.execute(sa.select(sa.func.pg_try_advisory_xact_lock(PULL_LOCK_ID)))
         return bool(result.scalar())
 
+    async def lock(self) -> None:
+        """Take the pull's advisory lock until the transaction ends, waiting for a poll that holds it."""
+        await self._session.execute(sa.select(sa.func.pg_advisory_xact_lock(PULL_LOCK_ID)))
+
     async def get_realm(self, realm: str) -> KeycloakPullState | None:
         """The realm's state as committed (never a stale copy the session already holds)."""
         stmt = (

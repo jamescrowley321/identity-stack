@@ -115,9 +115,9 @@ client up, and stops the backend before it serves a request when a setting is mi
 refuses the credential, a role is missing, or the API client cannot be found or its roles managed
 ([environment-variables.md](environment-variables.md)). Map the roles to the service account
 directly: roles it reaches only through a group or a composite realm role are not seen. No route
-changes: the services that synced to Descope sync to Keycloak instead. Reconciliation
-(`POST /api/internal/reconciliation/run`) compares the canonical model with Descope, so with
-`SYNC_PROVIDER=keycloak` it is refused (409).
+changes: the services that synced to Descope sync to Keycloak instead. With
+`SYNC_PROVIDER=keycloak`, reconciliation (`POST /api/internal/reconciliation/run`) runs Keycloak's
+pass ([Reconciliation](#reconciliation)).
 
 | Canonical | Keycloak | What the adapter pushes |
 |---|---|---|
@@ -170,8 +170,9 @@ raises. A failure of the service's own database during a push (reading or writin
 link) is such an error too, with no status: Keycloak was not asked. A push that takes access away
 (ending a membership, a deactivation) and fails is logged as an `ERROR` beginning
 `IdP revocation failed`, and the service's answer carries `"provider_sync": "failed"`: Keycloak
-still holds what the canonical change took away until the push is made again (reconciliation,
-[identity-stack#661](https://github.com/jamescrowley321/identity-stack/issues/661)). Authorization
+still holds what the canonical change took away until the push is made again: the change stays
+[pending](#reconciliation), and the next reconciliation pass pushes it, ending the membership or
+disabling the account, and keeps it pending until a push is delivered. Authorization
 never reads it: a removed membership is refused on the next request from the canonical model.
 `DELETE /api/roles/{name}` returns that answer; `POST /api/roles/remove` builds its own and does not
 show it, so alert on the log. The unit tests replay answers recorded from Keycloak 26.8.2
@@ -202,7 +203,7 @@ What Keycloak does not do, or the adapter does not take on:
 | A Keycloak user who signed up through the login page and has no `keycloak` IdP link, such as the realm's fixture users, has another username and is not taken over by email. | Keycloak refuses to create a second user with the same email (409); the adapter returns that error. A membership or status change for such a user is an error, logged and told as above. |
 | The adapter treats any Keycloak user whose username equals a canonical user id as its own. | A realm must not let users choose their username where it can hold a canonical id: keep self-registration and brokered first login from setting usernames, and keep users from editing theirs (`editUsernameAllowed` off). The compose realm has registration off, no identity providers and `editUsernameAllowed` at Keycloak's default, off. |
 | The admin client's grants reach further than the adapter needs: `manage-users` also creates realm groups, and `manage` on the API client also changes that client's settings and reads its secret. | Keep its secret like a realm admin's. |
-| A push that fails leaves Keycloak behind the canonical model. | It is logged and told as above; reconciliation ([identity-stack#661](https://github.com/jamescrowley321/identity-stack/issues/661)) re-pushes it. |
+| A push that fails leaves Keycloak behind the canonical model. | It is logged and told as above; the next [reconciliation](#reconciliation) pass re-pushes it. |
 | An organization's alias cannot change in Keycloak. | The alias is the canonical tenant id, which does not change either, or the alias a tenant was linked to. |
 | A canonical tenant's row is gone by the time `delete_tenant` runs. | The organization it reaches is the one whose alias is the canonical tenant id; a tenant linked to another alias keeps its organization. Nothing deletes a canonical tenant today. |
 | An organization's domains must be valid domain names, each held by one organization in the realm. | A domain Keycloak refuses (400) is an error, and the organization keeps its name and domains. |
@@ -255,8 +256,7 @@ canonical changes, their `sync_events` and the advanced cursor together: a resta
 mid-batch, resumes from the last commit and applies no event twice. The poll reads from 5 seconds
 before the cursor and passes the events it has already applied by id, so two events in the same
 millisecond, or one committed after a later one, are not lost. The first poll of a realm starts at the
-newest events: what happened before the pull was enabled is reconciliation's
-([identity-stack#661](https://github.com/jamescrowley321/identity-stack/issues/661)).
+newest events: what happened before the pull was enabled is [reconciliation's](#reconciliation).
 
 **Several workers.** Each worker runs the loop; a batch first takes a Postgres advisory lock
 (`pg_try_advisory_xact_lock`), and a worker that cannot take it leaves the poll to the one that holds
@@ -276,6 +276,67 @@ is skipped.
 user disabled, deleted or removed from an organization in Keycloak is refused (403) on the first
 request after the poll that applies it: up to `KEYCLOAK_PULL_INTERVAL_SECONDS` plus the poll. Their
 Keycloak tokens stay valid until they expire; the backend refuses them.
+
+## Reconciliation
+
+`POST /api/internal/reconciliation/run` (guarded by `DESCOPE_FLOW_SYNC_SECRET`, as for Descope) runs
+one pass per configured provider: the provider the canonical model is pushed to (`SYNC_PROVIDER`),
+when it has a reader. Descope and Keycloak have one; Ory and Zitadel are refused with 409 until theirs
+is added as one more entry of `RECONCILIATION_PASSES` (`app/dependencies/identity.py`). Each pass runs
+in its own transactions and is reported under `providers.<name>` of the answer, and its last outcome
+under `reconciliation.<name>` of `GET /api/sync/status`, which also gives `pending_pushes`, the number of
+canonical changes Keycloak is not yet confirmed to hold. The code is
+`app/services/keycloak_reconciliation.py`, wired in `app/dependencies/keycloak_reconciliation.py`.
+
+**Pending pushes.** A database trigger on `tenants`, `users`, `permissions`, `roles`,
+`role_permissions` and `user_tenant_roles` (migration `009_pending_pushes`) marks the entity a write
+changes in `pending_pushes`, in the transaction of the write: `tenant`, `user`, `permission`, `role`
+(its permissions included) or `membership` (every role of a user in a tenant). An update that changes
+nothing a push carries (a link the adapter writes, `updated_at`) marks nothing. A canonical change is
+**not yet delivered** while its entity is marked: from the commit that makes it, through a push in
+flight and a push that failed (`provider_sync: failed`), until a reconciliation pass has pushed the
+entity's current state and removed the mark. Each mark has a `seq` that every later change raises, and
+a pass removes a mark only up to the `seq` it read before it read the entity, so a change made during
+the push keeps its mark. A successful push from a request does not remove the mark: the next pass
+confirms it. The migration marks every entity that existed before it, so an entity that is not marked
+has been delivered at least once. The writes of the [event pull](#event-pull) and of a pass itself are
+Keycloak's state (`identity_stack.sync_origin` is `provider` for their transaction): they mark nothing,
+and they raise the `seq` of an entity already marked.
+
+**A pass**, with the event poller stopped or running:
+
+1. **Keycloak into Postgres.** In one transaction holding the reconciliation lock and the pull's lock,
+   the pass reads the marks, then the realm: the organizations, the members and role groups (with their
+   members) of those a tenant is linked to, the users, and the API client's roles with their composites.
+   Every difference is applied as the event that would have made it, through
+   `InboundSyncService.apply_keycloak_change` (the [event pull](#event-pull)'s table), each in a savepoint:
+   - A linked organization's name, domains and `enabled` are the tenant's; one that is gone suspends it.
+   - A linked account's names, `enabled`, and its email once Keycloak has verified it, are the user's;
+     a linked account that is gone deactivates the user.
+   - Every API client role is created or updated as a permission or role; a canonical permission or
+     role that no client role stands for (by its canonical id, or by name for an unstamped one) was
+     deleted in Keycloak and is deleted. A role's composites are its permissions.
+   - A member's role groups are their roles in the tenant. A member in no role group holds the default
+     role `member`, as the pull reads a member added. A user Keycloak no longer has as a member holds
+     no role there. So a role group deleted in the console, for which Keycloak records no member
+     removal and the pull takes in nothing, unassigns its role at the next pass.
+
+   A change whose subject is marked is rolled back: Keycloak's older state does not overwrite a
+   canonical change not yet delivered. Before committing, the pass reads the marks of every entity it
+   changed again; a canonical change committed during the read marks one of them, and then the pass
+   commits nothing and answers 409, to be run again. A poll waits for this half (its lock is taken
+   blocking here, and the poll only tries it), so a batch and the pass never interleave.
+2. **Postgres into Keycloak.** Each marked entity, in the order tenant, permission, role, user,
+   membership, is pushed from its current canonical state through `KeycloakSyncAdapter`, whose pushes
+   are idempotent: a tenant, a permission, a role with its permissions, a user's profile then status, or
+   every role group of a membership (a membership with no role left is ended, the case of
+   [identity-stack#612](https://github.com/jamescrowley321/identity-stack/issues/612)). An entity whose
+   row is gone is deleted in Keycloak. When every push for it is delivered its mark is removed; when one
+   fails, the mark stays for the next pass and a `failed` sync event (`detail.source` `reconciliation`)
+   records the operation and the error. A tenant linked to another provider's organization has nothing
+   to push. This half takes no lock: its pushes are idempotent and its marks are removed by `seq`.
+
+When the realm cannot be read, the pass applies and pushes nothing and answers 502.
 
 ## Upgrading from the token-authorized model
 

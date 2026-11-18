@@ -15,6 +15,7 @@ from app.models.identity.sync_event import SyncEvent, SyncEventVerb
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
 from app.repositories.sync_event import SyncEventRepository
+from app.repositories.sync_ledger import PendingPushRepository, ReconciliationRunRepository
 
 logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
@@ -29,10 +30,14 @@ class SyncStatusService:
         provider_repository: ProviderRepository,
         idp_link_repository: IdPLinkRepository,
         sync_event_repository: SyncEventRepository,
+        run_repository: ReconciliationRunRepository | None = None,
+        pending_push_repository: PendingPushRepository | None = None,
     ) -> None:
         self._provider_repo = provider_repository
         self._link_repo = idp_link_repository
         self._event_repo = sync_event_repository
+        self._run_repo = run_repository
+        self._pending_repo = pending_push_repository
 
     async def get_status(self) -> Result[dict[str, Any], IdentityError]:
         with tracer.start_as_current_span("SyncStatusService.get_status"):
@@ -55,14 +60,25 @@ class SyncStatusService:
                     }
                 )
 
-            return Ok(
-                {
-                    "providers": provider_payloads,
-                    "last_reconciliation": (
-                        latest_overall.occurred_at.isoformat() if latest_overall is not None else None
-                    ),
+            payload: dict[str, Any] = {
+                "providers": provider_payloads,
+                "last_reconciliation": (latest_overall.occurred_at.isoformat() if latest_overall is not None else None),
+            }
+            if self._run_repo is not None:
+                # Each provider's last reconciliation pass, by provider (Descope, Keycloak).
+                payload["reconciliation"] = {
+                    run.provider: {
+                        "finished_at": run.finished_at.isoformat(),
+                        "status": run.status,
+                        "stats": run.stats,
+                        "error": run.error,
+                    }
+                    for run in await self._run_repo.list_all()
                 }
-            )
+            if self._pending_repo is not None:
+                # Canonical changes the push provider is not yet confirmed to hold.
+                payload["pending_pushes"] = await self._pending_repo.count()
+            return Ok(payload)
 
     async def list_events(
         self,

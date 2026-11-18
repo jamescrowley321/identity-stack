@@ -6,7 +6,8 @@ with the sync adapter of the configured provider (get_sync_adapter): DescopeSync
 wrapping the singleton DescopeManagementClient by default, KeycloakSyncAdapter with
 SYNC_PROVIDER=keycloak, ZitadelSyncAdapter with SYNC_PROVIDER=zitadel.
 AC-3.1.1: get_inbound_sync_service() wires repositories for inbound sync.
-AC-3.2.1: get_reconciliation_service() wires repositories + Descope client for reconciliation.
+AC-3.2.1: get_reconciliation_service() wires the reconciliation pass of the configured provider
+(Descope's on the Descope client, Keycloak's on the admin client).
 AC-4.1.3: get_idp_link_service(), get_provider_service() for IdP link/provider domain services.
 AC-4.3.1: get_identity_resolution_service() for identity resolution with Redis cache.
 """
@@ -20,6 +21,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import State
 
+from app.dependencies.keycloak_reconciliation import build_keycloak_reconciliation
 from app.dependencies.keycloak_sync import build_keycloak_sync_adapter
 from app.dependencies.zitadel_sync import build_zitadel_sync_adapter
 from app.errors.identity import Conflict, IdentityErrorRaised
@@ -32,6 +34,7 @@ from app.repositories.permission import PermissionRepository
 from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
 from app.repositories.sync_event import SyncEventRepository
+from app.repositories.sync_ledger import PendingPushRepository, ReconciliationRunRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 from app.services.adapters.base import IdentityProviderAdapter
@@ -42,7 +45,7 @@ from app.services.idp_link import IdPLinkService
 from app.services.inbound_sync import InboundSyncService
 from app.services.permission import PermissionService
 from app.services.provider import ProviderService
-from app.services.reconciliation import ReconciliationService
+from app.services.reconciliation import ProviderReconciliation, ReconciliationService
 from app.services.role import RoleService
 from app.services.sync_status import SyncStatusService
 from app.services.tenant import TenantService
@@ -69,9 +72,10 @@ SYNC_ADAPTERS: dict[str, Callable[[State, AsyncSession], IdentityProviderAdapter
 }
 
 
-# Reconciliation reads Descope and writes what it finds into the canonical model,
-# so it is refused where the canonical model is pushed to another provider.
-RECONCILIATION_NEEDS_DESCOPE = "Reconciliation compares the canonical model with Descope; SYNC_PROVIDER is not descope"
+# Reconciliation runs one pass per configured provider: the provider the canonical
+# model is pushed to (SYNC_PROVIDER), when it has a reader. A provider with none
+# (Ory, Zitadel) is refused.
+RECONCILIATION_HAS_NO_READER = "Reconciliation has no reader for SYNC_PROVIDER; it reads descope and keycloak"
 
 
 def get_sync_adapter(request: Request, session: AsyncSession) -> IdentityProviderAdapter:
@@ -182,6 +186,8 @@ async def get_sync_status_service(
         provider_repository=ProviderRepository(session),
         idp_link_repository=IdPLinkRepository(session),
         sync_event_repository=SyncEventRepository(session),
+        run_repository=ReconciliationRunRepository(session),
+        pending_push_repository=PendingPushRepository(session),
     )
 
 
@@ -189,21 +195,17 @@ async def get_reconciliation_service(
     request: Request,
     session: AsyncSession = Depends(get_async_session),
 ) -> ReconciliationService:
-    """Build a ReconciliationService with all repositories and Descope client.
+    """Build a ReconciliationService with the pass of every configured provider.
 
-    AC-3.2.1: Wiring: AsyncSession -> all identity repositories + DescopeManagementClient
-               -> ReconciliationService(session, acquire_lock, descope_client, repositories...)
+    AC-3.2.1: Wiring: AsyncSession -> all identity repositories + the provider's reader
+               -> ReconciliationService(session, acquire_lock, descope_client | passes, repositories...)
     Advisory lock callable injected here to keep SA imports out of the domain service.
-    Refused (409) unless ``SYNC_PROVIDER`` is ``descope``.
+    The configured provider is ``SYNC_PROVIDER``: Descope's pass reads the Descope
+    Management API, Keycloak's the realm (``app.state.keycloak_admin``). Refused
+    (409) for a provider with no reader.
     """
-    if SYNC_PROVIDER != "descope":
-        raise IdentityErrorRaised(Conflict(message=RECONCILIATION_NEEDS_DESCOPE))
-    user_repository = UserRepository(session)
-    role_repository = RoleRepository(session)
-    permission_repository = PermissionRepository(session)
-    tenant_repository = TenantRepository(session)
-    idp_link_repository = IdPLinkRepository(session)
-    provider_repository = ProviderRepository(session)
+    if SYNC_PROVIDER != "descope" and SYNC_PROVIDER not in RECONCILIATION_PASSES:
+        raise IdentityErrorRaised(Conflict(message=RECONCILIATION_HAS_NO_READER))
 
     async def _acquire_lock() -> None:
         await session.execute(
@@ -211,18 +213,37 @@ async def get_reconciliation_service(
             {"lock_id": _RECONCILIATION_LOCK_ID},
         )
 
+    run_repository = ReconciliationRunRepository(session)
+    if SYNC_PROVIDER == "descope":
+        return ReconciliationService(
+            session=session,
+            acquire_lock=_acquire_lock,
+            descope_client=request.app.state.descope_client,
+            user_repository=UserRepository(session),
+            role_repository=RoleRepository(session),
+            permission_repository=PermissionRepository(session),
+            tenant_repository=TenantRepository(session),
+            idp_link_repository=IdPLinkRepository(session),
+            provider_repository=ProviderRepository(session),
+            publisher=request.app.state.cache_publisher,
+            run_repository=run_repository,
+        )
     return ReconciliationService(
         session=session,
         acquire_lock=_acquire_lock,
-        descope_client=request.app.state.descope_client,
-        user_repository=user_repository,
-        role_repository=role_repository,
-        permission_repository=permission_repository,
-        tenant_repository=tenant_repository,
-        idp_link_repository=idp_link_repository,
-        provider_repository=provider_repository,
+        passes=[RECONCILIATION_PASSES[SYNC_PROVIDER](request.app.state, session, _acquire_lock)],
         publisher=request.app.state.cache_publisher,
+        run_repository=run_repository,
     )
+
+
+# One entry per provider, besides Descope, whose state reconciliation reads: how its
+# pass is built from the application state, the request's session and the
+# reconciliation lock. Descope's pass is built by ReconciliationService from the
+# Descope client. A Zitadel or Ory reader is one more entry.
+RECONCILIATION_PASSES: dict[str, Callable[[State, AsyncSession, Callable], ProviderReconciliation]] = {
+    "keycloak": lambda state, session, lock: build_keycloak_reconciliation(state.keycloak_admin, session, lock),
+}
 
 
 async def get_idp_link_service(

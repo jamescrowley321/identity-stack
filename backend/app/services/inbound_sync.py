@@ -52,6 +52,11 @@ from app.services.keycloak_events import (
 logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
 
+# The ``detail.source`` of a sync event the Keycloak event pull recorded.
+KEYCLOAK_EVENT_SOURCE = "keycloak_event"
+# ... and of one a reconciliation pass recorded.
+RECONCILIATION_SOURCE = "reconciliation"
+
 
 def _hash_email(email: str) -> str:
     """One-way hash for OTel span attributes — avoids PII in traces."""
@@ -407,7 +412,12 @@ class InboundSyncService:
     # --- the Keycloak event pull ------------------------------------------------------
 
     async def apply_keycloak_change(
-        self, change: KeycloakChange, *, provider_id: uuid_mod.UUID, keycloak_event_id: str
+        self,
+        change: KeycloakChange,
+        *,
+        provider_id: uuid_mod.UUID,
+        keycloak_event_id: str,
+        source: str = KEYCLOAK_EVENT_SOURCE,
     ) -> Result[dict, IdentityError]:
         """Apply one change the Keycloak event pull read, in the caller's transaction.
 
@@ -418,8 +428,10 @@ class InboundSyncService:
         its client role carries, else by its name. A change of an entity the
         canonical model does not map is skipped and logged. The rows are flushed,
         never committed: the pull commits them together with its cursor. A sync
-        event is recorded for each change that writes or is skipped. The answer
-        names the cache entries to invalidate once the caller has committed.
+        event is recorded for each change that writes or is skipped, with
+        ``source`` (the pull's, or ``RECONCILIATION_SOURCE`` for a change a
+        reconciliation pass read). The answer names the cache entries to
+        invalidate once the caller has committed.
         """
         with tracer.start_as_current_span("InboundSyncService.apply_keycloak_change") as span:
             span.set_attribute("keycloak.change", type(change).__name__)
@@ -461,7 +473,7 @@ class InboundSyncService:
                     subject_id=applied.subject_id,
                     external_sub=applied.external_sub,
                     detail={
-                        "source": KEYCLOAK_EVENT_SOURCE,
+                        "source": source,
                         "keycloak_event_id": keycloak_event_id,
                         "change": type(change).__name__,
                         **({"reason": applied.reason} if applied.reason else {}),
@@ -858,10 +870,6 @@ class KeycloakPullRepositories:
     role: RoleRepository
     permission: PermissionRepository
     assignment: UserTenantRoleRepository
-
-
-# The ``detail.source`` of a sync event the Keycloak event pull recorded.
-KEYCLOAK_EVENT_SOURCE = "keycloak_event"
 
 
 @dataclass(frozen=True)

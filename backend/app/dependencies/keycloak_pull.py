@@ -24,6 +24,7 @@ from app.repositories.permission import PermissionRepository
 from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
 from app.repositories.sync_event import SyncEventRepository
+from app.repositories.sync_ledger import PendingPushRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 from app.services.cache_invalidation import CacheInvalidationPublisher
@@ -110,6 +111,7 @@ def build_keycloak_pull_service(
         provider_repository=ProviderRepository(session),
         page_size=page_size,
         publisher=publisher,
+        ledger=PendingPushRepository(session),
     )
 
 

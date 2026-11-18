@@ -19,6 +19,10 @@ and applies each event, oldest first across both stores, through
   can share one, and an event can be committed a little after a later one. A
   poll therefore reads from ``OVERLAP_MS`` before the cursor and passes the
   events it has already applied by id (``*_seen``).
+- **Not pushed back.** The canonical writes of a batch are Keycloak's state, so
+  they mark nothing pending (``PendingPushRepository.provider_writes``); a mark
+  already there is renewed, so a reconciliation pass that read the entity first
+  keeps it (``docs/keycloak.md#reconciliation``).
 - **First poll.** With no stored state the cursors start at the newest event of
   each store: what happened before the pull was enabled is reconciliation's.
 """
@@ -37,6 +41,7 @@ from app.errors.identity import IdentityError, NotFound, ProviderError
 from app.logbook import logbook
 from app.repositories.keycloak_pull import KeycloakPullStateRepository
 from app.repositories.provider import ProviderRepository
+from app.repositories.sync_ledger import PendingPushRepository
 from app.services.adapters.keycloak import PROVIDER_NAME
 from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.inbound_sync import InboundSyncService
@@ -110,8 +115,11 @@ class KeycloakPullService:
         provider_repository: ProviderRepository,
         page_size: int,
         publisher: CacheInvalidationPublisher | None = None,
+        ledger: PendingPushRepository | None = None,
     ) -> None:
         self._session = session
+        # Marks the batch's canonical writes as Keycloak's state: they are not changes to push back.
+        self._ledger = ledger
         self._api = api
         self._reader = reader
         self._inbound = inbound
@@ -171,6 +179,8 @@ class KeycloakPullService:
             # Nothing new: no write, and the lock goes with the transaction.
             await self._session.rollback()
             return Ok(False)
+        if self._ledger is not None:
+            await self._ledger.provider_writes(True)
         invalidations: list[dict] = []
         unavailable: KeycloakAdminError | None = None
         for event, stream in batch.events:
@@ -191,6 +201,8 @@ class KeycloakPullService:
         state.organizations = dict(snapshot.organizations)
         state.client_roles = dict(snapshot.client_roles)
         await self._states.update(state)
+        if self._ledger is not None:
+            await self._ledger.provider_writes(False)
         await self._states.commit()
         await self._publish(invalidations)
         if unavailable is not None:

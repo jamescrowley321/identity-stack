@@ -487,6 +487,27 @@ class KeycloakAdminApi:
         with tracer.start_as_current_span("KeycloakAdminApi.list_organizations"):
             return await self._all("/organizations", {"briefRepresentation": "true"})
 
+    async def organizations(self) -> list[dict]:
+        """Every organization of the realm with its domains and ``enabled``, read a page at a time."""
+        with tracer.start_as_current_span("KeycloakAdminApi.organizations"):
+            return await self._all("/organizations", {"briefRepresentation": "false"})
+
+    async def organization_members(self, organization_id: str) -> list[dict]:
+        """Every member of the organization, read a page at a time."""
+        with tracer.start_as_current_span("KeycloakAdminApi.organization_members"):
+            return await self._all(f"/organizations/{quote(organization_id, safe='')}/members", {})
+
+    async def organization_group_members(self, organization_id: str, group_id: str) -> list[dict]:
+        """Every member of one of the organization's groups, read a page at a time."""
+        with tracer.start_as_current_span("KeycloakAdminApi.organization_group_members"):
+            path = f"/organizations/{quote(organization_id, safe='')}/groups/{quote(group_id, safe='')}/members"
+            return await self._all(path, {})
+
+    async def users(self) -> list[dict]:
+        """Every user of the realm, read a page at a time."""
+        with tracer.start_as_current_span("KeycloakAdminApi.users"):
+            return await self._all("/users", {"briefRepresentation": "false"})
+
     async def organization_groups(self, organization_id: str) -> list[dict]:
         """Every group the organization owns, attributes included."""
         with tracer.start_as_current_span("KeycloakAdminApi.organization_groups"):

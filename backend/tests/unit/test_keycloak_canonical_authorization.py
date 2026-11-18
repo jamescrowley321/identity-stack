@@ -232,7 +232,12 @@ APP_DIR = Path(__file__).resolve().parents[2] / "app"
 # that adapter's canonical links: they push canonical changes out and decide no
 # request's access. ``dependencies/keycloak_pull.py`` wires the event pull, which
 # brings Keycloak's changes in, in a background task: no request goes through it.
-NOT_AUTHORIZATION = {"dependencies/identity.py", "dependencies/keycloak_sync.py", "dependencies/keycloak_pull.py"}
+NOT_AUTHORIZATION = {
+    "dependencies/identity.py",
+    "dependencies/keycloak_sync.py",
+    "dependencies/keycloak_pull.py",
+    "dependencies/keycloak_reconciliation.py",
+}
 
 
 def _code_mentions(tree: ast.AST) -> list[str]:

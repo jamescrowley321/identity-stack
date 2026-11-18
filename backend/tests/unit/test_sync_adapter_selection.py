@@ -47,6 +47,7 @@ from app.services.keycloak_admin import (
     ADMIN_CREDENTIAL_VARIABLE,
     KeycloakAdminApi,
 )
+from app.services.keycloak_reconciliation import KeycloakReconciliation
 from app.services.reconciliation import ReconciliationService
 from app.services.role import NOT_A_MEMBER_OF_THE_TENANT, RoleService
 from app.services.user import UserService
@@ -119,20 +120,29 @@ def recorded_client(api: RecordedAdminApi):
 
 
 class TestReconciliation:
-    """Reconciliation compares the canonical model with Descope: it runs only where Descope is synced to."""
+    """Reconciliation runs the pass of the provider the canonical model is pushed to, when it has a reader."""
 
     async def test_descope_deployments_reconcile(self):
         service = await get_reconciliation_service(mock_request(), session=AsyncMock())
 
         assert isinstance(service, ReconciliationService)
 
-    async def test_keycloak_deployments_refuse_to_reconcile_against_descope(self, monkeypatch):
+    async def test_keycloak_deployments_reconcile_against_keycloak_only(self, monkeypatch):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        keycloak_admin = object()
+
+        service = await get_reconciliation_service(mock_request(keycloak_admin=keycloak_admin), session=AsyncMock())
+
+        assert [type(provider_pass) for provider_pass in service._passes] == [KeycloakReconciliation]
+        assert service._passes[0]._api is keycloak_admin
+
+    async def test_a_provider_with_no_reader_is_refused(self, monkeypatch):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "zitadel")
 
         with pytest.raises(IdentityErrorRaised) as refused:
             await get_reconciliation_service(mock_request(), session=AsyncMock())
 
-        assert refused.value.error == Conflict(message=identity.RECONCILIATION_NEEDS_DESCOPE)
+        assert refused.value.error == Conflict(message=identity.RECONCILIATION_HAS_NO_READER)
 
 
 class FakeState:
