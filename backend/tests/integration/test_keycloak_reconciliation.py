@@ -13,6 +13,7 @@ afterwards whatever the outcome.
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 import httpx
@@ -20,7 +21,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import delete, select, text
 
-from app.dependencies.identity import _RECONCILIATION_LOCK_ID
+from app.dependencies.identity import _RECONCILIATION_LOCK_ID, _RECONCILIATION_PASS_LOCK_ID
 from app.dependencies.keycloak_reconciliation import build_keycloak_reconciliation
 from app.dependencies.keycloak_sync import build_keycloak_sync_adapter
 from app.models.identity.assignment import UserTenantRole
@@ -28,7 +29,7 @@ from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.role import Permission, Role
 from app.models.identity.sync_ledger import PendingPush, ReconciliationRun
 from app.models.identity.tenant import Tenant, TenantStatus
-from app.models.identity.user import User, UserStatus
+from app.models.identity.user import IdPLink, User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.permission import PermissionRepository
 from app.repositories.role import RoleRepository
@@ -52,6 +53,7 @@ from tests.helpers.keycloak import KeycloakTokenSource
 from tests.helpers.keycloak_model import ADMIN_CLIENT_ID, ADMIN_CLIENT_SECRET, API_AUDIENCE
 
 KEYCLOAK = "keycloak"
+PASS_LOCK = _RECONCILIATION_PASS_LOCK_ID
 
 
 @pytest.fixture
@@ -124,6 +126,15 @@ class Pass:
     api: KeycloakAdminApi
     session: object
 
+    @asynccontextmanager
+    async def hold_pass(self):
+        """The pass lock, on the test's own connection (its transaction is rolled back afterwards)."""
+        held = (await self.session.execute(text("SELECT pg_try_advisory_lock(:id)"), {"id": PASS_LOCK})).scalar()
+        try:
+            yield bool(held)
+        finally:
+            await self.session.execute(text("SELECT pg_advisory_unlock(:id)"), {"id": PASS_LOCK})
+
     async def run(self) -> dict:
         async def lock() -> None:
             await self.session.execute(
@@ -133,7 +144,7 @@ class Pass:
         service = ReconciliationService(
             session=self.session,
             acquire_lock=lock,
-            passes=[build_keycloak_reconciliation(self.api, self.session, lock)],
+            passes=[build_keycloak_reconciliation(self.api, self.session, lock, self.hold_pass)],
             run_repository=ReconciliationRunRepository(self.session),
         )
         result = await service.run()
@@ -275,6 +286,7 @@ class TestConvergence:
     async def test_changes_on_both_sides_converge_after_one_pass(
         self, console, api_client_id, made, db_session, provider, reconcile
     ):
+        provider_id = provider.id
         model, _ = await _pushed(db_session, reconcile, made)
         await _default_role(db_session)
         organization = _organization(console, model.alias)
@@ -298,6 +310,9 @@ class TestConvergence:
             "/users", json={"username": str(other_id), "email": other_email, "enabled": True}
         ).raise_for_status()
         other_account = _account(console, str(other_id))
+        # Linked as a first sign-in links an account: a username alone does not stand for a canonical user.
+        db_session.add(IdPLink(user_id=other_id, provider_id=provider_id, external_sub=other_account["id"]))
+        await db_session.flush()
         console.post(f"{path}/members", json=other_account["id"]).raise_for_status()
 
         # Canonical side, as the services write it: a new permission and a deactivation.
@@ -405,6 +420,42 @@ class TestFailedPushes:
             extra_name: str(extra_id),
         }
         assert await _roles_of(db_session, model.user_id, model.tenant_id) == sorted([role_name, extra_name])
+
+
+class TestUnlinkedAccounts:
+    async def test_an_account_under_a_canonical_id_it_was_not_created_for_is_not_that_user(
+        self, console, made, db_session, provider, reconcile
+    ):
+        """An account someone else made with a canonical user's id as its username takes over nothing."""
+        suffix = uuid.uuid4().hex[:10]
+        victim = User(
+            email=f"victim-{suffix}@recon.test", user_name="victim", given_name="Victim", status=UserStatus.active
+        )
+        db_session.add(victim)
+        await db_session.flush()
+        victim_id = victim.id
+        made.usernames.append(str(victim_id))
+        console.post(
+            "/users",
+            json={
+                "username": str(victim_id),
+                "email": f"squat-{suffix}@recon.test",
+                "emailVerified": True,
+                "firstName": "Squatter",
+                "enabled": False,
+            },
+        ).raise_for_status()
+
+        await reconcile.run()
+
+        await db_session.refresh(victim)
+        assert (victim.given_name, victim.email, victim.status) == (
+            "Victim",
+            f"victim-{suffix}@recon.test",
+            UserStatus.active,
+        )
+        links = (await db_session.execute(select(IdPLink).where(IdPLink.user_id == victim_id))).scalars().all()
+        assert links == []
 
 
 class TestUndelivered:

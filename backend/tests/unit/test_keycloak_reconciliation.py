@@ -7,6 +7,7 @@ pass against the compose Keycloak and Postgres.
 """
 
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -48,6 +49,8 @@ class FakeApi:
     group_members: dict[str, list[dict]] = field(default_factory=dict)
     users_: list[dict] = field(default_factory=list)
     roles: list[dict] = field(default_factory=list)
+    # Accounts a paged list missed but that are there when asked by id.
+    unlisted_users: list[dict] = field(default_factory=list)
     unavailable: bool = False
 
     async def organizations(self):
@@ -78,6 +81,16 @@ class FakeApi:
 
     async def find_user(self, username):
         return next((entry for entry in self.users_ if entry["username"] == username), None)
+
+    async def get_user(self, user_id):
+        return next((entry for entry in self.users_ + self.unlisted_users if entry["id"] == user_id), None)
+
+    async def organizations_of(self, user_id):
+        return frozenset(
+            organization_id
+            for organization_id, members in self.members.items()
+            if user_id in {member["id"] for member in members}
+        )
 
 
 @dataclass
@@ -176,14 +189,51 @@ def _tenant(alias="acme"):
     )
 
 
-def _pass(*, api=None, state=None, ledger=None, inbound=None, adapter=None, session=None, provider=True, events=None):
+class FakeLinks:
+    def __init__(self, linked=()):
+        self.linked = set(linked)
+        self.written = []
+
+    async def has_link(self, user_id):
+        return user_id in self.linked
+
+    async def link_user(self, user_id, sub, email):
+        self.written.append((user_id, sub, email))
+
+    async def linked_elsewhere(self, tenant_id):
+        return False
+
+
+def _held(held=True):
+    @asynccontextmanager
+    async def hold():
+        yield held
+
+    return hold
+
+
+def _pass(
+    *,
+    api=None,
+    state=None,
+    ledger=None,
+    inbound=None,
+    adapter=None,
+    session=None,
+    provider=True,
+    events=None,
+    links=None,
+    hold_pass=None,
+):
     providers = AsyncMock()
     providers.get_by_name.return_value = SimpleNamespace(id=PROVIDER_ID) if provider else None
     return KeycloakReconciliation(
         session=session or _session(),
         acquire_lock=AsyncMock(),
+        hold_pass=hold_pass or _held(),
         api=api or FakeApi(),
         adapter=adapter or AsyncMock(),
+        links=links or FakeLinks(),
         inbound=inbound or RecordingInbound(),
         state=state or FakeState(),
         ledger=ledger or FakeLedger(),
@@ -253,8 +303,8 @@ class TestNotYetDelivered:
         assert result.is_error()
         assert isinstance(result.error, Conflict)
         session.rollback.assert_awaited()
-        session.commit.assert_not_awaited()
-        adapter.sync_tenant.assert_not_awaited()
+        # Nothing of the first half commits; the pending tenant is still pushed.
+        adapter.sync_tenant.assert_awaited_once()
 
     async def test_a_change_to_an_unmarked_entity_is_applied(self):
         tenant = _tenant()
@@ -312,6 +362,24 @@ class TestTheRealmRead:
         assert inbound.applied == []
         adapter.sync_tenant.assert_not_awaited()
         session.commit.assert_not_awaited()
+
+    async def test_a_pass_already_running(self):
+        inbound = RecordingInbound()
+
+        result = await _pass(hold_pass=_held(False), inbound=inbound).reconcile()
+
+        assert result.error == Conflict(message="A Keycloak reconciliation pass is already running")
+        assert inbound.applied == []
+
+    async def test_an_account_a_paged_list_missed_is_not_deleted(self):
+        user_id = uuid.uuid4()
+        state = FakeState(links=[SimpleNamespace(external_sub="kc-there", user_id=user_id)])
+        api = FakeApi(unlisted_users=[{"id": "kc-there", "username": "there"}])
+        inbound = RecordingInbound()
+
+        await _pass(api=api, state=state, inbound=inbound).reconcile()
+
+        assert [change for change, _ in inbound.applied if isinstance(change, UserDeleted)] == []
 
     async def test_no_provider_row(self):
         result = await _pass(provider=False).reconcile()
@@ -374,7 +442,7 @@ class TestTheRealmRead:
             by_kind.setdefault(type(change), []).append(change)
 
         def account(name):
-            return KeycloakAccount(id=f"kc-{name}", username=name)
+            return KeycloakAccount(id=f"kc-{name}", username=name, admin_named=False)
 
         assert by_kind[TenantDeleted] == [TenantDeleted(alias="deleted")]
         assert by_kind[UserDeleted] == [UserDeleted(KeycloakAccount(id="kc-departed", username=None))]
@@ -423,7 +491,13 @@ class TestPushes:
         adapter = AsyncMock()
         adapter.sync_user.return_value = Ok(None)
 
-        await _pass(state=FakeState(users_=[user]), ledger=ledger, adapter=adapter).reconcile()
+        await _pass(
+            api=FakeApi(users_=[{"id": "kc", "username": str(user.id)}]),
+            state=FakeState(users_=[user]),
+            ledger=ledger,
+            adapter=adapter,
+            links=FakeLinks(linked={user.id}),
+        ).reconcile()
 
         data = {"email": "a@x.test", "status": "inactive", "given_name": "A", "family_name": "B"}
         assert [entry.kwargs for entry in adapter.sync_user.await_args_list] == [
@@ -431,6 +505,70 @@ class TestPushes:
             {"user_id": user.id, "data": {**data, STATUS_CHANGED: True}},
         ]
         assert ledger.cleared == [("user", str(user.id), 3)]
+
+    async def test_an_account_the_push_creates_is_linked(self):
+        user = SimpleNamespace(
+            id=uuid.uuid4(), email="a@x.test", status=SimpleNamespace(value="active"), given_name="A", family_name="B"
+        )
+        api = FakeApi()
+        adapter = AsyncMock()
+
+        async def create(*, user_id, data):
+            if not api.users_:
+                api.users_.append({"id": "kc-new", "username": str(user_id)})
+            return Ok(None)
+
+        adapter.sync_user.side_effect = create
+        links = FakeLinks()
+
+        await _pass(
+            api=api,
+            state=FakeState(users_=[user]),
+            ledger=FakeLedger(marks={("user", str(user.id)): 1}),
+            adapter=adapter,
+            links=links,
+        ).reconcile()
+
+        assert links.written == [(user.id, "kc-new", "a@x.test")]
+
+    async def test_an_account_already_under_the_canonical_id_is_not_linked(self):
+        """A username is not proof: an account someone else made under the canonical id stays unlinked."""
+        user = SimpleNamespace(
+            id=uuid.uuid4(), email="a@x.test", status=SimpleNamespace(value="active"), given_name="A", family_name="B"
+        )
+        api = FakeApi(users_=[{"id": "kc-other", "username": str(user.id)}])
+        adapter = AsyncMock()
+        adapter.sync_user.return_value = Ok(None)
+        links = FakeLinks()
+
+        await _pass(
+            api=api,
+            state=FakeState(users_=[user]),
+            ledger=FakeLedger(marks={("user", str(user.id)): 1}),
+            adapter=adapter,
+            links=links,
+        ).reconcile()
+
+        assert links.written == []
+
+    async def test_an_unlinked_account_named_after_a_canonical_user_is_not_that_user(self):
+        user = SimpleNamespace(id=uuid.uuid4())
+        api = FakeApi(
+            users_=[
+                {
+                    "id": "kc-squatter",
+                    "username": str(user.id),
+                    "enabled": False,
+                    "emailVerified": True,
+                    "email": "s@x.test",
+                }
+            ]
+        )
+        inbound = RecordingInbound()
+
+        await _pass(api=api, state=FakeState(users_=[user]), inbound=inbound).reconcile()
+
+        assert [change for change, _ in inbound.applied if isinstance(change, UserUpdated)] == []
 
     async def test_a_tenant_linked_to_another_provider_has_nothing_to_push(self):
         tenant = _tenant(alias=None)

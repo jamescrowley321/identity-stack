@@ -1,5 +1,6 @@
 """KeycloakReconciliation — Keycloak's reconciliation pass (``docs/keycloak.md#reconciliation``).
 
+One pass runs at a time (``hold_pass``, a session lock held from start to end).
 A pass has two halves.
 
 1. **Keycloak into Postgres.** In one transaction holding the reconciliation lock
@@ -10,7 +11,8 @@ A pass has two halves.
    pull would have read (``InboundSyncService.apply_keycloak_change``), so a
    difference means what the matching event means: a member with no role group
    holds the default role ``member``, a deleted organization suspends its tenant,
-   a deleted account deactivates its user. Each change is applied in a savepoint.
+   a deleted account deactivates its user. An account is a canonical user's only
+   through its ``keycloak`` IdP link. Each change is applied in a savepoint.
 2. **Postgres into Keycloak.** Every entity marked in ``pending_pushes`` is pushed
    through ``KeycloakSyncAdapter`` from its current canonical state, and its mark
    is removed once every push for it is delivered.
@@ -56,6 +58,7 @@ from app.services.adapters.base import LAST_ROLE_IN_TENANT, STATUS_CHANGED, Sync
 from app.services.adapters.keycloak import (
     PROVIDER_NAME,
     SERVICE_ACCOUNT_PREFIX,
+    KeycloakLinks,
     KeycloakSyncAdapter,
     Refusal,
     role_client_name,
@@ -83,6 +86,7 @@ from app.services.reconciliation import PassOutcome
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
+    from contextlib import AbstractAsyncContextManager
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -105,7 +109,7 @@ _MARK_KIND = {
 }
 
 # Refusals that mean Keycloak has nothing to change: the tenant is another
-# provider's organization, or a removal for an account Keycloak does not have.
+# provider's organization.
 _NOTHING_TO_PUSH = frozenset({Refusal.TENANT_LINKED_ELSEWHERE})
 
 
@@ -142,8 +146,10 @@ class KeycloakReconciliation:
         *,
         session: AsyncSession,
         acquire_lock: Callable[[], Coroutine[Any, Any, None]],
+        hold_pass: Callable[[], AbstractAsyncContextManager[bool]],
         api: KeycloakAdminApi,
         adapter: KeycloakSyncAdapter,
+        links: KeycloakLinks,
         inbound: InboundSyncService,
         state: CanonicalStateRepository,
         ledger: PendingPushRepository,
@@ -153,8 +159,10 @@ class KeycloakReconciliation:
     ) -> None:
         self._session = session
         self._acquire_lock = acquire_lock
+        self._hold_pass = hold_pass
         self._api = api
         self._adapter = adapter
+        self._links = links
         self._inbound = inbound
         self._state = state
         self._ledger = ledger
@@ -174,31 +182,45 @@ class KeycloakReconciliation:
                 "push_failed": 0,
                 "pending": 0,
             }
-            try:
-                await self._acquire_lock()
-                # The pull's lock too: a poll waits for the first half instead of interleaving with it.
-                await self._pull.lock()
-            except Exception as exc:
-                await self._session.rollback()
-                logger.error("Keycloak reconciliation: the locks could not be taken: %s", type(exc).__name__)
-                return Error(ProviderError(message=f"Failed to acquire reconciliation lock: {exc}"))
-            provider = await self._providers.get_by_name(PROVIDER_NAME)
-            if provider is None:
-                await self._session.rollback()
-                return Error(NotFound(message=f"No {PROVIDER_NAME!r} provider row: run the Keycloak seed first"))
-            provider_id = provider.id
+            # One pass at a time from start to end: the second half commits after each push,
+            # which ends a transaction lock, and two passes pushing one entity from reads of
+            # different ages would leave Keycloak with the older one and no mark.
+            async with self._hold_pass() as held:
+                if not held:
+                    return Error(Conflict(message="A Keycloak reconciliation pass is already running"))
+                return await self._reconcile(run_id, stats, span)
 
-            pulled = await self._pull_in(provider_id, run_id, stats)
-            if pulled.is_error():
-                span.set_attribute("reconciliation.status", "aborted")
-                return Error(pulled.error)
-            await self._push_out(provider_id, run_id, stats)
-            stats["pending"] = await self._ledger.count()
+    async def _reconcile(self, run_id: str, stats: dict[str, int], span) -> Result[PassOutcome, IdentityError]:
+        try:
+            await self._acquire_lock()
+            # The pull's lock too: a poll waits for the first half instead of interleaving with it.
+            await self._pull.lock()
+        except Exception as exc:
             await self._session.rollback()
-            for key, value in stats.items():
-                span.set_attribute(f"reconciliation.{key}", value)
-            logger.info("Keycloak reconciliation completed: %s", stats)
-            return Ok(PassOutcome(stats=stats, changes=stats["applied"] + stats["pushed"]))
+            logger.error("Keycloak reconciliation: the locks could not be taken: %s", type(exc).__name__)
+            return Error(ProviderError(message=f"Failed to acquire reconciliation lock: {exc}"))
+        provider = await self._providers.get_by_name(PROVIDER_NAME)
+        if provider is None:
+            await self._session.rollback()
+            return Error(NotFound(message=f"No {PROVIDER_NAME!r} provider row: run the Keycloak seed first"))
+        provider_id = provider.id
+
+        pulled = await self._pull_in(provider_id, run_id, stats)
+        if pulled.is_error() and not isinstance(pulled.error, Conflict):
+            span.set_attribute("reconciliation.status", "aborted")
+            return Error(pulled.error)
+        # After a conflict too: the pushes do not depend on the first half, and a write that
+        # keeps conflicting must not keep every pending change from being delivered.
+        await self._push_out(provider_id, run_id, stats)
+        stats["pending"] = await self._ledger.count()
+        await self._session.rollback()
+        for key, value in stats.items():
+            span.set_attribute(f"reconciliation.{key}", value)
+        if pulled.is_error():
+            span.set_attribute("reconciliation.status", "conflict")
+            return Error(pulled.error)
+        logger.info("Keycloak reconciliation completed: %s", stats)
+        return Ok(PassOutcome(stats=stats, changes=stats["applied"] + stats["pushed"]))
 
     # --- Keycloak into Postgres -----------------------------------------------------
 
@@ -207,11 +229,11 @@ class KeycloakReconciliation:
         tenants = await self._state.tenants_linked_to(provider_id)
         try:
             realm = await self._read_realm({tenant.external_org_id for tenant in tenants})
+            changes = await self._changes(realm, tenants, provider_id)
         except KeycloakAdminError as exc:
             await self._session.rollback()
             logger.warning("Keycloak reconciliation: the realm could not be read (status %s)", exc.status)
             return Error(ProviderError(message=f"Keycloak could not be read: {exc}"))
-        changes = await self._changes(realm, tenants, provider_id)
         await self._ledger.provider_writes(True)
         touched: set[tuple[str, str]] = set()
         for change in changes:
@@ -294,7 +316,9 @@ class KeycloakReconciliation:
         for tenant in tenants:
             organization = by_alias.get(tenant.external_org_id)
             if organization is None:
-                changes.append(TenantDeleted(alias=tenant.external_org_id))
+                # A list read a page at a time can miss an entry that moved: asked once more, by itself.
+                if await self._api.find_organization(tenant.external_org_id) is None:
+                    changes.append(TenantDeleted(alias=tenant.external_org_id))
                 continue
             changes.append(
                 TenantUpdated(
@@ -384,7 +408,7 @@ class KeycloakReconciliation:
                 )
             )
         for link in links:
-            if link.external_sub not in accounts:
+            if link.external_sub not in accounts and await self._api.get_user(link.external_sub) is None:
                 changes.append(UserDeleted(KeycloakAccount(id=link.external_sub, username=None)))
 
         # Memberships and role assignments, organization by organization.
@@ -413,7 +437,7 @@ class KeycloakReconciliation:
                 canonical = held.get((user_id, tenant.id), set())
                 account = _account(accounts[account_id])
                 if account_id not in members:
-                    if canonical:
+                    if canonical and organization["id"] not in await self._api.organizations_of(account_id):
                         changes.append(MembershipChanged(alias=alias, account=account, added=False))
                     continue
                 grouped = in_groups.get(account_id, set())
@@ -429,30 +453,15 @@ class KeycloakReconciliation:
         return changes
 
     async def _account_users(self, realm: RealmState, links: list) -> dict[str, uuid.UUID]:
-        """The canonical user each Keycloak account stands for: its ``keycloak`` link, else its username.
+        """The canonical user each Keycloak account stands for: the one its ``keycloak`` link names.
 
-        A username stands for the canonical user of that id only when that user is
-        linked to no other account (``InboundSyncService._keycloak_user``).
+        A username is not taken as proof (unlike an administrator's event in the
+        pull): a realm that lets a person choose a username would let them name
+        another canonical user. The accounts a pass creates are linked when they
+        are created (``_push``), as the adapter links a user created in a tenant.
         """
-        linked = {link.external_sub: link.user_id for link in links}
-        linked_users = defaultdict(set)
-        for link in links:
-            linked_users[link.user_id].add(link.external_sub)
-        named: dict[str, uuid.UUID] = {}
-        for account in realm.users:
-            if account["id"] in linked or _is_service_account(account):
-                continue
-            try:
-                named[account["id"]] = uuid.UUID(str(account.get("username")))
-            except ValueError:
-                continue
-        existing = {user.id for user in await self._state.users(named.values())}
-        user_of = {account_id: user_id for account_id, user_id in linked.items()}
-        for account_id, user_id in named.items():
-            if user_id in existing and linked_users[user_id] <= {account_id}:
-                user_of[account_id] = user_id
         accounts = {account["id"] for account in realm.users if not _is_service_account(account)}
-        return {account_id: user_id for account_id, user_id in user_of.items() if account_id in accounts}
+        return {link.external_sub: link.user_id for link in links if link.external_sub in accounts}
 
     async def _failed(
         self, provider_id: uuid.UUID, run_id: str, operation: str, subject: str, message: str, stats: dict[str, int]
@@ -499,7 +508,7 @@ class KeycloakReconciliation:
         if kind == TENANT:
             rows = await self._state.tenants([entity_id])
             if not rows:
-                return _failure(await self._adapter.delete_tenant(tenant_id=entity_id))
+                return await self._delete_tenant(entity_id, snapshot)
             tenant = rows[0]
             data = {
                 "name": tenant.name,
@@ -540,18 +549,49 @@ class KeycloakReconciliation:
                 "given_name": user.given_name,
                 "family_name": user.family_name,
             }
+            # Only an account this push creates is linked: one already under the canonical id is not proof.
+            creates = not await self._links.has_link(entity_id) and await self._api.find_user(key) is None
             # The profile first (it creates a missing account), then the status, which never creates one.
             failure = _failure(await self._adapter.sync_user(user_id=entity_id, data=data))
             if failure is not None:
                 return failure
+            if creates:
+                created = await self._api.find_user(key)
+                if created is None:
+                    return SyncError(message=Refusal.USER_NOT_IN_KEYCLOAK.value, operation="link_user")
+                await self._links.link_user(entity_id, created["id"], user.email)
             return _failure(await self._adapter.sync_user(user_id=entity_id, data={**data, STATUS_CHANGED: True}))
         logger.warning("Keycloak reconciliation: a pending push of unknown kind %r is left as it is", kind)
         return SyncError(message=f"unknown pending push kind {kind!r}", operation="push")
+
+    async def _delete_tenant(self, tenant_id: uuid.UUID, snapshot: dict) -> SyncError | None:
+        """The tenant row is gone, and its link with it: its organization is the one the snapshot names."""
+        provider = await self._providers.get_by_name(PROVIDER_NAME)
+        alias = snapshot.get("external_org_id")
+        if (
+            provider is None
+            or not isinstance(alias, str)
+            or snapshot.get("external_org_provider_id") != str(provider.id)
+        ):
+            if isinstance(alias, str):
+                # Linked to another provider's organization: nothing of it is Keycloak's.
+                return None
+            return _failure(await self._adapter.delete_tenant(tenant_id=tenant_id))
+        try:
+            organization = await self._api.find_organization(alias)
+            if organization is not None:
+                await self._api.delete_organization(organization["id"])
+        except KeycloakAdminError as exc:
+            return SyncError(message=str(exc), operation="delete_tenant", context={"status": exc.status})
+        return None
 
     async def _push_membership(self, user_id: uuid.UUID, tenant_id: uuid.UUID, snapshot: dict) -> SyncError | None:
         """Make the user's role groups in the tenant's organization exactly their canonical roles there."""
         if not await self._state.tenants([tenant_id]):
             # The tenant is gone; its organization is the tenant push's.
+            return None
+        if await self._links.linked_elsewhere(tenant_id):
+            # The tenant is another provider's organization: Keycloak holds no membership of it.
             return None
         role_ids = {assignment.role_id for assignment in await self._state.assignments_of(user_id, tenant_id)}
         if not role_ids:
@@ -583,7 +623,9 @@ class KeycloakReconciliation:
         """The roles of the organization groups the user's account is in that are not among ``role_ids``."""
         tenant = (await self._state.tenants([tenant_id]))[0]
         provider = await self._providers.get_by_name(PROVIDER_NAME)
-        linked = provider is not None and tenant.external_org_provider_id == provider.id
+        if provider is None:
+            return []
+        linked = tenant.external_org_provider_id == provider.id
         organization = await self._api.find_organization(tenant.external_org_id if linked else str(tenant_id))
         if organization is None:
             return []
@@ -622,8 +664,11 @@ def _is_service_account(account: dict) -> bool:
 
 
 def _account(account: dict) -> KeycloakAccount:
+    """A linked account: found by its link, never by its username (``admin_named`` off)."""
     username = account.get("username")
-    return KeycloakAccount(id=account["id"], username=username if isinstance(username, str) else None)
+    return KeycloakAccount(
+        id=account["id"], username=username if isinstance(username, str) else None, admin_named=False
+    )
 
 
 def _uuid(value: object) -> uuid.UUID | None:

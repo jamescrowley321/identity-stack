@@ -117,3 +117,15 @@ async def test_a_delete_keeps_what_its_push_needs(db_session, ledger):
     assert marks[("role", str(role_id))][1] == {"name": role_name, "tenant_id": None}
     assert marks[("permission", str(permission_id))][1] == {"name": permission_name}
     assert marks[("membership", f"{user.id}:{tenant.id}")][1] == {"role_id": str(role_id)}
+
+
+async def test_a_tenant_delete_keeps_its_organization_link(db_session, ledger):
+    tenant, *_ = await _rows(db_session)
+    tenant.external_org_id = "acme-org"
+    await db_session.flush()
+    tenant_id = tenant.id
+
+    await db_session.delete(tenant)
+    await db_session.flush()
+
+    assert (await _marks(db_session))[("tenant", str(tenant_id))][1]["external_org_id"] == "acme-org"

@@ -75,6 +75,24 @@ class TestEveryProvider:
         }
         assert working.runs == 1
 
+    async def test_a_pass_that_raises_is_that_pass_failing(self):
+        class Raising:
+            provider = "keycloak"
+
+            async def reconcile(self):
+                raise RuntimeError("database gone")
+
+        working = FakePass("other", Ok(PassOutcome(stats={}, changes=0)))
+        runs = AsyncMock(spec=ReconciliationRunRepository)
+
+        result = await _service(Raising(), working, runs=runs).run()
+
+        assert result.ok["providers"]["keycloak"] == {
+            "status": "failed",
+            "error": "The keycloak pass failed: RuntimeError",
+        }
+        assert working.runs == 1
+
     async def test_every_pass_failed_is_the_first_error(self):
         error = ProviderError(message="Keycloak could not be read")
 

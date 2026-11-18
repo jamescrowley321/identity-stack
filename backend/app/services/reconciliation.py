@@ -142,7 +142,15 @@ class ReconciliationService:
             totals: dict[str, int] = {}
             errors: list[IdentityError] = []
             for provider_pass in self._passes:
-                result = await provider_pass.reconcile()
+                try:
+                    result = await provider_pass.reconcile()
+                except Exception as exc:
+                    # A pass that raises is that pass failing: the others still run, and it is recorded.
+                    logger.error("Reconciliation: the %s pass raised", provider_pass.provider, exc_info=True)
+                    await self._session.rollback()
+                    result = Error(
+                        ProviderError(message=f"The {provider_pass.provider} pass failed: {type(exc).__name__}")
+                    )
                 if result.is_error():
                     errors.append(result.error)
                     reports[provider_pass.provider] = {"status": PassStatus.FAILED, "error": result.error.message}

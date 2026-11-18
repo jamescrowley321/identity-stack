@@ -305,6 +305,10 @@ and they raise the `seq` of an entity already marked.
 
 **A pass**, with the event poller stopped or running:
 
+One pass runs at a time: a pass holds a Postgres session lock on a connection of its own from start
+to end (its second half commits after each push, which a transaction lock would not survive), and a
+pass started while another holds it answers 409.
+
 1. **Keycloak into Postgres.** In one transaction holding the reconciliation lock and the pull's lock,
    the pass reads the marks, then the realm: the organizations, the members and role groups (with their
    members) of those a tenant is linked to, the users, and the API client's roles with their composites.
@@ -312,7 +316,10 @@ and they raise the `seq` of an entity already marked.
    `InboundSyncService.apply_keycloak_change` (the [event pull](#event-pull)'s table), each in a savepoint:
    - A linked organization's name, domains and `enabled` are the tenant's; one that is gone suspends it.
    - A linked account's names, `enabled`, and its email once Keycloak has verified it, are the user's;
-     a linked account that is gone deactivates the user.
+     a linked account that is gone deactivates the user. An account stands for a canonical user only
+     through its `keycloak` IdP link, never through a username that is a canonical user id: a realm
+     that lets a person choose a username would let them name someone else. The accounts a pass creates
+     are linked when it creates them; an account already under a canonical id is not.
    - Every API client role is created or updated as a permission or role; a canonical permission or
      role that no client role stands for (by its canonical id, or by name for an unstamped one) was
      deleted in Keycloak and is deleted. A role's composites are its permissions.
@@ -321,10 +328,13 @@ and they raise the `seq` of an entity already marked.
      no role there. So a role group deleted in the console, for which Keycloak records no member
      removal and the pull takes in nothing, unassigns its role at the next pass.
 
+   A list is read a page at a time, so an organization, an account or a membership missing from it
+   is asked for again by itself before it is taken as deleted.
+
    A change whose subject is marked is rolled back: Keycloak's older state does not overwrite a
    canonical change not yet delivered. Before committing, the pass reads the marks of every entity it
    changed again; a canonical change committed during the read marks one of them, and then the pass
-   commits nothing and answers 409, to be run again. A poll waits for this half (its lock is taken
+   commits nothing of this half, still runs the second, and answers 409, to be run again. A poll waits for this half (its lock is taken
    blocking here, and the poll only tries it), so a batch and the pass never interleave.
 2. **Postgres into Keycloak.** Each marked entity, in the order tenant, permission, role, user,
    membership, is pushed from its current canonical state through `KeycloakSyncAdapter`, whose pushes
@@ -333,8 +343,9 @@ and they raise the `seq` of an entity already marked.
    [identity-stack#612](https://github.com/jamescrowley321/identity-stack/issues/612)). An entity whose
    row is gone is deleted in Keycloak. When every push for it is delivered its mark is removed; when one
    fails, the mark stays for the next pass and a `failed` sync event (`detail.source` `reconciliation`)
-   records the operation and the error. A tenant linked to another provider's organization has nothing
-   to push. This half takes no lock: its pushes are idempotent and its marks are removed by `seq`.
+   records the operation and the error. A tenant linked to another provider's organization, and its
+   memberships, have nothing to push. A deleted tenant's organization is the one its link named (the
+   mark keeps it).
 
 When the realm cannot be read, the pass applies and pushes nothing and answers 502.
 

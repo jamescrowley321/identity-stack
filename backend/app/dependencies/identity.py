@@ -14,7 +14,8 @@ AC-4.3.1: get_identity_resolution_service() for identity resolution with Redis c
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, Request
 from sqlalchemy import text
@@ -27,7 +28,7 @@ from app.dependencies.zitadel_sync import build_zitadel_sync_adapter
 from app.errors.identity import Conflict, IdentityErrorRaised
 from app.knobs import knob
 from app.logbook import logbook
-from app.models.database import get_async_session
+from app.models.database import get_async_session, get_engine
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.permission import PermissionRepository
@@ -53,6 +54,39 @@ from app.services.user import UserService
 
 # Postgres advisory lock ID for reconciliation (arbitrary constant)
 _RECONCILIATION_LOCK_ID = 73_82_69_67  # "RECON" in digits
+# ... and the session lock a pass that commits more than once holds from start to end.
+_RECONCILIATION_PASS_LOCK_ID = 73_82_69_67_80  # "RECONP"
+
+
+@asynccontextmanager
+async def hold_reconciliation_pass() -> AsyncIterator[bool]:
+    """Hold the pass lock on a connection of its own for the whole pass; ``False`` when another pass holds it.
+
+    A session-level lock survives the pass's commits. The connection is dropped,
+    not returned to the pool, if the unlock fails, so the lock never outlives the pass.
+    """
+    async with get_engine().connect() as connection:
+        held = bool(
+            (
+                await connection.execute(
+                    text("SELECT pg_try_advisory_lock(:lock_id)"), {"lock_id": _RECONCILIATION_PASS_LOCK_ID}
+                )
+            ).scalar()
+        )
+        await connection.commit()
+        try:
+            yield held
+        finally:
+            if held:
+                try:
+                    await connection.execute(
+                        text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": _RECONCILIATION_PASS_LOCK_ID}
+                    )
+                    await connection.commit()
+                except Exception:
+                    logger.warning("Reconciliation: the pass lock could not be released; dropping its connection")
+                    await connection.invalidate()
+
 
 logger = logbook(__name__)
 
@@ -187,7 +221,8 @@ async def get_sync_status_service(
         idp_link_repository=IdPLinkRepository(session),
         sync_event_repository=SyncEventRepository(session),
         run_repository=ReconciliationRunRepository(session),
-        pending_push_repository=PendingPushRepository(session),
+        # The marks mean something only where a pass consumes them.
+        pending_push_repository=PendingPushRepository(session) if SYNC_PROVIDER in RECONCILIATION_PASSES else None,
     )
 
 
@@ -242,7 +277,9 @@ async def get_reconciliation_service(
 # reconciliation lock. Descope's pass is built by ReconciliationService from the
 # Descope client. A Zitadel or Ory reader is one more entry.
 RECONCILIATION_PASSES: dict[str, Callable[[State, AsyncSession, Callable], ProviderReconciliation]] = {
-    "keycloak": lambda state, session, lock: build_keycloak_reconciliation(state.keycloak_admin, session, lock),
+    "keycloak": lambda state, session, lock: build_keycloak_reconciliation(
+        state.keycloak_admin, session, lock, hold_reconciliation_pass
+    ),
 }
 
 

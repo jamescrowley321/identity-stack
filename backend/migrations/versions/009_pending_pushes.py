@@ -59,7 +59,14 @@ LANGUAGE plpgsql AS $$
 BEGIN
     IF TG_TABLE_NAME = 'tenants' THEN
         IF TG_OP = 'DELETE' THEN
-            PERFORM pending_push_mark('tenant', OLD.id::text, jsonb_build_object('name', OLD.name));
+            PERFORM pending_push_mark(
+                'tenant', OLD.id::text,
+                jsonb_build_object(
+                    'name', OLD.name,
+                    'external_org_id', OLD.external_org_id,
+                    'external_org_provider_id', OLD.external_org_provider_id
+                )
+            );
         ELSE
             PERFORM pending_push_mark('tenant', NEW.id::text, NULL);
         END IF;
