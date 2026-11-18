@@ -1,0 +1,176 @@
+"""The shared test fixture (``infra/fixtures/test-identities.json``) and the Keycloak import that mirrors it.
+
+The provider Terraform roots build their tenants, users and memberships from the
+fixture. The Keycloak realm import is a file of its own, so this pins it to the
+fixture: the same users, organizations and members, and the record of each
+organization-bound type (``type:tenant-admin``) on exactly the fixture users
+whose role there binds them to it (owners and admins).
+"""
+
+import copy
+import json
+
+import pytest
+
+from tests.helpers.identity_fixture import (
+    FIXTURE_PATH,
+    IDENTITIES,
+    IdentityFixtureInvalid,
+    load_identity_fixture,
+)
+from tests.helpers.keycloak_target import REALM_IMPORT_PATH, import_users
+
+RAW = json.loads(FIXTURE_PATH.read_text())
+REALM = json.loads(REALM_IMPORT_PATH.read_text())
+# Each organization-bound type's attribute, to the canonical roles the Keycloak realm records
+# under it (infra/keycloak main.tf local.organization_bound_roles).
+ORGANIZATION_BOUND_ROLES = {"type:tenant-admin": frozenset({"owner", "admin"})}
+
+
+def _members(tenant: str) -> set[str]:
+    return {key for key, user in IDENTITIES.users.items() if tenant in user.roles}
+
+
+def _with(path: tuple, value) -> dict:
+    raw = copy.deepcopy(RAW)
+    target = raw
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    return raw
+
+
+# --- The cases the suites stand on ------------------------------------------------
+
+
+def test_the_two_tenant_user_is_a_member_of_two_tenants_with_a_different_role_in_each():
+    roles = IDENTITIES.cases.two_tenants.roles
+
+    assert len(roles) == 2
+    assert len(set(roles.values())) == 2
+
+
+def test_the_no_grant_user_holds_no_role_anywhere():
+    assert set(IDENTITIES.cases.no_grant.roles.values()) == {None}
+
+
+def test_the_tenant_admin_is_a_member_of_one_tenant_and_admin_there():
+    user = IDENTITIES.cases.tenant_admin
+
+    assert user.roles == {user.home: "admin"}
+
+
+def test_the_member_is_a_member_of_one_tenant_with_role_member():
+    user = IDENTITIES.cases.member
+
+    assert user.roles == {user.home: "member"}
+
+
+def test_the_unlinked_tenant_user_is_only_in_tenants_no_canonical_tenant_names():
+    user = IDENTITIES.cases.unlinked_tenant
+
+    assert user.roles
+    assert {IDENTITIES.tenants[tenant].canonical for tenant in user.roles} == {False}
+
+
+def test_every_user_email_is_in_their_home_tenant_domain():
+    for key, user in IDENTITIES.users.items():
+        assert user.email == f"{key}@{IDENTITIES.tenants[user.home].domain}"
+
+
+# --- The Keycloak realm import mirrors the fixture --------------------------------
+
+
+def test_the_realm_import_has_the_fixture_users_with_their_names_and_emails():
+    imported = {
+        user["username"]: (user["email"], user["firstName"], user["lastName"], user["emailVerified"])
+        for user in REALM["users"]
+        if user["username"] in import_users(REALM)
+    }
+
+    assert imported == {
+        key: (user.email, user.first_name, user.last_name, True) for key, user in IDENTITIES.users.items()
+    }
+
+
+def test_the_realm_import_has_one_organization_per_fixture_tenant():
+    imported = {
+        organization["alias"]: (organization["name"], [domain["name"] for domain in organization["domains"]])
+        for organization in REALM["organizations"]
+    }
+
+    assert imported == {key: (tenant.name, [tenant.domain]) for key, tenant in IDENTITIES.tenants.items()}
+
+
+def test_the_realm_import_organizations_have_the_fixture_members():
+    imported = {
+        organization["alias"]: {member["username"] for member in organization.get("members", [])}
+        for organization in REALM["organizations"]
+    }
+
+    assert imported == {tenant: _members(tenant) for tenant in IDENTITIES.tenants}
+
+
+def test_the_realm_import_records_the_holders_of_every_organization_bound_type():
+    ids = {username: user.id for username, user in import_users(REALM).items()}
+    imported = {
+        organization["alias"]: {
+            attribute: set(holders)
+            for attribute, holders in organization.get("attributes", {}).items()
+            if attribute.startswith("type:")
+        }
+        for organization in REALM["organizations"]
+    }
+
+    assert imported == {
+        tenant: {
+            attribute: {ids[key] for key, user in IDENTITIES.users.items() if user.roles.get(tenant) in roles}
+            for attribute, roles in ORGANIZATION_BOUND_ROLES.items()
+            if any(user.roles.get(tenant) in roles for user in IDENTITIES.users.values())
+        }
+        for tenant in IDENTITIES.tenants
+    }
+
+
+# --- A fixture that contradicts itself is refused ---------------------------------
+
+
+def test_the_fixture_file_loads():
+    assert load_identity_fixture(RAW) == IDENTITIES
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "message"),
+    [
+        (("users", "alice", "home"), "initech", "home 'initech' is no fixture tenant"),
+        (("users", "alice", "roles"), {"globex": "member"}, "member of their home tenant 'acme'"),
+        (("users", "alice", "roles"), {"acme": "member", "initech": None}, "'initech', which is no fixture tenant"),
+        (("users", "alice", "roles", "acme"), "superuser", "'superuser', not a canonical role"),
+        (("cases", "member"), "zed", r"cases \['member'\] name no fixture user"),
+        (("cases", "member"), ["alice"], r"cases \['member'\] name no fixture user"),
+        (("tenants", "platform"), {"name": "P", "domain": "p.test", "canonical": False}, "'platform' is reserved"),
+        (("tenants", "acme"), {"name": "Acme"}, "not the expected shape"),
+        (("tenants", "unlinked", "canonical"), "false", "tenant unlinked's canonical is 'false', not a boolean"),
+        (("tenants", "acme", "canonical"), 1, "tenant acme's canonical is 1, not a boolean"),
+        (("tenants", "acme", "name"), 7, "tenant acme's name is 7, not a string"),
+        (("tenants", "acme", "domain"), None, "tenant acme's domain is None, not a string"),
+        (("users", "alice", "first_name"), ["Alice"], r"user alice's first_name is \['Alice'\], not a string"),
+        (("users", "alice", "last_name"), 0, "user alice's last_name is 0, not a string"),
+    ],
+)
+def test_a_contradictory_fixture_is_refused(path, value, message):
+    with pytest.raises(IdentityFixtureInvalid, match=message):
+        load_identity_fixture(_with(path, value))
+
+
+def test_a_fixture_missing_a_case_is_refused():
+    raw = copy.deepcopy(RAW)
+    del raw["cases"]["no_grant"]
+
+    with pytest.raises(IdentityFixtureInvalid, match="cases must name exactly"):
+        load_identity_fixture(raw)
+
+
+def test_a_fixture_that_is_not_an_object_is_refused():
+    with pytest.raises(IdentityFixtureInvalid, match="must be a JSON object"):
+        load_identity_fixture([])

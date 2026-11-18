@@ -26,9 +26,17 @@ class Tenant(SQLModel, table=True):
     id: uuid_mod.UUID = Field(default_factory=uuid_mod.uuid4, primary_key=True, sa_type=sa.Uuid)
     name: str = Field(sa_column=sa.Column(sa.String, nullable=False, unique=True))
     domains: list[str] = Field(default_factory=list, sa_column=sa.Column(sa.JSON, nullable=False, server_default="[]"))
-    # Maps a canonical tenant to an Ory Organization id. Nullable/unused by default
-    # (canonical-side tenancy); populated only when Ory Organizations are enabled.
+    # Maps a canonical tenant to a provider's organization id (an Ory Organization,
+    # a Zitadel organization). Nullable/unused by default (canonical-side tenancy).
     external_org_id: str | None = Field(default=None, sa_column=sa.Column(sa.String, nullable=True, index=True))
+    # The provider whose organization external_org_id names. The providers' id
+    # formats are not kept apart by anything, so a lookup by organization names
+    # its provider too (TenantRepository.list_by_external_org_id); NULL is linked
+    # for no provider and matches none.
+    external_org_provider_id: uuid_mod.UUID | None = Field(
+        default=None,
+        sa_column=sa.Column(sa.Uuid, sa.ForeignKey("providers.id", ondelete="SET NULL"), nullable=True),
+    )
     status: TenantStatus = Field(
         default=TenantStatus.active,
         sa_column=sa.Column(sa.Enum(TenantStatus, name="tenant_status"), nullable=False, server_default="active"),

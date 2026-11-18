@@ -17,12 +17,12 @@ Requires DESCOPE_CLIENT_ID/DESCOPE_CLIENT_SECRET for auth-level tests.
 """
 
 import contextlib
-import os
 
 import pytest
 from playwright.sync_api import APIRequestContext
 
 from tests.e2e.helpers.api import unique_name
+from tests.e2e.not_applicable import descope_credentials_missing
 
 _DUMMY_UUID = "00000000-0000-0000-0000-000000000000"
 _NONEXISTENT_UUID = "ffffffff-ffff-ffff-ffff-ffffffffffff"
@@ -104,7 +104,7 @@ class TestAsyncEndpointsRejectNoAuth:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("DESCOPE_CLIENT_ID") or not os.environ.get("DESCOPE_CLIENT_SECRET"),
+    descope_credentials_missing("DESCOPE_CLIENT_ID", "DESCOPE_CLIENT_SECRET"),
     reason="DESCOPE_CLIENT_ID/DESCOPE_CLIENT_SECRET not set",
 )
 class TestAsyncTenantEndpoints:
@@ -128,7 +128,7 @@ class TestAsyncTenantEndpoints:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("DESCOPE_MANAGEMENT_KEY"),
+    descope_credentials_missing("DESCOPE_MANAGEMENT_KEY"),
     reason="DESCOPE_MANAGEMENT_KEY not set",
 )
 class TestAsyncTenantResourcesCRUD:
@@ -212,7 +212,7 @@ class TestAsyncTenantResourcesCRUD:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("DESCOPE_MANAGEMENT_KEY"),
+    descope_credentials_missing("DESCOPE_MANAGEMENT_KEY"),
     reason="DESCOPE_MANAGEMENT_KEY not set",
 )
 class TestAsyncDocumentCRUD:
@@ -391,7 +391,7 @@ class TestAsyncDocumentCRUD:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("DESCOPE_MANAGEMENT_KEY"),
+    descope_credentials_missing("DESCOPE_MANAGEMENT_KEY"),
     reason="DESCOPE_MANAGEMENT_KEY not set",
 )
 class TestAsyncErrorResponses:
@@ -445,7 +445,7 @@ class TestAsyncErrorResponses:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("DESCOPE_MANAGEMENT_KEY"),
+    descope_credentials_missing("DESCOPE_MANAGEMENT_KEY"),
     reason="DESCOPE_MANAGEMENT_KEY not set",
 )
 class TestAsyncDocumentValidation:

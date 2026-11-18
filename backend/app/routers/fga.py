@@ -3,6 +3,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from app.dependencies.descope import require_descope_principal
 from app.dependencies.fga import resolve_fga_user_target
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
@@ -12,7 +13,10 @@ from app.outbound import UpstreamStatusError, UpstreamTransportError
 
 logger = logbook(__name__)
 
-router = APIRouter(tags=["fga"])
+# Every route here reads or writes Descope's FGA store, so each serves Descope principals
+# only (conventions §18). The schema belongs to the whole Descope project: without the
+# guard an admin of any one canonical tenant would replace it for every tenant.
+router = APIRouter(tags=["fga"], dependencies=[Depends(require_descope_principal)])
 
 
 class UpdateSchemaRequest(BaseModel):

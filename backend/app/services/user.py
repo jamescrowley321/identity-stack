@@ -18,8 +18,17 @@ from app.models.identity.user import User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.base import RepositoryConflictError
 from app.repositories.user import UserRepository
-from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.adapters.base import (
+    CHANGED_IN_TENANT,
+    CREATED_IN_TENANT,
+    PROVIDER_SYNC,
+    PROVIDER_SYNC_FAILED,
+    STATUS_CHANGED,
+    IdentityProviderAdapter,
+    SyncError,
+)
 from app.services.cache_invalidation import CacheInvalidationPublisher
+from app.services.memberships import restore_memberships
 
 logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
@@ -77,7 +86,14 @@ class UserService:
                 return Error(Conflict(message=f"User with email '{email}' already exists"))
 
             result_dict = user.model_dump()
-            sync_data = {"email": user.email, "status": user.status.value}
+            sync_data = {
+                "email": user.email,
+                "status": user.status.value,
+                "user_name": user.user_name,
+                "given_name": user.given_name,
+                "family_name": user.family_name,
+                CREATED_IN_TENANT: str(tenant_id),
+            }
             user_id = user.id
             try:
                 await self._repository.commit()
@@ -209,18 +225,22 @@ class UserService:
                 return Error(Conflict(message="User deactivation conflicts with existing data"))
 
             result_dict = user.model_dump()
-            sync_data = {"email": user.email, "status": user.status.value}
+            sync_data = {
+                "email": user.email,
+                "status": user.status.value,
+                STATUS_CHANGED: True,
+                CHANGED_IN_TENANT: str(tenant_id),
+            }
             await self._repository.commit()
 
             await self._publisher.publish(
                 entity_type="user", entity_id=user.id, operation="deactivate", tenant_id=tenant_id
             )
 
-            self._log_sync_failure(
-                await self._adapter.sync_user(user_id=user.id, data=sync_data),
-                user.id,
-                "deactivate",
-            )
+            if self._revocation_failed(
+                await self._adapter.sync_user(user_id=user.id, data=sync_data), user.id, "deactivate"
+            ):
+                result_dict[PROVIDER_SYNC] = PROVIDER_SYNC_FAILED
 
             return Ok(result_dict)
 
@@ -253,7 +273,12 @@ class UserService:
                 return Error(Conflict(message="User activation conflicts with existing data"))
 
             result_dict = user.model_dump()
-            sync_data = {"email": user.email, "status": user.status.value}
+            sync_data = {
+                "email": user.email,
+                "status": user.status.value,
+                STATUS_CHANGED: True,
+                CHANGED_IN_TENANT: str(tenant_id),
+            }
             await self._repository.commit()
 
             await self._publisher.publish(
@@ -302,16 +327,19 @@ class UserService:
             )
 
             # Best-effort sync: notify IdP of membership removal
-            self._log_sync_failure(
-                await self._adapter.sync_user(
-                    user_id=user_id,
-                    data={"email": user.email, "status": user.status.value},
-                ),
-                user_id,
-                "remove_user_from_tenant",
+            payload: dict = {"status": "removed", "user_id": str(user_id)}
+            pushed = await self._adapter.sync_user(
+                user_id=user_id,
+                data={"email": user.email, "status": user.status.value, "left_tenant_id": str(tenant_id)},
             )
+            if self._revocation_failed(pushed, user_id, "remove_user_from_tenant"):
+                payload[PROVIDER_SYNC] = PROVIDER_SYNC_FAILED
+            elif self._adapter.ends_memberships is True and pushed.is_ok():
+                # A role given in the tenant while the user left it pushed its
+                # membership before the removal, which undid it: it is added back.
+                await restore_memberships(self._assignment_repository, self._adapter, [(user_id, tenant_id)])
 
-            return Ok({"status": "removed", "user_id": str(user_id)})
+            return Ok(payload)
 
     async def search_users(
         self,
@@ -344,6 +372,21 @@ class UserService:
             if status is not None:
                 span.set_attribute("users.status_filter", status.value)
             return await self._repository.list_filtered(status=status, limit=limit)
+
+    def _revocation_failed(self, result: Result[None, SyncError], user_id: uuid.UUID, operation: str) -> bool:
+        """Whether a push that takes access away failed where the adapter keeps memberships (Keycloak).
+
+        There it is logged as an error and told to the caller: the provider still
+        grants what the canonical change took away. Elsewhere it is logged as
+        every sync failure is, and nothing is told.
+        """
+        if self._adapter.ends_memberships is not True:
+            self._log_sync_failure(result, user_id, operation)
+            return False
+        if result.is_ok():
+            return False
+        logger.error("IdP revocation failed for user %s (%s): %s", user_id, operation, result.error.message)
+        return True
 
     @staticmethod
     def _log_sync_failure(

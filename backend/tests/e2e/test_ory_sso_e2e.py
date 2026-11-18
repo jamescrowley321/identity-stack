@@ -22,7 +22,7 @@ Requirements, all supplied by the E2E CI job:
   * ``E2E_ORY_ISSUER_URL`` — the issuer the backend under test was started with.
     Absent, the backend cannot validate an Ory token at all and every test here
     would 401 for a reason that says nothing about the code, so the module skips.
-    It is listed in ``_CI_REQUIRED_ENV`` so that skip cannot happen in CI.
+    It is listed in ``DESCOPE_CI_REQUIRED_ENV`` (``helpers/providers.py``) so that skip cannot happen in CI.
   * a reachable Ory provider — the local ``hydra-test`` container by default.
   * ``E2E_DATABASE_URL`` (or ``DATABASE_URL``) — the tier-3 role grant is written
     straight to the canonical model. There is no API for it: ``POST

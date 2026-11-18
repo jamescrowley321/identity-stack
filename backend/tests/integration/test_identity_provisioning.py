@@ -3,7 +3,7 @@
 import pytest
 
 from app.models.identity.provider import Provider, ProviderType
-from app.models.identity.user import User, UserStatus
+from app.models.identity.user import LINK_ORIGIN, LINKED_AT_SIGN_IN, User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
@@ -169,3 +169,20 @@ async def test_distinct_subjects_share_default_tenant_and_role(db_session):
     b_assign = await UserTenantRoleRepository(db_session).list_by_user(b.ok)
     assert a_assign[0].tenant_id == tenant.id == b_assign[0].tenant_id
     assert a_assign[0].role_id == role.id == b_assign[0].role_id
+
+
+@pytest.mark.asyncio
+async def test_a_link_made_at_sign_in_records_it(db_session):
+    """Provider adapters follow only links a sign-in made (IdPLinkRepository.signed_in_sub_of)."""
+    await _seed_ory_provider(db_session)
+    result = await _service(db_session).provision(
+        provider_name="ory",
+        sub="ory-sub-signed-in",
+        email="signed-in@example.com",
+        email_verified=True,
+    )
+    assert result.is_ok()
+
+    link = await IdPLinkRepository(db_session).get_by_provider_name_and_sub("ory", "ory-sub-signed-in")
+    assert link.metadata_ == {LINK_ORIGIN: LINKED_AT_SIGN_IN}
+    assert await IdPLinkRepository(db_session).signed_in_sub_of(result.ok, "ory") == "ory-sub-signed-in"

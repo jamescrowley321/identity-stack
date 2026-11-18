@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { toast } from "sonner";
 import { useApiClient } from "@/hooks/useApiClient";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -50,23 +50,49 @@ interface AccessKey {
 
 export default function AccessKeys() {
   const { apiFetch } = useApiClient();
-  const [keys, setKeys] = useState<AccessKey[]>([]);
   const [name, setName] = useState("");
   const [expirationDays, setExpirationDays] = useState(DEFAULT_EXPIRATION_DAYS);
   const [newKeySecret, setNewKeySecret] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
+  // The page is mounted afresh for each tenant, so once it has gone, a call it
+  // started finishes in a tenant the user has left: nothing more is loaded or
+  // shown there, and no toast is shown, since the shell's toaster outlives the
+  // page and the toast would read as if the call ran in the tenant now on screen.
+  // The one exception is a key created after the page went (see handleCreate).
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  // The list reloads when apiFetch changes. Only the latest load fills it, so
+  // an earlier answer arriving late is dropped. Rows are kept only for the
+  // apiFetch that loaded them; a failed load keeps them and says so.
+  const [loaded, setLoaded] = useState<{ by: typeof apiFetch | null; keys: AccessKey[] }>({ by: null, keys: [] });
+  const keys = loaded.by === apiFetch ? loaded.keys : [];
+  const latestLoad = useRef(0);
+  const delayedReload = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const loadKeys = useCallback(() => {
+    if (!mounted.current) return;
+    const load = ++latestLoad.current;
+    const isLatest = () => mounted.current && load === latestLoad.current;
     apiFetch("/api/keys")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data?.keys) setKeys(data.keys);
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`keys load failed: ${res.status}`);
+        const data = await res.json();
+        if (isLatest()) setLoaded({ by: apiFetch, keys: Array.isArray(data?.keys) ? data.keys : [] });
       })
-      .catch(() => {});
+      .catch(() => {
+        if (isLatest()) toast.error("Failed to load access keys");
+      });
   }, [apiFetch]);
 
   useEffect(() => {
     loadKeys();
+    return () => clearTimeout(delayedReload.current);
   }, [loadKeys]);
 
   const handleCreate = useCallback(async () => {
@@ -87,6 +113,14 @@ export default function AccessKeys() {
       });
       if (res.ok) {
         const data = await res.json();
+        if (!mounted.current) {
+          // The page went (a tenant switch or another page) while the key was
+          // created: its secret, shown only once, has nowhere to be shown.
+          toast.warning(
+            "An access key was created after you left this page. Its secret can't be shown: revoke the key if you need it.",
+          );
+          return;
+        }
         setNewKeySecret(data.cleartext || null);
         setName("");
         setCopied(false);
@@ -94,13 +128,15 @@ export default function AccessKeys() {
         // Brief delay before refresh — the Descope search index needs a
         // moment to include the newly created key, otherwise loadKeys()
         // returns stale results and the list appears not to update.
-        setTimeout(loadKeys, 1500);
+        // One pending reload at a time, so the cleanup below always holds its timer.
+        clearTimeout(delayedReload.current);
+        delayedReload.current = setTimeout(loadKeys, 1500);
       } else {
         const err = await res.json();
-        toast.error(err.detail || "Failed to create key");
+        if (mounted.current) toast.error(err.detail || "Failed to create key");
       }
     } catch {
-      toast.error("Failed to create key");
+      if (mounted.current) toast.error("Failed to create key");
     }
   }, [name, expirationDays, apiFetch, loadKeys]);
 
@@ -108,10 +144,11 @@ export default function AccessKeys() {
     async (keyId: string) => {
       try {
         await apiFetch(`/api/keys/${keyId}/deactivate`, { method: "POST" });
+        if (!mounted.current) return;
         toast.success("Key revoked");
         loadKeys();
       } catch {
-        toast.error("Failed to revoke key");
+        if (mounted.current) toast.error("Failed to revoke key");
       }
     },
     [apiFetch, loadKeys],
@@ -121,10 +158,11 @@ export default function AccessKeys() {
     async (keyId: string) => {
       try {
         await apiFetch(`/api/keys/${keyId}/activate`, { method: "POST" });
+        if (!mounted.current) return;
         toast.success("Key activated");
         loadKeys();
       } catch {
-        toast.error("Failed to activate key");
+        if (mounted.current) toast.error("Failed to activate key");
       }
     },
     [apiFetch, loadKeys],
@@ -134,10 +172,11 @@ export default function AccessKeys() {
     async (keyId: string) => {
       try {
         await apiFetch(`/api/keys/${keyId}`, { method: "DELETE" });
+        if (!mounted.current) return;
         toast.success("Key deleted");
         loadKeys();
       } catch {
-        toast.error("Failed to delete key");
+        if (mounted.current) toast.error("Failed to delete key");
       }
     },
     [apiFetch, loadKeys],

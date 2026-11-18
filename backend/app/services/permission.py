@@ -1,34 +1,63 @@
-"""PermissionService — domain orchestration for canonical Permission operations.
+"""PermissionService — the application shell for permissions.
 
-Middle layer of onion architecture: orchestrates PermissionRepository (data access)
-and IdentityProviderAdapter (IdP sync). All methods return Result[T, IdentityError].
-OTel spans on every method. Sync failure -> log warning, still return Ok.
+Each method loads state through the repository, asks ``app.domain.access`` to
+decide, persists what was decided, then invalidates caches and syncs to the IdP.
+All methods return Result[T, IdentityError]. OTel spans on every method.
+Sync failure -> log warning, still return Ok.
 """
 
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
-from app.errors.identity import Conflict, IdentityError, NotFound
+from app.domain import access
+from app.errors.access import identity_error
+from app.errors.identity import Conflict, IdentityError
 from app.logbook import logbook
-from app.models.identity.role import Permission
 from app.repositories.base import RepositoryConflictError
-from app.repositories.permission import PermissionRepository
+from app.repositories.permission import (
+    PermissionRepository,
+    apply_permission,
+    permission_from_row,
+    permission_to_row,
+)
 from app.services.adapters.base import IdentityProviderAdapter, SyncError
 from app.services.cache_invalidation import CacheInvalidationPublisher
 
 logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
 
+# The cache-invalidation operation each event is announced as.
+_INVALIDATIONS: dict[type[access.AccessEvent], str] = {
+    access.PermissionCreated: "create",
+    access.PermissionUpdated: "update",
+    access.PermissionDeleted: "delete",
+}
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _permission_payload(permission: access.Permission) -> dict:
+    return {
+        "id": permission.id,
+        "name": permission.name.value,
+        "description": permission.description,
+        "created_at": permission.created_at,
+        "updated_at": permission.updated_at,
+    }
+
 
 class PermissionService:
-    """Domain service for Permission operations.
+    """Application service for Permission operations.
 
     Orchestrates PermissionRepository (inner) and IdentityProviderAdapter (outer).
-    Contains NO direct SQLAlchemy imports — uses repository methods only.
+    The decisions are made in ``app.domain.access``.
     """
 
     def __init__(
@@ -56,33 +85,42 @@ class PermissionService:
         with tracer.start_as_current_span("PermissionService.create_permission") as span:
             span.set_attribute("permission.name", name)
 
-            existing = await self._repository.get_by_name(name)
-            if existing is not None:
-                return Error(Conflict(message=f"Permission '{name}' already exists"))
+            parsed = access.permission_name(name)
+            if parsed.is_error():
+                return Error(identity_error(parsed.error))
+            command = access.CreatePermission(name=parsed.ok, description=description)
 
-            permission = Permission(name=name, description=description)
+            holder = await self._repository.get_by_name(name)
+            decision = access.create_permission(
+                None if holder is None else permission_from_row(holder),
+                command,
+                permission_id=uuid.uuid4(),
+                now=_now(),
+            )
+            if decision.is_error():
+                return Error(identity_error(decision.error))
+            decided, created = decision.ok
+
             try:
-                permission = await self._repository.create(permission)
+                row = await self._repository.create(permission_to_row(decided))
             except RepositoryConflictError:
                 await self._repository.rollback()
-                return Error(Conflict(message=f"Permission '{name}' already exists"))
-
-            result_dict = permission.model_dump()
-            permission_id = permission.id
+                return Error(identity_error(access.PermissionNameTaken(name=name)))
+            permission = permission_from_row(row)
             await self._repository.commit()
 
-            await self._publisher.publish(entity_type="permission", entity_id=permission_id, operation="create")
+            await self._invalidate(created, permission.id)
 
             self._log_sync_failure(
                 await self._adapter.sync_permission(
-                    permission_id=permission_id,
-                    data={"name": permission.name, "description": permission.description},
+                    permission_id=permission.id,
+                    data={"name": permission.name.value, "description": permission.description},
                 ),
-                permission_id,
+                permission.id,
                 "create_permission",
             )
 
-            return Ok(result_dict)
+            return Ok(_permission_payload(permission))
 
     async def get_permission(
         self,
@@ -93,16 +131,16 @@ class PermissionService:
         with tracer.start_as_current_span("PermissionService.get_permission") as span:
             span.set_attribute("permission.id", str(permission_id))
 
-            permission = await self._repository.get(permission_id)
-            if permission is None:
-                return Error(NotFound(message=f"Permission '{permission_id}' not found"))
-            return Ok(permission.model_dump())
+            row = await self._repository.get(permission_id)
+            if row is None:
+                return Error(identity_error(access.PermissionNotFound(permission_id=permission_id)))
+            return Ok(_permission_payload(permission_from_row(row)))
 
     async def list_permissions(self) -> Result[list[dict], IdentityError]:
         """List all permissions."""
         with tracer.start_as_current_span("PermissionService.list_permissions"):
-            permissions = await self._repository.list_all()
-            return Ok([p.model_dump() for p in permissions])
+            rows = await self._repository.list_all()
+            return Ok([_permission_payload(permission_from_row(row)) for row in rows])
 
     async def update_permission(
         self,
@@ -115,39 +153,48 @@ class PermissionService:
         with tracer.start_as_current_span("PermissionService.update_permission") as span:
             span.set_attribute("permission.id", str(permission_id))
 
-            permission = await self._repository.get(permission_id)
-            if permission is None:
-                return Error(NotFound(message=f"Permission '{permission_id}' not found"))
-
+            new_name = None
             if name is not None:
-                existing = await self._repository.get_by_name(name)
-                if existing is not None and existing.id != permission_id:
-                    return Error(Conflict(message=f"Permission '{name}' already exists"))
-                permission.name = name
-            if description is not None:
-                permission.description = description
+                parsed = access.permission_name(name)
+                if parsed.is_error():
+                    return Error(identity_error(parsed.error))
+                new_name = parsed.ok
 
+            row = await self._repository.get(permission_id)
+            holder = None
+            if row is not None and name is not None:
+                holder = await self._repository.get_by_name(name)
+            decision = access.update_permission(
+                None if row is None else permission_from_row(row),
+                None if holder is None else permission_from_row(holder),
+                access.UpdatePermission(permission_id=permission_id, name=new_name, description=description),
+                now=_now(),
+            )
+            if decision.is_error():
+                return Error(identity_error(decision.error))
+            decided, updated = decision.ok
+
+            apply_permission(decided, row)
             try:
-                permission = await self._repository.update(permission)
+                row = await self._repository.update(row)
             except RepositoryConflictError:
                 await self._repository.rollback()
                 return Error(Conflict(message=f"Permission name '{name}' conflicts with existing permission"))
-
-            result_dict = permission.model_dump()
+            permission = permission_from_row(row)
             await self._repository.commit()
 
-            await self._publisher.publish(entity_type="permission", entity_id=permission.id, operation="update")
+            await self._invalidate(updated, permission.id)
 
             self._log_sync_failure(
                 await self._adapter.sync_permission(
                     permission_id=permission.id,
-                    data={"name": permission.name, "description": permission.description},
+                    data={"name": permission.name.value, "description": permission.description},
                 ),
                 permission.id,
                 "update_permission",
             )
 
-            return Ok(result_dict)
+            return Ok(_permission_payload(permission))
 
     async def delete_permission(
         self,
@@ -158,18 +205,22 @@ class PermissionService:
         with tracer.start_as_current_span("PermissionService.delete_permission") as span:
             span.set_attribute("permission.id", str(permission_id))
 
-            permission = await self._repository.get(permission_id)
-            if permission is None:
-                return Error(NotFound(message=f"Permission '{permission_id}' not found"))
+            row = await self._repository.get(permission_id)
+            decision = access.delete_permission(
+                None if row is None else permission_from_row(row),
+                access.DeletePermission(permission_id=permission_id),
+                now=_now(),
+            )
+            if decision.is_error():
+                return Error(identity_error(decision.error))
+            deleted = decision.ok
 
-            perm_name = permission.name
-            deleted = await self._repository.delete(permission_id)
-            if not deleted:
-                return Error(NotFound(message=f"Permission '{permission_id}' not found"))
+            if not await self._repository.delete(permission_id):
+                return Error(identity_error(access.PermissionNotFound(permission_id=permission_id)))
 
             await self._repository.commit()
 
-            await self._publisher.publish(entity_type="permission", entity_id=permission_id, operation="delete")
+            await self._invalidate(deleted, permission_id)
 
             self._log_sync_failure(
                 await self._adapter.delete_permission(permission_id=permission_id),
@@ -177,7 +228,14 @@ class PermissionService:
                 "delete_permission",
             )
 
-            return Ok({"status": "deleted", "name": perm_name})
+            return Ok({"status": "deleted", "name": deleted.name})
+
+    async def _invalidate(self, event: access.AccessEvent, permission_id: uuid.UUID) -> None:
+        await self._publisher.publish(
+            entity_type="permission",
+            entity_id=permission_id,
+            operation=_INVALIDATIONS[type(event)],
+        )
 
     @staticmethod
     def _log_sync_failure(

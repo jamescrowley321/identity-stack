@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { toast } from "sonner";
 import { useApiClient } from "@/hooks/useApiClient";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -21,17 +21,40 @@ interface Member {
 
 export default function MemberManagement() {
   const { apiFetch } = useApiClient();
-  const [members, setMembers] = useState<Member[]>([]);
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState("member");
 
+  // The page is mounted afresh for each tenant, so once it has gone, a call it
+  // started finishes in a tenant the user has left: nothing more is loaded
+  // there, and no toast is shown, since the shell's toaster outlives the page and
+  // the toast would read as if the call ran in the tenant now on screen.
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  // The list reloads when apiFetch changes. Only the latest load fills it, so
+  // an earlier answer arriving late is dropped. Rows are kept only for the
+  // apiFetch that loaded them; a failed load keeps them and says so.
+  const [loaded, setLoaded] = useState<{ by: typeof apiFetch | null; members: Member[] }>({ by: null, members: [] });
+  const members = loaded.by === apiFetch ? loaded.members : [];
+  const latestLoad = useRef(0);
   const loadMembers = useCallback(() => {
+    if (!mounted.current) return;
+    const load = ++latestLoad.current;
+    const isLatest = () => mounted.current && load === latestLoad.current;
     apiFetch("/api/members")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data?.members) setMembers(data.members);
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`members load failed: ${res.status}`);
+        const data = await res.json();
+        if (isLatest()) setLoaded({ by: apiFetch, members: Array.isArray(data?.members) ? data.members : [] });
       })
-      .catch(() => {});
+      .catch(() => {
+        if (isLatest()) toast.error("Failed to load members");
+      });
   }, [apiFetch]);
 
   useEffect(() => {
@@ -46,16 +69,17 @@ export default function MemberManagement() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: inviteEmail.trim(), role_names: [inviteRole] }),
       });
+      if (!mounted.current) return;
       if (res.ok) {
         toast.success(`Invited ${inviteEmail.trim()}`);
         setInviteEmail("");
         loadMembers();
       } else {
         const err = await res.json();
-        toast.error(err.detail || res.statusText);
+        if (mounted.current) toast.error(err.detail || res.statusText);
       }
     } catch {
-      toast.error("Failed to invite");
+      if (mounted.current) toast.error("Failed to invite");
     }
   }, [inviteEmail, inviteRole, apiFetch, loadMembers]);
 
@@ -64,10 +88,11 @@ export default function MemberManagement() {
       const action = currentStatus === "enabled" ? "deactivate" : "activate";
       try {
         await apiFetch(`/api/members/${userId}/${action}`, { method: "POST" });
+        if (!mounted.current) return;
         toast.success(`Member ${action}d`);
         loadMembers();
       } catch {
-        toast.error(`Failed to ${action} member`);
+        if (mounted.current) toast.error(`Failed to ${action} member`);
       }
     },
     [apiFetch, loadMembers],
@@ -77,10 +102,11 @@ export default function MemberManagement() {
     async (userId: string) => {
       try {
         await apiFetch(`/api/members/${userId}`, { method: "DELETE" });
+        if (!mounted.current) return;
         toast.success("Member removed");
         loadMembers();
       } catch {
-        toast.error("Failed to remove member");
+        if (mounted.current) toast.error("Failed to remove member");
       }
     },
     [apiFetch, loadMembers],

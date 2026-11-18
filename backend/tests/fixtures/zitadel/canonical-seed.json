@@ -1,0 +1,18 @@
+{
+  "issuer_url": "http://zitadel.localhost:8480",
+  "linked_user": {
+    "email": "bob@globex.test",
+    "external_sub": "400004363667390467",
+    "family_name": "Two-Orgs",
+    "given_name": "Bob",
+    "roles": {
+      "acme": "admin",
+      "globex": "viewer"
+    },
+    "user_name": "bob"
+  },
+  "tenants": {
+    "acme": "400004360244969475",
+    "globex": "400004360211283971"
+  }
+}

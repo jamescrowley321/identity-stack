@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.dependencies.auth import get_claims
+from app.dependencies.descope import require_descope_principal
 from app.dependencies.identity import get_tenant_service
 from app.dependencies.tenant import get_tenant_claims, get_tenant_id
 from app.errors.problem_detail import result_to_response
@@ -88,7 +89,7 @@ async def list_user_tenants(
     return {"tenants": tenants}
 
 
-@router.get("/tenants/current")
+@router.get("/tenants/current", dependencies=[Depends(require_descope_principal)])
 async def get_current_tenant(
     request: Request,
     tenant_id: str = Depends(get_tenant_id),

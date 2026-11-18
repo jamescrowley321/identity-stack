@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 from opentelemetry import trace
-from py_identity_model import DiscoveryDocumentRequest, build_end_session_url
+from py_identity_model import DiscoveryDocumentRequest, DiscoveryPolicy, build_end_session_url
 from py_identity_model.aio import get_discovery_document
 
 from app.knobs import knob
@@ -56,26 +56,41 @@ async def _descope_management_logout(provider: ProviderTokenConfig, claims: dict
         return {"status": "logged_out", "sub": user_id}
 
 
-def _default_post_logout_redirect_uri() -> str:
-    """The URL the provider redirects back to after logout.
+def _logout_client_id(provider: ProviderTokenConfig, claims: dict) -> str | None:
+    """The client id to log out.
 
-    Defaults to the SPA's ``/login`` (derived from ``FRONTEND_URL``). This URI
-    MUST be registered in the Ory OAuth2 client's ``post_logout_redirect_uris``
-    (Epic 1) or the provider rejects the redirect.
+    The provider's fixed one (``ORY_CLIENT_ID``); else the claim it names, which
+    for Keycloak is ``azp``, the app client the caller's token was issued to;
+    else its single audience, which is what Ory has always fallen back to. A
+    Keycloak token without a usable ``azp`` sends no ``client_id``, and Keycloak
+    then goes by ``id_token_hint`` alone.
     """
-    frontend_url = knob("FRONTEND_URL", "http://localhost:3000").rstrip("/")
-    return knob("ORY_POST_LOGOUT_REDIRECT_URI") or f"{frontend_url}/login"
+    if provider.logout_client_id:
+        return provider.logout_client_id
+    if provider.logout_client_id_claim:
+        claimed = claims.get(provider.logout_client_id_claim)
+        return claimed if isinstance(claimed, str) and claimed else None
+    return provider.audience
 
 
-async def _ory_rp_initiated_logout(provider: ProviderTokenConfig, claims: dict, id_token: str | None) -> dict:
-    """Build an OIDC RP-initiated logout URL for a standard provider (Ory).
+async def _rp_initiated_logout(provider: ProviderTokenConfig, claims: dict, id_token: str | None) -> dict:
+    """Build an OIDC RP-initiated logout URL for a standard provider (Ory, Keycloak).
+
+    The client id and the post-logout redirect URI are the provider's own
+    (``app.middleware.providers.configured_providers``). The redirect URI MUST be
+    registered on the provider's client or the provider rejects the redirect.
 
     Fail-closed: if discovery fails or the provider advertises no
     ``end_session_endpoint`` we raise 500 rather than return 200 with no URL,
     which would silently leave the provider session live.
     """
     with tracer.start_as_current_span("logout.rp_initiated"):
-        disco = await get_discovery_document(DiscoveryDocumentRequest(address=provider.disco_address))
+        disco = await get_discovery_document(
+            DiscoveryDocumentRequest(
+                address=provider.disco_address,
+                policy=DiscoveryPolicy(require_https=provider.require_https),
+            )
+        )
         # ``is_successful`` is unguarded, but ``end_session_endpoint`` is a guarded
         # field that raises FailedResponseAccessError on a failed discovery (and
         # getattr's default does NOT suppress it), so check success before reading it.
@@ -89,8 +104,8 @@ async def _ory_rp_initiated_logout(provider: ProviderTokenConfig, claims: dict, 
         logout_url = build_end_session_url(
             end_session_endpoint,
             id_token_hint=id_token,
-            client_id=knob("ORY_CLIENT_ID") or provider.audience,
-            post_logout_redirect_uri=_default_post_logout_redirect_uri(),
+            client_id=_logout_client_id(provider, claims),
+            post_logout_redirect_uri=provider.post_logout_redirect_uri,
         )
         return {"status": "logout_redirect", "logout_url": logout_url, "sub": claims.get("sub")}
 
@@ -99,5 +114,5 @@ async def _ory_rp_initiated_logout(provider: ProviderTokenConfig, claims: dict, 
 # configuration (a new logout_kind row), not a change to the logout entrypoint.
 LOGOUT_STRATEGIES = {
     "management": _descope_management_logout,
-    "rp_initiated": _ory_rp_initiated_logout,
+    "rp_initiated": _rp_initiated_logout,
 }

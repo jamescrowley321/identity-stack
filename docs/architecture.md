@@ -1,6 +1,6 @@
 # Architecture
 
-identity-stack is an identity platform built around a **canonical identity store** (PostgreSQL) that the application owns, kept in sync with an external identity provider (Descope). The application is provider-agnostic at its boundaries — token validation and the data model are written against OIDC/OAuth2 concepts, not a specific vendor SDK.
+identity-stack is an identity platform built around a **canonical identity store** (PostgreSQL) that the application owns, kept in sync with an external identity provider (Descope). Ory can be configured as a second token provider (`ORY_ISSUER_URL`). The application is provider-agnostic at its boundaries — token validation and the data model are written against OIDC/OAuth2 concepts, not a specific vendor SDK.
 
 ## Components
 
@@ -28,23 +28,81 @@ Descope JWTs use two custom claims the middleware understands:
 - **`dct`** — the *current* tenant for the session.
 - **`tenants`** — all tenant memberships, each with its roles and permissions.
 
+Other providers' tokens carry neither. Each provider is one registration in `backend/app/middleware/providers.py`, with its own claims extractor if its tokens name a tenant. A provider listed in `CANONICAL_RBAC_PROVIDERS` (Ory by default) is authorized from the canonical store instead: the request's tenant is the caller's sole membership, or the one the `X-Tenant-ID` header selects among several ([conventions §18](conventions.md#18-one-resolver-decides-the-tenant-and-the-grants)).
+
 Three issuer formats are supported (all signed by the same project JWKS), so validation must accept all:
 
 - `https://api.descope.com/{project_id}` — OIDC / ID tokens
 - `https://api.descope.com/v1/apps/{project_id}` — OIDC inbound-app tokens
 - `{project_id}` — the bare project id, used by SDK / session / access-key tokens (e.g. the access-key exchange `sessionJwt`)
 
-Token validation is delegated to [`py-identity-model`](https://github.com/jamescrowley321/py-identity-model) (`>=3.8.5`); the RBAC/FGA authorization layer sits on top of the validated claims (see [security.md](security.md)).
+Token validation is delegated to [`py-identity-model`](https://github.com/jamescrowley321/identity-model) (the 5.0.0 pre-release); the RBAC/FGA authorization layer sits on top of the validated claims (see [security.md](security.md)).
+
+## Keycloak token model
+
+A Keycloak realm token is for one organization and one user type
+([ADR-0010](adr/0010-keycloak-token-model.md)). The backend reads five claims and nothing else
+(`backend/app/middleware/keycloak.py`):
+
+| Concept | In Keycloak | In the token | Read where |
+|---|---|---|---|
+| User type | A confidential "type client", such as `member` or `tenant-admin` | `aud`, exactly one value | Authentication: anything else is 401 |
+| App | A public client, one per type | `azp`, the app client configured for that `aud` | Authentication: anything else is 401 |
+| Tenant | An Organization | `organization`, exactly one alias | `get_tenant_id`: anything else is 403 |
+| Permission | A client role of the type client, named `<domain>:<action>` | `resource_access[aud].roles`, a list of strings | `require_permission`. Missing or of the wrong type: the token names no tenant, 403 |
+| Role | Not used | Nothing | `require_role` always answers 403 |
+
+The tenant is the organization alias, an opaque string. It is not a Descope tenant id and not a
+canonical tenant UUID, so every route that sends its tenant to Descope, parses it as a UUID or
+gates by role refuses a Keycloak principal with 403. `GET /api/access-checks/documents-read` and
+`GET /api/access-checks/settings-manage` answer one: each needs the permission in its name and
+returns the tenant the resolver decided. `realm_access`, and Descope's `dct` and `tenants` when
+they appear on a Keycloak token, are never read.
+
+Keycloak assigns client roles to the user, not to the user in an organization, so every type is
+declared one of two ways:
+
+- **Portable** (`KEYCLOAK_PORTABLE_TYPES`). The token grants only the roles listed for the type
+  in `KEYCLOAK_PORTABLE_PERMISSIONS`, which may hold only `<domain>:read` and `<domain>:list`
+  permissions. Those hold in every organization the user belongs to.
+- **Organization-bound** (`KEYCLOAK_ORGANIZATION_BOUND_TYPES`). The token is accepted only when
+  the user belongs to exactly one organization, it is the token's, and that organization marks
+  the user as holding the type (its `type:<type client>` attribute lists the user's id). The
+  backend asks the realm's Admin REST API on every such request, with a read-only service
+  account, for the token's `sub` only (`services/keycloak_directory.py`). A lookup that fails,
+  or does not answer within `MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`, is 502 and no grant. A lookup
+  answered 401 is asked once more with a new service-account token. A `sub` the realm does
+  not know (404: the user was deleted while the token lives) belongs to no organization, and
+  the token is refused with 403.
+
+Two limits follow. A portable permission holds in every organization the user belongs to. And
+nothing ends access when a user leaves an organization before the token expires, which is 300
+seconds with the realm's defaults: Keycloak refuses the next refresh for that organization, but
+the backend does not ask the directory about a portable token.
+
+`GET /api/identity` answers a Keycloak principal with the canonical user and linked identities,
+the organizations the same lookup lists as `tenant_memberships`, no `roles`, and a
+`token_tenant` field holding the token's organization and the permissions it grants there. Only
+principals whose tenant comes from their token get that field: switching tenant takes a new
+token. The directory is read once per request: the same answer confirms an organization-bound
+token and lists the memberships. The response is 403 when the token names no organization
+(the user is then not provisioned either) or the directory does not list the token's
+organization, and 502 when the directory cannot be asked. Provisioning a Keycloak user is
+opt-in (`JIT_ENABLED_PROVIDERS`) and gives it no canonical role.
+
+The backend refuses to start with a half-configured Keycloak provider: see the `KEYCLOAK_*`
+rows of [environment-variables.md](environment-variables.md).
 
 ## Sync flows
 
 The canonical store is the source of truth for the application; Descope is kept consistent with it through two flows:
 
-1. **Outbound (API write → canonical store → provider).** Writes through the API persist to PostgreSQL and are pushed to Descope via the provider service (`backend/app/services/provider.py`, `descope.py`).
-2. **Inbound (provider event → reconciliation → canonical store).** Descope flow/webhook events reach the internal endpoints and reconcile the canonical store (`backend/app/routers/internal.py`, `backend/app/services/reconciliation.py`):
-   - `POST /api/internal/users/sync` — flow-driven user sync (guarded by `DESCOPE_FLOW_SYNC_SECRET`).
-   - `POST /api/internal/webhooks/descope` — Descope webhooks (guarded by `DESCOPE_WEBHOOK_SECRET`).
-   - `GET /api/internal/identity` — identity resolution (guarded by `INTERNAL_IDENTITY_KEY`; results cached for `IDENTITY_CACHE_TTL` seconds).
+1. **Outbound (API write → canonical store → provider).** Writes through the API persist to PostgreSQL, and the canonical services (`backend/app/services/user.py`, `role.py`, `permission.py`, `tenant.py`) push them to Descope through a sync adapter (`backend/app/services/adapters/descope.py`, wired in `backend/app/dependencies/identity.py`). A failed sync is logged and the write still succeeds; reconciliation catches the drift.
+2. **Inbound (provider event → canonical store).** Descope flow/webhook events reach the internal endpoints and update the canonical store (`backend/app/routers/internal.py`, `backend/app/services/inbound_sync.py`), and a reconciliation pass repairs drift (`backend/app/routers/reconciliation.py`, `backend/app/services/reconciliation.py`):
+   - `POST /api/internal/users/sync` — flow-driven user sync (guarded by `DESCOPE_FLOW_SYNC_SECRET`, sent as `X-Flow-Secret`).
+   - `POST /api/internal/webhooks/descope` — Descope webhooks (guarded by `DESCOPE_WEBHOOK_SECRET`, checked against `X-Descope-Webhook-S256`).
+   - `GET /api/internal/identity` — identity resolution (guarded by `INTERNAL_IDENTITY_KEY`, sent as `X-Identity-Key`; results cached for `IDENTITY_CACHE_TTL` seconds).
+   - `POST /api/internal/reconciliation/run` — a full reconciliation between Postgres and Descope (guarded by `DESCOPE_FLOW_SYNC_SECRET`).
 
 These secrets are **not** required for the app to boot, but each guarded endpoint rejects all requests until its secret is set (`backend/app/main.py:_warn_missing_secrets`).
 
@@ -57,11 +115,16 @@ backend/app/
   logbook.py      # logbook(__name__): the only source of loggers (§7)
   middleware/     # token validation, claims, rate limiting, security headers, factory
   routers/        # API routes (auth, tenants, roles, fga, internal, ...)
-  services/       # provider sync, descope client, reconciliation, identity resolution
+  dependencies/   # auth, tenant, RBAC and FGA guards; service wiring
+  errors/         # IdentityError kinds + RFC 9457 problem details
+  domain/         # the pure core, one package per bounded context (§22-§27, ADR-0008)
+  repositories/   # SQL against the canonical model (§19)
+  services/       # canonical services, sync adapters, descope client, reconciliation, identity resolution
   models/         # canonical DB models (identity/: tenant, role, provider, ...)
+backend/migrations/ # Alembic migrations
 frontend/         # React + Vite SPA
-infra/            # Terraform (Descope project config)
+infra/            # Terraform (Descope project config; infra/ory/ for Ory)
 tyk/              # gateway config + init sidecar
 ```
 
-The rules the backend code follows (configuration, outbound HTTP, logging, results and errors, authorization, data access) are in [conventions.md](conventions.md). The decisions behind them are in [adr/](adr/README.md).
+The rules the backend code follows (configuration, outbound HTTP, logging, results and errors, authorization, data access, layers and the domain) are in [conventions.md](conventions.md). The decisions behind them are in [adr/](adr/README.md).

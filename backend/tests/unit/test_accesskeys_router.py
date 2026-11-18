@@ -4,9 +4,12 @@ import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from expression import Error
 from httpx import ASGITransport, AsyncClient
 
+from app.errors.identity import ProviderError
 from app.main import app
+from app.services.descope_management import DescopeManagementAdapter
 
 
 # The API requires a bounded, future expiry, so every create needs one. Computed
@@ -445,3 +448,30 @@ async def test_validated_expiry_is_what_reaches_descope(mock_validate, client):
     )
 
     assert mock_client.create_access_key.await_args.kwargs["expire_time"] == expiry
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("http_method", "path", "adapter_method"),
+    [
+        ("POST", "/api/keys/key123/deactivate", "deactivate_access_key"),
+        ("POST", "/api/keys/key123/activate", "activate_access_key"),
+        ("DELETE", "/api/keys/key123", "delete_access_key"),
+    ],
+)
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_key_command_error_is_not_reported_as_success(mock_validate, client, http_method, path, adapter_method):
+    """An adapter Error must not answer with the success body: a failed revoke would fail open."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.load_access_key.return_value = KEY_IN_TENANT
+    app.state.descope_client = mock_client
+    failure = AsyncMock(return_value=Error(ProviderError(message="Descope API error")))
+
+    with patch.object(DescopeManagementAdapter, adapter_method, failure):
+        response = await client.request(http_method, path, headers={"Authorization": "Bearer valid.token"})
+
+    assert response.status_code == 502
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["type"] == "/errors/provider-error"
+    failure.assert_awaited_once_with("key123")

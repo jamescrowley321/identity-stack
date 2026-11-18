@@ -4,14 +4,15 @@ These tests use OIDC token injection to authenticate the browser session.
 Requires DESCOPE_CLIENT_ID, DESCOPE_CLIENT_SECRET, and DESCOPE_MANAGEMENT_KEY.
 """
 
-import os
 import re
 
 import pytest
 from playwright.sync_api import Page, Request, Response, expect
 
+from tests.e2e.not_applicable import descope_credentials_missing
+
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("DESCOPE_MANAGEMENT_KEY") or not os.environ.get("DESCOPE_CLIENT_ID"),
+    descope_credentials_missing("DESCOPE_MANAGEMENT_KEY", "DESCOPE_CLIENT_ID"),
     reason="DESCOPE credentials not set",
 )
 

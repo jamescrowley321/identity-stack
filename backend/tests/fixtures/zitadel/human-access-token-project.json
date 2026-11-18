@@ -1,0 +1,25 @@
+{
+  "claims": {
+    "aud": [
+      "399781183577210883",
+      "399781187016540163",
+      "399781183140937731"
+    ],
+    "client_id": "399781187016540163",
+    "exp": 1794827359,
+    "iat": 1794784159,
+    "iss": "http://zitadel.localhost:8480",
+    "jti": "V2_399781191579877379-at_399781191579942915",
+    "nbf": 1794784159,
+    "sub": "399781146147897347",
+    "urn:zitadel:iam:user:resourceowner:id": "399781146147241987",
+    "urn:zitadel:iam:user:resourceowner:name": "ZITADEL",
+    "urn:zitadel:iam:user:resourceowner:primary_domain": "zitadel.zitadel.localhost"
+  },
+  "format": "jwt",
+  "header": {
+    "alg": "RS256",
+    "kid": "399781148344991747",
+    "typ": "JWT"
+  }
+}

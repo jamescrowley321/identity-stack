@@ -1,0 +1,21 @@
+# Traefik routes for the compose `zitadel` profile: Login V2 under
+# /ui/v2/login, everything else to the Zitadel API over h2c.
+http:
+  routers:
+    zitadel-login:
+      entryPoints: [web]
+      rule: PathPrefix(`/ui/v2/login`)
+      service: zitadel-login
+    zitadel-api:
+      entryPoints: [web]
+      rule: PathPrefix(`/`)
+      service: zitadel-api
+  services:
+    zitadel-login:
+      loadBalancer:
+        servers:
+          - url: http://zitadel-login:3000
+    zitadel-api:
+      loadBalancer:
+        servers:
+          - url: h2c://zitadel-api:8080

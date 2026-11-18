@@ -29,6 +29,13 @@ class User(SQLModel, table=True):
     user_name: str = Field(sa_column=sa.Column(sa.String, nullable=False))
     given_name: str = Field(default="", sa_column=sa.Column(sa.String, nullable=False, server_default=""))
     family_name: str = Field(default="", sa_column=sa.Column(sa.String, nullable=False, server_default=""))
+    # True for a user a Zitadel organization's first login created: its email is
+    # one the organization's administrators chose, so no first login of any
+    # provider links to this user by email (IdentityProvisioningService.provision).
+    email_from_organization: bool = Field(
+        default=False,
+        sa_column=sa.Column(sa.Boolean, nullable=False, server_default=sa.text("false")),
+    )
     status: UserStatus = Field(
         default=UserStatus.active,
         sa_column=sa.Column(sa.Enum(UserStatus, name="user_status"), nullable=False, server_default="active"),
@@ -43,6 +50,18 @@ class User(SQLModel, table=True):
             sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now(), onupdate=sa.func.now()
         ),
     )
+
+
+# ``IdPLink.metadata_`` key recording how a link was made, and its values: a link
+# made from a validated sign-in (just-in-time provisioning), and one the backend
+# wrote for an account it created or that the operator's seed names (the Zitadel
+# sync adapter and seed). The admin route may not set the key
+# (``IdPLinkService.create_idp_link``), so only the backend can. A provider adapter
+# that writes to the linked account follows only such links: an admin-made link
+# names whatever account the admin typed in.
+LINK_ORIGIN = "linked_by"
+LINKED_AT_SIGN_IN = "sign_in"
+LINKED_BY_BACKEND = "backend"
 
 
 class IdPLink(SQLModel, table=True):

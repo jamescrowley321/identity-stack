@@ -6,6 +6,8 @@ from fastapi import FastAPI
 from scalar_fastapi import get_scalar_api_reference
 from slowapi.errors import RateLimitExceeded
 
+from app.dependencies import identity as identity_dependencies
+from app.dependencies.zitadel_sync import zitadel_admin_settings
 from app.errors.identity import IdentityErrorRaised
 from app.errors.problem_detail import identity_error_raised_handler
 from app.knobs import knob, required_knob
@@ -14,8 +16,9 @@ from app.logging_config import setup_logging
 from app.middleware.factory import configure_middleware
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.models.database import get_engine
-from app.outbound import outbound_client
+from app.outbound import OutboundClient, outbound_client
 from app.routers import (
+    access_checks,
     accesskeys,
     attributes,
     auth,
@@ -36,6 +39,18 @@ from app.routers import (
 )
 from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.descope import DescopeManagementClient
+from app.services.keycloak_admin import (
+    ADMIN_CLIENT_ID_VARIABLE,
+    ADMIN_CREDENTIAL_VARIABLE,
+    ADMIN_TIMEOUT_SECONDS,
+    ISSUER_VARIABLE,
+    REALM_MANAGEMENT_CLIENT,
+    REQUIRED_ROLES,
+    KeycloakAdminError,
+    KeycloakAdminNotConfigured,
+    KeycloakAdminRolesMissing,
+    connect_keycloak_admin,
+)
 from app.telemetry import init_telemetry, shutdown_telemetry
 
 logger = logbook(__name__)
@@ -49,6 +64,66 @@ def _warn_missing_secrets() -> None:
         logger.warning("DESCOPE_FLOW_SYNC_SECRET not set — flow sync endpoint will reject all requests")
     if not knob("INTERNAL_IDENTITY_KEY"):
         logger.warning("INTERNAL_IDENTITY_KEY not set — identity resolution endpoint will reject all requests")
+
+
+KEYCLOAK_ADMIN_TIMEOUT_SECONDS = ADMIN_TIMEOUT_SECONDS
+
+
+def _admin_check_failure(status: int | None) -> str:
+    """Why startup stopped, by what Keycloak answered the admin client's credential check."""
+    if status is None:
+        return (
+            f"Keycloak gave the admin client's credential check no readable answer: "
+            f"check {ISSUER_VARIABLE} and that Keycloak is up"
+        )
+    if status in (400, 401, 403):
+        return (
+            f"Keycloak refused the admin client's credential (status {status}): "
+            f"check {ADMIN_CLIENT_ID_VARIABLE} and {ADMIN_CREDENTIAL_VARIABLE}"
+        )
+    return (
+        f"Keycloak answered the admin client's credential check with status {status}: "
+        f"check {ISSUER_VARIABLE} names a realm with organizations enabled"
+    )
+
+
+async def _start_sync_provider(app: FastAPI) -> OutboundClient | None:
+    """Open what the configured sync adapter needs, or stop startup.
+
+    ``SYNC_PROVIDER=keycloak`` builds the Keycloak admin client's one HTTP client
+    and checks its credential, and the roles of its service account, against the
+    realm before any request is served. ``SYNC_PROVIDER=zitadel`` reads the Zitadel
+    adapter's settings (``app.state.zitadel_admin``); an incomplete configuration
+    raises ``ZitadelSyncNotConfigured``. That adapter opens a client per operation.
+    Returns the Keycloak HTTP client for the lifespan to close, or ``None``.
+    """
+    provider = identity_dependencies.SYNC_PROVIDER
+    known = sorted(identity_dependencies.SYNC_ADAPTERS)
+    if provider not in known:
+        raise RuntimeError(f"SYNC_PROVIDER {provider!r} is not one of {known}")
+    app.state.keycloak_admin = None
+    app.state.zitadel_admin = zitadel_admin_settings() if provider == "zitadel" else None
+    if provider != "keycloak":
+        return None
+    http = outbound_client(timeout=KEYCLOAK_ADMIN_TIMEOUT_SECONDS)
+    try:
+        app.state.keycloak_admin = await connect_keycloak_admin(http)
+    except KeycloakAdminNotConfigured as exc:
+        await http.aclose()
+        raise RuntimeError(f"SYNC_PROVIDER is keycloak but {exc}") from exc
+    except KeycloakAdminRolesMissing as exc:
+        await http.aclose()
+        raise RuntimeError(
+            f"The Keycloak admin client's service account lacks {REALM_MANAGEMENT_CLIENT} roles "
+            f"{sorted(exc.missing)}: grant it {sorted(REQUIRED_ROLES)} directly (roles reached through a group "
+            f"or a composite realm role are not read) or name another client "
+            f"in {ADMIN_CLIENT_ID_VARIABLE}"
+        ) from exc
+    except KeycloakAdminError as exc:
+        await http.aclose()
+        raise RuntimeError(_admin_check_failure(exc.status)) from exc
+    logger.info("Keycloak admin client connected: canonical tenants and users sync to Keycloak")
+    return http
 
 
 @asynccontextmanager
@@ -78,6 +153,18 @@ async def lifespan(app: FastAPI):
     http_client = outbound_client(timeout=30.0)
     base_url = knob("DESCOPE_BASE_URL", "https://api.descope.com")
     app.state.descope_client = DescopeManagementClient(project_id, management_key, base_url, http_client=http_client)
+    try:
+        sync_http_client = await _start_sync_provider(app)
+    except Exception:
+        # Startup stops here: close what was opened before it, each close whatever the one before did.
+        try:
+            await http_client.aclose()
+        finally:
+            try:
+                await asyncio.get_running_loop().run_in_executor(None, shutdown_telemetry)
+            finally:
+                await engine.dispose()
+        raise
 
     # Redis for cache invalidation pub/sub — optional, degrades gracefully
     redis_client = None
@@ -152,7 +239,14 @@ async def lifespan(app: FastAPI):
                     except Exception:
                         logger.warning("HTTP client close failed", exc_info=True)
                     finally:
-                        await engine.dispose()
+                        try:
+                            app.state.keycloak_admin = None
+                            if sync_http_client is not None:
+                                await sync_http_client.aclose()
+                        except Exception:
+                            logger.warning("Sync provider HTTP client close failed", exc_info=True)
+                        finally:
+                            await engine.dispose()
 
 
 app = FastAPI(title="Descope SaaS Starter API", docs_url=None, redoc_url="/redoc", lifespan=lifespan)
@@ -185,6 +279,7 @@ app.include_router(idp_links.router, prefix="/api")
 app.include_router(providers.router, prefix="/api")
 app.include_router(sync_status.router, prefix="/api")
 app.include_router(canonical_users.router, prefix="/api")
+app.include_router(access_checks.router, prefix="/api")
 
 
 @app.get("/docs", include_in_schema=False)

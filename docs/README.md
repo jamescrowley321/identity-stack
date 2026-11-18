@@ -6,6 +6,8 @@ Deeper reference for the identity-stack platform. Start with the [project README
 |-----|----------------|
 | [architecture.md](architecture.md) | Canonical-identity-store model, components, deployment modes, the Descope claim/issuer model, and the two sync flows |
 | [local-development.md](local-development.md) | The `make` workflow, Compose profiles, and the isolated test stack |
+| [keycloak.md](keycloak.md) | What the Keycloak end-to-end, integration and Terraform runs prove, against which Keycloak version, and every limit found |
+| [zitadel.md](zitadel.md) | The local Zitadel compose profile: issuer, bootstrap credential, and what the instance was observed to issue |
 | [deployment.md](deployment.md) | Standalone vs. gateway deployment, the Terraform `infra/` apply flow, and the required-secrets matrix |
 | [environment-variables.md](environment-variables.md) | Every environment variable the backend and frontend read, with defaults |
 | [conventions.md](conventions.md) | The backend's numbered house rules (MUST/SHOULD/MAY), their named exceptions and how each is enforced |

@@ -26,6 +26,7 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from tests.helpers.keycloak import KeycloakTokenSource, KeycloakTokenSourceUnavailable
 from tests.helpers.ory import (
     OryTokenSource,
     OryTokenSourceMisconfigured,
@@ -251,3 +252,23 @@ def ory_token_source() -> OryTokenSource:
         pytest.fail(str(exc))
     except OryTokenSourceUnavailable as exc:
         _unavailable(str(exc))
+
+
+# ──────────────────────────────────────────────
+# Keycloak fixtures — real realm-signed tokens
+# ──────────────────────────────────────────────
+
+
+@pytest.fixture(scope="session")
+def keycloak_token_source() -> KeycloakTokenSource:
+    """The ``keycloak-test`` container, which needs no credential.
+
+    Fails rather than skips when it is not running, here and in CI: it starts
+    with ``make test-integration``, so its absence is a broken stack.
+    """
+    source = KeycloakTokenSource()
+    try:
+        source.check_reachable()
+    except KeycloakTokenSourceUnavailable as exc:
+        pytest.fail(str(exc))
+    return source

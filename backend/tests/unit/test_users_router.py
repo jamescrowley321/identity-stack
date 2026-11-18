@@ -176,6 +176,7 @@ async def test_invite_member(mock_validate, mock_descope, client):
 async def test_deactivate_member(mock_validate, mock_descope, client):
     mock_validate.return_value = ADMIN_CLAIMS
     user_id = "U2abc123"
+    mock_descope.load_user.return_value = DESCOPE_USER
     mock_descope.update_user_status.return_value = None
 
     response = await client.post(
@@ -207,6 +208,7 @@ async def test_deactivate_member_forwards_the_id_this_api_hands_out(mock_validat
     """
     mock_validate.return_value = ADMIN_CLAIMS
     descope_user_id = "U3J36liQh0rQ39NT2SdRqdEqb4Zs"
+    mock_descope.load_user.return_value = DESCOPE_USER
     mock_descope.update_user_status.return_value = None
 
     response = await client.post(f"/api/members/{descope_user_id}/deactivate", headers=AUTH_HEADER)
@@ -234,6 +236,7 @@ async def test_remove_member_forwards_the_id_this_api_hands_out(mock_validate, m
 async def test_activate_member(mock_validate, mock_descope, client):
     mock_validate.return_value = ADMIN_CLAIMS
     user_id = "U2abc123"
+    mock_descope.load_user.return_value = DESCOPE_USER
     mock_descope.update_user_status.return_value = None
 
     response = await client.post(
@@ -353,6 +356,7 @@ async def test_invite_member_descope_502(mock_validate, mock_descope, client):
 async def test_deactivate_member_descope_error(mock_validate, mock_descope, client):
     """Descope API error deactivating -> 502."""
     mock_validate.return_value = ADMIN_CLAIMS
+    mock_descope.load_user.return_value = DESCOPE_USER
     mock_descope.update_user_status.side_effect = _make_http_status_error(500)
 
     response = await client.post(
@@ -367,6 +371,7 @@ async def test_deactivate_member_descope_error(mock_validate, mock_descope, clie
 async def test_activate_member_descope_error(mock_validate, mock_descope, client):
     """Descope API error activating -> 502."""
     mock_validate.return_value = ADMIN_CLAIMS
+    mock_descope.load_user.return_value = DESCOPE_USER
     mock_descope.update_user_status.side_effect = _make_http_status_error(500)
 
     response = await client.post(
@@ -388,6 +393,107 @@ async def test_remove_member_descope_error(mock_validate, mock_descope, client):
         headers=AUTH_HEADER,
     )
     assert response.status_code == 502
+
+
+# --- Tenant scope of activate/deactivate (#581) ---
+
+OTHER_TENANT_ID = "9d1f6f0e-2a55-4b53-9a0e-6a3f1c1f7a11"
+STATUS_ROUTES = ["deactivate", "activate"]
+
+
+async def _unknown_user_response(mock_descope, client, action):
+    """What the route answers for a user Descope does not have."""
+    mock_descope.load_user.return_value = {}
+    mock_descope.update_user_status.side_effect = _make_http_status_error(404)
+    response = await client.post(f"/api/members/Unosuchuser/{action}", headers=AUTH_HEADER)
+    mock_descope.update_user_status.reset_mock(side_effect=True)
+    return response
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("action", STATUS_ROUTES)
+@pytest.mark.parametrize(
+    "user_tenants",
+    [
+        [{"tenantId": OTHER_TENANT_ID, "roleNames": ["member"]}],
+        [],
+        None,
+    ],
+)
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_member_status_refuses_a_user_outside_the_callers_tenant(
+    mock_validate, mock_descope, client, action, user_tenants
+):
+    """The refusal reads exactly like an unknown user, and Descope's status endpoint is never called."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    unknown = await _unknown_user_response(mock_descope, client, action)
+    mock_descope.load_user.return_value = {**DESCOPE_USER, "userTenants": user_tenants}
+
+    response = await client.post(f"/api/members/{DESCOPE_USER['userId']}/{action}", headers=AUTH_HEADER)
+
+    assert response.status_code == unknown.status_code == 502
+    assert response.json() == unknown.json()
+    assert response.headers["content-type"] == unknown.headers["content-type"]
+    mock_descope.load_user.assert_awaited_with(DESCOPE_USER["userId"])
+    mock_descope.update_user_status.assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("action", STATUS_ROUTES)
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_member_status_does_not_call_descope_for_an_unknown_user(mock_validate, mock_descope, client, action):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_descope.load_user.return_value = {}
+
+    response = await client.post(f"/api/members/Unosuchuser/{action}", headers=AUTH_HEADER)
+
+    assert response.status_code == 502
+    mock_descope.update_user_status.assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("action", STATUS_ROUTES)
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_member_status_fails_closed_when_the_lookup_fails(mock_validate, mock_descope, client, action):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_descope.load_user.side_effect = _make_http_status_error(500)
+
+    response = await client.post(f"/api/members/{DESCOPE_USER['userId']}/{action}", headers=AUTH_HEADER)
+
+    assert response.status_code == 502
+    mock_descope.update_user_status.assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("action", STATUS_ROUTES)
+@pytest.mark.parametrize(
+    "other_membership",
+    [
+        {"tenantId": OTHER_TENANT_ID, "roleNames": ["member"]},
+        {"roleNames": ["member"]},
+    ],
+)
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_member_status_refuses_a_user_shared_with_another_tenant(
+    mock_validate, mock_descope, client, action, other_membership
+):
+    """Status is per account, so a member who also belongs elsewhere is not this tenant's to disable or enable."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_descope.load_user.return_value = {
+        **DESCOPE_USER,
+        "userTenants": [{"tenantId": TENANT_ID, "roleNames": ["admin"]}, other_membership],
+    }
+
+    response = await client.post(f"/api/members/{DESCOPE_USER['userId']}/{action}", headers=AUTH_HEADER)
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": (
+            "Status applies to the member's whole account, which also belongs to another tenant. "
+            "Remove the member from this tenant instead."
+        )
+    }
+    mock_descope.update_user_status.assert_not_awaited()
 
 
 # --- Input validation ---

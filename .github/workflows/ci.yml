@@ -23,6 +23,9 @@ jobs:
       - name: Ruff format check
         run: cd backend && ruff format --check .
 
+      - name: Import contracts
+        run: cd backend && lint-imports
+
   frontend-tests:
     name: Frontend Tests
     runs-on: ubuntu-latest
@@ -96,8 +99,12 @@ jobs:
 
       - uses: ./.github/actions/setup-backend
 
-      - name: Start test stack (postgres + redis + hydra)
-        run: docker compose -f docker-compose.test.yml up -d --wait
+      - name: Start test stack (postgres + redis + hydra + keycloak)
+        # The Keycloak issuer is a fixed *.localhost name; pin it to loopback
+        # rather than depend on the runner's resolver.
+        run: |
+          echo "127.0.0.1 keycloak-test.localhost" | sudo tee -a /etc/hosts
+          docker compose -f docker-compose.test.yml --profile keycloak up -d --wait
 
       - name: Run integration tests
         # Deliberately unguarded. A step-level `if:` on a credential meant that an
@@ -119,9 +126,83 @@ jobs:
           TEST_DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
           TEST_REDIS_URL: redis://localhost:16379/0
 
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.2"
+          terraform_wrapper: false
+
+      - name: Run the Keycloak integration tests against a realm built by infra/keycloak
+        # The same tests again, logged in to the realm the Terraform root builds
+        # beside the import (generated user ids, passwords and directory secret)
+        # instead of the import. Here rather than in the credential-free
+        # keycloak-terraform-check job: one of them needs a live Descope token.
+        run: make keycloak-terraform-integration
+        env:
+          DESCOPE_PROJECT_ID: ${{ secrets.DESCOPE_PROJECT_ID }}
+          DESCOPE_CLIENT_ID: ${{ secrets.DESCOPE_CLIENT_ID }}
+          DESCOPE_CLIENT_SECRET: ${{ secrets.DESCOPE_CLIENT_SECRET }}
+
       - name: Stop test stack
         if: always()
-        run: docker compose -f docker-compose.test.yml down -v
+        run: docker compose -f docker-compose.test.yml --profile keycloak down -v
+
+  keycloak-terraform-check:
+    name: Keycloak Terraform Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # No credential: the realm is built in the keycloak-test container, so this
+    # runs on every pull request, forks and Dependabot included. It fails when
+    # infra/keycloak and keycloak/realm/identity-stack-realm.json disagree.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-backend
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.2"
+          terraform_wrapper: false
+
+      - name: Start keycloak-test
+        # The Keycloak issuer is a fixed *.localhost name; pin it to loopback
+        # rather than depend on the runner's resolver.
+        run: |
+          echo "127.0.0.1 keycloak-test.localhost" | sudo tee -a /etc/hosts
+          make test-up-keycloak
+
+      - name: Apply infra/keycloak and compare it with the imported realm
+        run: make keycloak-terraform-check
+
+  zitadel-terraform-check:
+    name: Zitadel Terraform Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # No credential: infra/zitadel is applied to a fresh compose Zitadel, with the
+    # token its first start writes to a volume, so this runs on every pull request.
+    # The backend's live Zitadel suite (tests/integration_zitadel) then runs against
+    # the applied root, with the test Postgres.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/setup-backend
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.2"
+          terraform_wrapper: false
+
+      - name: Start the local Zitadel
+        # The issuer is a fixed *.localhost name; pin it to loopback rather than
+        # depend on the runner's resolver.
+        run: |
+          echo "127.0.0.1 zitadel.localhost" | sudo tee -a /etc/hosts
+          make zitadel-up
+
+      - name: Start the test Postgres
+        run: make test-up
+
+      - name: Apply infra/zitadel, read the instance back and run the live Zitadel suite
+        run: make zitadel-terraform-integration
 
   e2e-tests:
     name: E2E Tests
@@ -360,6 +441,353 @@ jobs:
       - name: Stop test stack
         if: always()
         run: docker compose -f docker-compose.test.yml down -v
+
+  e2e-keycloak:
+    name: E2E Tests (Keycloak)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # This job uses no repository secrets. infra/keycloak is applied to
+    # keycloak-test with the compose bootstrap admin, so this runs on every
+    # pull request, forks and Dependabot included. The Descope E2E job above
+    # needs secrets and serves its own SPA on localhost:3000, the only origin
+    # the realm's app clients redirect to, so Keycloak has a job of its own: the
+    # shared UI and API suite (backend/tests/e2e/, E2E_PROVIDER=keycloak) and
+    # the Keycloak suite (backend/tests/e2e_keycloak/).
+    env:
+      DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: ./.github/actions/setup-backend
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.2"
+          terraform_wrapper: false
+
+      - name: Install Playwright browsers
+        run: playwright install --with-deps chromium
+
+      - name: Install frontend dependencies
+        run: cd frontend && npm ci
+
+      - name: Start test stack (postgres + redis + hydra + keycloak)
+        # The Keycloak issuer is a fixed *.localhost name; pin it to loopback
+        # rather than depend on the runner's resolver.
+        run: |
+          echo "127.0.0.1 keycloak-test.localhost" | sudo tee -a /etc/hosts
+          make test-up-keycloak
+
+      - name: Apply infra/keycloak
+        # A realm beside the compose import, built by the root. Local state in
+        # infra/keycloak, which the later steps read the outputs from. The
+        # provider logs in as the compose bootstrap admin (docker-compose.test.yml).
+        run: |
+          terraform -chdir=infra/keycloak init -input=false
+          terraform -chdir=infra/keycloak apply -auto-approve -input=false \
+            -var issuer_url=http://keycloak-test.localhost:18180/realms/identity-stack-terraform
+        env:
+          KEYCLOAK_USER: admin
+          KEYCLOAK_PASSWORD: admin
+
+      - name: Build frontend for the realm's member-app
+        # The root's frontend_environment. The suite starts bob in acme, so the
+        # build asks for that organization by name, and the tenant switch asks
+        # for the one picked, instead of letting Keycloak ask him which one.
+        run: |
+          # Captured first: `eval "$(...)"` would drop a terraform or jq failure.
+          set -o pipefail
+          vars="$(terraform -chdir=infra/keycloak output -json frontend_environment \
+            | jq -er 'to_entries[] | if (.key | test("^VITE_OIDC_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
+          eval "$vars"
+          cd frontend && VITE_OIDC_SCOPE="openid profile email organization:acme" \
+            VITE_OIDC_TENANT_SCOPE_TEMPLATE="openid profile email organization:{tenant}" npm run build
+
+      - name: Apply database schema and register the Keycloak provider
+        run: |
+          set -o pipefail
+          KEYCLOAK_ISSUER_URL="$(terraform -chdir=infra/keycloak output -json backend_environment | jq -er .KEYCLOAK_ISSUER_URL)"
+          export KEYCLOAK_ISSUER_URL
+          cd backend
+          python -m alembic upgrade head
+          python -m scripts.seed_keycloak
+
+      # The internal endpoints' shared secrets, generated per run as in the
+      # Descope E2E job: the shared suite's internal-endpoint tests compute
+      # their headers and HMACs from the same variables.
+      - name: Generate the test stack's shared secrets
+        run: |
+          for name in INTERNAL_IDENTITY_KEY DESCOPE_WEBHOOK_SECRET DESCOPE_FLOW_SYNC_SECRET; do
+            value="$(openssl rand -hex 32)"
+            echo "::add-mask::$value"
+            echo "$name=$value" >> "$GITHUB_ENV"
+          done
+
+      - name: Start backend
+        # The root's backend_environment without the admin client: this backend
+        # does not sync to Keycloak (SYNC_PROVIDER stays descope), so it gets no
+        # credential that writes to the realm. The directory client's secret is
+        # masked in the job log. Descope is left unconfigured: these tests present
+        # Keycloak tokens only. The log goes to a file: the backend outlives this step.
+        run: |
+          # Captured first: `eval "$(...)"` would drop a terraform or jq failure.
+          set -o pipefail
+          environment="$(terraform -chdir=infra/keycloak output -json backend_environment)"
+          directory_secret="$(printf '%s' "$environment" | jq -er .KEYCLOAK_DIRECTORY_CLIENT_SECRET)"
+          echo "::add-mask::$directory_secret"
+          vars="$(printf '%s' "$environment" \
+            | jq -er 'to_entries[] | select(.key | startswith("KEYCLOAK_ADMIN_CLIENT_") | not) | if (.key | test("^KEYCLOAK_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
+          eval "$vars"
+          cd backend
+          uvicorn app.main:app --host 127.0.0.1 --port 8000 > "$RUNNER_TEMP/backend.log" 2>&1 &
+          curl -fsS --retry 30 --retry-connrefused --retry-delay 1 -o /dev/null http://localhost:8000/api/health
+        env:
+          DESCOPE_PROJECT_ID: ""
+          DESCOPE_MANAGEMENT_KEY: ""
+          REDIS_URL: redis://localhost:16379/0
+          JIT_ENABLED_PROVIDERS: keycloak
+          # The limiter runs before token validation, so its key is the client
+          # address, shared by every request in this job. At the 60/minute
+          # default, the every-protected-route refusal test would get 429s
+          # instead of 401s. Limiter behaviour is covered by
+          # tests/unit/test_rate_limiting.py.
+          RATE_LIMIT_DEFAULT: 2000/minute
+          RATE_LIMIT_AUTH: 1000/minute
+
+      - name: Start frontend (preview)
+        run: |
+          cd frontend
+          npx vite preview --port 3000 --strictPort > "$RUNNER_TEMP/frontend.log" 2>&1 &
+          curl -fsS --retry 30 --retry-connrefused --retry-delay 1 -o /dev/null http://localhost:3000/login
+
+      - name: Run Keycloak E2E tests
+        # The suite's session fixture fails every test, never skips, when
+        # keycloak-test, the backend or the SPA does not answer. The target
+        # reads the realm, user ids and passwords from the root's outputs.
+        run: >-
+          make test-e2e-keycloak
+          PYTEST_ARGS='--screenshot=only-on-failure --tracing=retain-on-failure --output=${{ runner.temp }}/playwright'
+        env:
+          E2E_BACKEND_URL: "http://localhost:8000"
+
+      # Same scrub as the Descope E2E job before anything leaves the runner:
+      # this repository is public and artifacts are world-readable.
+      - name: Redact credentials from the logs
+        id: redact
+        if: always()
+        run: |
+          for f in "$RUNNER_TEMP/backend.log" "$RUNNER_TEMP/frontend.log"; do
+            [ -f "$f" ] || continue
+            sed -i -E \
+              -e 's/eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]+/<redacted-jwt>/g' \
+              -e 's/(bearer )[A-Za-z0-9._~+:\/-]+=*/\1<redacted>/gI' \
+              -e 's/(basic )[A-Za-z0-9+\/=]+/\1<redacted>/gI' \
+              -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^:/@ ]+:[^@ ]+@#\1<redacted>:<redacted>@#g' \
+              "$f"
+          done
+
+      - name: Upload logs
+        if: always() && steps.redact.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-keycloak-logs
+          path: |
+            ${{ runner.temp }}/backend.log
+            ${{ runner.temp }}/frontend.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      # Screenshots and traces hold only the fixture realm's throwaway users,
+      # but traces carry their tokens, so retention is short.
+      - name: Upload Playwright failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-keycloak-playwright-failures
+          path: ${{ runner.temp }}/playwright
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Stop test stack
+        if: always()
+        run: make test-down
+
+  e2e-zitadel:
+    name: E2E Tests (Zitadel)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 25
+    # This job uses no repository secrets. infra/zitadel is applied to a fresh
+    # compose Zitadel with the token its first start writes to a volume, so
+    # this runs on every pull request, forks and Dependabot included. The SPA
+    # is served on localhost:3000, the origin the root's applications redirect
+    # to, so Zitadel has a job of its own: the shared UI and API suite
+    # (backend/tests/e2e/, E2E_PROVIDER=zitadel) and the Zitadel suite
+    # (backend/tests/e2e_zitadel/).
+    env:
+      DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: ./.github/actions/setup-backend
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.2"
+          terraform_wrapper: false
+
+      - name: Install Playwright browsers
+        run: playwright install --with-deps chromium
+
+      - name: Install frontend dependencies
+        run: cd frontend && npm ci
+
+      - name: Start the local Zitadel and the test Postgres
+        # The issuer is a fixed *.localhost name; pin it to loopback rather than
+        # depend on the runner's resolver.
+        run: |
+          echo "127.0.0.1 zitadel.localhost" | sudo tee -a /etc/hosts
+          make zitadel-up
+          make test-up
+
+      - name: Apply infra/zitadel
+        # Local state in infra/zitadel, which the later steps read the outputs from.
+        # Assigned, then exported: `export X="$(...)"` returns export's status, not make's.
+        run: |
+          TF_VAR_zitadel_access_token="$(make -s zitadel-admin-pat)"
+          export TF_VAR_zitadel_access_token
+          terraform -chdir=infra/zitadel init -input=false
+          terraform -chdir=infra/zitadel apply -auto-approve -input=false -var-file=environments/dev.tfvars
+
+      - name: Apply database schema and link the tenants
+        run: |
+          (cd backend && python -m alembic upgrade head)
+          make zitadel-seed
+
+      - name: Build frontend for the SPA application
+        # The root's frontend_environment, with no tenant scope template: a
+        # Zitadel user switches tenant on the client.
+        run: |
+          # Captured first: `eval "$(...)"` would drop a terraform or jq failure.
+          set -o pipefail
+          vars="$(terraform -chdir=infra/zitadel output -json frontend_environment \
+            | jq -er 'to_entries[] | if (.key | test("^VITE_OIDC_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
+          eval "$vars"
+          cd frontend && VITE_OIDC_TENANT_SCOPE_TEMPLATE= npm run build
+
+      # The internal endpoints' shared secrets, generated per run as in the
+      # Descope E2E job: the shared suite's internal-endpoint tests compute
+      # their headers and HMACs from the same variables.
+      - name: Generate the test stack's shared secrets
+        run: |
+          for name in INTERNAL_IDENTITY_KEY DESCOPE_WEBHOOK_SECRET DESCOPE_FLOW_SYNC_SECRET; do
+            value="$(openssl rand -hex 32)"
+            echo "::add-mask::$value"
+            echo "$name=$value" >> "$GITHUB_ENV"
+          done
+
+      - name: Start backend
+        # The root's backend_environment without ZITADEL_ADMIN_TOKEN, with
+        # canonical authorization and first login for zitadel. This backend does
+        # not sync to Zitadel (SYNC_PROVIDER stays descope), so it gets no
+        # credential that writes to the instance. Descope is left unconfigured:
+        # these tests present Zitadel tokens only. The log goes to a file: the
+        # backend outlives this step.
+        run: |
+          # Captured first: `eval "$(...)"` would drop a terraform or jq failure.
+          set -o pipefail
+          vars="$(terraform -chdir=infra/zitadel output -json backend_environment \
+            | jq -er 'to_entries[] | select(.key != "ZITADEL_ADMIN_TOKEN") | if (.key | test("^ZITADEL_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
+          eval "$vars"
+          cd backend
+          uvicorn app.main:app --host 127.0.0.1 --port 8000 > "$RUNNER_TEMP/backend.log" 2>&1 &
+          curl -fsS --retry 30 --retry-connrefused --retry-delay 1 -o /dev/null http://localhost:8000/api/health
+        env:
+          DESCOPE_PROJECT_ID: ""
+          DESCOPE_MANAGEMENT_KEY: ""
+          REDIS_URL: redis://localhost:16379/0
+          CANONICAL_RBAC_PROVIDERS: zitadel
+          JIT_ENABLED_PROVIDERS: zitadel
+          FRONTEND_URL: http://localhost:3000
+          # The limiter runs before token validation, so its key is the client
+          # address, shared by every request in this job. Limiter behaviour is
+          # covered by tests/unit/test_rate_limiting.py.
+          RATE_LIMIT_DEFAULT: 2000/minute
+          RATE_LIMIT_AUTH: 1000/minute
+
+      - name: Start frontend (preview)
+        run: |
+          cd frontend
+          npx vite preview --port 3000 --strictPort > "$RUNNER_TEMP/frontend.log" 2>&1 &
+          curl -fsS --retry 30 --retry-connrefused --retry-delay 1 -o /dev/null http://localhost:3000/login
+
+      - name: Run Zitadel E2E tests
+        # The suite's session fixtures fail every test, never skip, when
+        # Zitadel, the database, the backend or the SPA does not answer.
+        run: >-
+          make test-e2e-zitadel
+          PYTEST_ARGS='--screenshot=only-on-failure --tracing=retain-on-failure --output=${{ runner.temp }}/playwright'
+        env:
+          E2E_BACKEND_URL: "http://localhost:8000"
+          E2E_FRONTEND_URL: "http://localhost:3000"
+
+      # Same scrub as the other E2E jobs before anything leaves the runner: this
+      # repository is public and artifacts are world-readable.
+      - name: Redact credentials from the logs
+        id: redact
+        if: always()
+        run: |
+          for f in "$RUNNER_TEMP/backend.log" "$RUNNER_TEMP/frontend.log"; do
+            [ -f "$f" ] || continue
+            sed -i -E \
+              -e 's/eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]+/<redacted-jwt>/g' \
+              -e 's/(bearer )[A-Za-z0-9._~+:\/-]+=*/\1<redacted>/gI' \
+              -e 's/(basic )[A-Za-z0-9+\/=]+/\1<redacted>/gI' \
+              -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^:/@ ]+:[^@ ]+@#\1<redacted>:<redacted>@#g' \
+              "$f"
+          done
+
+      - name: Upload logs
+        if: always() && steps.redact.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-zitadel-logs
+          path: |
+            ${{ runner.temp }}/backend.log
+            ${{ runner.temp }}/frontend.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      # Screenshots and traces hold only the instance's throwaway test users, but
+      # traces carry their tokens and passwords, so retention is short.
+      - name: Upload Playwright failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-zitadel-playwright-failures
+          path: ${{ runner.temp }}/playwright
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Stop the stacks
+        if: always()
+        run: |
+          make test-down
+          POSTGRES_PASSWORD=unused DESCOPE_PROJECT_ID=unused TYK_GATEWAY_SECRET=unused \
+            docker compose --profile zitadel down --volumes zitadel-proxy zitadel-login zitadel-api zitadel-db
 
   docker-build:
     name: Docker Build

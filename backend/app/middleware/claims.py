@@ -9,10 +9,15 @@ from starlette.responses import JSONResponse
 
 from app.logbook import logbook
 from app.middleware.providers import (
+    ProviderTokenConfig,
+    algorithm_rejected,
     audience_rejected,
+    binding_refusal,
     build_provider_configs,
+    claimed_tenant_id,
     infer_single_tenant_dct,
     select_by_issuer,
+    sender_constrained,
     token_kind_rejected,
 )
 
@@ -38,7 +43,8 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
 
     Defense in depth: this middleware ALSO enforces ``exp`` and ``iss`` on
     every request (and ``aud`` when the provider defines one), even though Tyk
-    should have done the same. If Tyk is ever silently bypassed, misconfigured,
+    should have done the same. It also refuses a sender-constrained token
+    (``cnf.jkt``, ``cnf["x5t#S256"]``), which Tyk does not check. If Tyk is ever silently bypassed, misconfigured,
     or not in front of the backend — the failure mode that went undetected for
     four days while ``tyk/entrypoint.sh`` was broken (issue #240) — these checks
     prevent forged or expired tokens from being trusted.
@@ -59,15 +65,22 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
         ory_issuer_url: str = "",
         ory_audience: str | None = None,
         ory_require_audience: bool = True,
+        providers: list[ProviderTokenConfig] | None = None,
     ):
         super().__init__(app)
         self.excluded_paths = excluded_paths or set()
         self.excluded_prefixes = tuple(excluded_prefixes) if excluded_prefixes else ()
-        self._providers = build_provider_configs(
-            descope_project_id=descope_project_id,
-            ory_issuer_url=ory_issuer_url,
-            ory_audience=ory_audience,
-            ory_require_audience=ory_require_audience,
+        # ``providers`` is the list from ``configured_providers``. The Descope and
+        # Ory arguments are for callers that build the middleware by hand.
+        self._providers = (
+            list(providers)
+            if providers is not None
+            else build_provider_configs(
+                descope_project_id=descope_project_id,
+                ory_issuer_url=ory_issuer_url,
+                ory_audience=ory_audience,
+                ory_require_audience=ory_require_audience,
+            )
         )
 
     async def dispatch(self, request: Request, call_next):
@@ -80,11 +93,11 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
 
         token = auth_header.removeprefix("Bearer ")
 
-        try:
-            parts = token.split(".")
-            if len(parts) != 3:
-                return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+        parts = token.split(".")
+        if len(parts) != 3:
+            return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
+        try:
             # Base64-decode the payload (second segment)
             payload_b64 = parts[1]
             # Add padding if needed
@@ -94,7 +107,13 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
 
             payload_bytes = base64.urlsafe_b64decode(payload_b64)
             claims = json.loads(payload_bytes)
+        except Exception:
+            # Any caller can send a bearer that is not a JWT, so this is one line
+            # and no traceback.
+            logger.warning("GatewayClaims rejected: the token payload could not be decoded")
+            return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
+        try:
             if not isinstance(claims, dict):
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
@@ -118,10 +137,25 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
                 logger.warning("GatewayClaims rejected: iss not in allow-list (iss=%r)", claims.get("iss"))
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
+            # Algorithm: a provider that pins its signing algorithms gets the
+            # same rule here as in standalone mode, where the library
+            # enforces it. Nothing here calls the library, so the header is checked.
+            if algorithm_rejected(token, provider):
+                logger.warning("GatewayClaims rejected: signing algorithm not accepted for %s", provider.name)
+                return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+
             # Audience: fail-closed for providers that require it (Ory); for Descope,
             # checked only when present (session tokens omit ``aud``).
             if audience_rejected(claims, provider):
                 logger.warning("GatewayClaims rejected: audience check failed (aud=%r)", claims.get("aud"))
+                return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+
+            # Token binding: what the provider requires of a token beyond its
+            # audience (Keycloak: exactly one ``aud`` and the ``azp`` configured
+            # for it). The same rule as in standalone mode, on every route.
+            unbound = binding_refusal(claims, provider)
+            if unbound is not None:
+                logger.warning("GatewayClaims rejected: %s binding refused (%s)", provider.name, unbound)
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
             # Token kind: bare-project-id tokens carry no ``aud``, so the check
@@ -131,14 +165,31 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
                 logger.warning("GatewayClaims rejected: token kind on the bare issuer (drn=%r)", claims.get("drn"))
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
+            # Sender constraint: a DPoP- or certificate-bound token needs a proof
+            # or a certificate this backend never receives. The library refuses
+            # it in standalone mode; nothing here calls the library.
+            if sender_constrained(claims):
+                logger.warning(
+                    "GatewayClaims rejected (%s): sender-constrained token presented as a bearer token",
+                    provider.name,
+                )
+                return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+
             # Descope access-key tokens set `tenants` but not `dct`; infer the
             # current tenant when there is exactly one. No-op for Ory.
             infer_single_tenant_dct(claims, provider)
 
             request.state.claims = claims
             request.state.principal = to_principal(claims, provider.name)
-            request.state.tenant_id = claims.get("dct")
+            # Recorded for the tenant resolver, which reads the tenant and the
+            # grants with this provider's own extractor (conventions §18).
+            request.state.provider = provider
+            request.state.tenant_id = claimed_tenant_id(claims, provider)
         except Exception:
+            # Covers a principal that cannot be built and a claims extractor that
+            # raises, on a payload that did decode. The cause is logged here only:
+            # the body is the same 401 as every other rejection.
+            logger.warning("GatewayClaims rejected: the token could not be read", exc_info=True)
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
         return await call_next(request)

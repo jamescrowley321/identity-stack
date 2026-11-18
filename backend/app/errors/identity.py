@@ -34,6 +34,18 @@ class Conflict(IdentityError):
 
 
 @dataclass(frozen=True, unsafe_hash=False)
+class EmailLinkRefused(Conflict):
+    """A first login's email is already held by a canonical user it may not be linked to.
+
+    Just-in-time provisioning of a provider whose organization picks the tenant
+    (Zitadel) returns it: an organization's administrators can set any email on
+    their users, so the email does not show the login is that user's. Any first
+    login (just-in-time provisioning, the Descope flow sync) returns it too for
+    a user such a login created (``User.email_from_organization``).
+    """
+
+
+@dataclass(frozen=True, unsafe_hash=False)
 class ValidationError(IdentityError):
     """Input failed domain validation rules."""
 

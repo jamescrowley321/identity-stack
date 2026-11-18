@@ -191,6 +191,17 @@ class ReconciliationService:
                         continue
                     stats["tenants_created"] += 1
                     logger.info("Reconciliation: created tenant '%s'", name)
+                elif existing.external_org_provider_id is not None:
+                    # Linked to a provider's organization: its domains are the
+                    # admission list of that organization's first logins, set by
+                    # an operator (conventions §28), and a Descope tenant that
+                    # shares its name does not choose them. Logged only when
+                    # they differ, not for every linked tenant on every run.
+                    if existing.domains != domains:
+                        logger.info(
+                            "Reconciliation: tenant '%s' is linked to an organization, domains left as they are",
+                            name,
+                        )
                 else:
                     changed = False
                     old_domains = list(existing.domains) if existing.domains else []
@@ -354,6 +365,19 @@ class ReconciliationService:
                 canonical_status = _DESCOPE_STATUS_MAP.get(descope_status, UserStatus.inactive)
 
                 existing = canonical_by_email.get(email)
+
+                if existing is not None and existing.email_from_organization:
+                    # A Zitadel organization's administrators chose that email; it
+                    # does not show this Descope identity is that user
+                    # (IdentityProvisioningService.provision). Neither link nor
+                    # update it. Log the holder's id, never the email.
+                    logger.warning(
+                        "Reconciliation refused: Descope subject %s has the email of canonical user %s, "
+                        "whose email an organization chose",
+                        user_id,
+                        existing.id,
+                    )
+                    continue
 
                 if existing is None:
                     user = User(

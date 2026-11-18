@@ -17,7 +17,7 @@ def _future_exp(seconds_ahead: int = 3600) -> int:
     return int(time.time()) + seconds_ahead
 
 
-def _make_token(payload: dict, *, auto_exp: bool = True) -> str:
+def _make_token(payload: dict, *, auto_exp: bool = True, alg: str = "RS256") -> str:
     """Build an unsigned JWT with the given payload.
 
     By default a valid future ``exp`` is injected if the caller did not
@@ -26,7 +26,7 @@ def _make_token(payload: dict, *, auto_exp: bool = True) -> str:
     """
     if auto_exp and "exp" not in payload:
         payload = {**payload, "exp": _future_exp()}
-    header = base64.urlsafe_b64encode(json.dumps({"alg": "RS256", "typ": "JWT"}).encode()).decode().rstrip("=")
+    header = base64.urlsafe_b64encode(json.dumps({"alg": alg, "typ": "JWT"}).encode()).decode().rstrip("=")
     body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
     return f"{header}.{body}.fakesig"
 
@@ -145,6 +145,83 @@ def app():
 @pytest.fixture
 def client(app):
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+class TestSigningAlgorithm:
+    """Descope and Ory accept RS256 only. The gateway never calls the library, so the header is checked."""
+
+    DESCOPE_CLAIMS = {"sub": "descope-user", "iss": "https://api.descope.com/P123", "aud": "P123"}
+    ORY_CLAIMS = {"sub": "ory-user", "iss": ORY_ISSUER, "aud": ORY_AUD}
+
+    @pytest.fixture
+    def client(self):
+        app = _build_app(descope_project_id="P123", ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
+        return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(("claims", "provider"), [(DESCOPE_CLAIMS, "Descope"), (ORY_CLAIMS, "Ory")])
+    async def test_rs256_is_accepted(self, client, claims, provider):
+        resp = await client.get("/api/protected", headers={"Authorization": f"Bearer {_make_token(claims)}"})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["auth_type"] == provider
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("claims", [DESCOPE_CLAIMS, ORY_CLAIMS], ids=["Descope", "Ory"])
+    @pytest.mark.parametrize("alg", ["ES256", "PS256", "HS256", "none"])
+    async def test_any_other_algorithm_is_refused(self, client, claims, alg):
+        token = _make_token(claims, alg=alg)
+
+        resp = await client.get("/api/protected", headers={"Authorization": f"Bearer {token}"})
+
+        assert resp.status_code == 401
+        assert resp.json() == {"detail": "Invalid or expired token"}
+
+
+class TestSenderConstrainedToken:
+    """A bound token sent as a bearer token is refused, as the library refuses it in standalone mode.
+
+    RFC 9449 §7.2 (``cnf.jkt``) and RFC 8705 §3 (``cnf["x5t#S256"]``). The gateway
+    forwards neither a DPoP proof nor a client certificate, so no binding can be checked here.
+    """
+
+    DESCOPE_CLAIMS = {"sub": "descope-user", "iss": "https://api.descope.com/P123", "aud": "P123"}
+    ORY_CLAIMS = {"sub": "ory-user", "iss": ORY_ISSUER, "aud": ORY_AUD}
+    # The JWK thumbprint of the example proof key in RFC 9449 §6.1.
+    DPOP_BOUND = {"jkt": "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"}
+    # The certificate thumbprint in the example of RFC 8705 §3.1.
+    CERTIFICATE_BOUND = {"x5t#S256": "bwcK0esc3ACC3DB2Y5_lESsXE8o9ltc05O89jdN-dg2"}
+
+    @pytest.fixture
+    def client(self):
+        app = _build_app(descope_project_id="P123", ory_issuer_url=ORY_ISSUER, ory_audience=ORY_AUD)
+        return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("claims", [DESCOPE_CLAIMS, ORY_CLAIMS], ids=["Descope", "Ory"])
+    @pytest.mark.parametrize("cnf", [DPOP_BOUND, CERTIFICATE_BOUND, {"jkt": None}], ids=["dpop", "mtls", "null-jkt"])
+    async def test_a_bound_token_is_refused(self, client, claims, cnf):
+        bound = _make_token({**claims, "cnf": cnf})
+
+        resp = await client.get("/api/protected", headers={"Authorization": f"Bearer {bound}"})
+
+        assert resp.status_code == 401
+        assert resp.json() == {"detail": "Invalid or expired token"}
+
+        # Control: the confirmation claim is the only reason.
+        unbound = await client.get("/api/protected", headers={"Authorization": f"Bearer {_make_token(claims)}"})
+        assert unbound.status_code == 200, unbound.text
+
+    @pytest.mark.anyio
+    async def test_the_refusal_names_its_cause_in_the_log_only(self, client, caplog):
+        bound = _make_token({**self.DESCOPE_CLAIMS, "cnf": self.DPOP_BOUND})
+
+        with caplog.at_level("WARNING", logger="app.middleware.claims"):
+            await client.get("/api/protected", headers={"Authorization": f"Bearer {bound}"})
+
+        assert [record.getMessage() for record in caplog.records] == [
+            "GatewayClaims rejected (Descope): sender-constrained token presented as a bearer token"
+        ]
 
 
 class TestClaimsExtraction:

@@ -4,6 +4,7 @@ Tests cover:
 - create: happy path, duplicate assignment → RepositoryConflictError
 - get: composite PK lookup (user_id, tenant_id, role_id)
 - list_by_user_tenant: returns all role assignments for a user in a tenant
+- list_by_role: returns every assignment of a role, across users and tenants
 - delete: specific assignment (composite PK)
 - delete_by_user_tenant: bulk delete all assignments for user in tenant
 - Tenant isolation: data for tenant A not visible from tenant B queries
@@ -130,6 +131,34 @@ async def test_list_by_user_tenant(db_session):
     assert r2.id in role_ids
 
 
+async def test_list_by_role_lists_every_holder_of_the_role_and_no_other(db_session):
+    repo = UserTenantRoleRepository(db_session)
+    alice, bob = _make_user(), _make_user()
+    first, second = _make_tenant(), _make_tenant()
+    db_session.add_all([alice, bob, first, second])
+    await db_session.flush()
+    shared, other = _make_role(), _make_role()
+    db_session.add_all([shared, other])
+    await db_session.flush()
+    for user_id, tenant_id, role_id in [
+        (alice.id, first.id, shared.id),
+        (alice.id, second.id, shared.id),
+        (bob.id, first.id, shared.id),
+        (bob.id, second.id, other.id),
+    ]:
+        await repo.create(UserTenantRole(user_id=user_id, tenant_id=tenant_id, role_id=role_id))
+
+    holders = await repo.list_by_role(shared.id)
+
+    assert sorted((a.user_id, a.tenant_id, a.role_id) for a in holders) == sorted(
+        [
+            (alice.id, first.id, shared.id),
+            (alice.id, second.id, shared.id),
+            (bob.id, first.id, shared.id),
+        ]
+    )
+
+
 async def test_delete_assignment(db_session):
     repo = UserTenantRoleRepository(db_session)
     user, tenant, role = await _setup_entities(db_session)
@@ -191,3 +220,25 @@ async def test_tenant_isolation(db_session):
     # Tenant B has nothing
     b_results = await repo.list_by_user_tenant(user.id, tenant_b.id)
     assert len(b_results) == 0
+
+
+async def test_list_by_user_tenants_lists_the_assignments_of_exactly_the_pairs_given(db_session):
+    """One query for many pairs: a user's rows in a tenant paired with another user are not listed."""
+    repo = UserTenantRoleRepository(db_session)
+    alice, bob = _make_user(), _make_user()
+    first, second = _make_tenant(), _make_tenant()
+    db_session.add_all([alice, bob, first, second])
+    await db_session.flush()
+    role = _make_role()
+    db_session.add(role)
+    await db_session.flush()
+    for user_id, tenant_id in [(alice.id, first.id), (alice.id, second.id), (bob.id, first.id), (bob.id, second.id)]:
+        await repo.create(UserTenantRole(user_id=user_id, tenant_id=tenant_id, role_id=role.id))
+
+    listed = await repo.list_by_user_tenants([(alice.id, first.id), (bob.id, second.id)])
+
+    assert sorted((row.user_id, row.tenant_id) for row in listed) == sorted([(alice.id, first.id), (bob.id, second.id)])
+
+
+async def test_list_by_user_tenants_of_no_pairs_is_empty(db_session):
+    assert await UserTenantRoleRepository(db_session).list_by_user_tenants([]) == []

@@ -318,6 +318,29 @@ class TestReconcileTenants:
         assert existing.domains == ["new.com"]
         mocks["tenant_repo"].update.assert_awaited_once()
 
+    async def test_a_tenant_linked_to_another_providers_organization_keeps_its_domains(self):
+        """Its domains are that organization's admission allow-list, written by its operator, not Descope's."""
+        service, mocks = _build_service()
+        _empty_descope_state(mocks)
+        _empty_canonical_state(mocks)
+        linked = _make_tenant(
+            name="Acme", domains=["acme.test"], external_org_id="org-acme", external_org_provider_id=uuid.uuid4()
+        )
+        unlinked = _make_tenant(name="Globex", domains=["old.com"])
+        mocks["descope"].list_tenants.return_value = [
+            {"name": "Acme", "selfProvisioningDomains": ["globex.test"]},
+            {"name": "Globex", "selfProvisioningDomains": ["new.com"]},
+        ]
+        mocks["tenant_repo"].list_all.return_value = [linked, unlinked]
+
+        result = await service.run()
+
+        assert result.is_ok()
+        assert result.ok["stats"]["tenants_updated"] == 1
+        assert linked.domains == ["acme.test"]
+        assert unlinked.domains == ["new.com"]
+        mocks["tenant_repo"].update.assert_awaited_once_with(unlinked)
+
     async def test_no_change_tenant_not_updated(self):
         service, mocks = _build_service()
         _empty_descope_state(mocks)
@@ -787,6 +810,45 @@ class TestReconcileUsers:
         assert result.is_ok()
         assert result.ok["stats"]["links_created"] == 0
         mocks["link_repo"].create.assert_not_awaited()
+
+    async def test_user_whose_email_an_organization_chose_is_never_linked(self, caplog):
+        """A Descope user is not linked to, or written into, a user a Zitadel organization created.
+
+        The organization's administrators chose that email, so it does not show the
+        Descope identity is that user. The refusal names the holder's id, never the email.
+        """
+        service, mocks = _build_service()
+        _empty_descope_state(mocks)
+        _empty_canonical_state(mocks)
+        holder = _make_user(
+            email="victim@corp.test", given_name="Org", family_name="Chosen", email_from_organization=True
+        )
+        mocks["descope"].search_all_users.return_value = [
+            {
+                "userId": "descope-victim",
+                "email": "victim@corp.test",
+                "givenName": "Victim",
+                "familyName": "Real",
+                "status": "disabled",
+            }
+        ]
+        mocks["user_repo"].list_all.return_value = [holder]
+        mocks["link_repo"].get_by_provider_and_sub.return_value = None
+
+        with caplog.at_level("WARNING", logger="app.services.reconciliation"):
+            result = await service.run()
+
+        assert result.is_ok()
+        assert result.ok["stats"]["links_created"] == 0
+        assert result.ok["stats"]["users_updated"] == 0
+        mocks["link_repo"].create.assert_not_awaited()
+        mocks["user_repo"].update.assert_not_awaited()
+        assert (holder.given_name, holder.family_name, holder.status) == ("Org", "Chosen", UserStatus.active)
+        refusals = [r.getMessage() for r in caplog.records if "refused" in r.getMessage()]
+        assert len(refusals) == 1
+        assert str(holder.id) in refusals[0]
+        assert "descope-victim" in refusals[0]
+        assert "victim@corp.test" not in refusals[0]
 
     async def test_multiple_users_processed(self):
         """Multiple Descope users are all reconciled."""

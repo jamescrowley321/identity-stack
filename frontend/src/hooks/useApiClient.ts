@@ -1,6 +1,7 @@
 import { useAuth } from "react-oidc-context";
-import { useCallback, useRef, useEffect } from "react";
+import { useCallback, useContext, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { TENANT_SELECTOR_HEADER, TenantSelectorContext } from "../contexts/TenantSelector";
 
 /**
  * Absolute base URL the browser uses for API calls.
@@ -31,6 +32,11 @@ export function apiUrl(path: string): string {
  * Hook that provides an authenticated fetch wrapper.
  *
  * - Attaches the current access token as a Bearer header.
+ * - Names the active tenant in the `X-Tenant-ID` header when there is one
+ *   (`TenantSelectorContext`, supplied by `IdentityProvider`). A value the
+ *   caller set is always dropped, with or without an active tenant, so a call
+ *   never acts in a tenant the UI does not show. `apiFetch` changes when the
+ *   tenant does, so a page that loads with it loads again in the new tenant.
  * - Prepends API_BASE_URL to the request path so the same call site
  *   works in both standalone (relative URL → nginx proxy) and gateway
  *   (absolute URL → Tyk) modes.
@@ -40,6 +46,7 @@ export function apiUrl(path: string): string {
 export function useApiClient() {
   const auth = useAuth();
   const navigate = useNavigate();
+  const tenantId = useContext(TenantSelectorContext);
 
   // Keep a ref so the callback always sees the latest auth state
   // without needing auth in its dependency array (avoids re-creating
@@ -49,22 +56,38 @@ export function useApiClient() {
     authRef.current = auth;
   }, [auth]);
 
+  // navigate changes on every route change. Read through a ref, it leaves
+  // apiFetch to change with the tenant alone: a new apiFetch reloads the
+  // identity and each page's data, which a move to another page must not do.
+  const navigateRef = useRef(navigate);
+  useEffect(() => {
+    navigateRef.current = navigate;
+  }, [navigate]);
+
   const apiFetch = useCallback(
     async (path: string, options: RequestInit = {}): Promise<Response> => {
       const currentAuth = authRef.current;
       const token = currentAuth.user?.access_token;
 
       if (!token) {
-        navigate("/login");
+        navigateRef.current("/login");
         return Promise.reject(new Error("No access token"));
       }
 
       const url = apiUrl(path);
 
+      // Headers reads every form a caller may pass (object, entry list,
+      // Headers) and matches names without regard to case, so deleting from it
+      // drops a tenant or authorization header the caller gave in any case.
+      const callerHeaders = new Headers(options.headers);
+      callerHeaders.delete(TENANT_SELECTOR_HEADER);
+      callerHeaders.delete("Authorization");
+      const tenantHeader: Record<string, string> =
+        tenantId === null ? {} : { [TENANT_SELECTOR_HEADER]: tenantId };
       const makeRequest = (t: string) =>
         fetch(url, {
           ...options,
-          headers: { ...options.headers, Authorization: `Bearer ${t}` },
+          headers: { ...Object.fromEntries(callerHeaders), ...tenantHeader, Authorization: `Bearer ${t}` },
         });
 
       const response = await makeRequest(token);
@@ -79,12 +102,12 @@ export function useApiClient() {
           // Silent renewal failed — session is unrecoverable.
         }
         await currentAuth.removeUser();
-        navigate("/login", { state: { sessionExpired: true } });
+        navigateRef.current("/login", { state: { sessionExpired: true } });
       }
 
       return response;
     },
-    [navigate],
+    [tenantId],
   );
 
   return { apiFetch };

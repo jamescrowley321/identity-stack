@@ -4,6 +4,7 @@ from expression import Error, Ok
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
+from app.dependencies.descope import require_descope_principal
 from app.dependencies.identity import get_permission_service
 from app.dependencies.rbac import require_role
 from app.errors.identity import NotFound
@@ -11,7 +12,10 @@ from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.permission import PermissionService
 
-router = APIRouter(tags=["Permissions"])
+# Every route here is Descope-backed (conventions §18): ``PermissionService`` mirrors each
+# definition to Descope (``DescopeSyncAdapter``), and the definitions belong to no tenant,
+# so without the guard an admin of any one canonical tenant would change them for all.
+router = APIRouter(tags=["Permissions"], dependencies=[Depends(require_descope_principal)])
 
 
 class CreatePermissionRequest(BaseModel):

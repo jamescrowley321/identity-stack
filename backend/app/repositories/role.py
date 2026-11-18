@@ -1,6 +1,7 @@
 """RoleRepository — data access layer for canonical Role and RolePermission models.
 
-Handles all SQLAlchemy queries for role CRUD and permission mapping.
+Handles all SQLAlchemy queries for role CRUD and permission mapping, and maps
+role rows to and from the Access domain's values.
 Contains NO business logic, NO OTel spans, NO adapter calls — data access only.
 """
 
@@ -11,8 +12,42 @@ import uuid
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 
+from app.domain import access
 from app.models.identity.role import Permission, Role, RolePermission
 from app.repositories.base import BaseRepository, RepositoryConflictError
+
+
+def role_from_row(row: Role) -> access.Role:
+    """Rebuild the domain value. A stored name is trusted, not re-validated."""
+    return access.Role(
+        id=row.id,
+        name=access.RoleName(row.name),
+        description=row.description,
+        tenant_id=row.tenant_id,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def role_to_row(role: access.Role) -> Role:
+    """Build the row for a role that has not been stored yet."""
+    return Role(
+        id=role.id,
+        name=role.name.value,
+        description=role.description,
+        tenant_id=role.tenant_id,
+        created_at=role.created_at,
+        updated_at=role.updated_at,
+    )
+
+
+def apply_role(role: access.Role, row: Role) -> None:
+    """Copy the fields an update may change onto the stored row.
+
+    ``updated_at`` is left to the database, which stamps it on write.
+    """
+    row.name = role.name.value
+    row.description = role.description
 
 
 class RoleRepository(BaseRepository[Role]):
@@ -22,6 +57,14 @@ class RoleRepository(BaseRepository[Role]):
     """
 
     _model = Role
+
+    async def lock(self, role_id: uuid.UUID) -> None:
+        """Hold the role's row (``FOR UPDATE``) until the transaction ends.
+
+        An assignment of the role checks its foreign key against this row and
+        waits, so the role's holders cannot change until the transaction commits.
+        """
+        await self._session.execute(sa.select(Role.id).where(Role.id == role_id).with_for_update())
 
     async def get_by_name(self, name: str, tenant_id: uuid.UUID | None = None) -> Role | None:
         """Fetch a role by name within a tenant scope. Returns None if not found."""

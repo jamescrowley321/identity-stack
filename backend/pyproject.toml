@@ -12,10 +12,17 @@ dependencies = [
     # Revisit when slowapi ships a fix for the new inclusion model.
     "fastapi>=0.115.0,<0.137",
     "uvicorn[standard]>=0.34.0,<1",
-    # Floor at 3.8.5: first release that requires cryptography>=50, which carries
-    # the fixes for PYSEC-2026-3552/3553/3554. Older py-identity-model caps
-    # cryptography<49 and would hold us on a vulnerable build.
-    "py-identity-model>=3.8.5,<4",
+    # The 5.0.0 pre-release, pinned to one commit of the library's repository: v5
+    # pre-releases are not on PyPI, and their release assets are deleted when the
+    # next one is cut. The commit carries TokenValidationConfig.token_issuers
+    # (identity-model#1184), which Descope's three issuer forms need. Move the pin
+    # to a release/v5 commit once that merges; replace with ">=5.0.0,<6" when
+    # 5.0.0 is released (#584). The installed version reads 4.1.1: the library's
+    # version is set when it is released, not in the repository. From 4.1.1 the library enforces
+    # TokenValidationConfig.algorithms in discovery mode; 5.x also refuses HMAC
+    # algorithms and weak keys by default. It requires cryptography>=50
+    # (PYSEC-2026-3552/3553/3554).
+    "py-identity-model @ git+https://github.com/jamescrowley321/identity-model@23cf375f47b94413dda7c2ee214f9092546c4783#subdirectory=py",
     "sqlmodel>=0.0.22,<1",
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.31.0",
@@ -67,11 +74,76 @@ select = ["E", "F", "I", "W", "S", "TID251", "G004", "G010"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106", "TID251"]  # assert, hardcoded passwords OK in tests; house bans cover app/ only
+"tests/unit/test_provider_terraform_roots.py" = ["S603"]  # runs the CI step's jq filter and the make target under test
 "app/knobs.py" = ["TID251"]  # the settings module: the one reader of os.environ
 "app/outbound.py" = ["TID251"]  # the HTTP client helper: the one importer of httpx
 "app/logbook.py" = ["TID251"]  # the logging helper: the one caller of logging.getLogger
 "scripts/**" = ["TID251"]  # operator scripts run outside the app process
 "migrations/**" = ["TID251"]  # Alembic env.py runs under the alembic CLI and reads DATABASE_URL itself
+
+# docs/conventions.md §22-§27 and ADR-0008. Run by `make lint` as `lint-imports`.
+[tool.importlinter]
+root_package = "app"
+include_external_packages = true
+contract_types = ["context_layers: import_contracts.ContextLayersContract"]
+
+[[tool.importlinter.contracts]]
+name = "Layers import inward (conventions §22)"
+type = "layers"
+layers = [
+    "app.routers",
+    "app.dependencies",
+    "app.services",
+    "app.repositories",
+    "app.models",
+    "app.domain",
+]
+
+[[tool.importlinter.contracts]]
+name = "The domain imports no framework and no other layer (conventions §23)"
+type = "forbidden"
+source_modules = ["app.domain"]
+forbidden_modules = [
+    "app.*",
+    "alembic",
+    "asyncpg",
+    "fastapi",
+    "httpx",
+    "logging",
+    "opentelemetry",
+    "pydantic",
+    "py_identity_model",
+    "redis",
+    "slowapi",
+    "sqlalchemy",
+    "sqlmodel",
+    "starlette",
+]
+
+[[tool.importlinter.contracts]]
+name = "Bounded contexts do not import each other (conventions §27)"
+type = "independence"
+modules = ["app.domain.*"]
+
+# Routers reach data and providers only through a service; services hold domain
+# values, not table rows (§26). `unmigrated` has one entry per bounded
+# context that has not moved onto the domain yet. A migration deletes its entry;
+# the contract fails on an entry that no longer excuses anything.
+[[tool.importlinter.contracts]]
+name = "Routers and services skip no layer (conventions §26)"
+type = "context_layers"
+rules = [
+    "app.routers -> app.repositories",
+    "app.routers -> app.models",
+    "app.routers -> app.outbound",
+    "app.services -> app.models",
+]
+unmigrated = [
+    "Directory (#515): app.routers.canonical_users app.routers.tenants app.services.tenant app.services.user",
+    "Federation (#516): app.routers.idp_links app.routers.providers app.services.identity_provisioning app.services.idp_link app.services.provider",
+    "Documents and FGA (#517): app.routers.documents app.routers.fga",
+    "Synchronisation (#518): app.routers.sync_status app.services.inbound_sync app.services.reconciliation app.services.sync_status",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -91,4 +163,5 @@ dev = [
     "ruff>=0.9",
     "aiosqlite>=0.20",
     "testcontainers[postgres]>=4.0",
+    "import-linter>=2.16",
 ]

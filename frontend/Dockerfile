@@ -4,6 +4,16 @@ COPY package.json package-lock.json* ./
 RUN npm install
 COPY . .
 ARG VITE_DESCOPE_PROJECT_ID
+# Provider-neutral OIDC settings (see frontend/.env.example). No default:
+# an arg that is not passed stays unset, so a value in frontend/.env still
+# applies (Vite lets any set variable, even an empty one, override .env).
+# All unset, the SPA falls back to VITE_DESCOPE_* for login and offers no
+# tenant sign-in switch.
+ARG VITE_OIDC_AUTHORITY
+ARG VITE_OIDC_CLIENT_ID
+ARG VITE_OIDC_SCOPE
+ARG VITE_OIDC_REDIRECT_URI
+ARG VITE_OIDC_TENANT_SCOPE_TEMPLATE
 # VITE_API_BASE_URL is the absolute base URL the browser uses to call
 # the API. Empty string (the default) means the frontend uses relative
 # `/api/...` URLs and nginx's `/api/` proxy forwards them to the backend

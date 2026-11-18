@@ -11,7 +11,7 @@ import uuid
 import sqlalchemy as sa
 
 from app.models.identity.provider import Provider
-from app.models.identity.user import IdPLink
+from app.models.identity.user import LINK_ORIGIN, LINKED_AT_SIGN_IN, IdPLink
 from app.repositories.base import BaseRepository
 
 
@@ -53,6 +53,25 @@ class IdPLinkRepository(BaseRepository[IdPLink]):
         )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def signed_in_sub_of(self, user_id: uuid.UUID, provider_name: str) -> str | None:
+        """The external subject of the user's link to the provider named ``provider_name``, if a sign-in made it.
+
+        None when the user has no such link, or when it was made otherwise (the
+        admin route): its subject is whatever the admin typed in.
+        """
+        stmt = (
+            sa.select(IdPLink.external_sub, IdPLink.metadata_)
+            .join(Provider, Provider.id == IdPLink.provider_id)
+            .where(IdPLink.user_id == user_id, Provider.name == provider_name)
+        )
+        row = (await self._session.execute(stmt)).one_or_none()
+        if row is None:
+            return None
+        external_sub, metadata = row
+        if isinstance(metadata, dict) and metadata.get(LINK_ORIGIN) == LINKED_AT_SIGN_IN:
+            return external_sub
+        return None
 
     async def get_by_user(self, user_id: uuid.UUID) -> list[IdPLink]:
         """Fetch all IdP links for a user."""

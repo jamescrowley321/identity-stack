@@ -5,6 +5,7 @@ from expression import Error, Ok
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.dependencies.descope import require_descope_principal
 from app.dependencies.identity import get_role_service
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_claims, get_tenant_id
@@ -13,7 +14,11 @@ from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.role import RoleService
 
-router = APIRouter(tags=["Roles"])
+# Every route here is Descope-backed (conventions §18). ``RoleService`` mirrors each
+# definition and each assignment to Descope (``DescopeSyncAdapter``), and ``/roles/me``
+# reads the Descope ``tenants`` claim. The definitions belong to no tenant, so without
+# the guard an admin of any one canonical tenant would change them for every tenant.
+router = APIRouter(tags=["Roles"], dependencies=[Depends(require_descope_principal)])
 
 
 class RoleAssignmentRequest(BaseModel):

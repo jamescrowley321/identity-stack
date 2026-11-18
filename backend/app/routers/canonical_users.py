@@ -8,7 +8,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.dependencies.identity import get_user_service
-from app.dependencies.rbac import require_role
+from app.dependencies.rbac import require_global_role
 from app.models.identity.user import UserStatus
 from app.services.user import UserService
 
@@ -37,7 +37,7 @@ async def list_canonical_users(
     request: Request,
     status: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=_MAX_USERS_LIMIT),
-    _operator_roles: list[str] = Depends(require_role("operator")),
+    _operator_roles: list[str] = Depends(require_global_role("operator")),
     service: UserService = Depends(get_user_service),
 ):
     """List canonical users, optionally filtered by status."""
@@ -52,6 +52,9 @@ async def list_canonical_users(
                 "given_name": u.given_name,
                 "family_name": u.family_name,
                 "status": u.status.value,
+                # True when a Zitadel organization's first login created the user:
+                # its email is one the organization's administrators chose.
+                "email_from_organization": u.email_from_organization,
                 "created_at": u.created_at.isoformat(),
                 "updated_at": u.updated_at.isoformat(),
             }

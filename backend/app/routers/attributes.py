@@ -1,17 +1,16 @@
+from expression import Ok
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from app.dependencies.auth import get_claims
+from app.dependencies.descope import get_descope_management, is_descope_principal, require_descope_principal
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
-from app.logbook import logbook
-from app.outbound import UpstreamStatusError, UpstreamTransportError
-
-logger = logbook(__name__)
+from app.errors.identity import NotFound
+from app.errors.problem_detail import result_to_response
+from app.services.descope_management import AttributeValue, DescopeManagementAdapter
 
 router = APIRouter(tags=["Attributes"])
-
-AttributeValue = str | int | bool | float | None
 
 ALLOWED_USER_ATTRIBUTES = {"department", "job_title", "avatar_url"}
 ALLOWED_TENANT_ATTRIBUTES = {"plan_tier", "max_members"}
@@ -27,40 +26,40 @@ class UpdateTenantSettingsRequest(BaseModel):
 
 
 @router.get("/profile")
-async def get_profile(request: Request, claims: dict = Depends(get_claims)):
-    """Load the current user's profile and custom attributes from Descope."""
+async def get_profile(
+    request: Request,
+    claims: dict = Depends(get_claims),
+    management: DescopeManagementAdapter = Depends(get_descope_management),
+):
+    """Load the current user's profile and custom attributes from Descope.
+
+    Every provider's session loads this page. Only a Descope principal's ``sub``
+    is a Descope user id, so only a Descope principal is looked up there
+    (conventions §18): anyone else gets the empty profile, without a call.
+    """
     # Descope's sub claim is the userId (not loginId)
     user_id = claims.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="Missing user identity (sub claim)")
-    try:
-        client = request.app.state.descope_client
-        user = await client.load_user(user_id)
-        return {
-            "user_id": user_id,
-            "name": user.get("name", ""),
-            "email": user.get("email", ""),
-            "custom_attributes": user.get("customAttributes", {}),
-        }
-    except (UpstreamStatusError, UpstreamTransportError) as exc:
+    empty_profile = {"user_id": user_id, "name": "", "email": "", "custom_attributes": {}}
+    if not is_descope_principal(request):
+        return result_to_response(Ok(empty_profile), request)
+    result = await management.load_profile(user_id)
+    if result.is_error():
         # Degrade gracefully — profile is informational, not critical.
         # In CI the Descope credentials are fake so every call 401s;
         # in production a transient Descope outage shouldn't crash the
         # profile page.
-        logger.warning("Descope API error loading profile for %s: %s", user_id, exc)
-        return {
-            "user_id": user_id,
-            "name": "",
-            "email": "",
-            "custom_attributes": {},
-        }
+        result = Ok(empty_profile)
+    return result_to_response(result, request)
 
 
-@router.patch("/profile")
+@router.patch("/profile", dependencies=[Depends(require_descope_principal)])
 async def update_profile_attribute(
     request: Request,
     body: UpdateAttributeRequest,
     claims: dict = Depends(get_claims),
+    management: DescopeManagementAdapter = Depends(get_descope_management),
 ):
     """Update a single custom attribute on the current user's profile."""
     # Descope's sub claim is the userId — mutation endpoints require loginId
@@ -69,52 +68,34 @@ async def update_profile_attribute(
         raise HTTPException(status_code=400, detail="Missing user identity (sub claim)")
     if body.key not in ALLOWED_USER_ATTRIBUTES:
         raise HTTPException(status_code=400, detail=f"Attribute '{body.key}' is not allowed")
-    try:
-        client = request.app.state.descope_client
-        login_id = await client.resolve_login_id(user_id)
-        await client.update_user_custom_attribute(login_id, body.key, body.value)
-        return {"status": "updated", "key": body.key, "value": body.value}
-    except UpstreamStatusError as exc:
-        logger.warning(
-            "Descope API error updating attribute %s for %s: %s", body.key, user_id, exc.response.status_code
-        )
+    result = await management.update_profile_attribute(user_id, body.key, body.value)
+    if result.is_error():
         raise HTTPException(status_code=502, detail="Failed to update attribute in identity provider")
+    return result_to_response(Ok({"status": "updated", "key": body.key, "value": body.value}), request)
 
 
-@router.get("/tenants/current/settings")
-async def get_tenant_settings(request: Request, tenant_id: str = Depends(get_tenant_id)):
+@router.get("/tenants/current/settings", dependencies=[Depends(require_descope_principal)])
+async def get_tenant_settings(
+    request: Request,
+    tenant_id: str = Depends(get_tenant_id),
+    management: DescopeManagementAdapter = Depends(get_descope_management),
+):
     """Load the current tenant's settings and custom attributes from Descope."""
-    try:
-        client = request.app.state.descope_client
-        tenant = await client.load_tenant(tenant_id)
-        if not tenant:
-            return {
-                "tenant_id": tenant_id,
-                "name": "",
-                "custom_attributes": {},
-            }
-        return {
-            "tenant_id": tenant_id,
-            "name": tenant.get("name", ""),
-            "custom_attributes": tenant.get("customAttributes", {}),
-        }
-    except UpstreamStatusError as exc:
-        if exc.response.status_code == 404:
-            return {
-                "tenant_id": tenant_id,
-                "name": "",
-                "custom_attributes": {},
-            }
-        logger.warning("Descope API error loading tenant %s: %s", tenant_id, exc.response.status_code)
-        raise HTTPException(status_code=502, detail="Failed to load tenant settings from identity provider")
+    result = await management.load_tenant_settings(tenant_id)
+    if result.is_error():
+        if not isinstance(result.error, NotFound):
+            raise HTTPException(status_code=502, detail="Failed to load tenant settings from identity provider")
+        result = Ok({"tenant_id": tenant_id, "name": "", "custom_attributes": {}})
+    return result_to_response(result, request)
 
 
-@router.patch("/tenants/current/settings")
+@router.patch("/tenants/current/settings", dependencies=[Depends(require_descope_principal)])
 async def update_tenant_settings(
     request: Request,
     body: UpdateTenantSettingsRequest,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    management: DescopeManagementAdapter = Depends(get_descope_management),
 ):
     """Update custom attributes on the current tenant. Requires owner or admin role."""
     disallowed = set(body.custom_attributes.keys()) - ALLOWED_TENANT_ATTRIBUTES
@@ -123,10 +104,9 @@ async def update_tenant_settings(
             status_code=400,
             detail=f"Attribute(s) not allowed: {', '.join(sorted(disallowed))}",
         )
-    try:
-        client = request.app.state.descope_client
-        await client.update_tenant_custom_attributes(tenant_id, body.custom_attributes)
-        return {"status": "updated", "tenant_id": tenant_id, "custom_attributes": body.custom_attributes}
-    except UpstreamStatusError as exc:
-        logger.warning("Descope API error updating tenant %s: %s", tenant_id, exc.response.status_code)
+    result = await management.update_tenant_settings(tenant_id, body.custom_attributes)
+    if result.is_error():
         raise HTTPException(status_code=502, detail="Failed to update tenant settings in identity provider")
+    return result_to_response(
+        Ok({"status": "updated", "tenant_id": tenant_id, "custom_attributes": body.custom_attributes}), request
+    )

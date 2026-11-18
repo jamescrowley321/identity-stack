@@ -11,6 +11,7 @@ import ast
 import dataclasses
 import inspect
 import re
+import sys
 from pathlib import Path
 
 from app.errors import identity as identity_errors
@@ -269,7 +270,9 @@ def test_queries_live_in_repositories():
 # (module, function) -> why it reads request.state itself.
 REQUEST_STATE_READERS = {
     ("routers/auth.py", "logout"): "needs the principal or None, to fall back to the first configured provider",
-    ("routers/protected.py", "canonical_identity"): "checks principal, identity and claims together for one 401",
+    ("routers/protected.py", "canonical_identity"): (
+        "checks principal, identity and claims together for one 401, and hands the provider to first-login provisioning"
+    ),
     ("routers/idp_links.py", "_require_user_in_tenant"): "a raising guard; answers 404, not 401/403, by design",
 }
 
@@ -399,33 +402,8 @@ def test_abstract_identity_service_has_no_implementation_to_trace():
 
 # --- §4: every router function that calls Descope handles both upstream failures ---
 
-_STATUS_ONLY = "predates #512: catches UpstreamStatusError only, so a transport failure is a 500 (follow-up)"
-_UNHANDLED = "predates #512: catches no upstream failure, so every Descope error is a 500 (follow-up)"
-
 # (module, function) -> why it does not catch both UpstreamStatusError and UpstreamTransportError.
-UPSTREAM_HANDLING_EXCEPTIONS = {
-    **{
-        ("routers/users.py", name): _STATUS_ONLY
-        for name in ("list_members", "invite_member", "deactivate_member", "activate_member", "remove_member")
-    },
-    **{
-        ("routers/attributes.py", name): _STATUS_ONLY
-        for name in ("update_profile_attribute", "get_tenant_settings", "update_tenant_settings")
-    },
-    **{
-        ("routers/accesskeys.py", name): _UNHANDLED
-        for name in (
-            "_verify_key_tenant",
-            "create_access_key",
-            "list_access_keys",
-            "get_access_key",
-            "deactivate_access_key",
-            "activate_access_key",
-            "delete_access_key",
-        )
-    },
-    ("routers/users.py", "_get_descope_client"): "returns the client; makes no call itself",
-}
+UPSTREAM_HANDLING_EXCEPTIONS: dict[tuple[str, str], str] = {}
 
 
 def _caught_names(handler: ast.ExceptHandler) -> set[str]:
@@ -467,6 +445,67 @@ def test_router_functions_that_call_descope_handle_upstream_failures():
     )
 
 
+_ADAPTER = "services/descope_management.py"
+_ADAPTER_CLASS = "DescopeManagementAdapter"
+_ADAPTER_STATUS_ONLY = "predates #512: catches UpstreamStatusError only, so a transport failure is a 500 (#558)"
+_ADAPTER_UNHANDLED = "predates #512: catches no upstream failure, so every Descope error is a 500 (#558)"
+
+# method -> why it does not catch both UpstreamStatusError and UpstreamTransportError.
+ADAPTER_UPSTREAM_HANDLING_EXCEPTIONS = {
+    **{
+        name: _ADAPTER_STATUS_ONLY
+        for name in (
+            "list_members",
+            "invite_member",
+            "set_member_status",
+            "remove_member",
+            "update_profile_attribute",
+            "load_tenant_settings",
+            "update_tenant_settings",
+        )
+    },
+    **{
+        name: _ADAPTER_UNHANDLED
+        for name in (
+            "create_access_key",
+            "list_access_keys",
+            "load_tenant_access_key",
+            "deactivate_access_key",
+            "activate_access_key",
+            "delete_access_key",
+        )
+    },
+}
+
+
+def _calls_the_client(func: ast.AST) -> bool:
+    """Whether ``func`` reads ``self._client``."""
+    return any(
+        isinstance(node, ast.Attribute)
+        and node.attr == "_client"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+        for node in ast.walk(func)
+    )
+
+
+def test_adapter_methods_that_call_descope_handle_upstream_failures():
+    """§4, for the routes behind the adapter: the adapter makes the calls, so it is checked."""
+    cls = next(
+        node for node in _tree(APP / _ADAPTER).body if isinstance(node, ast.ClassDef) and node.name == _ADAPTER_CLASS
+    )
+    methods = [m for m in cls.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef)) and m.name != "__init__"]
+    callers = [m for m in methods if _calls_the_client(m)]
+    # Guard the scan: load_profile is the compliant method, so it must be seen and must pass.
+    assert "load_profile" in {m.name for m in callers}
+    found = {m.name for m in callers if not _handles_both_upstream_failures(m)}
+    expected = ADAPTER_UPSTREAM_HANDLING_EXCEPTIONS.keys()
+    assert found == expected, (
+        f"§4: {_ADAPTER_CLASS} methods catch UpstreamStatusError and UpstreamTransportError and return Error. "
+        f"New: {sorted(found - expected)}; stale exceptions: {sorted(expected - found)}"
+    )
+
+
 def test_caught_names_reads_dotted_and_bare_handlers():
     tree = ast.parse(
         "try:\n    pass\nexcept app.outbound.UpstreamStatusError:\n    pass\ntry:\n    pass\nexcept:\n    pass\n"
@@ -491,3 +530,139 @@ def test_descope_client_spans_leave_status_to_the_caller():
             if not (isinstance(value, ast.Constant) and value.value is False):
                 offenders.append(f"line {node.lineno}: {name}")
     assert not offenders, f"§20: {offenders}"
+
+
+# --- §5: the pass-through routers reach Descope only through the adapter -------
+
+ADAPTER_ONLY_ROUTERS = ("users.py", "internal.py", "attributes.py", "accesskeys.py", "protected.py")
+
+
+def test_pass_through_routers_reach_descope_only_through_the_adapter():
+    """§5: no client, no upstream error type and no management URL in these routers."""
+    offenders = []
+    for name in ADAPTER_ONLY_ROUTERS:
+        tree = _tree(APP / "routers" / name)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module in ("httpx", "app.outbound", "app.services.descope"):
+                offenders.append(f"routers/{name}:{node.lineno} imports {node.module}")
+            if isinstance(node, ast.Import):
+                offenders += [
+                    f"routers/{name}:{node.lineno} imports {alias.name}"
+                    for alias in node.names
+                    if alias.name in ("httpx", "app.outbound", "app.services.descope")
+                ]
+            if isinstance(node, ast.Attribute) and node.attr == "descope_client":
+                offenders.append(f"routers/{name}:{node.lineno} reads descope_client")
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value == "descope_client":
+                offenders.append(f"routers/{name}:{node.lineno} reads descope_client")
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and "/v1/mgmt/" in node.value:
+                offenders.append(f"routers/{name}:{node.lineno} builds a management URL")
+    assert not offenders, f"§5: call app.services.descope_management.DescopeManagementAdapter instead: {offenders}"
+
+
+# --- §23-§25: the domain is pure, returns Result and is immutable -------------
+
+# Standard-library modules that do I/O, read the clock or produce randomness.
+_IMPURE_STDLIB = {
+    "asyncio",
+    "http",
+    "io",
+    "logging",
+    "os",
+    "pathlib",
+    "random",
+    "secrets",
+    "shutil",
+    "socket",
+    "sqlite3",
+    "subprocess",
+    "tempfile",
+    "threading",
+    "time",
+    "urllib",
+}
+_CLOCK_AND_ID_SOURCES = {"now", "utcnow", "today", "uuid1", "uuid4", "uuid6", "uuid7"}
+
+
+def _impure_domain_lines(tree: ast.Module) -> list[int]:
+    """Lines that import outside the standard library and ``expression``, or name a clock or id source."""
+    allowed = (set(sys.stdlib_module_names) - _IMPURE_STDLIB) | {"expression"}
+    lines = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            imported = [node.module or ""]
+            if {alias.name for alias in node.names} & _CLOCK_AND_ID_SOURCES:
+                lines.append(node.lineno)
+        elif isinstance(node, ast.Attribute) and node.attr in _CLOCK_AND_ID_SOURCES:
+            lines.append(node.lineno)
+            continue
+        else:
+            continue
+        for name in imported:
+            in_domain = name == "app.domain" or name.startswith("app.domain.")
+            if not in_domain and name.split(".")[0] not in allowed:
+                lines.append(node.lineno)
+    return lines
+
+
+def test_domain_modules_are_found():
+    """Guard the scans below: over an empty package they would pass vacuously."""
+    assert "domain/access/decisions.py" in {_rel(path) for path in _modules("domain")}
+
+
+def test_domain_is_pure():
+    offenders = [f"{_rel(path)}:{line}" for path in _modules("domain") for line in _impure_domain_lines(_tree(path))]
+    assert not offenders, f"§23: the domain imports stdlib and expression only; time and ids are passed in: {offenders}"
+
+
+def test_domain_purity_scan_catches_impure_code():
+    impure = ast.parse(
+        "import logging\n"
+        "import sqlalchemy\n"
+        "from app.errors import identity\n"
+        "from uuid import uuid4\n"
+        "stamp = datetime.now(timezone.utc)\n"
+        "new_id = uuid.uuid4()\n"
+    )
+    pure = ast.parse(
+        "import uuid\n"
+        "from datetime import datetime\n"
+        "from expression import Ok\n"
+        "from app.domain.access.values import Role\n"
+        "def decide(now: datetime) -> datetime:\n"
+        "    return now\n"
+    )
+    assert _impure_domain_lines(impure) == [1, 2, 3, 4, 5, 6]
+    assert _impure_domain_lines(pure) == []
+
+
+def test_domain_does_not_raise():
+    offenders = [
+        f"{_rel(path)}:{node.lineno}"
+        for path in _modules("domain")
+        for node in ast.walk(_tree(path))
+        if isinstance(node, ast.Raise)
+    ]
+    assert not offenders, f"§24: a domain function returns Error(...) for an expected failure: {offenders}"
+
+
+def _is_frozen_dataclass(cls: ast.ClassDef) -> bool:
+    for decorator in cls.decorator_list:
+        if isinstance(decorator, ast.Call) and ast.unparse(decorator.func) in ("dataclass", "dataclasses.dataclass"):
+            return any(
+                kw.arg == "frozen" and isinstance(kw.value, ast.Constant) and kw.value.value is True
+                for kw in decorator.keywords
+            )
+    return False
+
+
+def test_domain_types_are_frozen_dataclasses_or_enums():
+    offenders = []
+    for path in _modules("domain"):
+        for cls in (node for node in ast.walk(_tree(path)) if isinstance(node, ast.ClassDef)):
+            is_enum = any(ast.unparse(base).rsplit(".", 1)[-1] in ("Enum", "StrEnum") for base in cls.bases)
+            if not is_enum and not _is_frozen_dataclass(cls):
+                offenders.append(f"{_rel(path)}:{cls.name}")
+    assert not offenders, f"§25: a domain type is a @dataclass(frozen=True) or an Enum: {offenders}"

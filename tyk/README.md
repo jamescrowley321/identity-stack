@@ -3,8 +3,9 @@
 This directory holds the file-based Tyk configuration the gateway profile
 mounts into the `tyk-gateway` container. Tyk runs in [file-based mode]
 (`use_db_app_configs: false`), so editing files here and running
-`make dev-gateway` (or `docker compose --profile gateway up --build`) is
-the canonical way to change gateway behavior.
+`make dev-gateway` (or `docker compose -f docker-compose.yml -f
+docker-compose.gateway.yml --profile gateway up --build`) is the canonical
+way to change gateway behavior.
 
 [file-based mode]: https://tyk.io/docs/tyk-self-managed/install/install-tyk-gateway/configure-tyk-gateway/
 
@@ -25,7 +26,7 @@ The base directory layout is mounted into the container at boot:
 
 | Host path             | Container path                            | Mode | Notes                                                   |
 | --------------------- | ----------------------------------------- | ---- | ------------------------------------------------------- |
-| `tyk/tyk.conf`        | `/opt/tyk-gateway/tyk.conf`               | rw   | Gateway config — substituted at startup, edit freely    |
+| `tyk/tyk.conf`        | `/opt/tyk-gateway/tyk.conf`               | rw   | Gateway config — `TYK_GW_*` env vars override keys at startup |
 | `tyk/apps/`           | (mounted into `tyk-init`'s `/in`, not gateway) | ro   | API definition **templates** (with `${VAR}` placeholders) |
 | `tyk-apps` (volume)   | `/opt/tyk-gateway/apps`                   | ro   | Substituted API definitions (written by `tyk-init`)     |
 | `tyk/middleware/`     | `/opt/tyk-gateway/middleware`             | rw   | JS plugin directory                                     |
@@ -84,9 +85,11 @@ shared substitution output directory, mounted read-only into the
 gateway. Adding a new template:
 
   1. Drop `your-api.json` into `tyk/apps/`.
-  2. Use `${DESCOPE_PROJECT_ID}` (or any other env var) anywhere you
-     want compose-time substitution.
-  3. `make dev-gateway` (or `docker compose --profile gateway up --build`)
+  2. Use `${DESCOPE_PROJECT_ID}` anywhere you want the project id
+     substituted. It is the only placeholder `tyk-init` replaces; any
+     other `${VAR}` is copied through literally.
+  3. `make dev-gateway` (or `docker compose -f docker-compose.yml -f
+     docker-compose.gateway.yml --profile gateway up --build`)
      — `tyk-init` will sed-substitute it on next boot.
 
 ## API definition: `tyk/apps/saas-backend.json`
@@ -139,7 +142,7 @@ The substitution script enforces `[A-Za-z0-9_-]` on the project id to
 prevent shell-injection-style placeholder values. Set `DESCOPE_PROJECT_ID`
 in `.env` (or your CI env) to a real project id.
 
-**`tyk-gateway` healthcheck fails / 404 from `/api/health`**
+**404 from `/api/health` through Tyk**
 
 Confirm `tyk-init` exited cleanly and the `tyk-apps` volume contains
 the substituted JSON: `docker run --rm -v identity-stack_tyk-apps:/data alpine:3.20 ls -la /data/`.
