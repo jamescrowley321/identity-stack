@@ -21,24 +21,25 @@ from httpx import ASGITransport, AsyncClient
 from slowapi.errors import RateLimitExceeded
 
 from app.middleware.auth import TokenValidationMiddleware
-from app.middleware.providers import ProviderTokenConfig, configured_providers
+from app.middleware.providers import KeycloakTokenBinding, ProviderTokenConfig, configured_providers
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.routers import auth as auth_router
 from tests.helpers.keycloak import (
     ACCESS_TOKEN_ALG_ATTRIBUTE,
     ACCESS_TOKEN_LIFESPAN_ATTRIBUTE,
     BOB,
-    CAROL,
     KEYCLOAK_POST_LOGOUT_REDIRECT_URI,
-    MEMBER_APP_CLIENT,
-    MEMBER_TYPE_CLIENT,
-    TENANT_ADMIN_APP_CLIENT,
-    TENANT_ADMIN_TYPE_CLIENT,
     KeycloakTokens,
     KeycloakTokenSource,
     decode_unverified,
 )
-from tests.helpers.keycloak_model import MODEL_VARIABLES, set_model_environment
+from tests.helpers.keycloak_model import (
+    API_AUDIENCE,
+    KEYCLOAK_VARIABLES,
+    OTHER_CLIENT_ID,
+    SPA_CLIENT_ID,
+    set_client_environment,
+)
 
 PROBE = "/api/probe"
 LOGOUT = "/api/auth/logout"
@@ -57,11 +58,7 @@ _PROVIDER_VARIABLES = (
     "ORY_REQUIRE_AUDIENCE",
     "ORY_CLIENT_ID",
     "ORY_POST_LOGOUT_REDIRECT_URI",
-    "KEYCLOAK_ISSUER_URL",
-    "KEYCLOAK_AUDIENCES",
-    "KEYCLOAK_REQUIRE_HTTPS",
-    "KEYCLOAK_POST_LOGOUT_REDIRECT_URI",
-    *MODEL_VARIABLES,
+    *KEYCLOAK_VARIABLES,
     "FRONTEND_URL",
 )
 
@@ -70,9 +67,8 @@ _PROVIDER_VARIABLES = (
 class KeycloakTokenSet:
     """One login per case, taken once for the module."""
 
-    member: KeycloakTokens
-    tenant_admin: KeycloakTokens
-    no_audience: KeycloakTokens
+    spa: KeycloakTokens
+    other_client: KeycloakTokens
     es256: KeycloakTokens
     expired: KeycloakTokens
     other_realm_access_token: str
@@ -85,14 +81,13 @@ def keycloak(keycloak_token_source) -> KeycloakTokenSource:
 
 @pytest.fixture(scope="module")
 def tokens(keycloak) -> KeycloakTokenSet:
-    with keycloak.client_attribute(MEMBER_APP_CLIENT, ACCESS_TOKEN_ALG_ATTRIBUTE, "ES256"):
-        es256 = keycloak.login(BOB, client_id=MEMBER_APP_CLIENT)
-    with keycloak.client_attribute(MEMBER_APP_CLIENT, ACCESS_TOKEN_LIFESPAN_ATTRIBUTE, str(SHORT_LIFESPAN_SECONDS)):
-        expired = keycloak.login(BOB, client_id=MEMBER_APP_CLIENT)
+    with keycloak.client_attribute(SPA_CLIENT_ID, ACCESS_TOKEN_ALG_ATTRIBUTE, "ES256"):
+        es256 = keycloak.login(BOB, client_id=SPA_CLIENT_ID)
+    with keycloak.client_attribute(SPA_CLIENT_ID, ACCESS_TOKEN_LIFESPAN_ATTRIBUTE, str(SHORT_LIFESPAN_SECONDS)):
+        expired = keycloak.login(BOB, client_id=SPA_CLIENT_ID)
     token_set = KeycloakTokenSet(
-        member=keycloak.login(BOB, client_id=MEMBER_APP_CLIENT),
-        tenant_admin=keycloak.login(BOB, client_id=TENANT_ADMIN_APP_CLIENT),
-        no_audience=keycloak.login(CAROL, client_id=MEMBER_APP_CLIENT),
+        spa=keycloak.login(BOB, client_id=SPA_CLIENT_ID),
+        other_client=keycloak.login(BOB, client_id=OTHER_CLIENT_ID),
         es256=es256,
         expired=expired,
         other_realm_access_token=keycloak.admin_access_token(),
@@ -108,8 +103,7 @@ def environment(monkeypatch, keycloak):
     for name in _PROVIDER_VARIABLES:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", keycloak.issuer)
-    monkeypatch.setenv("KEYCLOAK_AUDIENCES", MEMBER_TYPE_CLIENT)
-    set_model_environment(monkeypatch, MEMBER_TYPE_CLIENT)
+    set_client_environment(monkeypatch)
     monkeypatch.setenv("KEYCLOAK_REQUIRE_HTTPS", "false")
     monkeypatch.setenv("KEYCLOAK_POST_LOGOUT_REDIRECT_URI", KEYCLOAK_POST_LOGOUT_REDIRECT_URI)
     return monkeypatch
@@ -154,11 +148,11 @@ def _assert_uniform_401(response: httpx.Response) -> None:
 
 
 async def test_valid_token_authenticates(environment, keycloak, tokens):
-    header, claims = decode_unverified(tokens.member.access_token)
+    header, claims = decode_unverified(tokens.spa.access_token)
     assert header["alg"] == "RS256"
-    assert claims["aud"] == MEMBER_TYPE_CLIENT
+    assert (claims["aud"], claims["azp"], claims["typ"]) == (API_AUDIENCE, SPA_CLIENT_ID, "Bearer")
 
-    response = await _probe(tokens.member.access_token)
+    response = await _probe(tokens.spa.access_token)
 
     assert response.status_code == 200, response.text
     assert response.json() == {"sub": claims["sub"], "iss": keycloak.issuer, "provider": KEYCLOAK}
@@ -176,13 +170,13 @@ async def test_wrong_issuer_is_refused(environment, keycloak, tokens):
 async def test_configured_for_another_realm_refuses_this_realms_token(environment, keycloak, tokens):
     environment.setenv("KEYCLOAK_ISSUER_URL", f"{keycloak.base_url}/realms/master")
 
-    _assert_uniform_401(await _probe(tokens.member.access_token))
+    _assert_uniform_401(await _probe(tokens.spa.access_token))
 
 
 async def test_expired_token_is_refused(environment, tokens):
     """Issued with a one-second lifespan, presented after it ran out."""
     _, claims = decode_unverified(tokens.expired.access_token)
-    assert claims["aud"] == MEMBER_TYPE_CLIENT
+    assert claims["aud"] == API_AUDIENCE
     assert claims["exp"] - claims["iat"] == SHORT_LIFESPAN_SECONDS
     assert claims["exp"] < time.time()
 
@@ -193,7 +187,7 @@ async def test_non_rs256_token_is_refused(environment, keycloak, tokens):
     """Signed ES256 by the realm, with the key in the realm's JWKS."""
     header, claims = decode_unverified(tokens.es256.access_token)
     assert header["alg"] == "ES256"
-    assert claims["aud"] == MEMBER_TYPE_CLIENT
+    assert claims["aud"] == API_AUDIENCE
     jwks = httpx.get(f"{keycloak.issuer}/protocol/openid-connect/certs").json()["keys"]
     assert header["kid"] in {key["kid"] for key in jwks}
 
@@ -204,34 +198,40 @@ async def test_non_rs256_token_is_refused(environment, keycloak, tokens):
     assert unpinned.status_code == 200, unpinned.text
 
 
-async def test_token_without_audience_is_refused(environment, tokens):
-    """``carol`` has no client role, so Keycloak issues her token with no ``aud``."""
-    _, claims = decode_unverified(tokens.no_audience.access_token)
+async def test_another_clients_token_is_refused(environment, tokens):
+    """``identity-stack-other``'s token: the same user and realm, no API audience, its own ``azp``."""
+    _, claims = decode_unverified(tokens.other_client.access_token)
     assert "aud" not in claims
-    assert claims["azp"] == MEMBER_APP_CLIENT
+    assert (claims["azp"], claims["typ"]) == (OTHER_CLIENT_ID, "Bearer")
 
-    _assert_uniform_401(await _probe(tokens.no_audience.access_token))
+    _assert_uniform_401(await _probe(tokens.other_client.access_token))
 
 
-async def test_audience_outside_the_set_is_refused(environment, tokens):
-    _, claims = decode_unverified(tokens.tenant_admin.access_token)
-    assert claims["aud"] == TENANT_ADMIN_TYPE_CLIENT
+async def test_a_token_without_the_api_audience_is_refused_for_that_alone(environment, tokens):
+    """With the binding moved to the other client, its token still fails: it lacks the API audience."""
+    rebound = _with_keycloak(token_binding=KeycloakTokenBinding(OTHER_CLIENT_ID))
 
-    _assert_uniform_401(await _probe(tokens.tenant_admin.access_token))
+    _assert_uniform_401(await _probe(tokens.other_client.access_token, rebound))
 
-    # Control: with that type client in the set, the same token validates.
-    environment.setenv("KEYCLOAK_AUDIENCES", f"{MEMBER_TYPE_CLIENT},{TENANT_ADMIN_TYPE_CLIENT}")
-    set_model_environment(environment, MEMBER_TYPE_CLIENT, TENANT_ADMIN_TYPE_CLIENT)
-    widened = await _probe(tokens.tenant_admin.access_token)
-    assert widened.status_code == 200, widened.text
+    # Control: the audience is the only reason. Not required, the same token validates.
+    unaudienced = _with_keycloak(token_binding=KeycloakTokenBinding(OTHER_CLIENT_ID), require_audience=False)
+    accepted = await _probe(tokens.other_client.access_token, unaudienced)
+    assert accepted.status_code == 200, accepted.text
 
 
 async def test_id_token_is_not_an_access_token_for_the_api(environment, tokens):
-    """The ID token's ``aud`` is the app client, which is never in the set."""
-    _, claims = decode_unverified(tokens.member.id_token)
-    assert claims["aud"] == MEMBER_APP_CLIENT
+    """The ID token names the SPA in ``aud`` and ``azp`` and says ``typ`` ``ID``."""
+    _, claims = decode_unverified(tokens.spa.id_token)
+    assert (claims["aud"], claims["azp"], claims["typ"]) == (SPA_CLIENT_ID, SPA_CLIENT_ID, "ID")
 
-    _assert_uniform_401(await _probe(tokens.member.id_token))
+    _assert_uniform_401(await _probe(tokens.spa.id_token))
+
+
+async def test_refresh_token_is_not_an_access_token_for_the_api(environment, tokens):
+    _, claims = decode_unverified(tokens.spa.refresh_token)
+    assert (claims["azp"], claims["typ"]) == (SPA_CLIENT_ID, "Refresh")
+
+    _assert_uniform_401(await _probe(tokens.spa.refresh_token))
 
 
 # --- Done when 2 ---------------------------------------------------------------
@@ -241,13 +241,13 @@ async def test_https_switch_on_refuses_the_plain_http_issuer(environment, keyclo
     assert keycloak.issuer.startswith("http://")
     environment.delenv("KEYCLOAK_REQUIRE_HTTPS")
 
-    _assert_uniform_401(await _probe(tokens.member.access_token))
+    _assert_uniform_401(await _probe(tokens.spa.access_token))
 
 
 async def test_https_switch_off_validates_the_plain_http_issuer(environment, tokens):
     environment.setenv("KEYCLOAK_REQUIRE_HTTPS", "false")
 
-    response = await _probe(tokens.member.access_token)
+    response = await _probe(tokens.spa.access_token)
 
     assert response.status_code == 200, response.text
 
@@ -255,7 +255,7 @@ async def test_https_switch_off_validates_the_plain_http_issuer(environment, tok
 async def test_mistyped_https_switch_stays_on(environment, tokens):
     environment.setenv("KEYCLOAK_REQUIRE_HTTPS", "flase")
 
-    _assert_uniform_401(await _probe(tokens.member.access_token))
+    _assert_uniform_401(await _probe(tokens.spa.access_token))
 
 
 # --- Done when 3 ---------------------------------------------------------------
@@ -271,7 +271,7 @@ async def test_keycloak_token_is_not_accepted_on_the_descope_provider(environmen
     environment.setenv("DESCOPE_PROJECT_ID", DESCOPE_ONLY_PROJECT_ID)
     assert [provider.name for provider in configured_providers()] == ["Descope"]
 
-    _assert_uniform_401(await _probe(tokens.member.access_token))
+    _assert_uniform_401(await _probe(tokens.spa.access_token))
 
 
 async def test_ory_token_is_not_accepted_on_the_keycloak_provider(environment, ory_token_source):
@@ -286,7 +286,7 @@ async def test_keycloak_token_is_not_accepted_on_the_ory_provider(environment, o
     environment.setenv("ORY_ISSUER_URL", ory_token_source.issuer)
     environment.setenv("ORY_AUDIENCE", ory_token_source.audience)
 
-    _assert_uniform_401(await _probe(tokens.member.access_token))
+    _assert_uniform_401(await _probe(tokens.spa.access_token))
 
 
 # --- Done when 4 ---------------------------------------------------------------
@@ -294,7 +294,7 @@ async def test_keycloak_token_is_not_accepted_on_the_ory_provider(environment, o
 
 async def test_logout_returns_the_realms_end_session_url(environment, keycloak, tokens):
     limiter.reset()
-    session = keycloak.login(BOB, client_id=MEMBER_APP_CLIENT)
+    session = keycloak.login(BOB, client_id=SPA_CLIENT_ID)
 
     async with AsyncClient(transport=ASGITransport(app=_app()), base_url="http://test") as client:
         response = await client.post(
@@ -312,7 +312,7 @@ async def test_logout_returns_the_realms_end_session_url(environment, keycloak, 
     assert f"{logout_url.scheme}://{logout_url.netloc}{logout_url.path}" == keycloak.end_session_endpoint
     assert parse_qs(logout_url.query) == {
         "id_token_hint": [session.id_token],
-        "client_id": [MEMBER_APP_CLIENT],
+        "client_id": [SPA_CLIENT_ID],
         "post_logout_redirect_uri": [KEYCLOAK_POST_LOGOUT_REDIRECT_URI],
     }
 
@@ -333,8 +333,8 @@ async def test_logout_discovery_obeys_the_https_switch(environment, keycloak, to
     async with AsyncClient(transport=ASGITransport(app=_app(authenticating)), base_url="http://test") as client:
         response = await client.post(
             LOGOUT,
-            headers={"Authorization": f"Bearer {tokens.member.access_token}"},
-            json={"id_token": tokens.member.id_token},
+            headers={"Authorization": f"Bearer {tokens.spa.access_token}"},
+            json={"id_token": tokens.spa.id_token},
         )
 
     assert response.status_code == 500

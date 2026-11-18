@@ -16,11 +16,10 @@ from app.dependencies.identity import (
     get_identity_provisioning_service,
     get_identity_resolution_service,
 )
-from app.dependencies.rbac import TokenTenant, token_tenant
 from app.errors.identity import Forbidden, NotFound, ValidationError
 from app.knobs import knob, knob_set
 from app.logbook import logbook
-from app.middleware.providers import ZITADEL_PROVIDER_NAME, ProviderTokenConfig, descope_config
+from app.middleware.providers import ORGANIZATION_FIRST_LOGIN_PROVIDERS, ProviderTokenConfig, descope_config
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.first_login_profile import userinfo_profile
 from app.services.identity_provisioning import IdentityProvisioningService
@@ -42,7 +41,7 @@ DESCOPE = descope_config(DESCOPE_PROJECT_ID)
 PROVIDER_FAULTS = (NetworkException, DiscoveryValidationError, JwksValidationError, ConfigurationException)
 REFUSED_DETAIL = "Invalid or expired token"
 UNAVAILABLE_DETAIL = "Identity provider unavailable"
-# First-login refusals of a provider whose organization picks the user's tenant (Zitadel).
+# First-login refusals of a provider whose organization picks the user's tenant (Zitadel, Keycloak).
 ORGANIZATION_NOT_LINKED = "Your organization is not linked to a tenant"
 USERINFO_SUBJECT_MISMATCH = "The identity provider's UserInfo does not match the token"
 PROVIDER_NOT_CONFIGURED = "Identity provider not configured"
@@ -50,12 +49,10 @@ PROVISIONING_FAILED = "Could not provision identity"
 
 # Providers eligible for just-in-time provisioning on first login. Ory is
 # greenfield (every user is JIT-provisioned); Descope users are pre-provisioned
-# via the seed, so Descope is intentionally excluded by default. Keycloak is
-# opt-in: provisioning links a new identity to the canonical user with the same
-# verified email, which makes the realm's ``email_verified`` a linking trust
-# root (docs/security.md), so an operator names ``keycloak`` here to accept it.
-# Zitadel is opt-in too (``ory,zitadel``): its first-login users join the tenant
-# their organization is linked to, and take their email from UserInfo.
+# via the seed, so Descope is intentionally excluded by default. Zitadel and
+# Keycloak are opt-in (``ory,zitadel,keycloak``): their first-login users join
+# the tenant their organization is linked to; Zitadel's take their email from
+# UserInfo, Keycloak's from the access token.
 JIT_ENABLED_PROVIDERS = knob_set("JIT_ENABLED_PROVIDERS", "ory")
 
 
@@ -104,41 +101,20 @@ async def claims(claims: dict = Depends(get_claims)):
     return claims
 
 
-def _as_token_tenant_identity(identity: dict, tenant: TokenTenant) -> dict:
-    """The canonical identity of a principal whose tenant and grants come from its own token.
-
-    The one place ``GET /api/identity`` differs by provider. The user and the
-    linked identities are the canonical ones. The tenant and its permissions
-    are the token's (``token_tenant``), so the canonical role assignments,
-    such as the default tenant and role that provisioning grants, are not the
-    caller's here and are not reported: ``roles`` is empty. The memberships are
-    the provider directory's. ``token_tenant`` is the one field only these
-    principals get: its presence says the tenant comes from the token, so
-    switching tenant takes a new token.
-    """
-    return {
-        **identity,
-        "roles": [],
-        "tenant_memberships": [
-            {"tenant_id": membership.tenant_id, "tenant_name": membership.tenant_name}
-            for membership in tenant.memberships
-        ],
-        "token_tenant": {"tenant_id": tenant.tenant_id, "permissions": list(tenant.permissions)},
-    }
-
-
 def _recorded_provider(recorded: object, provider_name: str) -> ProviderTokenConfig | None:
     """The config the token middleware recorded for this principal's provider.
 
     Both middlewares record one beside the claims (conventions §18, and
     ``test_provider_registration.py::TestClaimsAreNeverRecordedWithoutTheirProvider``),
     so ``None`` is only a hand-built request, read as before: the profile from
-    the token's claims. Not for a Zitadel principal: its first login needs its
-    config's organization and UserInfo rules, so ``None`` is refused (500) for
-    it, as is anything recorded that is not the principal's own provider
-    config. A first login whose rules cannot be found is not provisioned.
+    the token's claims. Not for a principal of a provider whose organization
+    picks the first login's tenant (``ORGANIZATION_FIRST_LOGIN_PROVIDERS``):
+    its first login needs its config's organization rules, so ``None`` is
+    refused (500) for it, as is anything recorded that is not the principal's
+    own provider config. A first login whose rules cannot be found is not
+    provisioned.
     """
-    if recorded is None and provider_name != ZITADEL_PROVIDER_NAME.lower():
+    if recorded is None and provider_name not in ORGANIZATION_FIRST_LOGIN_PROVIDERS:
         return None
     if not isinstance(recorded, ProviderTokenConfig) or recorded.name.lower() != provider_name:
         logger.error("first login refused: no provider config recorded for provider %s", provider_name)
@@ -155,7 +131,7 @@ async def _first_login_profile(
 ) -> dict:
     """The profile and organization ``provision`` is called with for a first-login subject.
 
-    For a provider with a ``first_login_organization`` (Zitadel), a provider
+    For a provider with a ``first_login_organization`` (Zitadel, Keycloak), a provider
     with no canonical ``providers`` row is refused (500), and a token that
     names no organization, or names one no single active tenant is linked to
     for that provider, is refused (403), all before UserInfo is fetched. The
@@ -208,17 +184,14 @@ async def canonical_identity(
     request: Request,
     resolver: IdentityResolutionService = Depends(get_identity_resolution_service),
     provisioner: IdentityProvisioningService = Depends(get_identity_provisioning_service),
-    tenant: TokenTenant | None = Depends(token_tenant),
 ):
     """Return the canonical identity (user, roles, permissions, tenants) for the caller.
 
-    Roles and tenants come from the canonical model, except for a provider
-    whose tenant and grants come from its token alone (Keycloak), where they
-    come from the token and the provider's directory (``token_tenant``). For
-    JIT-enabled providers (``JIT_ENABLED_PROVIDERS``), a first-login subject that
-    resolves to no canonical user is provisioned on the fly, then resolved: for
-    Zitadel into the tenant linked to the token's organization, with the profile
-    from UserInfo (``_first_login_profile``).
+    Roles and tenants come from the canonical model. For JIT-enabled providers
+    (``JIT_ENABLED_PROVIDERS``), a first-login subject that resolves to no
+    canonical user is provisioned on the fly, then resolved: for Zitadel and
+    Keycloak into the tenant linked to the token's organization, Zitadel's with
+    the profile from UserInfo (``_first_login_profile``).
     """
     principal = getattr(request.state, "principal", None)
     claims = getattr(request.state, "claims", None)
@@ -243,9 +216,7 @@ async def canonical_identity(
             provider_name=provider_name,
             sub=sub,
             **first_login,
-            # ``tenant`` is set exactly for a provider whose grants come from
-            # its token alone (Keycloak): none are written for it.
-            assign_default_role=tenant is None,
+            assign_default_role=True,
         )
         if provisioned.is_error():
             err = provisioned.error
@@ -270,8 +241,6 @@ async def canonical_identity(
 
     if result.is_error():
         raise HTTPException(status_code=404, detail="Identity not found")
-    if tenant is not None:
-        return _as_token_tenant_identity(result.ok, tenant)
     return result.ok
 
 

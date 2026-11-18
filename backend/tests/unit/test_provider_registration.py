@@ -28,7 +28,6 @@ from app.middleware import providers as provider_registry
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.providers import (
-    KeycloakTenantClaims,
     ProviderConfigurationError,
     ProviderTokenConfig,
     TenantClaims,
@@ -42,7 +41,13 @@ from app.middleware.providers import (
 )
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.routers import auth as auth_router
-from tests.helpers.keycloak_model import MODEL_VARIABLES, builder_settings, model_settings, set_model_environment
+from tests.helpers.keycloak_model import (
+    API_AUDIENCE,
+    KEYCLOAK_VARIABLES,
+    SPA_CLIENT_ID,
+    builder_settings,
+    set_client_environment,
+)
 
 DESCOPE_PROJECT = "P123"
 ORY_ISSUER = "https://ory.example.test"
@@ -68,11 +73,7 @@ _PROVIDER_VARIABLES = (
     "ORY_REQUIRE_AUDIENCE",
     "ORY_CLIENT_ID",
     "ORY_POST_LOGOUT_REDIRECT_URI",
-    "KEYCLOAK_ISSUER_URL",
-    "KEYCLOAK_AUDIENCES",
-    "KEYCLOAK_REQUIRE_HTTPS",
-    "KEYCLOAK_POST_LOGOUT_REDIRECT_URI",
-    *MODEL_VARIABLES,
+    *KEYCLOAK_VARIABLES,
     "FRONTEND_URL",
 )
 
@@ -193,8 +194,7 @@ def _bearer(claims: dict) -> dict[str, str]:
 class TestRegistry:
     def test_the_shipped_registrations_build_descope_ory_and_keycloak(self, with_ory):
         with_ory.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.example.test/realms/identity-stack")
-        with_ory.setenv("KEYCLOAK_AUDIENCES", "member")
-        set_model_environment(with_ory, "member")
+        set_client_environment(with_ory)
 
         assert [provider.name for provider in configured_providers()] == ["Descope", "Ory", "Keycloak"]
 
@@ -251,12 +251,9 @@ class TestClaimsExtractors:
     def test_ory_declares_none(self):
         assert ory_config(ORY_ISSUER, ORY_AUDIENCE).tenant_claims is None
 
-    def test_keycloak_declares_its_own(self):
-        """The organization and the client roles of its token, never the canonical model."""
-        keycloak = keycloak_config("https://kc.test/realms/r", frozenset({"member"}), **model_settings("member"))
-
-        assert isinstance(keycloak.tenant_claims, KeycloakTenantClaims)
-        assert keycloak.token_authorized_only is True
+    def test_keycloak_declares_none(self):
+        """Its principals are authorized from the canonical model, as Ory's are."""
+        assert keycloak_config("https://kc.test/realms/r", API_AUDIENCE, SPA_CLIENT_ID).tenant_claims is None
 
     def test_descope_extractor_reads_the_current_tenant_and_its_grants(self):
         claims = {
@@ -532,8 +529,7 @@ class TestOneAssemblyBehindBothBuilders:
 
     def test_it_builds_what_the_registrations_build_from_the_same_values(self, with_ory):
         with_ory.setenv("KEYCLOAK_ISSUER_URL", self.KEYCLOAK_ISSUER)
-        with_ory.setenv("KEYCLOAK_AUDIENCES", "member")
-        set_model_environment(with_ory, "member")
+        set_client_environment(with_ory)
         with_ory.setenv("KEYCLOAK_REQUIRE_HTTPS", "false")
         with_ory.setenv("KEYCLOAK_POST_LOGOUT_REDIRECT_URI", "https://app.example.test/kc-signed-out")
 
@@ -544,17 +540,14 @@ class TestOneAssemblyBehindBothBuilders:
             ory_client_id=ORY_CLIENT_ID,
             ory_post_logout_redirect_uri=ORY_REDIRECT,
             keycloak_issuer_url=self.KEYCLOAK_ISSUER,
-            keycloak_audiences=frozenset({"member"}),
             keycloak_require_https=False,
             keycloak_post_logout_redirect_uri="https://app.example.test/kc-signed-out",
-            **builder_settings("member"),
+            **builder_settings(),
         )
 
         assert by_hand == configured_providers()
 
     def test_a_shared_issuer_is_refused_by_hand_too(self):
-        # A Keycloak issuer is <origin>/realms/<realm> (its Admin API is derived from it), so the
-        # issuer both providers claim has that form.
         shared = "https://shared.example.test/realms/identity-stack"
         with pytest.raises(ProviderConfigurationError, match=shared):
             build_provider_configs(
@@ -562,8 +555,7 @@ class TestOneAssemblyBehindBothBuilders:
                 ory_issuer_url=shared,
                 ory_audience=ORY_AUDIENCE,
                 keycloak_issuer_url=shared,
-                keycloak_audiences=frozenset({"member"}),
-                **builder_settings("member"),
+                **builder_settings(),
             )
 
     @pytest.mark.parametrize("spelling", [f"{ORY_ISSUER}/", ORY_ISSUER.upper(), f"{ORY_ISSUER.upper()}//"])
@@ -687,9 +679,7 @@ class TestOnlyDescopeIsDescopeManaged:
     def test_no_other_provider_does(self):
         others = [
             ory_config(ORY_ISSUER, ORY_AUDIENCE),
-            keycloak_config(
-                "https://keycloak.example.test/realms/r", frozenset({"member"}), **model_settings("member")
-            ),
+            keycloak_config("https://keycloak.example.test/realms/r", API_AUDIENCE, SPA_CLIENT_ID),
             _second_provider(),
         ]
 

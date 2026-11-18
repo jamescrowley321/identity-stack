@@ -59,7 +59,7 @@ class FixtureCases:
     no_grant: FixtureUser
     # An admin of exactly one tenant.
     tenant_admin: FixtureUser
-    # A member whose Keycloak client roles give documents:write alone.
+    # A member of one tenant, the second member case.
     write_only: FixtureUser
     # An admin of one tenant whom tests move to another tenant and back.
     moving_admin: FixtureUser

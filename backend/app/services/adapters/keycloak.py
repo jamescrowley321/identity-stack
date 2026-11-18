@@ -82,9 +82,11 @@ from app.services.adapters.base import (
     SyncError,
 )
 from app.services.keycloak_admin import KeycloakAdminApi, KeycloakAdminError
-from app.services.keycloak_directory import GRANT_ATTRIBUTE_PREFIX
 
 tracer = trace.get_tracer(__name__)
+
+# The organization attribute that lists the members holding a user type there.
+GRANT_ATTRIBUTE_PREFIX = "type:"
 
 # A membership removal or status change found no Keycloak account: none named by
 # the user's IdP link and none under the canonical id. A user who signed up through

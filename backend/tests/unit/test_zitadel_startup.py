@@ -111,7 +111,6 @@ class TestTheRegistration:
 
         assert provider.tenant_claims is None
         assert provider.descope_managed is False
-        assert provider.token_authorized_only is False
         assert provider.first_login_organization is organization_id
         assert provider.profile_from_userinfo is True
 

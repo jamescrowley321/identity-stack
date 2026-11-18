@@ -176,8 +176,8 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
                 return None
 
             # Token binding: what the provider requires of a token beyond its
-            # audience (Keycloak: exactly one ``aud`` and the ``azp`` configured
-            # for it). Checked here so that it holds on every route.
+            # audience (Keycloak and Zitadel: issued to the SPA, and an access
+            # token). Checked here so that it holds on every route.
             unbound = binding_refusal(claims, provider)
             if unbound is not None:
                 logger.warning("rejected: %s binding refused (%s)", provider.name, unbound)

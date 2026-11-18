@@ -38,57 +38,36 @@ Three issuer formats are supported (all signed by the same project JWKS), so val
 
 Token validation is delegated to [`py-identity-model`](https://github.com/jamescrowley321/identity-model) (the 5.0.0 pre-release); the RBAC/FGA authorization layer sits on top of the validated claims (see [security.md](security.md)).
 
-## Keycloak token model
+## Keycloak principals
 
-A Keycloak realm token is for one organization and one user type
-([ADR-0010](adr/0010-keycloak-token-model.md)). The backend reads five claims and nothing else
-(`backend/app/middleware/keycloak.py`):
+A Keycloak principal is authorized from the canonical store, as Ory and Zitadel principals are
+([ADR-0011](adr/0011-keycloak-canonical-authorization.md)): the token says who the caller is,
+Postgres says what the caller may do. A deployment lists `keycloak` in
+`CANONICAL_RBAC_PROVIDERS`; unlisted, a Keycloak principal is granted nothing.
 
-| Concept | In Keycloak | In the token | Read where |
-|---|---|---|---|
-| User type | A confidential "type client", such as `member` or `tenant-admin` | `aud`, exactly one value | Authentication: anything else is 401 |
-| App | A public client, one per type | `azp`, the app client configured for that `aud` | Authentication: anything else is 401 |
-| Tenant | An Organization | `organization`, exactly one alias | `get_tenant_id`: anything else is 403 |
-| Permission | A client role of the type client, named `<domain>:<action>` | `resource_access[aud].roles`, a list of strings | `require_permission`. Missing or of the wrong type: the token names no tenant, 403 |
-| Role | Not used | Nothing | `require_role` always answers 403 |
+The token is bound to this API at authentication (`KeycloakTokenBinding` in
+`backend/app/middleware/providers.py`); anything else is 401 on every route:
 
-The tenant is the organization alias, an opaque string. It is not a Descope tenant id and not a
-canonical tenant UUID, so every route that sends its tenant to Descope, parses it as a UUID or
-gates by role refuses a Keycloak principal with 403. `GET /api/access-checks/documents-read` and
-`GET /api/access-checks/settings-manage` answer one: each needs the permission in its name and
-returns the tenant the resolver decided. `realm_access`, and Descope's `dct` and `tenants` when
-they appear on a Keycloak token, are never read.
+| Check | Why |
+|---|---|
+| RS256 signature from the realm's keys, `iss` equal to `KEYCLOAK_ISSUER_URL` | A token of another realm or provider |
+| `aud` contains `KEYCLOAK_AUDIENCE`, the API client | A token of a client the audience mapper does not serve |
+| `azp` equals `KEYCLOAK_CLIENT_ID`, the SPA client | Another client's token given the audience |
+| `typ` is `Bearer` | The SPA's own ID tokens (`ID`) and refresh tokens (`Refresh`), which carry its `azp`, `sid` and `auth_time` too |
 
-Keycloak assigns client roles to the user, not to the user in an organization, so every type is
-declared one of two ways:
+The tenant is the one the `X-Tenant-ID` header selects among the caller's canonical
+memberships, or their sole membership, and the roles and permissions are the canonical ones
+in it. `resource_access`, `realm_access`, `roles`, `dct` and `tenants` on a Keycloak token
+grant nothing (a `dct` is read as a tenant selector, [conventions §18](conventions.md#18-one-resolver-decides-the-tenant-and-the-grants)).
 
-- **Portable** (`KEYCLOAK_PORTABLE_TYPES`). The token grants only the roles listed for the type
-  in `KEYCLOAK_PORTABLE_PERMISSIONS`, which may hold only `<domain>:read` and `<domain>:list`
-  permissions. Those hold in every organization the user belongs to.
-- **Organization-bound** (`KEYCLOAK_ORGANIZATION_BOUND_TYPES`). The token is accepted only when
-  the user belongs to exactly one organization, it is the token's, and that organization marks
-  the user as holding the type (its `type:<type client>` attribute lists the user's id). The
-  backend asks the realm's Admin REST API on every such request, with a read-only service
-  account, for the token's `sub` only (`services/keycloak_directory.py`). A lookup that fails,
-  or does not answer within `MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`, is 502 and no grant. A lookup
-  answered 401 is asked once more with a new service-account token. A `sub` the realm does
-  not know (404: the user was deleted while the token lives) belongs to no organization, and
-  the token is refused with 403.
-
-Two limits follow. A portable permission holds in every organization the user belongs to. And
-nothing ends access when a user leaves an organization before the token expires, which is 300
-seconds with the realm's defaults: Keycloak refuses the next refresh for that organization, but
-the backend does not ask the directory about a portable token.
-
-`GET /api/identity` answers a Keycloak principal with the canonical user and linked identities,
-the organizations the same lookup lists as `tenant_memberships`, no `roles`, and a
-`token_tenant` field holding the token's organization and the permissions it grants there. Only
-principals whose tenant comes from their token get that field: switching tenant takes a new
-token. The directory is read once per request: the same answer confirms an organization-bound
-token and lists the memberships. The response is 403 when the token names no organization
-(the user is then not provisioned either) or the directory does not list the token's
-organization, and 502 when the directory cannot be asked. Provisioning a Keycloak user is
-opt-in (`JIT_ENABLED_PROVIDERS`) and gives it no canonical role.
+The `organization` claim is read once, at first sign-in (`keycloak_organization_alias`). When
+`keycloak` is in `JIT_ENABLED_PROVIDERS`, `GET /api/identity` provisions a subject the
+canonical store does not know into the one active tenant whose `external_org_id` is the
+token's one alias (for the `keycloak` provider), as `member`, with the email and names from
+the access token. No claim, two aliases, an alias no tenant names, or a missing or
+unverified email provisions nothing (403, or 400 for the email). The email rules of an
+organization-placed first login apply, as for Zitadel ([security.md](security.md)).
+`make keycloak-seed` links the fixture tenants to the realm's aliases.
 
 The backend refuses to start with a half-configured Keycloak provider: see the `KEYCLOAK_*`
 rows of [environment-variables.md](environment-variables.md).

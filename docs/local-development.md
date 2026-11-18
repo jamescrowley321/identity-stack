@@ -131,15 +131,11 @@ To have the backend accept this realm's tokens, set in `backend/.env`:
 
 ```bash
 KEYCLOAK_ISSUER_URL=http://keycloak.localhost:8180/realms/identity-stack
-KEYCLOAK_AUDIENCES=member,tenant-admin
-KEYCLOAK_APP_CLIENTS=member=member-app,tenant-admin=tenant-admin-app
-KEYCLOAK_PORTABLE_TYPES=member
-KEYCLOAK_ORGANIZATION_BOUND_TYPES=tenant-admin
-KEYCLOAK_PORTABLE_PERMISSIONS=member=documents:read
+KEYCLOAK_AUDIENCE=identity-stack-api   # the API client: the SPA's access tokens carry it in aud
+KEYCLOAK_CLIENT_ID=identity-stack-spa  # the SPA client: the azp of its access tokens
 KEYCLOAK_REQUIRE_HTTPS=false   # local only: allowed because the issuer host ends in .localhost
-KEYCLOAK_DIRECTORY_CLIENT_ID=identity-stack-directory
-KEYCLOAK_DIRECTORY_CLIENT_SECRET=local-only-directory-client   # local fixture value
-JIT_ENABLED_PROVIDERS=ory,keycloak   # opt-in: provision Keycloak users on first login
+CANONICAL_RBAC_PROVIDERS=ory,keycloak   # roles and permissions from the canonical store
+JIT_ENABLED_PROVIDERS=ory,keycloak      # opt-in: provision Keycloak users on first sign-in
 ```
 
 To push canonical tenants, users and memberships to the realm instead of Descope, add the admin
@@ -151,20 +147,16 @@ KEYCLOAK_ADMIN_CLIENT_ID=identity-stack-admin
 KEYCLOAK_ADMIN_CLIENT_SECRET=local-only-admin-client   # local fixture value
 ```
 
-Register the provider row once, so that a first login is provisioned:
-`cd backend && DATABASE_URL=... KEYCLOAK_ISSUER_URL=... python -m scripts.seed_keycloak`.
+Register the provider row once, and link canonical tenants to the realm's organizations, so
+that a first sign-in is provisioned: `cd backend && DATABASE_URL=... KEYCLOAK_ISSUER_URL=...
+python -m scripts.seed_keycloak` registers the row, and `make keycloak-seed` does that and links
+`acme` and `globex` (`tenants.external_org_id` set to each organization's alias) for a realm
+built by `infra/keycloak`.
 
 The backend refuses to start with only part of this set. See
 [environment-variables.md](environment-variables.md) for each variable and
-[architecture.md](architecture.md#keycloak-token-model) for what the backend reads from a
+[architecture.md](architecture.md#keycloak-principals) for what the backend reads from a
 Keycloak token.
-
-With these settings `alice` and `bob` can call `GET /api/access-checks/documents-read` with a
-token from `member-app`, and `erin` cannot. On `GET /api/access-checks/settings-manage` a
-`tenant-admin` token of `dave` or `frank` is allowed in `acme`: each belongs to that one
-organization, and `acme` marks them as tenant admins. `bob`'s is refused, because he belongs
-to two organizations. `GET /api/identity` lists each user's organizations from the same
-lookup.
 
 The end-to-end suite that drives the SPA and backend against this realm from Chromium, and how to
 run it locally, is in [keycloak.md](keycloak.md).

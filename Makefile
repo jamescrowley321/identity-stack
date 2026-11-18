@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup lint test-up test-down test-unit test-frontend test-integration test-e2e test-all security dev-backend dev-frontend dev test-gateway-proxy dev-gateway test-integration-standalone test-integration-gateway seed zitadel-up zitadel-reset zitadel-admin-pat zitadel-terraform-check zitadel-seed zitadel-frontend
+.PHONY: help setup lint test-up test-down test-unit test-frontend test-integration test-e2e test-all security dev-backend dev-frontend dev test-gateway-proxy dev-gateway test-integration-standalone test-integration-gateway seed zitadel-up zitadel-reset zitadel-admin-pat zitadel-terraform-check zitadel-seed zitadel-frontend keycloak-seed
 
 COMPOSE_TEST := docker compose -f docker-compose.test.yml
 TEST_DATABASE_URL := postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
@@ -147,6 +147,14 @@ zitadel-terraform-check: ## apply infra/zitadel to a fresh local Zitadel (make z
 zitadel-terraform-integration: ## zitadel-terraform-check, then the backend's live Zitadel suite (tests/integration_zitadel) against the applied root (make zitadel-reset and make test-up first)
 	TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TF_VAR_zitadel_access_token="$$($(MAKE) -s zitadel-admin-pat)" \
 	infra/zitadel/scripts/check-against-compose.sh --integration-tests
+
+keycloak-seed: ## register the keycloak provider and link canonical tenants to the applied infra/keycloak root's organization aliases in DATABASE_URL (migrated database; idempotent)
+	@environment="$$(terraform -chdir=infra/keycloak output -json backend_environment)" || exit 1; \
+	issuer="$$(printf '%s' "$$environment" | jq -er .KEYCLOAK_ISSUER_URL)" || exit 1; \
+	aliases="$$(terraform -chdir=infra/keycloak output -json organization_aliases)" || exit 1; \
+	linked="$$(printf '%s' "$$aliases" | jq -e --slurpfile fixture infra/fixtures/test-identities.json \
+		'with_entries(select($$fixture[0].tenants[.key].canonical))')" || exit 1; \
+	printf '%s' "$$linked" | (cd backend && KEYCLOAK_ISSUER_URL="$$issuer" python -m scripts.seed_keycloak --link-organizations)
 
 zitadel-seed: ## link the applied infra/zitadel root to canonical tenants in DATABASE_URL (migrated database; idempotent)
 	terraform -chdir=infra/zitadel output -json canonical_seed | (cd backend && python -m scripts.seed_zitadel)

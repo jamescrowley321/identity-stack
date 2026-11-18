@@ -1,8 +1,8 @@
 # Keycloak: what is proved, and its limits
 
-identity-stack works against a Keycloak realm with Organizations as tenants and client roles as
-permissions ([ADR-0010](adr/0010-keycloak-token-model.md),
-[architecture.md](architecture.md#keycloak-token-model)). This page records what the automated
+identity-stack works against a Keycloak realm with Organizations as tenants, its principals
+authorized from the canonical model ([ADR-0011](adr/0011-keycloak-canonical-authorization.md),
+[architecture.md](architecture.md#keycloak-principals)). This page records what the automated
 runs prove, the Keycloak version they ran against, and every limit found. Running Keycloak
 locally and configuring the backend for it: [local-development.md](local-development.md#local-keycloak).
 
@@ -211,6 +211,6 @@ What Keycloak does not do, or the adapter does not take on:
 | A user removed from an organization keeps a portable token's permissions until it expires (300 s with realm defaults). Keycloak refuses the next refresh. An organization-bound token is checked against the directory on every request. | [`keycloak/fixtures/README.md`](../keycloak/fixtures/README.md#leaving-an-organization-while-holding-a-token-for-it) | Recorded (decision 13) |
 | Signing out ends the SPA's Keycloak session only. The user's other sessions (another browser, another app client) stay. | Scope 5 | None |
 | A silent token renewal can bring back a token for another organization than the one shown. | SPA | [identity-stack#602](https://github.com/jamescrowley321/identity-stack/issues/602) |
-| Routes that send the tenant to Descope, parse it as a canonical tenant id or gate by role answer a Keycloak principal 403, `GET /api/tenants` included. | [architecture.md](architecture.md#keycloak-token-model) | Open: the [admin adapter](#admin-adapter) changes no route |
+| Routes that send the tenant to Descope, parse it as a canonical tenant id or gate by role answer a Keycloak principal 403, `GET /api/tenants` included. | [architecture.md](architecture.md#keycloak-principals) | Open: the [admin adapter](#admin-adapter) changes no route |
 | The realm registers one SPA origin, `http://localhost:3000`, so the Keycloak end-to-end suite runs in a job of its own, apart from the Descope one that serves its SPA there. | CI | None |
 | Keycloak sets its session cookies `Secure` on the plain-HTTP origin. Chromium keeps them for a `*.localhost` host; other clients may not, and the login form then answers 400. | Every browser login | None: local and CI only |

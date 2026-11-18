@@ -1,21 +1,27 @@
 """Which Keycloak realm the Keycloak integration tests log in to.
 
 By default the realm ``keycloak-test`` imports, with its fixed user ids and
-fixture passwords. The five ``KEYCLOAK_TEST_*`` variables point the same tests
+fixture passwords. The four ``KEYCLOAK_TEST_*`` variables point the same tests
 at the realm ``infra/keycloak/`` builds, whose ids and secrets Keycloak and
-Terraform generate. Half a target is refused, so a run can never mix the two.
+Terraform generate. Half a target is refused, so a run can never mix the two. The two places that
+set them, the Makefile's ``test-e2e-keycloak`` and
+``infra/keycloak/scripts/check-against-compose.sh --integration-tests``, set
+exactly those four (and the Makefile the base URL ``tests/helpers/keycloak.py``
+reads).
 """
 
 import json
+import re
+from pathlib import Path
 
 import pytest
 
 from tests.helpers.identity_fixture import IDENTITIES
 from tests.helpers.keycloak_target import (
     IMPORT_ADMIN_CLIENT_SECRET,
-    IMPORT_DIRECTORY_CLIENT_SECRET,
     IMPORT_REALM,
     IMPORT_USERS,
+    TARGET_VARIABLES,
     KeycloakTestTargetMisconfigured,
     KeycloakUser,
     keycloak_test_target,
@@ -31,7 +37,6 @@ def _terraform_environment(**overrides: str) -> dict[str, str]:
         "KEYCLOAK_TEST_REALM": "identity-stack-terraform",
         "KEYCLOAK_TEST_USER_IDS": json.dumps(TERRAFORM_IDS),
         "KEYCLOAK_TEST_USER_PASSWORDS": json.dumps(TERRAFORM_PASSWORDS),
-        "KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET": "generated-directory-secret",
         "KEYCLOAK_TEST_ADMIN_CLIENT_SECRET": "generated-admin-secret",
         **overrides,
     }
@@ -42,7 +47,6 @@ def test_no_variable_targets_the_imported_realm():
 
     assert target.realm == IMPORT_REALM == "identity-stack"
     assert target.users == IMPORT_USERS
-    assert target.directory_client_secret == IMPORT_DIRECTORY_CLIENT_SECRET == "local-only-directory-client"
     assert target.admin_client_secret == IMPORT_ADMIN_CLIENT_SECRET == "local-only-admin-client"
 
 
@@ -51,14 +55,13 @@ def test_the_imported_realm_has_the_fixture_users():
     assert IMPORT_USERS["alice"] == KeycloakUser("alice", "local-only-alice", "a11ce000-0000-4000-8000-000000000001")
 
 
-def test_the_five_variables_target_the_terraform_realm():
+def test_the_four_variables_target_the_terraform_realm():
     target = keycloak_test_target(_terraform_environment())
 
     assert target.realm == "identity-stack-terraform"
     assert target.users == {
         name: KeycloakUser(name, TERRAFORM_PASSWORDS[name], TERRAFORM_IDS[name]) for name in USERNAMES
     }
-    assert target.directory_client_secret == "generated-directory-secret"
     assert target.admin_client_secret == "generated-admin-secret"
 
 
@@ -68,7 +71,6 @@ def test_the_five_variables_target_the_terraform_realm():
         "KEYCLOAK_TEST_REALM",
         "KEYCLOAK_TEST_USER_IDS",
         "KEYCLOAK_TEST_USER_PASSWORDS",
-        "KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET",
         "KEYCLOAK_TEST_ADMIN_CLIENT_SECRET",
     ],
 )
@@ -131,5 +133,50 @@ def test_a_target_repr_never_carries_a_secret():
     target = keycloak_test_target(_terraform_environment())
 
     assert not any(password in repr(target) for password in TERRAFORM_PASSWORDS.values())
-    assert "generated-directory-secret" not in repr(target)
     assert "generated-admin-secret" not in repr(target)
+
+
+REPO = Path(__file__).resolve().parents[3]
+# The base URL is read by tests/helpers/keycloak.py, not by the target: the
+# Makefile sets it, and check-against-compose.sh keeps keycloak-test's default.
+BASE_URL_VARIABLE = "KEYCLOAK_TEST_BASE_URL"
+# A shell assignment (``NAME=``) or a jq object key (``NAME:``).
+_SET_VARIABLE = re.compile(r"\b(KEYCLOAK_TEST_[A-Z_]+)[=:]")
+
+
+def _variables_set_in(path: Path) -> set[str]:
+    return set(_SET_VARIABLE.findall(path.read_text()))
+
+
+@pytest.mark.parametrize(
+    ("path", "also"),
+    [
+        (REPO / "Makefile", {BASE_URL_VARIABLE}),
+        (REPO / "infra" / "keycloak" / "scripts" / "check-against-compose.sh", set()),
+    ],
+    ids=["Makefile", "check-against-compose.sh"],
+)
+def test_the_runners_set_exactly_the_target_variables(path, also):
+    """A variable a runner stops setting, or one it sets that nothing reads, fails here."""
+    assert _variables_set_in(path) == set(TARGET_VARIABLES) | also
+
+
+@pytest.mark.parametrize(
+    "path",
+    [REPO / "Makefile", REPO / "infra" / "keycloak" / "scripts" / "check-against-compose.sh"],
+    ids=["Makefile", "check-against-compose.sh"],
+)
+def test_what_the_runners_set_names_the_terraform_realm(path):
+    values = {
+        "KEYCLOAK_TEST_REALM": "identity-stack-terraform",
+        "KEYCLOAK_TEST_USER_IDS": json.dumps(TERRAFORM_IDS),
+        "KEYCLOAK_TEST_USER_PASSWORDS": json.dumps(TERRAFORM_PASSWORDS),
+        "KEYCLOAK_TEST_ADMIN_CLIENT_SECRET": "generated-admin-secret",
+        BASE_URL_VARIABLE: "http://keycloak-test.localhost:18180",
+    }
+    environment = {name: values[name] for name in _variables_set_in(path)}
+
+    target = keycloak_test_target(environment)
+
+    assert target.realm == "identity-stack-terraform"
+    assert target.admin_client_secret == "generated-admin-secret"

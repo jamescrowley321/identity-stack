@@ -33,20 +33,13 @@ from app.services.keycloak_admin import (
     ADMIN_CREDENTIAL_VARIABLE,
     ADMIN_TIMEOUT_SECONDS,
     ISSUER_VARIABLE,
-    REQUIRED_ROLES,
     KeycloakAdminError,
-    KeycloakAdminRolesMissing,
     connect_keycloak_admin,
 )
 from app.services.role import RoleService
 from tests.helpers.identity_fixture import IDENTITIES
 from tests.helpers.keycloak import KeycloakTokenSource
-from tests.helpers.keycloak_model import (
-    ADMIN_CLIENT_ID,
-    ADMIN_CLIENT_SECRET,
-    DIRECTORY_CLIENT_ID,
-    DIRECTORY_CLIENT_SECRET,
-)
+from tests.helpers.keycloak_model import ADMIN_CLIENT_ID, ADMIN_CLIENT_SECRET
 
 # A fixture user's email: she signed up in Keycloak, the adapter did not create her.
 FIXTURE_EMAIL = IDENTITIES.cases.member.email
@@ -507,25 +500,6 @@ class TestCredential:
                 await connect_keycloak_admin(http)
 
         assert refused.value.status == 401
-
-    async def test_the_read_only_directory_client_is_refused_at_startup(self, environment, monkeypatch):
-        """Keycloak accepts its credential and lets it read; it would fail only on the first write."""
-        monkeypatch.setenv(ADMIN_CLIENT_ID_VARIABLE, DIRECTORY_CLIENT_ID)
-        monkeypatch.setenv(ADMIN_CREDENTIAL_VARIABLE, DIRECTORY_CLIENT_SECRET)
-
-        async with httpx.AsyncClient(timeout=ADMIN_TIMEOUT_SECONDS) as http:
-            with pytest.raises(KeycloakAdminRolesMissing) as refused:
-                await connect_keycloak_admin(http)
-
-        assert (refused.value.status, refused.value.missing) == (403, REQUIRED_ROLES)
-
-    async def test_startup_stops_on_the_read_only_directory_client(self, environment, monkeypatch):
-        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
-        monkeypatch.setenv(ADMIN_CLIENT_ID_VARIABLE, DIRECTORY_CLIENT_ID)
-        monkeypatch.setenv(ADMIN_CREDENTIAL_VARIABLE, DIRECTORY_CLIENT_SECRET)
-
-        with pytest.raises(RuntimeError, match="lacks realm-management roles"):
-            await main._start_sync_provider(FastAPI())
 
     async def test_startup_opens_the_adapter_with_a_working_credential(self, environment, monkeypatch):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")

@@ -24,12 +24,11 @@ from app.middleware.providers import (
     library_token_issuers,
     ory_config,
 )
-from tests.helpers.keycloak_model import model_settings
+from tests.helpers.keycloak_model import API_AUDIENCE, SPA_CLIENT_ID
 from tests.helpers.local_op import ES256, HS256, PS256, RS256, UNSIGNED, LocalProvider, local_provider
 
 PROBE = "/api/probe"
 UNIFORM_401 = {"detail": "Invalid or expired token"}
-KEYCLOAK_AUDIENCE = "member"
 DESCOPE_PROJECT_ID = "P2algorithmallowlistcheck"
 DESCOPE_ISSUER = f"https://api.descope.com/{DESCOPE_PROJECT_ID}"
 PINNED_TO_RS256 = frozenset({RS256})
@@ -44,9 +43,7 @@ def op() -> LocalProvider:
 
 
 def _keycloak(op: LocalProvider, **changes) -> ProviderTokenConfig:
-    return replace(
-        keycloak_config(op.issuer, frozenset({KEYCLOAK_AUDIENCE}), **model_settings(KEYCLOAK_AUDIENCE)), **changes
-    )
+    return replace(keycloak_config(op.issuer, API_AUDIENCE, SPA_CLIENT_ID), **changes)
 
 
 def _descope_issuers(op: LocalProvider) -> frozenset[str]:
@@ -68,7 +65,7 @@ def _descope(op: LocalProvider, **changes) -> ProviderTokenConfig:
 
 
 def _keycloak_claims(op: LocalProvider) -> dict:
-    return {"iss": op.issuer, "sub": "kc-user", "aud": KEYCLOAK_AUDIENCE, "azp": "member-app"}
+    return {"iss": op.issuer, "sub": "kc-user", "aud": API_AUDIENCE, "azp": SPA_CLIENT_ID, "typ": "Bearer"}
 
 
 def _descope_claims(op: LocalProvider) -> dict:

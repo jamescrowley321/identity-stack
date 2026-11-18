@@ -159,7 +159,7 @@ Log calls **MUST** pass values as `%`-style arguments, as in
 
 Log records **MUST NOT** contain credentials. That covers bearer tokens, the Descope
 management key, `DESCOPE_WEBHOOK_SECRET`, `DESCOPE_FLOW_SYNC_SECRET`,
-`INTERNAL_IDENTITY_KEY`, `ZITADEL_ADMIN_TOKEN`, `KEYCLOAK_DIRECTORY_CLIENT_SECRET` and `KEYCLOAK_ADMIN_CLIENT_SECRET` and the
+`INTERNAL_IDENTITY_KEY`, `ZITADEL_ADMIN_TOKEN` and `KEYCLOAK_ADMIN_CLIENT_SECRET` and the
 service-account tokens they are exchanged for, and raw `Authorization` headers. Log identifiers instead, such as a
 user id, tenant id, provider name or HTTP status. An upstream response body **MUST** be
 truncated to 500 characters before it is logged (`exc.response.text[:500]`).
@@ -298,37 +298,8 @@ or several candidate tenants, a tenant selector that names a tenant the caller d
 belong to, a non-active canonical user and a malformed `dct`. An error from the FGA store
 **MUST** be answered with 502 and treated as a denial, never as an allow.
 
-For a Keycloak principal the branches are those of the token model
-(`app/middleware/keycloak.py`, [ADR-0010](adr/0010-keycloak-token-model.md)), and each
-failure has one answer, in this order:
-
-1. **At authentication, 401** with the uniform body, on every route: more than one `aud`,
-   an `aud` that is not a configured type client, and an `azp` that is missing, not a
-   string or not the app client configured for that `aud`.
-2. **From the token alone, 403:** an `organization` claim that is missing or names anything
-   but exactly one alias (a one-element list or a one-key map), client roles that cannot be
-   read (`resource_access`, its entry for the `aud` or `roles` is missing or of the wrong
-   type, or `roles` holds an entry that is not a string), a permission that is not in
-   `resource_access[aud].roles` or, for a portable type, not on its portable list, and
-   every `require_role` gate. A token whose `organization` or client roles cannot be read
-   names no tenant: `get_tenant_id` refuses it too. An empty `roles` list is readable and
-   holds nothing.
-3. **From the membership lookup**, for a token of an organization-bound type only, and only
-   after the first two: 403 when no lookup is wired or when the caller's organizations are
-   anything but the token's alone, and 502 with no grant when the lookup fails, does not
-   answer within `MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`, or answers with something that is not
-   a collection of strings. The order **MUST NOT** depend on how
-   a route declares its dependencies: `get_tenant_id`'s own dependency runs every guard on
-   the request's route that is registered with `refuses_from_the_token_alone`
-   (`require_descope_principal`, `get_tenant_claims`), with that guard's own answer, and
-   applies the check of every `require_*` gate, before it asks the lookup. A dependency that
-   refuses from the claims and provider alone **MUST** be registered so;
-   `test_keycloak_routes.py` refuses a shipped dependency of such a route that is neither a
-   gate, a registered guard nor listed with its reason in `RUNS_AFTER_THE_LOOKUP`.
-
 *Enforcement:* review, plus tests (`test_rbac_dependencies.py`, `test_tenant_resolution.py`,
-`test_fga_dependencies.py`, `test_keycloak_token_model.py`, `test_keycloak_tenant_access.py`,
-`test_keycloak_routes.py`).
+`test_fga_dependencies.py`, `test_keycloak_canonical_authorization.py`).
 
 ### 18. One resolver decides the tenant and the grants
 
@@ -340,13 +311,8 @@ tenant, role or permission claim itself. The resolver takes its sources in this 
 1. **The provider's claims extractor** (`ProviderTokenConfig.tenant_claims`, §28), for a
    provider that is not listed in `CANONICAL_RBAC_PROVIDERS`. Descope's extractor reads
    the signed `dct` and `tenants` claims, and a Descope principal **MUST** be decided from
-   them alone. Keycloak's reads `organization` and `resource_access[aud].roles`: the
-   tenant is the organization alias, an opaque string that is neither a Descope tenant id
-   nor a canonical tenant UUID, the permissions are the client roles, and there is no
-   role. A Keycloak principal **MUST** be decided from those two claims alone, and
-   `realm_access`, `dct` and `tenants` on its token **MUST NOT** be read. A provider with
-   no extractor has no source and is refused: another provider's claim shapes on its token
-   are not read.
+   them alone. Descope is the one provider with an extractor. A provider with no extractor
+   has no source and is refused: another provider's claim shapes on its token are not read.
 2. **The request's tenant selector**, for a provider listed in `CANONICAL_RBAC_PROVIDERS`
    (default `ory`). The selector is the `X-Tenant-ID` request header. It grants nothing by
    itself: it only chooses among the tenants the caller's canonical memberships name. A
@@ -356,35 +322,15 @@ tenant, role or permission claim itself. The resolver takes its sources in this 
 3. **The caller's sole canonical membership**, when the request selects nothing.
 
 Anything else is 403, including an extractor that raises, and one whose answer is not a
-`TenantClaims` with a non-empty string for the tenant, lists of strings for the roles
-and the permissions, and a boolean for `sole_membership_required`. Roles and permissions **MUST** be resolved from the canonical model
-only for a provider listed in `CANONICAL_RBAC_PROVIDERS`.
+`TenantClaims` with a non-empty string for the tenant and lists of strings for the roles
+and the permissions. Roles and permissions **MUST** be resolved from the canonical model
+only for a provider listed in `CANONICAL_RBAC_PROVIDERS`. Ory, Zitadel and Keycloak are
+authorized this way ([ADR-0011](adr/0011-keycloak-canonical-authorization.md)): their
+tokens say who the caller is, and no request-time decision reads a role, permission or
+tenant claim from them.
 
-An extractor **MAY** mark its answer `sole_membership_required`: the token alone does not
-settle it, and it holds only for a caller whose one tenant is the token's. Keycloak's does
-so for a token of an organization-bound type, because client roles are realm-wide. The
-resolver **MUST** refuse such an answer (403, `This tenant is not confirmed as the caller's
-only membership`) unless it is handed the tenant that the provider's
-`sole_membership_lookup` confirmed, so a caller of the resolver that confirms nothing
-grants nothing. `app.dependencies.rbac` asks the lookup, once per request, after what the
-token alone decides (§17). A lookup **MUST** bound its own time (§6), and the request
-waits for it no longer than `MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`: a lookup that has not
-answered by then is cancelled and is a failed lookup (502). The token
-middlewares **MUST NOT** record the tenant of such an answer as `request.state.tenant_id`:
-nothing has confirmed it at authentication, so it stays `None` for the whole request.
-Confirming the membership does not show that the token's client roles were granted for
-that organization: Keycloak keeps a user's client roles when the user leaves an
-organization. A lookup **MUST** therefore confirm the grant as well as the membership:
-Keycloak's (`CountedMemberships(KeycloakTenantMemberships)`) counts the token's organization
-only where its `type:<type client>` attribute lists the caller's id. A provider with a
-`tenant_memberships` list **MUST** have that list's `counted` entries
-(`CountedMemberships`) as its lookup and no other, so `GET /api/identity` and the routes
-that ask the lookup answer one token alike; `ProviderTokenConfig` refuses anything else
-(`MembershipSourcesDisagree`). A lookup **MUST** ask about the
-verified token's `sub` and nothing from the request, and **MUST** refuse a `sub` that is
-not a well-formed id before any call. The canonical membership read of the third source
-**MUST NOT** be served from the identity cache, and it **MUST NOT** be kept beyond the request
-that made it. `get_tenant_id` **MUST NOT** open a database session or read the canonical
+The canonical membership read of the third source **MUST NOT** be served from the identity
+cache, and it **MUST NOT** be kept beyond the request that made it. `get_tenant_id` **MUST NOT** open a database session or read the canonical
 model for any other provider. See
 [ADR-0009](adr/0009-provider-registrations-and-one-tenant-resolver.md).
 
@@ -407,26 +353,6 @@ adapter is Descope-backed: `POST /api/roles/assign` and `/api/roles/remove` are,
 `/api/access-checks` routes, which answer the resolver's tenant to a holder of
 `documents:read` or `settings:manage` and depend on nothing but the resolver.
 
-`GET /api/identity` takes the tenant and the permissions of a `token_authorized_only`
-principal (Keycloak) from the same resolver, through `app.dependencies.rbac.token_tenant`,
-and **MUST NOT** report the canonical role assignments as that principal's: canonical roles
-are not its grants, and provisioning writes none for it (`assign_default_role=False`). A
-token that names no tenant **MUST** be refused (403 `No tenant context`) before any lookup
-and before provisioning, as on every other route. Its memberships come from the provider's
-`tenant_memberships` list, and a token whose tenant is not on that list **MUST** be refused
-(403): the directory is believed over the token. A list that cannot be had is 502. The
-list is read once per request, within one `MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`, and also
-confirms a `sole_membership_required` token (its `counted` entries are what the provider's
-`sole_membership_lookup` would answer), so the request does not ask the directory twice. For
-every other provider `token_tenant` answers `None` without I/O and the response is the
-canonical identity, unchanged.
-
-A Keycloak principal **MUST** get 403 on every route that takes a tenant (`get_tenant_id`
-or `get_tenant_claims`) or is gated by a role, unless the route is in
-`PROVIDER_NEUTRAL_ROUTES` (`backend/tests/unit/test_keycloak_routes.py` walks every
-shipped route): its tenant is an organization alias, which names nothing in Descope and
-is not a UUID.
-
 A route over state that belongs to the whole Descope project **MUST** carry the same guard
 and be listed in `DESCOPE_PROJECT_ROUTES` in that file: the role and permission definition
 routes (`/api/roles`, `/api/roles/{name}`, `/api/permissions`, `/api/permissions/{name}`),
@@ -448,11 +374,7 @@ grant these routes need is #593. A route gated by `require_role` or `require_per
 
 A `descope_managed` provider **MUST NOT** be listed in `CANONICAL_RBAC_PROVIDERS`: it
 would pass the guard with a canonical tenant id. The middleware factory refuses that
-configuration at startup (`refuse_canonical_descope_managed`). A `token_authorized_only`
-provider (Keycloak) **MUST NOT** be listed there either: the canonical model would decide
-its principals and its extractor, with the portable list and the organization-bound rule,
-would not be called. The factory refuses that too, and a `token_authorized_only` provider
-with no extractor (`refuse_ambiguous_authorization_source`).
+configuration at startup (`refuse_canonical_descope_managed`).
 
 - Exception: a `dct` claim on the token of a provider listed in
   `CANONICAL_RBAC_PROVIDERS` is read as a tenant selector, as it was before the header
@@ -468,12 +390,8 @@ with no extractor (`refuse_ambiguous_authorization_source`).
   It checks relations in Descope's FGA store, which is keyed on Descope tenant ids, so it
   serves Descope principals only.
 - Exception: `get_tenant_claims` returns the Descope `tenants` claim as it is, for the
-  routes that list a Descope principal's memberships. A principal of a provider that
-  has its own extractor and is not `descope_managed` (Keycloak) is refused with 403
-  (`TENANTS_CLAIM_NOT_READ`), whatever the token carries, so `GET /api/tenants` and the
-  `/api/tenants/{tenant_id}/resources` routes refuse it rather than answer an empty
-  membership list. A provider with no extractor of its own (Ory) is still read for the
-  claim (#597).
+  routes that list a Descope principal's memberships. Every provider's token is read for
+  the claim (#597).
 - Exception: `POST /api/tenants` is gated by `require_admin_role`
   (`routers/tenants.py`), which reads a top-level `roles` claim itself, for every
   provider, and takes no tenant (#596).
@@ -494,12 +412,10 @@ with no extractor (`refuse_ambiguous_authorization_source`).
 `test_tenant_dependencies.py`, and `test_descope_backed_routes.py`, which walks every route
 of the application against its registers, calls each guarded route as a canonical
 principal, and calls each `require_global_role` route as an operator of one of several
-tenants who names it). `test_keycloak_routes.py` calls every route that takes a tenant or
-is gated by a role as a Keycloak `member` and as a confirmed Keycloak `tenant-admin`, and
-`test_keycloak_tenant_access.py` covers the extractor, the confirmation and the lookup,
-`test_keycloak_directory.py` the Admin API call and the grant marker, and
-`test_keycloak_identity.py` `GET /api/identity`. `test_provider_registration.py` fails on a writer of `request.state.claims`
-that records no provider.
+tenants who names it). `test_keycloak_canonical_authorization.py` shows a Keycloak
+principal's grants come from the canonical store whatever its token claims, and fails on
+a Keycloak branch in `app/dependencies/` or `app/routers/`. `test_provider_registration.py`
+fails on a writer of `request.state.claims` that records no provider.
 
 ## Data access
 
@@ -677,8 +593,8 @@ settings themselves.
 Everything that differs between providers is a field of `ProviderTokenConfig`: the
 accepted issuers and audiences, the signing algorithms, the logout kind with the
 provider's own client id and post-logout redirect URI, the claims extractor (§18),
-`descope_managed` (§18), the token binding, the membership lookup and
-`token_authorized_only` (§18), and `require_https`. `require_https` **MUST** default to on, so that plain-HTTP discovery is
+`descope_managed` (§18), the token binding, the first-login organization reader and
+whether the first-login profile comes from UserInfo, and `require_https`. `require_https` **MUST** default to on, so that plain-HTTP discovery is
 allowed only for the one provider whose own switch turns it off. A registration that would
 accept tokens it must not **MUST** raise, which stops startup. `configured_providers()`
 raises `ProviderConfigurationError` when two providers share a name or an issuer, because
@@ -689,18 +605,23 @@ A provider whose tokens need more than an issuer and an audience to be tokens fo
 declares a `token_binding`. Both token middlewares **MUST** check it (`binding_refusal`)
 after the audience check and before any claim becomes a principal, a tenant or a
 permission, so that it holds on every route, and **MUST** answer a refusal with the uniform
-401. Keycloak's binding is exactly one `aud` and the `azp` configured for it.
+401.
 
-The Keycloak registration **MUST** refuse to build a half-configured provider. With
-`KEYCLOAK_ISSUER_URL` set it raises unless `KEYCLOAK_AUDIENCES` names a type client,
-`KEYCLOAK_APP_CLIENTS` names the app client of every type client, no app client is
-itself an audience and no two type clients share one, every type client is in exactly one of `KEYCLOAK_PORTABLE_TYPES` and
-`KEYCLOAK_ORGANIZATION_BOUND_TYPES`, every portable type has a list in
-`KEYCLOAK_PORTABLE_PERMISSIONS` holding only `<domain>:read` and `<domain>:list`
-permissions, and `KEYCLOAK_REQUIRE_HTTPS` is on or the issuer host is loopback or a
+The Keycloak registration **MUST** refuse to start with `KEYCLOAK_ISSUER_URL` set unless
+`KEYCLOAK_AUDIENCE` names the API client and `KEYCLOAK_CLIENT_ID` the SPA client, and
+**MUST** refuse `KEYCLOAK_REQUIRE_HTTPS` off unless the issuer host is loopback or a
 `.localhost` name. That exemption is by name: nothing checks what a `.localhost` name
 resolves to. The middleware factory therefore **MUST** log a warning at startup for every
-provider whose `require_https` is off. See [ADR-0010](adr/0010-keycloak-token-model.md).
+provider whose `require_https` is off. Its binding is an RS256 signature, `aud`
+containing the API client, `azp` the SPA client and `typ` `Bearer`: Keycloak signs the
+SPA's ID tokens (`typ` `ID`) and refresh tokens (`typ` `Refresh`) with the same keys, and
+its access tokens carry `sid` and `auth_time` too. It has no claims extractor: its
+principals are decided from the canonical model. Its `organization` claim is read by
+`keycloak_organization_alias` alone, and only first-login provisioning calls it, through
+`ProviderTokenConfig.first_login_organization`: exactly one alias, the
+`external_org_id` of one active tenant of the `keycloak` provider, places the user;
+anything else provisions nothing. The profile comes from the access token. See
+[ADR-0011](adr/0011-keycloak-canonical-authorization.md).
 
 The Zitadel registration **MUST** refuse to start with `ZITADEL_ISSUER_URL` set unless
 `ZITADEL_AUDIENCE` names the project id and `ZITADEL_CLIENT_ID` the SPA application, and
@@ -728,8 +649,8 @@ The user such a login creates is marked `users.email_from_organization`, and no 
 login of any provider (just-in-time provisioning, the Descope flow sync) **MUST** link to
 that user by email either: it is `EmailLinkRefused` too. A Descope reconciliation run
 **MUST NOT** link or update that user either; it skips it and logs the holder's id. A login that finds, by email,
-the user a concurrent login for its own subject just created gets that user. A Zitadel
-principal with no recorded provider config **MUST NOT** be provisioned (500).
+the user a concurrent login for its own subject just created gets that user. A Zitadel or
+Keycloak principal with no recorded provider config **MUST NOT** be provisioned (500).
 
 Both token middlewares **MUST** build the principal and read the tenant with the
 provider's extractor inside the code path that answers a failure with the uniform 401, so
@@ -748,6 +669,8 @@ standalone and in gateway mode, with the cause logged and not returned.
 *Enforcement:* tests (`test_provider_registration.py` registers a second provider from the
 test alone and drives it through the factory, both middlewares and logout;
 `test_keycloak_startup.py` starts the factory on each incomplete Keycloak configuration,
+`test_keycloak_token_binding.py` runs the recorded Keycloak tokens through the binding,
+`test_keycloak_first_login.py` checks that the organization claim has one reader,
 `test_zitadel_startup.py` on each incomplete Zitadel one, `test_zitadel_token_binding.py`
 runs the recorded Zitadel tokens through the binding and `test_zitadel_first_login.py`
 checks that the organization claim has one reader), plus review.

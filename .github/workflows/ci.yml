@@ -509,14 +509,10 @@ jobs:
           cd frontend && VITE_OIDC_SCOPE="openid profile email organization:acme" \
             VITE_OIDC_TENANT_SCOPE_TEMPLATE="openid profile email organization:{tenant}" npm run build
 
-      - name: Apply database schema and register the Keycloak provider
+      - name: Apply database schema, register the Keycloak provider and link the tenants
         run: |
-          set -o pipefail
-          KEYCLOAK_ISSUER_URL="$(terraform -chdir=infra/keycloak output -json backend_environment | jq -er .KEYCLOAK_ISSUER_URL)"
-          export KEYCLOAK_ISSUER_URL
-          cd backend
-          python -m alembic upgrade head
-          python -m scripts.seed_keycloak
+          (cd backend && python -m alembic upgrade head)
+          make keycloak-seed
 
       # The internal endpoints' shared secrets, generated per run as in the
       # Descope E2E job: the shared suite's internal-endpoint tests compute
@@ -530,7 +526,8 @@ jobs:
           done
 
       - name: Start backend
-        # The root's backend_environment without the admin client: this backend
+        # The root's backend_environment without the admin client, with
+        # canonical authorization and first login for keycloak. This backend
         # does not sync to Keycloak (SYNC_PROVIDER stays descope), so it gets no
         # credential that writes to the realm. Descope is left unconfigured:
         # these tests present Keycloak tokens only. The log goes to a file: the
@@ -549,6 +546,7 @@ jobs:
           DESCOPE_PROJECT_ID: ""
           DESCOPE_MANAGEMENT_KEY: ""
           REDIS_URL: redis://localhost:16379/0
+          CANONICAL_RBAC_PROVIDERS: keycloak
           JIT_ENABLED_PROVIDERS: keycloak
           # The limiter runs before token validation, so its key is the client
           # address, shared by every request in this job. At the 60/minute

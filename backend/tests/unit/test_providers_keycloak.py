@@ -24,22 +24,14 @@ from app.middleware.providers import (
     ory_config,
 )
 from tests.helpers.keycloak_model import (
-    DIRECTORY_CLIENT_ID,
-    DIRECTORY_CLIENT_SECRET,
-    MODEL_VARIABLES,
+    API_AUDIENCE,
+    KEYCLOAK_VARIABLES,
+    SPA_CLIENT_ID,
     builder_settings,
-    directory_settings,
-    model_settings,
-    set_model_environment,
+    set_client_environment,
 )
 
 ISSUER = "http://keycloak.example.test:8180/realms/identity-stack"
-MEMBER = "member"
-TENANT_ADMIN = "tenant-admin"
-APP_CLIENT = "member-app"
-AUDIENCES = frozenset({MEMBER, TENANT_ADMIN})
-# The token model that goes with ``AUDIENCES``: startup refuses a Keycloak provider without one.
-MODEL = model_settings(MEMBER, TENANT_ADMIN)
 # Plain HTTP may be allowed only for an issuer on loopback or a ``.localhost`` name.
 LOCAL_ISSUER = "http://keycloak.localhost:8180/realms/identity-stack"
 ORY_ISSUER = "https://ory.example.test"
@@ -53,11 +45,7 @@ _PROVIDER_VARIABLES = (
     "ORY_REQUIRE_AUDIENCE",
     "ORY_CLIENT_ID",
     "ORY_POST_LOGOUT_REDIRECT_URI",
-    "KEYCLOAK_ISSUER_URL",
-    "KEYCLOAK_AUDIENCES",
-    "KEYCLOAK_REQUIRE_HTTPS",
-    "KEYCLOAK_POST_LOGOUT_REDIRECT_URI",
-    *MODEL_VARIABLES,
+    *KEYCLOAK_VARIABLES,
     "FRONTEND_URL",
 )
 
@@ -72,13 +60,20 @@ def _jwt(claims: dict, *, header: object = None) -> str:
 
 
 def _claims(**overrides) -> dict:
-    claims = {"iss": ISSUER, "sub": "kc-user", "aud": MEMBER, "azp": APP_CLIENT, "exp": int(time.time()) + 300}
+    claims = {
+        "iss": ISSUER,
+        "sub": "kc-user",
+        "aud": API_AUDIENCE,
+        "azp": SPA_CLIENT_ID,
+        "typ": "Bearer",
+        "exp": int(time.time()) + 300,
+    }
     claims.update(overrides)
     return {name: value for name, value in claims.items() if value is not None}
 
 
 def _keycloak(**overrides):
-    return replace(keycloak_config(ISSUER, AUDIENCES, **MODEL), **overrides)
+    return replace(keycloak_config(ISSUER, API_AUDIENCE, SPA_CLIENT_ID), **overrides)
 
 
 def _provider_name(provider) -> str:
@@ -109,7 +104,7 @@ def clean_env(monkeypatch):
 
 class TestKeycloakConfig:
     def test_issuer_discovery_and_logout_kind(self):
-        provider = keycloak_config(ISSUER, AUDIENCES, **MODEL)
+        provider = keycloak_config(ISSUER, API_AUDIENCE, SPA_CLIENT_ID)
 
         assert provider.name == "Keycloak"
         assert provider.accepted_issuers == frozenset({ISSUER})
@@ -117,39 +112,36 @@ class TestKeycloakConfig:
         assert provider.logout_kind == "rp_initiated"
 
     def test_trailing_slash_is_dropped_because_the_token_issuer_has_none(self):
-        assert keycloak_config(f"{ISSUER}/", AUDIENCES, **MODEL).accepted_issuers == frozenset({ISSUER})
+        assert keycloak_config(f"{ISSUER}/", API_AUDIENCE, SPA_CLIENT_ID).accepted_issuers == frozenset({ISSUER})
 
-    def test_audience_is_the_set_and_is_required(self):
-        provider = keycloak_config(ISSUER, AUDIENCES, **MODEL)
+    def test_audience_is_the_api_client_and_is_required(self):
+        provider = keycloak_config(ISSUER, API_AUDIENCE, SPA_CLIENT_ID)
 
-        assert provider.audiences == AUDIENCES
+        assert provider.audience == API_AUDIENCE
         assert provider.require_audience is True
 
     def test_rs256_only(self):
-        assert keycloak_config(ISSUER, AUDIENCES, **MODEL).algorithms == frozenset({"RS256"})
+        assert keycloak_config(ISSUER, API_AUDIENCE, SPA_CLIENT_ID).algorithms == frozenset({"RS256"})
 
     def test_https_is_required_unless_switched_off(self):
-        assert keycloak_config(ISSUER, AUDIENCES, **MODEL).require_https is True
-        assert keycloak_config(LOCAL_ISSUER, AUDIENCES, require_https=False, **MODEL).require_https is False
+        assert keycloak_config(ISSUER, API_AUDIENCE, SPA_CLIENT_ID).require_https is True
+        assert keycloak_config(LOCAL_ISSUER, API_AUDIENCE, SPA_CLIENT_ID, require_https=False).require_https is False
 
-    def test_logout_client_is_the_tokens_azp(self):
+    def test_logout_client_is_the_spa(self):
         provider = keycloak_config(
-            ISSUER, AUDIENCES, post_logout_redirect_uri="https://app.example.test/login", **MODEL
+            ISSUER, API_AUDIENCE, SPA_CLIENT_ID, post_logout_redirect_uri="https://app.example.test/login"
         )
 
-        assert provider.logout_client_id is None
-        assert provider.logout_client_id_claim == "azp"
+        assert provider.logout_client_id == SPA_CLIENT_ID
         assert provider.post_logout_redirect_uri == "https://app.example.test/login"
 
-    @pytest.mark.parametrize("audiences", [frozenset(), frozenset({""}), frozenset({"  "})])
-    def test_no_usable_audience_is_refused(self, audiences):
-        with pytest.raises(ProviderConfigurationError, match="KEYCLOAK_AUDIENCES"):
-            keycloak_config(ISSUER, audiences)
+    def test_no_audience_is_refused(self):
+        with pytest.raises(ProviderConfigurationError, match="KEYCLOAK_AUDIENCE"):
+            keycloak_config(ISSUER, "", SPA_CLIENT_ID)
 
-    def test_other_providers_require_https_and_take_one_audience(self):
+    def test_other_providers_require_https(self):
         for provider in (descope_config("P123"), ory_config(ORY_ISSUER, "api")):
             assert provider.require_https is True
-            assert provider.audiences == frozenset()
 
     def test_every_provider_accepts_rs256_only(self):
         providers = {
@@ -157,7 +149,7 @@ class TestKeycloakConfig:
             for provider in (
                 descope_config("P123"),
                 ory_config(ORY_ISSUER, "api"),
-                keycloak_config(ISSUER, AUDIENCES, **MODEL),
+                keycloak_config(ISSUER, API_AUDIENCE, SPA_CLIENT_ID),
             )
         }
 
@@ -175,19 +167,18 @@ class TestBuildProviderConfigs:
             ory_issuer_url=ORY_ISSUER,
             ory_audience="api",
             keycloak_issuer_url=ISSUER,
-            keycloak_audiences=AUDIENCES,
-            **builder_settings(MEMBER, TENANT_ADMIN),
+            **builder_settings(),
         )
 
         assert [provider.name for provider in providers] == ["Descope", "Ory", "Keycloak"]
 
     def test_no_keycloak_without_an_issuer(self):
-        providers = build_provider_configs(descope_project_id="P123", keycloak_audiences=AUDIENCES)
+        providers = build_provider_configs(descope_project_id="P123", **builder_settings())
 
         assert [provider.name for provider in providers] == ["Descope"]
 
     def test_issuer_without_audience_fails(self):
-        with pytest.raises(ProviderConfigurationError, match="KEYCLOAK_AUDIENCES"):
+        with pytest.raises(ProviderConfigurationError, match="KEYCLOAK_AUDIENCE"):
             build_provider_configs(descope_project_id="P123", keycloak_issuer_url=ISSUER)
 
     def test_the_error_is_a_value_error_like_orys(self):
@@ -221,50 +212,32 @@ class TestConfiguredProviders:
 
     def test_keycloak_settings_come_from_the_environment(self, clean_env):
         clean_env.setenv("KEYCLOAK_ISSUER_URL", ISSUER)
-        clean_env.setenv("KEYCLOAK_AUDIENCES", " member , tenant-admin ,,")
-        set_model_environment(clean_env, MEMBER, TENANT_ADMIN)
+        set_client_environment(clean_env)
         clean_env.setenv("KEYCLOAK_POST_LOGOUT_REDIRECT_URI", "https://app.example.test/login")
 
         providers = {provider.name: provider for provider in configured_providers()}
 
         assert providers["Keycloak"] == keycloak_config(
-            ISSUER,
-            AUDIENCES,
-            post_logout_redirect_uri="https://app.example.test/login",
-            **MODEL,
-            **directory_settings(),
+            ISSUER, API_AUDIENCE, SPA_CLIENT_ID, post_logout_redirect_uri="https://app.example.test/login"
         )
-
-    def test_audience_client_ids_keep_their_case(self, clean_env):
-        clean_env.setenv("KEYCLOAK_ISSUER_URL", ISSUER)
-        clean_env.setenv("KEYCLOAK_AUDIENCES", "Member")
-        clean_env.setenv("KEYCLOAK_APP_CLIENTS", "Member=Member-App")
-        clean_env.setenv("KEYCLOAK_PORTABLE_TYPES", "Member")
-        clean_env.setenv("KEYCLOAK_PORTABLE_PERMISSIONS", "Member=documents:read")
-        clean_env.setenv("KEYCLOAK_DIRECTORY_CLIENT_ID", DIRECTORY_CLIENT_ID)
-        clean_env.setenv("KEYCLOAK_DIRECTORY_CLIENT_SECRET", DIRECTORY_CLIENT_SECRET)
-
-        providers = {provider.name: provider for provider in configured_providers()}
-
-        assert providers["Keycloak"].audiences == frozenset({"Member"})
 
     def test_post_logout_redirect_defaults_to_the_frontend_login_page(self, clean_env):
         clean_env.setenv("KEYCLOAK_ISSUER_URL", ISSUER)
-        clean_env.setenv("KEYCLOAK_AUDIENCES", MEMBER)
-        set_model_environment(clean_env, MEMBER)
+        set_client_environment(clean_env)
         clean_env.setenv("FRONTEND_URL", "https://app.example.test/")
 
         providers = {provider.name: provider for provider in configured_providers()}
 
         assert providers["Keycloak"].post_logout_redirect_uri == "https://app.example.test/login"
 
-    @pytest.mark.parametrize("audiences", [None, "", " , "])
-    def test_issuer_without_audience_fails(self, clean_env, audiences):
+    @pytest.mark.parametrize("audience", [None, "", " "])
+    def test_issuer_without_audience_fails(self, clean_env, audience):
         clean_env.setenv("KEYCLOAK_ISSUER_URL", ISSUER)
-        if audiences is not None:
-            clean_env.setenv("KEYCLOAK_AUDIENCES", audiences)
+        clean_env.setenv("KEYCLOAK_CLIENT_ID", SPA_CLIENT_ID)
+        if audience is not None:
+            clean_env.setenv("KEYCLOAK_AUDIENCE", audience)
 
-        with pytest.raises(ProviderConfigurationError, match="KEYCLOAK_AUDIENCES"):
+        with pytest.raises(ProviderConfigurationError, match="KEYCLOAK_AUDIENCE"):
             configured_providers()
 
     @pytest.mark.parametrize(
@@ -273,8 +246,7 @@ class TestConfiguredProviders:
     )
     def test_https_switch_is_on_unless_explicitly_off(self, clean_env, value, required):
         clean_env.setenv("KEYCLOAK_ISSUER_URL", LOCAL_ISSUER)
-        clean_env.setenv("KEYCLOAK_AUDIENCES", MEMBER)
-        set_model_environment(clean_env, MEMBER)
+        set_client_environment(clean_env)
         if value is not None:
             clean_env.setenv("KEYCLOAK_REQUIRE_HTTPS", value)
 
@@ -283,15 +255,15 @@ class TestConfiguredProviders:
         assert providers["Keycloak"].require_https is required
 
 
-class TestAudienceSet:
-    @pytest.mark.parametrize("aud", [MEMBER, TENANT_ADMIN, [MEMBER], ["account", TENANT_ADMIN]])
-    def test_an_audience_in_the_set_is_accepted(self, aud):
+class TestTheApiAudience:
+    @pytest.mark.parametrize("aud", [API_AUDIENCE, [API_AUDIENCE], ["account", API_AUDIENCE]])
+    def test_an_aud_that_names_the_api_is_accepted(self, aud):
         assert audience_rejected({"aud": aud}, _keycloak()) is False
 
     @pytest.mark.parametrize(
-        "aud", ["account", "", "member-app", [], ["account"], [["member"]], None, 7, {"member": 1}]
+        "aud", ["account", "", SPA_CLIENT_ID, [], ["account"], [[API_AUDIENCE]], None, 7, {API_AUDIENCE: 1}]
     )
-    def test_an_audience_outside_the_set_is_rejected(self, aud):
+    def test_an_aud_without_the_api_is_rejected(self, aud):
         assert audience_rejected({"aud": aud}, _keycloak()) is True
 
     def test_a_missing_audience_is_rejected(self):
@@ -392,7 +364,7 @@ class TestTokenValidationMiddleware:
 
         assert validate.await_args.kwargs["token_validation_config"].algorithms is None
 
-    @pytest.mark.parametrize("aud", [None, "account", APP_CLIENT, ["account"]])
+    @pytest.mark.parametrize("aud", [None, "account", SPA_CLIENT_ID, ["account"]])
     @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
     def test_missing_or_foreign_audience_is_refused(self, validate, aud):
         validate.return_value = _claims(aud=aud)
@@ -404,7 +376,7 @@ class TestTokenValidationMiddleware:
 
     @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
     def test_descope_issuer_is_refused_by_a_keycloak_only_backend_before_any_crypto(self, validate):
-        descope_claims = {"iss": "https://api.descope.com/P123", "sub": "descope-user", "aud": MEMBER}
+        descope_claims = {"iss": "https://api.descope.com/P123", "sub": "descope-user", "aud": API_AUDIENCE}
         validate.return_value = descope_claims
         client = _client(TokenValidationMiddleware, [descope_config(""), _keycloak()])
 
@@ -496,8 +468,7 @@ class TestFactory:
     def test_keycloak_is_registered_from_the_environment_alone(self, clean_env, mode, middleware):
         clean_env.setenv("DESCOPE_PROJECT_ID", "P123")
         clean_env.setenv("KEYCLOAK_ISSUER_URL", ISSUER)
-        clean_env.setenv("KEYCLOAK_AUDIENCES", "member,tenant-admin")
-        set_model_environment(clean_env, MEMBER, TENANT_ADMIN)
+        set_client_environment(clean_env)
 
         registered = self._configure(clean_env, mode)
 
@@ -508,5 +479,5 @@ class TestFactory:
     def test_startup_fails_when_the_issuer_is_set_and_no_audience_is(self, clean_env):
         clean_env.setenv("KEYCLOAK_ISSUER_URL", ISSUER)
 
-        with pytest.raises(ProviderConfigurationError, match="KEYCLOAK_AUDIENCES"):
+        with pytest.raises(ProviderConfigurationError, match="KEYCLOAK_AUDIENCE"):
             self._configure(clean_env, "standalone")

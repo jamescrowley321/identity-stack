@@ -28,25 +28,11 @@ its authorization decisions still come only from its own signed claims.
 
 Every branch of the canonical path that cannot produce an unambiguous answer fails
 closed with 403. An authorization decision is never made on a guess.
-
-A third shape carries authorization in the token but not all of it: a Keycloak
-token of an organization-bound type holds only for a caller whose one
-organization is the token's. This module asks the provider's membership lookup
-for those tokens, after everything the token alone decides: no lookup wired or
-an answer of "no" is 403, and a lookup that fails, or does not answer within
-``MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS``, is 502 and no grant. "After"
-holds however a route declares its dependencies: ``get_tenant_id``'s own
-dependency applies every gate on the route, and every dependency registered with
-``refuses_from_the_token_alone``, before it asks.
 """
 
-import asyncio
 import inspect
-import math
-import weakref
-from collections.abc import AsyncIterator, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.params import Depends as DependsMarker
@@ -57,17 +43,10 @@ from app.dependencies.tenant_access import (
     CanonicalGrant,
     CanonicalMemberships,
     TenantAccess,
-    awaiting_confirmation,
     resolve_tenant_access,
 )
-from app.knobs import knob, knob_set
+from app.knobs import knob_set
 from app.logbook import logbook
-from app.middleware.providers import (
-    ProviderConfigurationError,
-    ProviderTokenConfig,
-    TenantMembership,
-    counted_tenant_ids,
-)
 from app.models.database import get_session_factory
 from app.models.identity.user import UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
@@ -86,44 +65,6 @@ logger = logbook(__name__)
 CANONICAL_RBAC_PROVIDERS = knob_set("CANONICAL_RBAC_PROVIDERS", "ory")
 
 INSUFFICIENT_PERMISSIONS = "Insufficient permissions"
-
-# The check each ``require_*`` gate makes of a caller's grants, by the gate's
-# dependency function. ``confirmed_tenant`` finds a route's gates here.
-_GATE_CHECKS: "weakref.WeakKeyDictionary[Callable, Callable[[TenantAccess], bool]]" = weakref.WeakKeyDictionary()
-# Dependencies other than the ``require_*`` gates that refuse a request from its
-# claims and provider alone, asking no one. ``confirmed_tenant`` runs those of
-# the route before the lookup, so their refusal is never turned into a 502.
-_TOKEN_GUARDS: "weakref.WeakSet[Callable[[Request], object]]" = weakref.WeakSet()
-# The provider's directory could not say which tenants the caller belongs to.
-MEMBERSHIP_LOOKUP_FAILED = "Membership lookup failed"
-# The provider has no directory to list the caller's tenants from.
-MEMBERSHIPS_NOT_LISTED = "The caller's memberships cannot be listed"
-# The directory does not list the token's tenant among the caller's (decision 12):
-# the membership changed after the token was issued, and the token is not
-# believed over the directory.
-TENANT_NOT_A_MEMBERSHIP = "The token's tenant is not one of the caller's memberships"
-
-
-def membership_lookup_timeout() -> float:
-    """``MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`` as seconds: how long a request waits for a membership lookup.
-
-    Raises ``ProviderConfigurationError`` for a value that is not a positive,
-    finite number: a limit that cannot be read is not replaced by a guess.
-    """
-    raw = knob("MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS", "5")
-    try:
-        seconds = float(raw)
-    except ValueError:
-        seconds = math.nan
-    if not (math.isfinite(seconds) and seconds > 0):
-        raise ProviderConfigurationError(
-            f"MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS must be a positive number of seconds, not {raw!r}"
-        )
-    return seconds
-
-
-# Fixed when this module is imported, so a value that is no limit stops startup.
-MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS = membership_lookup_timeout()
 
 
 async def get_rbac_session() -> AsyncIterator[AsyncSession | None]:
@@ -305,322 +246,18 @@ async def canonical_memberships(request: Request) -> CanonicalMemberships | None
         return await _canonical_memberships(request, claims, session)
 
 
-@dataclass(frozen=True)
-class _SoleMembership:
-    """The tenant this request's lookup confirmed as the caller's only one. Never kept across requests."""
-
-    tenant_id: str
-
-
-def _log_lookup_timeout(name: str, limit: float, sub: object) -> None:
-    logger.warning("membership lookup of provider=%s did not answer within %s s (sub=%r)", name, limit, sub)
-
-
-async def _confirm_sole_membership(request: Request, claims: dict, tenant_id: str) -> str | None:
-    """``tenant_id`` when the provider's lookup says it is the caller's one tenant, else ``None``.
-
-    For claims that are ``sole_membership_required`` (conventions §18). ``None``
-    is a refusal the resolver answers with 403: no lookup is wired for the
-    provider, or the caller belongs to no tenant, to another one, or to several.
-    A lookup that raises, that does not answer within
-    ``MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`` (it is cancelled then, and an answer it
-    gives after that is refused too), or that answers with anything but a list,
-    tuple, set or frozenset of strings, could not be asked: that is 502
-    and no grant, as for the FGA store (§17). A
-    confirmation is kept on ``request.state`` for the rest of the request, so a
-    route that depends on both ``get_tenant_id`` and ``require_permission`` asks
-    once.
-    """
-    kept = getattr(request.state, "sole_membership", None)
-    if isinstance(kept, _SoleMembership) and kept.tenant_id == tenant_id:
-        return tenant_id
-    provider = getattr(request.state, "provider", None)
-    lookup = provider.sole_membership_lookup if isinstance(provider, ProviderTokenConfig) else None
-    name = provider.name if isinstance(provider, ProviderTokenConfig) else "unrecorded"
-    sub = claims.get("sub")
-    if lookup is None:
-        logger.warning("membership not confirmed: provider=%s has no membership lookup (sub=%r)", name, sub)
-        return None
-    limit = MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS
-    bound = asyncio.timeout(limit)
-    try:
-        async with bound:
-            tenants = await lookup(claims)
-    except Exception as exc:
-        if bound.expired():
-            _log_lookup_timeout(name, limit, sub)
-        else:
-            logger.warning("membership lookup failed for provider=%s sub=%r", name, sub, exc_info=True)
-        raise HTTPException(status_code=502, detail=MEMBERSHIP_LOOKUP_FAILED) from exc
-    # A lookup that catches its cancellation and returns leaves ``asyncio.timeout``
-    # without an error: an answer given after the limit ran out is still no answer.
-    if bound.expired():
-        _log_lookup_timeout(name, limit, sub)
-        raise HTTPException(status_code=502, detail=MEMBERSHIP_LOOKUP_FAILED)
-    if not isinstance(tenants, (list, tuple, set, frozenset)) or not all(isinstance(entry, str) for entry in tenants):
-        logger.warning("membership lookup of provider=%s gave an answer that cannot be used (sub=%r)", name, sub)
-        raise HTTPException(status_code=502, detail=MEMBERSHIP_LOOKUP_FAILED)
-    return _confirmed_by(request, name, sub, tenants, tenant_id)
-
-
-def _confirmed_by(request: Request, name: str, sub: object, tenants: Iterable[str], tenant_id: str) -> str | None:
-    """``tenant_id`` when ``tenants`` is exactly it, kept on ``request.state`` for the request; else ``None``."""
-    counted = set(tenants)
-    if counted != {tenant_id}:
-        logger.warning(
-            "membership not confirmed: provider=%s sub=%r belongs to %d tenant(s), not to the token's alone",
-            name,
-            sub,
-            len(counted),
-        )
-        return None
-    request.state.sole_membership = _SoleMembership(tenant_id)
-    return tenant_id
-
-
-def _is_key_of(registered: Mapping, call: object) -> bool:
-    """Whether ``call`` is a key of ``registered``. A callable that cannot be hashed is a key of nothing."""
-    try:
-        return call in registered
-    except TypeError:
-        return False
-
-
-def refuses_from_the_token_alone(guard: Callable[[Request], object]) -> Callable[[Request], object]:
-    """Register ``guard`` as a dependency that refuses from the request's claims and provider alone.
-
-    A dependency registered here is answered before the membership lookup, with
-    its own refusal, on every route that depends on it: a token it refuses is
-    refused even when the directory is down. It must take only the request, be
-    synchronous, and do no I/O; raising is its refusal, and what it returns is
-    not used before the lookup. A dependency that refuses after asking a
-    provider (an FGA check, a database read) is not one: it needs the tenant
-    the lookup confirms.
-    """
-    if inspect.iscoroutinefunction(guard):
-        raise TypeError(f"{guard.__qualname__} is asynchronous: a guard answered before the lookup does no I/O")
-    _TOKEN_GUARDS.add(guard)
-    return guard
-
-
-def _route_calls(request: Request) -> list[Callable]:
-    """Every dependency the request's route runs, at any depth, in the order FastAPI runs them.
-
-    Read from the route FastAPI matched, so it is the same list whether a
-    dependency is declared in ``dependencies=[...]``, as a parameter, or on the
-    router. A dependency the application has overridden is left out, and so is
-    everything under it: FastAPI runs the override in its place, and none of
-    what it depended on. Empty for a request that no route was matched for (one
-    built by hand).
-    """
-    scope = getattr(request, "scope", None)
-    route = scope.get("route") if isinstance(scope, dict) else None
-    dependant = getattr(route, "dependant", None)
-    if dependant is None:
-        return []
-    overridden = request.app.dependency_overrides
-    calls: list[Callable] = []
-
-    def visit(dependants) -> None:
-        # FastAPI resolves a dependency's own dependencies before calling it.
-        for sub in dependants:
-            if _is_key_of(overridden, sub.call):
-                continue
-            visit(sub.dependencies)
-            calls.append(sub.call)
-
-    visit(getattr(dependant, "dependencies", ()))
-    return calls
-
-
-def _route_gate_checks(request: Request) -> list[Callable[[TenantAccess], bool]]:
-    """The check of every ``require_*`` gate the request's route depends on, at any depth (see ``_route_calls``)."""
-    return [_GATE_CHECKS[call] for call in _route_calls(request) if _is_key_of(_GATE_CHECKS, call)]
-
-
-def _route_token_guards(request: Request) -> list[Callable[[Request], object]]:
-    """Every ``refuses_from_the_token_alone`` guard the request's route depends on, in the order FastAPI runs them."""
-    guards: list[Callable[[Request], object]] = []
-    for call in _route_calls(request):
-        if _is_key_of(_TOKEN_GUARDS, call) and call not in guards:
-            guards.append(call)
-    return guards
-
-
-async def confirmed_tenant(request: Request) -> str | None:
-    """Dependency: the tenant ``get_tenant_id`` may believe a ``sole_membership_required`` token for.
-
-    ``None`` for every request whose claims need no confirmation, without a
-    lookup: an unauthenticated one, a provider authorized from the canonical
-    model, and a token that names no tenant or settles its claims alone. Also
-    ``None`` when the lookup did not confirm the token's tenant, which
-    ``get_tenant_id`` then refuses. Raises 502 when the lookup fails.
-
-    FastAPI may resolve this before the route's ``require_*`` gate or another
-    refusing guard (one declared as a parameter after ``get_tenant_id``). What
-    the token alone decides still comes first: a token that one of the route's
-    ``refuses_from_the_token_alone`` guards refuses is refused here with that
-    guard's answer, one that a gate would refuse is refused here (403), and the
-    lookup is not asked.
-    """
-    claims = getattr(request.state, "claims", None)
-    if not isinstance(claims, dict) or _principal_provider(request) in CANONICAL_RBAC_PROVIDERS:
-        return None
-    unconfirmed = awaiting_confirmation(request, claims)
-    if unconfirmed is None:
-        return None
-    _refuse_what_the_token_alone_decides(request, unconfirmed)
-    return await _confirm_sole_membership(request, claims, unconfirmed.tenant_id)
-
-
-def _refuse_what_the_token_alone_decides(
-    request: Request, unconfirmed: TenantAccess, holds: Callable[[TenantAccess], bool] | None = None
-) -> None:
-    """Refuse, before any lookup, what the route's guards, its gates or ``holds`` refuse from the token alone.
-
-    The route's ``refuses_from_the_token_alone`` guards run first, in the order
-    FastAPI runs them, and refuse with their own answer. Then every gate of the
-    route is applied, not only the one asking (403): on a route with two gates,
-    or a gate and a guard, the one the token passes would otherwise ask the
-    lookup before the other refuses, and a directory that is down would answer
-    502 where the token alone decides 403.
-    """
-    for guard in _route_token_guards(request):
-        guard(request)
-    checks = _route_gate_checks(request)
-    if holds is not None and holds not in checks:
-        checks.append(holds)
-    if not all(check(unconfirmed) for check in checks):
-        raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
-
-
 async def _tenant_access(
     request: Request,
     session: AsyncSession | None,
     *,
     request_selects: bool = True,
-    holds: Callable[[TenantAccess], bool] | None = None,
 ) -> TenantAccess:
-    """The request's tenant and the caller's grants in it. 401 with no claims.
-
-    ``holds`` is the caller's own check of the grants. For a token that needs
-    its tenant confirmed it is applied first, with the route's
-    ``refuses_from_the_token_alone`` guards and the check of every other gate
-    of the route, to what the token alone says: a token that would be refused
-    anyway is refused (403) without a lookup, so a directory that is down never
-    turns that 403 into a 502.
-    """
+    """The request's tenant and the caller's grants in it. 401 with no claims."""
     claims = getattr(request.state, "claims", None)
     if claims is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     memberships = await _canonical_memberships(request, claims, session)
-    confirmed = None
-    if memberships is None:
-        unconfirmed = awaiting_confirmation(request, claims)
-        if unconfirmed is not None:
-            _refuse_what_the_token_alone_decides(request, unconfirmed, holds)
-            confirmed = await _confirm_sole_membership(request, claims, unconfirmed.tenant_id)
-    return resolve_tenant_access(
-        request, claims, memberships, request_selects=request_selects, confirmed_tenant=confirmed
-    )
-
-
-@dataclass(frozen=True)
-class TokenTenant:
-    """The tenant a principal's own token names, what the token grants there, and every tenant the caller is in.
-
-    For a ``token_authorized_only`` provider only: its principals' tenant and
-    grants are not in the canonical model, and switching tenant takes a new
-    token.
-    """
-
-    tenant_id: str
-    permissions: tuple[str, ...]
-    memberships: tuple[TenantMembership, ...]
-
-
-async def _list_memberships(request: Request, provider: ProviderTokenConfig, claims: dict) -> list[TenantMembership]:
-    """The provider's membership list for the caller, bounded like the lookup.
-
-    403 when the provider has none, 502 when it fails, is late or answers the wrong shape.
-    """
-    if provider.tenant_memberships is None:
-        logger.warning(
-            "memberships not listed: provider=%s has no membership list (sub=%r)", provider.name, claims.get("sub")
-        )
-        raise HTTPException(status_code=403, detail=MEMBERSHIPS_NOT_LISTED)
-    limit = MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS
-    bound = asyncio.timeout(limit)
-    try:
-        async with bound:
-            listed = await provider.tenant_memberships(claims)
-    except Exception as exc:
-        if bound.expired():
-            _log_lookup_timeout(provider.name, limit, claims.get("sub"))
-        else:
-            logger.warning(
-                "membership list failed for provider=%s sub=%r", provider.name, claims.get("sub"), exc_info=True
-            )
-        raise HTTPException(status_code=502, detail=MEMBERSHIP_LOOKUP_FAILED) from exc
-    if bound.expired():
-        _log_lookup_timeout(provider.name, limit, claims.get("sub"))
-        raise HTTPException(status_code=502, detail=MEMBERSHIP_LOOKUP_FAILED)
-    if not isinstance(listed, (list, tuple)) or not all(isinstance(entry, TenantMembership) for entry in listed):
-        logger.warning("membership list of provider=%s cannot be used (sub=%r)", provider.name, claims.get("sub"))
-        raise HTTPException(status_code=502, detail=MEMBERSHIP_LOOKUP_FAILED)
-    return list(listed)
-
-
-async def token_tenant(request: Request) -> TokenTenant | None:
-    """Dependency: the tenant and grants of a principal whose provider authorizes from its token alone.
-
-    ``None``, with no I/O, for every other request: an unauthenticated one and
-    a principal of any provider that is not ``token_authorized_only``, so
-    ``GET /api/identity`` answers them as before.
-
-    Otherwise the tenant and the permissions come from the token through the
-    one resolver (conventions §18), and what the token alone decides is
-    answered first: a token that names no tenant, or that the route's guards
-    refuse, is refused (403) before any lookup. Then the directory is read
-    once, within ``MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`` (502 when it fails), and
-    that one list serves both questions: a token that needs its tenant
-    confirmed is confirmed from the list's ``counted`` entries, as its
-    ``sole_membership_lookup`` would (403 when not), and a token whose tenant
-    is not on the list is refused (403, decision 12).
-    """
-    provider = getattr(request.state, "provider", None)
-    claims = getattr(request.state, "claims", None)
-    if not isinstance(provider, ProviderTokenConfig) or not provider.token_authorized_only:
-        return None
-    if not isinstance(claims, dict):
-        return None
-    unconfirmed = awaiting_confirmation(request, claims)
-    if unconfirmed is None:
-        access = await _tenant_access(request, None)
-        memberships = await _list_memberships(request, provider, claims)
-    else:
-        _refuse_what_the_token_alone_decides(request, unconfirmed)
-        memberships = await _list_memberships(request, provider, claims)
-        confirmed = _confirmed_by(
-            request,
-            provider.name,
-            claims.get("sub"),
-            counted_tenant_ids(memberships),
-            unconfirmed.tenant_id,
-        )
-        access = resolve_tenant_access(request, claims, None, confirmed_tenant=confirmed)
-    if access.tenant_id not in {membership.tenant_id for membership in memberships}:
-        logger.warning(
-            "membership list of provider=%s sub=%r does not hold the token's tenant",
-            provider.name,
-            claims.get("sub"),
-        )
-        raise HTTPException(status_code=403, detail=TENANT_NOT_A_MEMBERSHIP)
-    return TokenTenant(
-        tenant_id=access.tenant_id,
-        permissions=tuple(access.permissions),
-        memberships=tuple(memberships),
-    )
+    return resolve_tenant_access(request, claims, memberships, request_selects=request_selects)
 
 
 def _holds_any(wanted: tuple[str, ...], held: Callable[[TenantAccess], list[str]]) -> Callable[[TenantAccess], bool]:
@@ -647,8 +284,7 @@ def require_role(*roles: str):
     The tenant and the roles come from the tenant resolver (conventions §18):
     a Descope principal's from its ``dct`` + ``tenants`` JWT claims, and those of a
     principal from a provider in ``CANONICAL_RBAC_PROVIDERS`` from the canonical
-    model. A Keycloak token carries permissions and no role, so a Keycloak
-    principal is always refused here.
+    model.
 
     Returns the user's role list for downstream use.
     """
@@ -658,12 +294,11 @@ def require_role(*roles: str):
         request: Request,
         session: AsyncSession | None = Depends(get_rbac_session),
     ) -> list[str]:
-        access = await _tenant_access(request, session, holds=holds)
+        access = await _tenant_access(request, session)
         if not holds(access):
             raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
         return access.roles
 
-    _GATE_CHECKS[dependency] = holds
     return dependency
 
 
@@ -674,8 +309,7 @@ def require_permission(*permissions: str):
     The tenant and the permissions come from the tenant resolver (conventions
     §18): a Descope principal's from its ``dct`` + ``tenants`` JWT claims, and those
     of a principal from a provider in ``CANONICAL_RBAC_PROVIDERS`` from the canonical
-    model. A Keycloak principal's are the client roles of its token's one
-    audience, in the organization the token names.
+    model.
 
     Returns the user's permission list for downstream use.
     """
@@ -685,12 +319,11 @@ def require_permission(*permissions: str):
         request: Request,
         session: AsyncSession | None = Depends(get_rbac_session),
     ) -> list[str]:
-        access = await _tenant_access(request, session, holds=holds)
+        access = await _tenant_access(request, session)
         if not holds(access):
             raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
         return access.permissions
 
-    _GATE_CHECKS[dependency] = holds
     return dependency
 
 
@@ -714,10 +347,9 @@ def require_global_role(*roles: str):
         request: Request,
         session: AsyncSession | None = Depends(get_rbac_session),
     ) -> list[str]:
-        access = await _tenant_access(request, session, request_selects=False, holds=holds)
+        access = await _tenant_access(request, session, request_selects=False)
         if not holds(access):
             raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
         return access.roles
 
-    _GATE_CHECKS[dependency] = holds
     return dependency

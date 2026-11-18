@@ -22,7 +22,7 @@ from app.middleware.providers import configured_providers
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.routers import auth as auth_router
 from app.services.logout import _logout_client_id
-from tests.helpers.keycloak_model import MODEL_VARIABLES, set_model_environment
+from tests.helpers.keycloak_model import API_AUDIENCE, KEYCLOAK_VARIABLES, SPA_CLIENT_ID, set_client_environment
 
 ORY_ISSUER = "https://ory.example.test"
 ORY_AUDIENCE = "https://identity-stack-api"
@@ -32,8 +32,6 @@ ORY_REDIRECT = "https://app.example.test/signed-out"
 
 KEYCLOAK_ISSUER = "https://keycloak.example.test/realms/identity-stack"
 KEYCLOAK_END_SESSION = f"{KEYCLOAK_ISSUER}/protocol/openid-connect/logout"
-KEYCLOAK_TYPE_CLIENT = "member"
-KEYCLOAK_APP_CLIENT = "member-app"
 KEYCLOAK_REDIRECT = "https://app.example.test/login"
 
 ZITADEL_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "zitadel"
@@ -96,11 +94,7 @@ def _environment(monkeypatch):
         "ORY_REQUIRE_AUDIENCE",
         "ORY_CLIENT_ID",
         "ORY_POST_LOGOUT_REDIRECT_URI",
-        "KEYCLOAK_ISSUER_URL",
-        "KEYCLOAK_AUDIENCES",
-        "KEYCLOAK_REQUIRE_HTTPS",
-        "KEYCLOAK_POST_LOGOUT_REDIRECT_URI",
-        *MODEL_VARIABLES,
+        *KEYCLOAK_VARIABLES,
         "ZITADEL_ISSUER_URL",
         "ZITADEL_AUDIENCE",
         "ZITADEL_CLIENT_ID",
@@ -121,10 +115,9 @@ def ory(monkeypatch):
 @pytest.fixture
 def keycloak(monkeypatch):
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", KEYCLOAK_ISSUER)
-    monkeypatch.setenv("KEYCLOAK_AUDIENCES", KEYCLOAK_TYPE_CLIENT)
-    set_model_environment(monkeypatch, KEYCLOAK_TYPE_CLIENT)
+    set_client_environment(monkeypatch)
     monkeypatch.setenv("KEYCLOAK_POST_LOGOUT_REDIRECT_URI", KEYCLOAK_REDIRECT)
-    return {"sub": "kc-user", "iss": KEYCLOAK_ISSUER, "aud": KEYCLOAK_TYPE_CLIENT, "azp": KEYCLOAK_APP_CLIENT}
+    return {"sub": "kc-user", "iss": KEYCLOAK_ISSUER, "aud": API_AUDIENCE, "azp": SPA_CLIENT_ID, "typ": "Bearer"}
 
 
 @pytest.fixture
@@ -194,7 +187,7 @@ class TestOryResponseIsUnchanged:
 
 
 class TestKeycloakLogout:
-    async def test_url_carries_the_tokens_app_client_and_keycloaks_redirect(self, keycloak):
+    async def test_url_carries_the_spa_client_and_keycloaks_redirect(self, keycloak):
         response, _ = await _logout(keycloak, KEYCLOAK_END_SESSION)
 
         assert response.status_code == 200
@@ -204,7 +197,7 @@ class TestKeycloakLogout:
         assert body["logout_url"].split("?")[0] == KEYCLOAK_END_SESSION
         assert _query(body["logout_url"]) == {
             "id_token_hint": [ID_TOKEN],
-            "client_id": [KEYCLOAK_APP_CLIENT],
+            "client_id": [SPA_CLIENT_ID],
             "post_logout_redirect_uri": [KEYCLOAK_REDIRECT],
         }
 
@@ -216,8 +209,8 @@ class TestKeycloakLogout:
 
         assert _query(response.json()["logout_url"])["post_logout_redirect_uri"] == ["https://app.example.test/login"]
 
-    @pytest.mark.parametrize("azp", [None, "", 7, ["member-app"]])
-    async def test_a_token_without_a_usable_azp_does_not_authenticate(self, keycloak, azp):
+    @pytest.mark.parametrize("azp", [None, "", 7, [SPA_CLIENT_ID], "identity-stack-other"])
+    async def test_a_token_without_the_spas_azp_does_not_authenticate(self, keycloak, azp):
         """The token binding refuses it before logout runs: no URL is built and discovery is not asked."""
         claims = {**keycloak, "azp": azp}
         if azp is None:
@@ -229,16 +222,11 @@ class TestKeycloakLogout:
         assert response.json() == {"detail": "Invalid or expired token"}
         disco.assert_not_awaited()
 
-    @pytest.mark.parametrize("azp", [None, "", 7, ["member-app"]])
-    def test_the_logout_service_sends_no_client_id_for_an_unusable_azp(self, keycloak, azp):
-        """The service does not rely on the binding: a claim it cannot use names no client."""
+    def test_the_logout_service_names_the_spa_whatever_the_token_says(self, keycloak):
+        """The client id is the configured SPA's, never read from the caller's token."""
         (provider,) = [p for p in configured_providers() if p.name == "Keycloak"]
-        claims = {**keycloak, "azp": azp}
-        if azp is None:
-            del claims["azp"]
 
-        assert _logout_client_id(provider, claims) is None
-        assert _logout_client_id(provider, keycloak) == KEYCLOAK_APP_CLIENT
+        assert _logout_client_id(provider, {**keycloak, "azp": "identity-stack-other"}) == SPA_CLIENT_ID
 
     async def test_no_end_session_endpoint_fails_closed(self, keycloak):
         with (
@@ -290,7 +278,7 @@ class TestTwoRpInitiatedProviders:
         }
         assert _query(keycloak_response.json()["logout_url"]) == {
             "id_token_hint": [ID_TOKEN],
-            "client_id": [KEYCLOAK_APP_CLIENT],
+            "client_id": [SPA_CLIENT_ID],
             "post_logout_redirect_uri": [KEYCLOAK_REDIRECT],
         }
 

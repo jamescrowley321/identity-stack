@@ -4,12 +4,15 @@ Each root takes the same variables (``issuer_url``, ``frontend_url``) and gives 
 outputs: ``backend_environment`` and ``frontend_environment``, maps whose keys are the
 environment variables the backend and the SPA read, and ``test_credentials``. A key in an
 environment map that docs/environment-variables.md does not list for that side is a variable
-the app does not read, and fails here. The plain-HTTP rule is written once, in
+the app does not read, and fails here; a ``backend_environment`` key must also be a name the
+backend reads through ``app.knobs``, and every setting the backend reads for the root's
+provider must be one of its keys. The plain-HTTP rule is written once, in
 ``infra/modules/provider-urls``.
 
 The roots are read as text: the unit suite runs without Terraform.
 """
 
+import ast
 import json
 import os
 import re
@@ -23,6 +26,15 @@ import yaml
 REPO = Path(__file__).resolve().parents[3]
 INFRA = REPO / "infra"
 ENV_DOC = REPO / "docs" / "environment-variables.md"
+BACKEND_APP = REPO / "backend" / "app"
+# The ``app.knobs`` readers: each takes the variable's name as its first argument.
+KNOB_READERS = frozenset({"knob", "knob_flag", "knob_set", "required_knob"})
+# Settings the backend reads for a root's provider that the root does not set: tuning
+# knobs with a default, which an operator sets only to change it.
+NOT_FROM_THE_ROOT = {
+    "keycloak": {"KEYCLOAK_ORGANIZATION_LOCK_TIMEOUT_SECONDS"},
+    "zitadel": {"ZITADEL_ADMIN_TIMEOUT_SECONDS", "ZITADEL_POST_LOGOUT_REDIRECT_URI"},
+}
 URL_MODULE = INFRA / "modules" / "provider-urls"
 
 # Each local root and the prefix of the backend variables it configures.
@@ -132,6 +144,38 @@ def test_environment_keys_are_variables_the_app_reads(root: str, output: str) ->
 
     assert keys, f"infra/{root} output {output} has no keys: the scan matched nothing"
     assert sorted(keys - documented) == []
+
+
+def _backend_knobs() -> set[str]:
+    """Every variable name the backend reads through ``app.knobs``: the string literal its reader is called with."""
+    names: set[str] = set()
+    for path in sorted(BACKEND_APP.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in KNOB_READERS
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                names.add(node.args[0].value)
+    return names
+
+
+def test_the_knob_scan_finds_the_backends_settings() -> None:
+    """The scan reads the calls it is meant to: a guard against a scan that matches nothing."""
+    assert {"KEYCLOAK_ISSUER_URL", "ZITADEL_ISSUER_URL", "CANONICAL_RBAC_PROVIDERS"} <= _backend_knobs()
+
+
+@pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
+def test_backend_environment_is_exactly_what_the_backend_reads_for_the_provider(root: str) -> None:
+    """A key no ``knob(...)`` reads, or a setting the backend reads that the root does not emit, fails here."""
+    keys = _map_keys(_block(_root_text(root), "output", "backend_environment"))
+    read = {name for name in _backend_knobs() if name.startswith(LOCAL_ROOTS[root])} - NOT_FROM_THE_ROOT[root]
+
+    assert sorted(keys - read) == []
+    assert sorted(read - keys) == []
 
 
 @pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))

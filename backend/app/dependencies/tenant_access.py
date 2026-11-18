@@ -16,11 +16,6 @@ On a route whose state belongs to no tenant (``require_global_role``) the reques
 chooses nothing: a caller with several memberships is refused, whatever the
 header or a ``dct`` claim on the token names.
 
-Claims that are ``sole_membership_required`` (a Keycloak token of an
-organization-bound type) are believed only with ``confirmed_tenant``: the tenant
-the provider's lookup confirmed as the caller's only one. Without it they are
-refused, so a caller of the resolver that confirms nothing grants nothing.
-
 Anything else is 403. Nothing here does I/O: the canonical memberships are loaded
 by ``app.dependencies.rbac`` and passed in.
 """
@@ -42,8 +37,6 @@ NO_TENANT_CONTEXT = "No tenant context"
 # What ``get_tenant_id`` answers when a request has no single tenant, and what
 # ``require_descope_principal`` answers so its routes read as they always did.
 SELECT_A_TENANT_FIRST = "No tenant context — select a tenant first"
-# Its own answer: the token names a tenant, and selecting another would not help.
-SOLE_MEMBERSHIP_NOT_CONFIRMED = "This tenant is not confirmed as the caller's only membership"
 
 
 @dataclass(frozen=True)
@@ -129,27 +122,6 @@ def _claims_source(request: Request, claims: dict) -> TenantClaims | None:
     return claimed
 
 
-def awaiting_confirmation(request: Request, claims: dict) -> TenantAccess | None:
-    """What a token says when it is ``sole_membership_required``, before anything confirmed it.
-
-    ``None`` for every other request: one with no recorded provider or no
-    extractor, one whose extractor raises or answers with something unusable
-    (the resolver refuses and logs those), and one whose claims need no
-    confirmation. The answer is not an authorization: it tells the caller which
-    tenant to confirm, and lets it answer what the token alone decides first.
-    """
-    provider = getattr(request.state, "provider", None)
-    if not isinstance(provider, ProviderTokenConfig) or provider.tenant_claims is None:
-        return None
-    try:
-        claimed = provider.tenant_claims(claims)
-    except Exception:
-        return None
-    if not _usable(claimed) or claimed.sole_membership_required is not True:
-        return None
-    return TenantAccess(tenant_id=claimed.tenant_id, roles=claimed.roles, permissions=claimed.permissions)
-
-
 def _is_string_list(value: object) -> bool:
     return isinstance(value, list) and all(isinstance(entry, str) for entry in value)
 
@@ -160,8 +132,7 @@ def _usable(claimed: object) -> bool:
     The answer must be a ``TenantClaims`` whose tenant is a non-empty string and
     whose roles and permissions are lists of strings. ``require_role`` asks
     ``role in roles``, which on a string is a substring search, so anything but
-    a list of strings is refused here and never searched. ``sole_membership_required``
-    must be a real boolean: any other value could be read either way.
+    a list of strings is refused here and never searched.
     """
     return (
         isinstance(claimed, TenantClaims)
@@ -169,7 +140,6 @@ def _usable(claimed: object) -> bool:
         and bool(claimed.tenant_id)
         and _is_string_list(claimed.roles)
         and _is_string_list(claimed.permissions)
-        and isinstance(claimed.sole_membership_required, bool)
     )
 
 
@@ -267,7 +237,6 @@ def resolve_tenant_access(
     *,
     no_tenant_detail: str = NO_TENANT_CONTEXT,
     request_selects: bool = True,
-    confirmed_tenant: str | None = None,
 ) -> TenantAccess:
     """Resolve the request's tenant and the caller's roles and permissions in it.
 
@@ -275,23 +244,13 @@ def resolve_tenant_access(
     provider is authorized from the canonical model, and ``None`` for every other
     provider. ``request_selects`` is off for a route whose state belongs to no
     tenant: there neither the ``X-Tenant-ID`` header nor a ``dct`` claim may
-    choose among several memberships. ``confirmed_tenant`` is the tenant the provider's
-    membership lookup confirmed as the caller's only one, for claims that are
-    ``sole_membership_required``; such claims are refused (403, with their own
-    detail) unless it is the tenant they name. Raises 403 with ``no_tenant_detail`` on every branch that does not
-    end at exactly one tenant.
+    choose among several memberships. Raises 403 with ``no_tenant_detail`` on
+    every branch that does not end at exactly one tenant.
     """
     if memberships is None:
         claimed = _claims_source(request, claims)
         if claimed is None:
             raise HTTPException(status_code=403, detail=no_tenant_detail)
-        if claimed.sole_membership_required and confirmed_tenant != claimed.tenant_id:
-            logger.warning(
-                "tenant resolution refused: provider=%s sub=%r holds a token that needs its tenant "
-                "confirmed as the caller's only membership, and it was not",
-                *_caller(request, claims),
-            )
-            raise HTTPException(status_code=403, detail=SOLE_MEMBERSHIP_NOT_CONFIRMED)
         return TenantAccess(tenant_id=claimed.tenant_id, roles=claimed.roles, permissions=claimed.permissions)
 
     tenant_id = _canonical_tenant(request, claims, memberships, request_selects=request_selects)
