@@ -24,6 +24,7 @@ and never in a ``repr``.
 
 from __future__ import annotations
 
+import enum
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -75,6 +76,13 @@ REQUIRED_API_CLIENT_ACCESS = frozenset({"view", "manage"})
 PAGE_SIZE = 100
 # Keycloak names a client's service account this, in lower case like every username.
 _SERVICE_ACCOUNT_PREFIX = "service-account-"
+
+
+class EventStream(enum.StrEnum):
+    """The realm's two event stores, by their Admin API path."""
+
+    ADMIN = "/admin-events"
+    USER = "/events"
 
 
 class KeycloakAdminNotConfigured(ValueError):
@@ -198,6 +206,8 @@ class KeycloakAdminApi:
         self._token: dict = {}
         # The API client's Keycloak id, read once.
         self._api_client: str | None = None
+        # The Keycloak id of the admin client's service account, read once.
+        self._service_account: str | None = None
 
     def __repr__(self) -> str:
         return f"KeycloakAdminApi(issuer={self.settings.issuer!r}, client_id={self.settings.client_id!r})"
@@ -344,6 +354,7 @@ class KeycloakAdminApi:
         account = await self.find_user(f"{_SERVICE_ACCOUNT_PREFIX}{self.settings.client_id}".lower())
         if account is None:
             return frozenset()
+        self._service_account = account["id"]
         mappings_path = f"/users/{quote(account['id'], safe='')}/role-mappings"
         mappings = _body(await self._expect("GET", mappings_path, ok=frozenset({200})))
         client_mappings = mappings.get("clientMappings") if isinstance(mappings, dict) else None
@@ -524,13 +535,16 @@ class KeycloakAdminApi:
         client_id = self.settings.api_client_id
         return await self._find_one("/clients", {"clientId": client_id}, "clientId", client_id)
 
-    async def _api_client_path(self) -> str:
+    async def _api_client_uuid(self) -> str:
         if self._api_client is None:
             client = await self._find_api_client()
             if client is None:
                 raise KeycloakApiClientNotManaged(self.settings.api_client_id, REQUIRED_API_CLIENT_ACCESS, found=False)
             self._api_client = client["id"]
-        return f"/clients/{quote(self._api_client, safe='')}"
+        return self._api_client
+
+    async def _api_client_path(self) -> str:
+        return f"/clients/{quote(await self._api_client_uuid(), safe='')}"
 
     async def client_roles(self) -> list[dict]:
         """Every role of the API client, attributes included."""
@@ -576,6 +590,60 @@ class KeycloakAdminApi:
         with tracer.start_as_current_span("KeycloakAdminApi.remove_composites"):
             path = f"/roles-by-id/{quote(role_id, safe='')}/composites"
             await self._expect("DELETE", path, ok=frozenset({204}), json=[{"id": entry} for entry in composite_ids])
+
+    async def service_account_id(self) -> str:
+        """The Keycloak id of the admin client's service account: the user its own admin events name."""
+        with tracer.start_as_current_span("KeycloakAdminApi.service_account_id"):
+            if self._service_account is None:
+                account = await self.find_user(f"{_SERVICE_ACCOUNT_PREFIX}{self.settings.client_id}".lower())
+                if account is None:
+                    raise KeycloakAdminError("the admin client's service account is not in the realm")
+                self._service_account = account["id"]
+            return self._service_account
+
+    async def api_client_uuid(self) -> str:
+        """The API client's Keycloak id, which the paths of its client roles' admin events carry."""
+        with tracer.start_as_current_span("KeycloakAdminApi.api_client_uuid"):
+            return await self._api_client_uuid()
+
+    async def get_organization(self, organization_id: str) -> dict | None:
+        """The organization with this Keycloak id, or ``None`` when the realm has none."""
+        with tracer.start_as_current_span("KeycloakAdminApi.get_organization"):
+            response = await self._expect(
+                "GET",
+                f"/organizations/{quote(organization_id, safe='')}",
+                ok=frozenset({200}),
+                also_done=_answers(404, ORGANIZATION_NOT_FOUND_ANSWER),
+            )
+            if response.status_code == 404:
+                return None
+            found = _body(response)
+            if not isinstance(found, dict) or found.get("id") != organization_id:
+                raise KeycloakAdminError("admin API answer unreadable")
+            return found
+
+    async def events(
+        self, stream: EventStream, *, date_from: int, first: int, max_results: int, newest: bool = False
+    ) -> list[dict]:
+        """One page of a stream's events recorded at or after ``date_from`` (milliseconds), oldest first.
+
+        With ``newest`` the page is newest first instead. Each event must have a
+        string ``id`` and an integer ``time``; any other answer is unreadable.
+        """
+        with tracer.start_as_current_span("KeycloakAdminApi.events") as span:
+            span.set_attribute("keycloak.event_stream", stream.name)
+            params = {
+                "dateFrom": str(date_from),
+                "first": str(first),
+                "max": str(max_results),
+                "direction": "desc" if newest else "asc",
+            }
+            response = await self._expect("GET", stream.value, ok=frozenset({200}), params=params)
+            page = _objects(response, stream.value)
+            if not all(isinstance(event.get("time"), int) and not isinstance(event["time"], bool) for event in page):
+                logger.warning("keycloak admin: GET %s answered an event without a time", stream.value)
+                raise KeycloakAdminError("admin API answer unreadable")
+            return page
 
     async def _all(self, path: str, params: dict) -> list[dict]:
         """Every object of a paged list, ``PAGE_SIZE`` at a time."""

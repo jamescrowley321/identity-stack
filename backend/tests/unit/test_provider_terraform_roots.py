@@ -32,7 +32,8 @@ KNOB_READERS = frozenset({"knob", "knob_flag", "knob_set", "required_knob"})
 # Settings the backend reads for a root's provider that the root does not set: tuning
 # knobs with a default, which an operator sets only to change it.
 NOT_FROM_THE_ROOT = {
-    "keycloak": set(),
+    # The event pull's tuning, read with defaults; the root emits what names the realm and its clients.
+    "keycloak": {"KEYCLOAK_PULL_EVENTS", "KEYCLOAK_PULL_INTERVAL_SECONDS", "KEYCLOAK_PULL_PAGE_SIZE"},
     "zitadel": {"ZITADEL_ADMIN_TIMEOUT_SECONDS", "ZITADEL_POST_LOGOUT_REDIRECT_URI"},
 }
 URL_MODULE = INFRA / "modules" / "provider-urls"

@@ -209,6 +209,69 @@ What Keycloak does not do, or the adapter does not take on:
 | An organization's name must be unique in the realm. | A second tenant with a name another organization holds is refused (409). |
 | A client role's name is unique on the API client, for permissions and roles alike. | A permission and a role of the same name, or a name a realm admin gave another client role, are refused (`Refusal.NAME_HELD_BY_ANOTHER`). |
 
+## Event pull
+
+With `SYNC_PROVIDER=keycloak` and `KEYCLOAK_PULL_EVENTS` on (the default), what an administrator
+changes in Keycloak comes back to the canonical model. Every `KEYCLOAK_PULL_INTERVAL_SECONDS`
+(10) the backend reads the realm's admin events (`GET /admin/realms/{realm}/admin-events`, with
+representations) and user events (`GET /admin/realms/{realm}/events`) through the
+[admin adapter's](#admin-adapter) client, which holds `view-events`, and applies them, oldest first
+across both stores, through `InboundSyncService.apply_keycloak_change`. The code is
+`app/services/keycloak_pull.py` (the poll), `app/services/keycloak_events.py` (what an event
+changes) and `app/dependencies/keycloak_pull.py` (the settings and the loop, a background task of
+the application's lifespan). The compose realm keeps both stores 7 days.
+
+| Keycloak change | Canonical change |
+|---|---|
+| Organization updated (admin event `UPDATE ORGANIZATION`) | The tenant linked to its alias (`external_org_id`, `keycloak` provider) takes its name, domains and status (`enabled` → `active`, disabled → `suspended`). |
+| Organization deleted | That tenant is suspended, not deleted: its roles and records stay. |
+| User updated (`UPDATE USER`; user events `UPDATE_PROFILE`, `UPDATE_EMAIL`) | The canonical user takes the email, given and family names the event carries; after a user's own profile change, the account's email only once Keycloak has verified it. `enabled` is taken only when the event records a change of it (`details.updated_enabled`): disabled → `inactive`, enabled → `active` for an `inactive` user (a `provisioned` one stays). |
+| User deleted (`DELETE USER`; `DELETE_ACCOUNT`), or disabled by a permanent lockout | The canonical user is deactivated, as for Descope's `user.deleted`. |
+| Organization member added | The user holds the default role `member` in the tenant, unless they already hold a role there: a canonical membership is a role in the tenant. |
+| Organization member removed | Every role of the user in the tenant is removed. |
+| User put in or taken out of an organization group | The role the group stands for (its `identity-stack.role-id`, else its name: `<name>` a global role, `<name>@<tenant id>` that tenant's own) is assigned or unassigned. |
+| API client role created, updated or deleted | A client role carrying `identity-stack.permission-id`, or with no canonical id and a `<domain>:<action>` name, is a permission; any other is a role, global or, named `<name>@<tenant id>`, that tenant's own. It is created, renamed or given its description, or deleted. |
+| Composites added to or removed from a role's client role | The role's permissions gain or lose the permissions among them. |
+
+A user is the canonical user their `keycloak` IdP link names (the account id), else, for an account
+the adapter created, the canonical user whose id is its username and who is linked to no other
+account. Creating a user or an organization in Keycloak changes nothing canonical: a user is
+provisioned at first sign-in, and a tenant is made on the canonical side. Everything else Keycloak
+records (logins, clients, realm roles, credentials, groups themselves) is passed.
+
+**Skipped.** An admin event whose author (`authDetails.userId`) is the admin client's service account
+is the backend's own push coming back and changes nothing; so is a user event of the admin client
+(`clientId`). The service account cannot read its own client's Keycloak id, and acts for that client
+alone, so it stands for the client. An event naming an entity the canonical model does not map (an
+organization no tenant is linked to, an account no canonical user is) is logged, recorded as a
+`skipped` sync event and passed.
+
+**Order and the cursor.** The cursor of each store, the ids of the events it has applied in the last
+5 seconds before it, and the aliases and client role names of the realm (an event deleting one names
+only its Keycloak id) are one row of `keycloak_pull_state`, keyed by the issuer. A batch of at most
+`KEYCLOAK_PULL_PAGE_SIZE` (100) events of each store is applied in one transaction, which commits the
+canonical changes, their `sync_events` and the advanced cursor together: a restart, or a crash
+mid-batch, resumes from the last commit and applies no event twice. The poll reads from 5 seconds
+before the cursor and passes the events it has already applied by id, so two events in the same
+millisecond, or one committed after a later one, are not lost. The first poll of a realm starts at the
+newest events: what happened before the pull was enabled is reconciliation's
+([identity-stack#661](https://github.com/jamescrowley321/identity-stack/issues/661)).
+
+**Several workers.** Each worker runs the loop; a batch first takes a Postgres advisory lock
+(`pg_try_advisory_xact_lock`), and a worker that cannot take it leaves the poll to the one that holds
+it.
+
+**Failures.** A change the canonical model refuses (a name or email another row holds, no `member`
+role) is rolled back alone (a savepoint), recorded as a `failed` sync event and passed. When Keycloak
+cannot be read (no answer, a 5xx, 401, 403, 408 or 429) the batch is rolled back and the poll stops;
+the next one reads the same events. Any other refusal while reading an event is recorded as `failed`
+and passed.
+
+**Revocation.** Authorization reads the canonical model on every request (conventions §18), so a
+user disabled, deleted or removed from an organization in Keycloak is refused (403) on the first
+request after the poll that applies it: up to `KEYCLOAK_PULL_INTERVAL_SECONDS` plus the poll. Their
+Keycloak tokens stay valid until they expire; the backend refuses them.
+
 ## Upgrading from the token-authorized model
 
 The model before [ADR-0011](adr/0011-keycloak-canonical-authorization.md) read a Keycloak

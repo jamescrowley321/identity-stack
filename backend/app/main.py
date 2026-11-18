@@ -7,6 +7,7 @@ from scalar_fastapi import get_scalar_api_reference
 from slowapi.errors import RateLimitExceeded
 
 from app.dependencies import identity as identity_dependencies
+from app.dependencies.keycloak_pull import KeycloakPullNotConfigured, keycloak_pull_settings, run_keycloak_pull
 from app.dependencies.zitadel_sync import zitadel_admin_settings
 from app.errors.identity import IdentityErrorRaised
 from app.errors.problem_detail import identity_error_raised_handler
@@ -104,9 +105,14 @@ async def _start_sync_provider(app: FastAPI) -> OutboundClient | None:
     if provider not in known:
         raise RuntimeError(f"SYNC_PROVIDER {provider!r} is not one of {known}")
     app.state.keycloak_admin = None
+    app.state.keycloak_pull = None
     app.state.zitadel_admin = zitadel_admin_settings() if provider == "zitadel" else None
     if provider != "keycloak":
         return None
+    try:
+        app.state.keycloak_pull = keycloak_pull_settings()
+    except KeycloakPullNotConfigured as exc:
+        raise RuntimeError(f"SYNC_PROVIDER is keycloak but {exc}") from exc
     http = outbound_client(timeout=KEYCLOAK_ADMIN_TIMEOUT_SECONDS)
     try:
         app.state.keycloak_admin = await connect_keycloak_admin(http)
@@ -208,9 +214,26 @@ async def lifespan(app: FastAPI):
 
         subscriber_task = asyncio.create_task(run_cache_invalidation_subscriber(redis_client))
 
+    # Keycloak event pull — background task while the Keycloak adapter syncs (docs/keycloak.md#event-pull)
+    pull_task = None
+    pull_settings = app.state.keycloak_pull
+    if app.state.keycloak_admin is not None and pull_settings is not None and pull_settings.enabled:
+        pull_task = asyncio.create_task(
+            run_keycloak_pull(app.state.keycloak_admin, pull_settings, app.state.cache_publisher)
+        )
+
     try:
         yield
     finally:
+        # Stop the Keycloak pull before the clients and the engine it uses are closed
+        if pull_task is not None:
+            pull_task.cancel()
+            try:
+                await pull_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.warning("Keycloak pull shutdown error", exc_info=True)
         # Cancel cache invalidation subscriber before closing Redis
         if subscriber_task is not None:
             subscriber_task.cancel()
