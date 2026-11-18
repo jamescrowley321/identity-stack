@@ -160,9 +160,7 @@ zitadel-seed: ## link the applied infra/zitadel root to canonical tenants in DAT
 	terraform -chdir=infra/zitadel output -json canonical_seed | (cd backend && python -m scripts.seed_zitadel)
 
 # The SPA's VITE_OIDC_* values are the applied root's frontend_environment
-# output. The tenant scope template is passed empty: a Zitadel user switches
-# tenant on the client, so a template in frontend/.env must not reach the build.
-# Only VITE_OIDC_* keys are exported; any other key in the output is an error.
+# output. Only VITE_OIDC_* keys are exported; any other key in the output is an error.
 # `docker compose up` without --build then starts this image.
 zitadel-frontend: ## build the frontend image against the applied infra/zitadel root (its frontend_environment output)
 	@env_json="$$(terraform -chdir=infra/zitadel output -json frontend_environment)" || { \
@@ -171,7 +169,7 @@ zitadel-frontend: ## build the frontend image against the applied infra/zitadel 
 	}; \
 	exports="$$(printf '%s' "$$env_json" | jq -er 'to_entries[] | if (.key | test("^VITE_OIDC_[A-Z_]+$$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')" || exit 1; \
 	eval "$$exports"; \
-	VITE_OIDC_TENANT_SCOPE_TEMPLATE= $(COMPOSE_ZITADEL) build frontend
+	$(COMPOSE_ZITADEL) build frontend
 
 # The two environment maps every local provider root outputs, in .env form:
 # backend_environment (sensitive: it holds the service accounts' secrets) for

@@ -83,11 +83,10 @@ KEYCLOAK_ISSUER_URL=<KEYCLOAK_ISSUER_URL above> python -m scripts.seed_keycloak
 # values, exported the same in the shell that runs the suite
 
 cd ../frontend
-# the frontend lines, with the suite's scopes: bob starts in acme, and a tenant switch asks
-# for the organization picked
-export VITE_OIDC_AUTHORITY=... VITE_OIDC_CLIENT_ID=... VITE_OIDC_REDIRECT_URI=...
-VITE_OIDC_SCOPE="openid profile email organization:acme" \
-  VITE_OIDC_TENANT_SCOPE_TEMPLATE="openid profile email organization:{tenant}" npm run build
+# the frontend lines of `make keycloak-env` (the plain organization scope; the tenant is
+# switched in the app)
+export VITE_OIDC_AUTHORITY=... VITE_OIDC_CLIENT_ID=... VITE_OIDC_REDIRECT_URI=... VITE_OIDC_SCOPE=...
+npm run build
 npx vite preview --port 3000 --strictPort
 
 make test-e2e-keycloak   # from the repository root; the shared suite, then backend/tests/e2e_keycloak/;

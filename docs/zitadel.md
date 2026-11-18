@@ -96,7 +96,7 @@ VITE_OIDC_REDIRECT_URI=http://localhost:3000
 VITE_OIDC_SCOPE=openid profile email offline_access urn:zitadel:iam:user:resourceowner
 ```
 
-`make zitadel-frontend` builds the compose `frontend` image with those values, read from the Terraform output, and with `VITE_OIDC_TENANT_SCOPE_TEMPLATE` empty, so a template left in `frontend/.env` for another provider does not reach the build. `docker compose up` without `--build` then starts that image; `--build` would rebuild it from the shell and `.env` values. With no applied root the target fails and builds nothing.
+`make zitadel-frontend` builds the compose `frontend` image with those values, read from the Terraform output. `docker compose up` without `--build` then starts that image; `--build` would rebuild it from the shell and `.env` values. With no applied root the target fails and builds nothing.
 
 - **Sign-in** is authorization code with PKCE (S256), as for every provider. `urn:zitadel:iam:user:resourceowner` puts the user's organization in the access token, and the backend provisions a first login from it; without it the backend refuses the first login. The project-audience scope is not needed: a human's access token already lists the project id in `aud`.
 - **Renewal.** `offline_access` gives a refresh token, and the SPA renews the access token with it before it expires (15 minutes on this instance), so a session outlives its access token.
@@ -125,8 +125,8 @@ cd infra/zitadel && export TF_VAR_zitadel_access_token="$(make -s -C ../.. zitad
   && terraform init && terraform apply -var-file=environments/dev.tfvars && cd ../..
 export DATABASE_URL=postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
 (cd backend && python -m alembic upgrade head) && make zitadel-seed
-# the SPA: npm run build with the frontend lines of `make zitadel-env`
-#   and VITE_OIDC_TENANT_SCOPE_TEMPLATE empty, then `npx vite preview --port 3000 --strictPort`
+# the SPA: npm run build with the frontend lines of `make zitadel-env`,
+#   then `npx vite preview --port 3000 --strictPort`
 # the backend on :8000: the backend lines of `make zitadel-env`, CANONICAL_RBAC_PROVIDERS=zitadel,
 #   JIT_ENABLED_PROVIDERS=zitadel, FRONTEND_URL=http://localhost:3000, DESCOPE_PROJECT_ID= and
 #   RATE_LIMIT_DEFAULT=2000/minute RATE_LIMIT_AUTH=1000/minute

@@ -496,18 +496,16 @@ jobs:
           KEYCLOAK_USER: admin
           KEYCLOAK_PASSWORD: admin
 
-      - name: Build frontend for the realm's member-app
-        # The root's frontend_environment. The suite starts bob in acme, so the
-        # build asks for that organization by name, and the tenant switch asks
-        # for the one picked, instead of letting Keycloak ask him which one.
+      - name: Build frontend for the realm's SPA client
+        # The root's frontend_environment: the plain organization scope. The
+        # tenant is switched in the app with the X-Tenant-ID selector.
         run: |
           # Captured first: `eval "$(...)"` would drop a terraform or jq failure.
           set -o pipefail
           vars="$(terraform -chdir=infra/keycloak output -json frontend_environment \
             | jq -er 'to_entries[] | if (.key | test("^VITE_OIDC_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
           eval "$vars"
-          cd frontend && VITE_OIDC_SCOPE="openid profile email organization:acme" \
-            VITE_OIDC_TENANT_SCOPE_TEMPLATE="openid profile email organization:{tenant}" npm run build
+          cd frontend && npm run build
 
       - name: Apply database schema, register the Keycloak provider and link the tenants
         run: |
@@ -674,15 +672,15 @@ jobs:
           make zitadel-seed
 
       - name: Build frontend for the SPA application
-        # The root's frontend_environment, with no tenant scope template: a
-        # Zitadel user switches tenant on the client.
+        # The root's frontend_environment: a Zitadel user switches tenant on
+        # the client.
         run: |
           # Captured first: `eval "$(...)"` would drop a terraform or jq failure.
           set -o pipefail
           vars="$(terraform -chdir=infra/zitadel output -json frontend_environment \
             | jq -er 'to_entries[] | if (.key | test("^VITE_OIDC_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
           eval "$vars"
-          cd frontend && VITE_OIDC_TENANT_SCOPE_TEMPLATE= npm run build
+          cd frontend && npm run build
 
       # The internal endpoints' shared secrets, generated per run as in the
       # Descope E2E job: the shared suite's internal-endpoint tests compute
