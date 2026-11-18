@@ -63,7 +63,7 @@ test-e2e: ## run e2e tests (requires running frontend + backend)
 
 # The suite logs in to the realm the applied infra/keycloak root built: its
 # base URL and name from KEYCLOAK_ISSUER_URL, the users' ids and passwords and
-# the service accounts' secrets from the outputs (tests/helpers/keycloak_target.py).
+# the admin service account's secret from the outputs (tests/helpers/keycloak_target.py).
 # PYTEST_ARGS passes extra pytest options (CI's screenshots and traces).
 KEYCLOAK_TEST_TARGET_JQ := def setting(name): .[name] // error("backend_environment has no \(name): apply infra/keycloak again"); \
 	(.backend_environment.value // error("no backend_environment output: apply infra/keycloak first")) as $$backend \
@@ -73,7 +73,6 @@ KEYCLOAK_TEST_TARGET_JQ := def setting(name): .[name] // error("backend_environm
 	| { KEYCLOAK_TEST_BASE_URL: $$issuer.base, KEYCLOAK_TEST_REALM: $$issuer.realm, \
 		KEYCLOAK_TEST_USER_IDS: (.user_ids.value // error("no user_ids output: apply infra/keycloak first") | tojson), \
 		KEYCLOAK_TEST_USER_PASSWORDS: (.test_credentials.value.users // error("no test_credentials users output: apply infra/keycloak first") | tojson), \
-		KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET: ($$backend | setting("KEYCLOAK_DIRECTORY_CLIENT_SECRET")), \
 		KEYCLOAK_TEST_ADMIN_CLIENT_SECRET: ($$backend | setting("KEYCLOAK_ADMIN_CLIENT_SECRET")) } \
 	| to_entries[] | "export \(.key)=\(.value | @sh)"
 

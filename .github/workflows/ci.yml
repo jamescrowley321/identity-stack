@@ -532,15 +532,13 @@ jobs:
       - name: Start backend
         # The root's backend_environment without the admin client: this backend
         # does not sync to Keycloak (SYNC_PROVIDER stays descope), so it gets no
-        # credential that writes to the realm. The directory client's secret is
-        # masked in the job log. Descope is left unconfigured: these tests present
-        # Keycloak tokens only. The log goes to a file: the backend outlives this step.
+        # credential that writes to the realm. Descope is left unconfigured:
+        # these tests present Keycloak tokens only. The log goes to a file: the
+        # backend outlives this step.
         run: |
           # Captured first: `eval "$(...)"` would drop a terraform or jq failure.
           set -o pipefail
           environment="$(terraform -chdir=infra/keycloak output -json backend_environment)"
-          directory_secret="$(printf '%s' "$environment" | jq -er .KEYCLOAK_DIRECTORY_CLIENT_SECRET)"
-          echo "::add-mask::$directory_secret"
           vars="$(printf '%s' "$environment" \
             | jq -er 'to_entries[] | select(.key | startswith("KEYCLOAK_ADMIN_CLIENT_") | not) | if (.key | test("^KEYCLOAK_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
           eval "$vars"

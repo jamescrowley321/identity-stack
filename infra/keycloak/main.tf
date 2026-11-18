@@ -1,75 +1,55 @@
 # The realm the compose import ships (keycloak/realm/identity-stack-realm.json),
 # described in Terraform. Anything added to the import file is added here too.
 #
-# Model: an organization is a tenant. A "type client" is a confidential client
-# with no flows that holds client roles (the permissions). Each type client has
-# one public "app client" the SPA logs in through, scope-mapped to the type
-# client's roles only, so a token's aud is the type client and its
-# resource_access holds that type client's roles alone.
+# Model: the token says who the caller is; the canonical store (backend
+# database) says what the caller may do. An organization is a tenant. The SPA
+# logs in through one public client whose access tokens carry the API client's
+# id in aud. The API client holds the canonical permissions and roles as client
+# roles, mapped to no user and no group, so no token carries one. A role
+# assignment (user, tenant, role) is membership of the organization's group
+# for the role, a group with no role mapping: the record of the assignment,
+# never a grant.
 
 locals {
-  # Type clients, their client roles, and the app client for each. `portable`
-  # and `portable_permissions` are the backend's token model for the type
-  # (KEYCLOAK_PORTABLE_TYPES, KEYCLOAK_ORGANIZATION_BOUND_TYPES,
-  # KEYCLOAK_PORTABLE_PERMISSIONS); the realm itself does not read them.
-  type_clients = {
-    "member" = {
-      name                 = "Type client: member"
-      app_client           = "member-app"
-      app_name             = "App client for type member"
-      roles                = ["documents:read", "documents:write"]
-      portable             = true
-      portable_permissions = ["documents:read"]
-    }
-    "tenant-admin" = {
-      name                 = "Type client: tenant-admin"
-      app_client           = "tenant-admin-app"
-      app_name             = "App client for type tenant-admin"
-      roles                = ["members:invite", "members:remove", "settings:manage"]
-      portable             = false
-      portable_permissions = []
-    }
+  # The canonical permissions, <domain>:<action>, and the canonical roles with
+  # the permissions each one composes. The API client holds both as client
+  # roles; a role is a composite of its permissions.
+  permissions = toset([
+    "billing:manage",
+    "documents:delete",
+    "documents:read",
+    "documents:write",
+    "members:invite",
+    "members:remove",
+    "members:update_role",
+    "projects:create",
+    "projects:delete",
+    "projects:read",
+    "projects:update",
+    "settings:manage",
+  ])
+  roles = {
+    owner  = sort(local.permissions)
+    admin  = sort(setsubtract(local.permissions, ["billing:manage"]))
+    member = ["documents:read", "documents:write", "members:invite", "projects:read", "projects:update"]
+    viewer = ["documents:read", "projects:read"]
   }
 
-  client_roles = merge([
-    for type_client, spec in local.type_clients : {
-      for role in spec.roles : "${type_client}/${role}" => {
-        type_client = type_client
-        name        = role
-      }
-    }
-  ]...)
+  spa_client_id   = "identity-stack-spa"
+  api_client_id   = "identity-stack-api"
+  other_client_id = "identity-stack-other"
+
+  # The public clients a browser logs in through: the SPA, and another one
+  # whose tokens lack the API audience (for tests that a token of another
+  # client is refused).
+  public_clients = {
+    (local.spa_client_id)   = "The identity-stack SPA"
+    (local.other_client_id) = "Another public client, without the API audience"
+  }
 
   # The test tenants and users (infra/fixtures/test-identities.json): every
   # tenant is an organization, every user a realm user.
   fixture = jsondecode(file("${path.module}/../fixtures/test-identities.json"))
-
-  # The client roles ("<type client>/<role>" keys of local.client_roles) a
-  # canonical role in any organization gives a user. Client roles are
-  # realm-wide, so a user holds those of every role they have anywhere.
-  role_client_roles = {
-    owner  = ["member/documents:read", "member/documents:write", "tenant-admin/members:invite", "tenant-admin/members:remove", "tenant-admin/settings:manage"]
-    admin  = ["tenant-admin/members:invite", "tenant-admin/members:remove", "tenant-admin/settings:manage"]
-    member = ["member/documents:read", "member/documents:write"]
-    viewer = ["member/documents:read"]
-  }
-
-  # Keycloak-only cases (keys of the fixture's `cases`): the case's user holds
-  # exactly these client roles instead.
-  case_client_roles = {
-    # A member whose one client role is documents:write.
-    write_only = ["member/documents:write"]
-  }
-
-  case_users = { for name, roles in local.case_client_roles : local.fixture.cases[name] => roles }
-
-  # Each organization-bound type client, to the canonical roles that make
-  # their holder hold it in an organization: every role whose client roles
-  # (local.role_client_roles) include that type's. A role not listed here (a
-  # portable type's) needs no record in the organization.
-  organization_bound_roles = {
-    "tenant-admin" = ["owner", "admin"]
-  }
 
   # Fixture users. Keycloak picks their ids: the provider cannot set one, so
   # a token's sub differs from the import's fixed ids.
@@ -78,42 +58,66 @@ locals {
       email      = "${username}@${local.fixture.tenants[user.home].domain}"
       first_name = user.first_name
       last_name  = user.last_name
-      roles = lookup(local.case_users, username, sort(distinct(flatten([
-        for role in values(user.roles) : local.role_client_roles[role] if role != null
-      ]))))
     }
   }
 
-  # Organizations, one per fixture tenant. `type_holders` is the
-  # organization's record of which members hold an organization-bound type
-  # there: attribute type:<type client> listing their user ids, read by the
-  # backend's directory lookup.
+  # Each fixture user's canonical role in each tenant, as membership of that
+  # organization's group for the role, keyed "<alias>/<role>/<username>".
+  role_assignments = merge([
+    for username, user in local.fixture.users : {
+      for alias, role in user.roles : "${alias}/${role}/${username}" => {
+        alias = alias, role = role, username = username
+      } if role != null
+    }
+  ]...)
+
+  # Organizations, one per fixture tenant, with their members.
   organizations = {
     for alias, tenant in local.fixture.tenants : alias => {
       name    = tenant.name
       domain  = tenant.domain
       members = sort([for username, user in local.fixture.users : username if contains(keys(user.roles), alias)])
-      type_holders = {
-        for type_client, roles in local.organization_bound_roles : type_client => sort(flatten([
-          for role in roles : [
-            for username, user in local.fixture.users : username if lookup(user.roles, alias, null) == role
-          ]
-        ]))
-      }
     }
   }
 
-  # The backend's read-only service account for the organization lookup.
-  directory_client_id    = "identity-stack-directory"
-  directory_client_roles = ["view-users", "view-organizations"]
+  # One group per organization and canonical role, owned by the organization.
+  role_groups = merge([
+    for alias in keys(local.organizations) : {
+      for role in keys(local.roles) : "${alias}/${role}" => { alias = alias, role = role }
+    }
+  ]...)
 
   # The backend's service account for the Keycloak admin adapter, which pushes
-  # canonical tenants and users (organizations, users, memberships).
+  # canonical changes to the realm and pulls the realm's changes back. Each
+  # role is probed in keycloak/fixtures/README.md.
   admin_client_id    = "identity-stack-admin"
-  admin_client_roles = ["manage-users", "manage-organizations"]
+  admin_client_roles = ["manage-users", "manage-organizations", "query-clients", "view-events"]
+  # Its fine-grained admin permission (v2) on the API client alone: read it,
+  # manage its roles, and set their composites.
+  admin_api_client_scopes = ["manage", "map-roles-composite", "view"]
 
-  # The provider's separator for a multi-valued attribute in a map(string).
-  multivalue_separator = "##"
+  # How long Keycloak keeps user and admin events, in seconds: 7 days. The
+  # backend's pull reads them; a reconciliation pass catches what expired, so
+  # this outlasts the interval between passes.
+  events_expiration_seconds = 604800
+
+  # Sets $token to an Admin API token of the bootstrap admin the provider logs
+  # in as (KEYCLOAK_USER, KEYCLOAK_PASSWORD from the environment).
+  admin_token_command = <<-EOT
+    token="$(curl -fsS --max-time 20 "${local.keycloak_url}/realms/master/protocol/openid-connect/token" \
+      --data-urlencode grant_type=password --data-urlencode client_id=admin-cli \
+      --data-urlencode "username=$KEYCLOAK_USER" --data-urlencode "password=$KEYCLOAK_PASSWORD" | jq -er .access_token)"
+  EOT
+
+  # Adds the user in $ASSIGNMENT to the organization's group, through the
+  # Organization API.
+  role_assignment_command = <<-EOT
+    set -euo pipefail
+    a() { jq -r --arg k "$1" '.[$k]' <<<"$ASSIGNMENT"; }
+    ${local.admin_token_command}
+    curl -fsS --max-time 20 -o /dev/null -X PUT -H "Authorization: Bearer $token" \
+      "$(a keycloak_url)/admin/realms/$(a realm)/organizations/$(a organization_id)/groups/$(a group_id)/members/$(a user_id)"
+  EOT
 }
 
 resource "keycloak_realm" "this" {
@@ -126,6 +130,15 @@ resource "keycloak_realm" "this" {
   # verified email (docs/security.md), so the realm verifies emails.
   verify_email          = true
   organizations_enabled = true
+  # Fine-grained admin permissions (v2): what scopes the admin service
+  # account's client management to the API client.
+  admin_permissions_enabled = true
+
+  # Keycloak keeps admin events' expiry as a realm attribute; the events
+  # resource below has no argument for it.
+  attributes = {
+    adminEventsExpiration = tostring(local.events_expiration_seconds)
+  }
 
   # Brute-force detection on, with temporary lockouts (Keycloak's own numbers),
   # as the import sets it: a guessed password locks the user out for a while.
@@ -142,14 +155,23 @@ resource "keycloak_realm" "this" {
   }
 }
 
-# --- Type clients and their client roles -------------------------------------
-
-resource "keycloak_openid_client" "type" {
-  for_each = local.type_clients
-
+# User events and admin events, admin events with their representations: what
+# the backend's pull reads.
+resource "keycloak_realm_events" "this" {
   realm_id                     = keycloak_realm.this.id
-  client_id                    = each.key
-  name                         = each.value.name
+  events_enabled               = true
+  events_expiration            = local.events_expiration_seconds
+  admin_events_enabled         = true
+  admin_events_details_enabled = true
+  events_listeners             = ["jboss-logging"]
+}
+
+# --- The API client: audience, permissions and roles ---------------------------
+
+resource "keycloak_openid_client" "api" {
+  realm_id                     = keycloak_realm.this.id
+  client_id                    = local.api_client_id
+  name                         = "The identity-stack API: its id is the access token audience; its client roles are the canonical permissions and roles"
   enabled                      = true
   access_type                  = "CONFIDENTIAL"
   standard_flow_enabled        = false
@@ -161,22 +183,31 @@ resource "keycloak_openid_client" "type" {
   valid_post_logout_redirect_uris = ["+"]
 }
 
-resource "keycloak_role" "client" {
-  for_each = local.client_roles
+resource "keycloak_role" "permission" {
+  for_each = local.permissions
 
   realm_id  = keycloak_realm.this.id
-  client_id = keycloak_openid_client.type[each.value.type_client].id
-  name      = each.value.name
+  client_id = keycloak_openid_client.api.id
+  name      = each.key
 }
 
-# --- App clients -----------------------------------------------------------------
+resource "keycloak_role" "role" {
+  for_each = local.roles
 
-resource "keycloak_openid_client" "app" {
-  for_each = local.type_clients
+  realm_id        = keycloak_realm.this.id
+  client_id       = keycloak_openid_client.api.id
+  name            = each.key
+  composite_roles = [for permission in each.value : keycloak_role.permission[permission].id]
+}
+
+# --- Public clients ----------------------------------------------------------------
+
+resource "keycloak_openid_client" "public" {
+  for_each = local.public_clients
 
   realm_id                        = keycloak_realm.this.id
-  client_id                       = each.value.app_client
-  name                            = each.value.app_name
+  client_id                       = each.key
+  name                            = each.value
   enabled                         = true
   access_type                     = "PUBLIC"
   standard_flow_enabled           = true
@@ -190,30 +221,32 @@ resource "keycloak_openid_client" "app" {
   valid_post_logout_redirect_uris = ["${local.frontend_url}/login"]
 }
 
-resource "keycloak_openid_client_default_scopes" "app" {
-  for_each = local.type_clients
+# No `roles` scope: a token carries no resource_access or realm_access.
+resource "keycloak_openid_client_default_scopes" "public" {
+  for_each = local.public_clients
 
   realm_id       = keycloak_realm.this.id
-  client_id      = keycloak_openid_client.app[each.key].id
-  default_scopes = ["basic", "roles", "profile", "email", "web-origins", "acr"]
+  client_id      = keycloak_openid_client.public[each.key].id
+  default_scopes = ["basic", "profile", "email", "web-origins", "acr"]
 }
 
-resource "keycloak_openid_client_optional_scopes" "app" {
-  for_each = local.type_clients
+resource "keycloak_openid_client_optional_scopes" "public" {
+  for_each = local.public_clients
 
   realm_id        = keycloak_realm.this.id
-  client_id       = keycloak_openid_client.app[each.key].id
+  client_id       = keycloak_openid_client.public[each.key].id
   optional_scopes = ["organization", "offline_access"]
 }
 
-# Scope mapping: each app client may put its own type client's roles, and no
-# other role, in a token.
-resource "keycloak_generic_role_mapper" "app" {
-  for_each = local.client_roles
-
-  realm_id  = keycloak_realm.this.id
-  client_id = keycloak_openid_client.app[each.value.type_client].id
-  role_id   = keycloak_role.client[each.key].id
+# The SPA's access tokens, and only they, carry the API client's id in aud.
+resource "keycloak_openid_audience_protocol_mapper" "spa_api_audience" {
+  realm_id                   = keycloak_realm.this.id
+  client_id                  = keycloak_openid_client.public[local.spa_client_id].id
+  name                       = "API audience"
+  included_client_audience   = keycloak_openid_client.api.client_id
+  add_to_access_token        = true
+  add_to_id_token            = false
+  add_to_token_introspection = true
 }
 
 # --- Users -----------------------------------------------------------------------
@@ -244,15 +277,15 @@ resource "keycloak_user" "this" {
   }
 }
 
-# Authoritative over each user's roles: a user holds exactly the client roles
-# listed and no realm role, as in the import (Keycloak gives a user created
-# through the Admin API the realm's default role; the import does not).
+# Authoritative over each user's roles: none, as in the import (Keycloak gives
+# a user created through the Admin API the realm's default role; the import
+# does not).
 resource "keycloak_user_roles" "this" {
   for_each = local.users
 
   realm_id   = keycloak_realm.this.id
   user_id    = keycloak_user.this[each.key].id
-  role_ids   = [for role in each.value.roles : keycloak_role.client[role].id]
+  role_ids   = []
   exhaustive = true
 }
 
@@ -270,12 +303,6 @@ resource "keycloak_organization" "this" {
     name     = each.value.domain
     verified = false
   }
-
-  attributes = {
-    for type_client, holders in each.value.type_holders :
-    "type:${type_client}" => join(local.multivalue_separator, [for username in holders : keycloak_user.this[username].id])
-    if length(holders) > 0
-  }
 }
 
 # Authoritative: a member added to an organization by hand is removed on the
@@ -288,7 +315,121 @@ resource "keycloak_organization_memberships" "this" {
   members         = [for username in each.value.members : keycloak_user.this[username].username]
 }
 
-# --- Directory service account ---------------------------------------------------
+# --- Role assignments: organization groups -----------------------------------------
+
+# One group per organization and canonical role, owned by the organization.
+# No role mapping on any of them: membership records an assignment and grants
+# nothing.
+resource "keycloak_group" "role" {
+  for_each = local.role_groups
+
+  realm_id        = keycloak_realm.this.id
+  organization_id = keycloak_organization.this[each.value.alias].id
+  name            = each.value.role
+}
+
+# Membership of an organization's group goes through the Organization API
+# (PUT/DELETE /organizations/{id}/groups/{group}/members/{user}): Keycloak
+# refuses the realm group API for an organization's group, and the provider
+# has no resource for it. Each assignment is set here with the bootstrap admin
+# the provider logs in as (KEYCLOAK_USER, KEYCLOAK_PASSWORD) and taken away on
+# destroy. Keycloak refuses a user who is not a member of the organization.
+resource "terraform_data" "role_assignment" {
+  for_each = local.role_assignments
+
+  input = {
+    keycloak_url    = local.keycloak_url
+    realm           = keycloak_realm.this.realm
+    organization_id = keycloak_organization.this[each.value.alias].id
+    group_id        = keycloak_group.role["${each.value.alias}/${each.value.role}"].id
+    user_id         = keycloak_user.this[each.value.username].id
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    command     = local.role_assignment_command
+    environment = { ASSIGNMENT = jsonencode(self.input) }
+  }
+
+  provisioner "local-exec" {
+    when        = destroy
+    interpreter = ["bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      a() { jq -r --arg k "$1" '.[$k]' <<<"$ASSIGNMENT"; }
+      token="$(curl -fsS --max-time 20 "$(a keycloak_url)/realms/master/protocol/openid-connect/token" \
+        --data-urlencode grant_type=password --data-urlencode client_id=admin-cli \
+        --data-urlencode "username=$KEYCLOAK_USER" --data-urlencode "password=$KEYCLOAK_PASSWORD" | jq -er .access_token)"
+      code="$(curl -sS --max-time 20 -o /dev/null -w '%%{http_code}' -X DELETE -H "Authorization: Bearer $token" \
+        "$(a keycloak_url)/admin/realms/$(a realm)/organizations/$(a organization_id)/groups/$(a group_id)/members/$(a user_id)")"
+      # 404: the realm, organization, group or membership is already gone.
+      case "$code" in 204|404) ;; *) echo "removing the role assignment answered HTTP $code" >&2; exit 1 ;; esac
+    EOT
+    environment = { ASSIGNMENT = jsonencode(self.input) }
+  }
+
+  depends_on = [keycloak_organization_memberships.this]
+}
+
+# --- Scoped admin permission on the API client ---------------------------------------
+
+# The id of the admin-permissions client, the resource server of every
+# fine-grained admin permission. The provider's keycloak_openid_client data
+# source cannot read it: it also reads the client's secret, which Keycloak
+# 26.8 refuses even to the bootstrap admin (403). The realm's own
+# representation names the client (adminPermissionsClient).
+data "external" "admin_permissions_client" {
+  program = ["bash", "-c", <<-EOT
+    set -euo pipefail
+    query="$(cat)"
+    q() { jq -r --arg k "$1" '.[$k]' <<<"$query"; }
+    ${local.admin_token_command}
+    curl -fsS --max-time 20 -H "Authorization: Bearer $token" "$(q keycloak_url)/admin/realms/$(q realm)" |
+      jq -ce '{id: .adminPermissionsClient.id}'
+  EOT
+  ]
+  query = {
+    keycloak_url = local.keycloak_url
+    # The realm's internal id, unknown until the realm exists: the lookup waits for it.
+    realm             = keycloak_realm.this.realm
+    realm_internal_id = keycloak_realm.this.internal_id
+  }
+}
+
+resource "keycloak_openid_client_user_policy" "admin" {
+  realm_id           = keycloak_realm.this.id
+  resource_server_id = data.external.admin_permissions_client.result.id
+  name               = "${local.admin_client_id} service account"
+  users              = [keycloak_openid_client.admin.service_account_user_id]
+  logic              = "POSITIVE"
+  decision_strategy  = "UNANIMOUS"
+}
+
+# The admin service account may read the API client and manage its roles and
+# their composites, and no other client (fine-grained admin permissions v2).
+resource "keycloak_openid_client_admin_permissions" "admin_api_client" {
+  realm_id          = keycloak_realm.this.id
+  name              = "${local.admin_client_id} manages the API client"
+  client_ids        = [keycloak_openid_client.api.id]
+  scopes            = local.admin_api_client_scopes
+  policies          = [keycloak_openid_client_user_policy.admin.id]
+  decision_strategy = "UNANIMOUS"
+}
+
+# And may read the realm-management client: without it Keycloak leaves that
+# client out of the service account's own role mappings, which the adapter
+# reads at startup to confirm its roles. Changing that client, or its own
+# roles, stays refused.
+resource "keycloak_openid_client_admin_permissions" "admin_realm_management" {
+  realm_id          = keycloak_realm.this.id
+  name              = "${local.admin_client_id} reads the realm-management client"
+  client_ids        = [data.keycloak_openid_client.realm_management.id]
+  scopes            = ["view"]
+  policies          = [keycloak_openid_client_user_policy.admin.id]
+  decision_strategy = "UNANIMOUS"
+}
+
+# --- Admin service account ---------------------------------------------------------
 
 data "keycloak_openid_client" "realm_management" {
   realm_id  = keycloak_realm.this.id
@@ -296,66 +437,17 @@ data "keycloak_openid_client" "realm_management" {
 }
 
 data "keycloak_role" "realm_management" {
-  for_each = toset(concat(local.directory_client_roles, local.admin_client_roles))
+  for_each = toset(local.admin_client_roles)
 
   realm_id  = keycloak_realm.this.id
   client_id = data.keycloak_openid_client.realm_management.id
   name      = each.key
 }
 
-resource "keycloak_openid_client" "directory" {
-  realm_id                     = keycloak_realm.this.id
-  client_id                    = local.directory_client_id
-  name                         = "Backend service account: organization lookup, read-only"
-  enabled                      = true
-  access_type                  = "CONFIDENTIAL"
-  standard_flow_enabled        = false
-  implicit_flow_enabled        = false
-  direct_access_grants_enabled = false
-  service_accounts_enabled     = true
-  full_scope_allowed           = false
-  # "+": the redirect URIs, of which there are none. What the import sets.
-  valid_post_logout_redirect_uris = ["+"]
-}
-
-# Without kc-admin-api the service account's token lacks the Admin API
-# audience and every Admin API call is 401.
-resource "keycloak_openid_client_default_scopes" "directory" {
-  realm_id       = keycloak_realm.this.id
-  client_id      = keycloak_openid_client.directory.id
-  default_scopes = ["kc-admin-api"]
-}
-
-resource "keycloak_openid_client_optional_scopes" "directory" {
-  realm_id        = keycloak_realm.this.id
-  client_id       = keycloak_openid_client.directory.id
-  optional_scopes = []
-}
-
-# Authoritative over the service account's roles: exactly the realm-management
-# roles listed and no realm role, as in the import (Keycloak gives a new
-# service account the realm's default role, as it does a user).
-resource "keycloak_user_roles" "directory" {
-  realm_id   = keycloak_realm.this.id
-  user_id    = keycloak_openid_client.directory.service_account_user_id
-  role_ids   = [for role in local.directory_client_roles : data.keycloak_role.realm_management[role].id]
-  exhaustive = true
-}
-
-resource "keycloak_generic_role_mapper" "directory" {
-  for_each = toset(local.directory_client_roles)
-
-  realm_id  = keycloak_realm.this.id
-  client_id = keycloak_openid_client.directory.id
-  role_id   = data.keycloak_role.realm_management[each.key].id
-}
-
-# --- Admin service account ---------------------------------------------------------
-
 resource "keycloak_openid_client" "admin" {
   realm_id                     = keycloak_realm.this.id
   client_id                    = local.admin_client_id
-  name                         = "Backend service account: pushes canonical tenants and users"
+  name                         = "Backend service account: pushes to and pulls from the realm"
   enabled                      = true
   access_type                  = "CONFIDENTIAL"
   standard_flow_enabled        = false
@@ -381,8 +473,9 @@ resource "keycloak_openid_client_optional_scopes" "admin" {
   optional_scopes = []
 }
 
-# Authoritative, as for the directory client: exactly these realm-management
-# roles and no realm role.
+# Authoritative over the service account's roles: exactly these
+# realm-management roles and no realm role, as in the import (Keycloak gives a
+# new service account the realm's default role, as it does a user).
 resource "keycloak_user_roles" "admin" {
   realm_id   = keycloak_realm.this.id
   user_id    = keycloak_openid_client.admin.service_account_user_id

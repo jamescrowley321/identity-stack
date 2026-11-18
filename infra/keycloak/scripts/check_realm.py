@@ -7,26 +7,34 @@ test helpers on ``PYTHONPATH`` (``backend/``).
 
 It checks, against the admin API and against real tokens from both realms:
 
-1. the realm settings, every client (built-in ones by presence only), client
-   roles, scope mappings, the directory service account's client and realm
-   roles, every user, their client and realm roles, organizations, domains,
-   members and ``type:`` attributes match the import, in both directions (user
-   ids differ: Keycloak picks them in the Terraform realm, so ``type:``
-   attributes are compared by username);
+1. the realm settings and event settings, every client (built-in ones by
+   presence only) with its protocol mappers, the API client's roles and their
+   composites and that no user or group holds one, the admin service account's
+   client and realm roles and its fine-grained admin permissions, every user
+   and their client, realm and group memberships, organizations, domains,
+   members, attributes and organization groups (their members and role
+   mappings) match the import, in both directions (user ids differ: Keycloak
+   picks them in the Terraform realm, so everything is compared by username);
 2. a token from each realm has the same ``iss`` (up to the realm name),
-   ``aud``, ``azp``, ``organization``, ``resource_access`` and claim names, and
-   the Terraform realm's token has the claim names of
-   ``keycloak/fixtures/access-token.json``;
-3. no protocol mapper in the Terraform realm writes a user attribute or user
+   ``typ``, ``aud``, ``azp``, ``organization``, ``resource_access``,
+   ``realm_access``, ``email_verified`` and claim names, and the Terraform
+   realm's tokens have the claim names of the recorded fixtures in
+   ``keycloak/fixtures/``;
+3. in both realms, the SPA's access token is ``typ`` ``Bearer`` with the API
+   audience in ``aud``, ``azp`` the SPA, ``email_verified`` and no
+   ``resource_access`` or ``realm_access``, also for a user with role
+   assignments; its ID token is ``typ`` ``ID``; the other client's access token
+   lacks the API audience; and no organization group or realm group maps a role;
+4. no protocol mapper in the Terraform realm writes a user attribute or user
    property to ``aud``, ``azp``, ``organization``, ``resource_access``, ``dct``
    or ``tenants``;
-4. output ``frontend_environment`` builds the SPA for the member app client
-   with the realm's issuer, and a login through each app client in
-   ``KEYCLOAK_APP_CLIENTS`` with its scope (``VITE_OIDC_SCOPE``) carries the
-   user's organization;
-5. the directory client reads a user's organizations through the Admin API
-   with the secret in output ``backend_environment``, and the admin client
-   reaches the Admin API with its own.
+5. the outputs name the realm's issuer, the API audience, the SPA and other
+   client ids and the organization aliases, ``frontend_environment`` builds the
+   SPA for the SPA client, and a login with its scope (``VITE_OIDC_SCOPE``)
+   carries the user's organization;
+6. the admin client, with the secret in output ``backend_environment``, reads
+   its own realm-management roles, organizations, admin events, user events
+   and the API client's roles, and is refused the SPA client.
 
 Exits non-zero with every difference listed.
 """
@@ -43,21 +51,29 @@ from tests.helpers.keycloak import (
     ACME_SCOPE,
     ALICE,
     BOB,
-    BOTH_ORGANIZATIONS_SCOPE,
     CAROL,
     DAVE,
     ERIN,
     FRANK,
     GLOBEX_SCOPE,
-    MEMBER_APP_CLIENT,
-    TENANT_ADMIN_APP_CLIENT,
     KeycloakTokenSource,
     KeycloakUser,
     decode_unverified,
 )
 
 REPO = Path(__file__).resolve().parents[3]
-FIXTURE_TOKEN = REPO / "keycloak" / "fixtures" / "access-token.json"
+FIXTURES = REPO / "keycloak" / "fixtures"
+FIXTURE_ACCESS_TOKEN = FIXTURES / "access-token.json"
+FIXTURE_ID_TOKEN = FIXTURES / "id-token.json"
+FIXTURE_OTHER_CLIENT_TOKEN = FIXTURES / "other-client-access-token.json"
+FIXTURE_TENANTS = REPO / "infra" / "fixtures" / "test-identities.json"
+
+SPA_CLIENT = "identity-stack-spa"
+API_CLIENT = "identity-stack-api"
+OTHER_CLIENT = "identity-stack-other"
+ADMIN_CLIENT = "identity-stack-admin"
+ADMIN_PERMISSIONS_CLIENT = "admin-permissions"
+REALM_MANAGEMENT_CLIENT = "realm-management"
 
 GUARDED_CLAIMS = frozenset({"aud", "azp", "organization", "resource_access", "dct", "tenants"})
 # Mapper types that copy something the user record holds into a claim.
@@ -70,6 +86,7 @@ REALM_SETTINGS = (
     "duplicateEmailsAllowed",
     "verifyEmail",
     "organizationsEnabled",
+    "adminPermissionsEnabled",
     "bruteForceProtected",
     "permanentLockout",
     "failureFactor",
@@ -80,6 +97,15 @@ REALM_SETTINGS = (
     "maxDeltaTimeSeconds",
     "maxTemporaryLockouts",
     "bruteForceStrategy",
+)
+REALM_ATTRIBUTES = ("adminEventsExpiration",)
+EVENT_SETTINGS = (
+    "eventsEnabled",
+    "eventsExpiration",
+    "eventsListeners",
+    "enabledEventTypes",
+    "adminEventsEnabled",
+    "adminEventsDetailsEnabled",
 )
 CLIENT_SETTINGS = (
     "name",
@@ -96,24 +122,28 @@ CLIENT_SETTINGS = (
     "optionalClientScopes",
 )
 CLIENT_ATTRIBUTES = ("pkce.code.challenge.method", "post.logout.redirect.uris")
+MAPPER_CONFIG = (
+    "included.client.audience",
+    "included.custom.audience",
+    "access.token.claim",
+    "id.token.claim",
+    "introspection.token.claim",
+)
 USER_SETTINGS = ("enabled", "email", "emailVerified", "firstName", "lastName")
 
-# Logins compared between the two realms: (user, app client, scope).
+# Logins compared between the two realms: (user, client, scope).
 LOGINS = (
-    (BOB, MEMBER_APP_CLIENT, ACME_SCOPE),
-    (BOB, TENANT_ADMIN_APP_CLIENT, GLOBEX_SCOPE),
-    (BOB, MEMBER_APP_CLIENT, BOTH_ORGANIZATIONS_SCOPE),
-    (ALICE, MEMBER_APP_CLIENT, ACME_SCOPE),
-    (ALICE, MEMBER_APP_CLIENT, GLOBEX_SCOPE),
-    (CAROL, MEMBER_APP_CLIENT, ACME_SCOPE),
-    (DAVE, TENANT_ADMIN_APP_CLIENT, ACME_SCOPE),
-    (ERIN, MEMBER_APP_CLIENT, ACME_SCOPE),
-    (FRANK, TENANT_ADMIN_APP_CLIENT, ACME_SCOPE),
+    (BOB, SPA_CLIENT, ACME_SCOPE),
+    (BOB, SPA_CLIENT, GLOBEX_SCOPE),
+    (ALICE, SPA_CLIENT, ACME_SCOPE),
+    (CAROL, SPA_CLIENT, ACME_SCOPE),
+    (DAVE, SPA_CLIENT, ACME_SCOPE),
+    (ERIN, SPA_CLIENT, ACME_SCOPE),
+    (ALICE, OTHER_CLIENT, ACME_SCOPE),
 )
 ABSENT = "<absent>"
-# Users of one organization (acme) holding each app client's type, logged in
-# with the scope output frontend_environment gives the SPA.
-FRONTEND_LOGIN_USERS = {MEMBER_APP_CLIENT: ALICE, TENANT_ADMIN_APP_CLIENT: DAVE}
+# A member of acme alone, logged in with the scope output frontend_environment gives the SPA.
+FRONTEND_LOGIN_USER = ALICE
 
 
 @dataclass(frozen=True)
@@ -160,22 +190,36 @@ def _sorted(value: object) -> object:
 
 
 def describe(realm: Realm) -> dict:
-    """A realm's settings, clients, users and organizations, keyed by name rather than id."""
+    """A realm's settings, clients, users, groups and organizations, keyed by name rather than id."""
     with realm.admin() as http:
         settings = _get(http, "")
+        events = _get(http, "/events/config")
+        names_by_id = {user["id"]: user["username"] for user in _list(http, "/users", briefRepresentation="false")}
+
         clients = {}
+        client_ids = {}
         for client in _get(http, "/clients"):
             client_id = client["clientId"]
+            client_ids[client["id"]] = client_id
+            if client_id == ADMIN_PERMISSIONS_CLIENT:
+                clients[client_id] = _admin_permissions(http, client["id"])
+                continue
             if client_id in BUILT_IN_CLIENTS:
                 # Keycloak creates these with every realm; only their presence is compared.
                 clients[client_id] = "built in"
                 continue
-            roles = sorted(role["name"] for role in _get(http, f"/clients/{client['id']}/roles"))
             scope = _get(http, f"/clients/{client['id']}/scope-mappings")
             clients[client_id] = {
                 **{key: _sorted(client.get(key, ABSENT)) for key in CLIENT_SETTINGS},
                 **{f"attribute {key}": client.get("attributes", {}).get(key, ABSENT) for key in CLIENT_ATTRIBUTES},
-                "roles": roles,
+                "protocol mappers": {
+                    mapper["name"]: {
+                        "type": mapper["protocolMapper"],
+                        **{key: mapper.get("config", {}).get(key, ABSENT) for key in MAPPER_CONFIG},
+                    }
+                    for mapper in client.get("protocolMappers", [])
+                },
+                "roles": _client_roles_of(http, client["id"], names_by_id),
                 "scope mappings": {
                     name: sorted(role["name"] for role in mapping["mappings"])
                     for name, mapping in (scope.get("clientMappings") or {}).items()
@@ -188,35 +232,92 @@ def describe(realm: Realm) -> dict:
                 clients[client_id]["service account realm roles"] = _realm_roles(http, realm, account["id"])
 
         users = {}
-        names_by_id = {}
-        for user in _list(http, "/users", briefRepresentation="false"):
-            names_by_id[user["id"]] = user["username"]
-            users[user["username"]] = {
+        for user_id, username in names_by_id.items():
+            user = _get(http, f"/users/{user_id}")
+            users[username] = {
                 **{key: user.get(key, ABSENT) for key in USER_SETTINGS},
-                "client roles": _client_roles(http, user["id"]),
-                "realm roles": _realm_roles(http, realm, user["id"]),
+                "client roles": _client_roles(http, user_id),
+                "realm roles": _realm_roles(http, realm, user_id),
+                "realm groups": sorted(group["path"] for group in _get(http, f"/users/{user_id}/groups")),
             }
 
         organizations = {}
         for organization in _list(http, "/organizations", briefRepresentation="false"):
-            members = _list(http, f"/organizations/{organization['id']}/members")
+            base = f"/organizations/{organization['id']}"
+            members = _list(http, f"{base}/members")
             organizations[organization["alias"]] = {
                 "name": organization["name"],
                 "enabled": organization["enabled"],
                 "domains": sorted((d["name"], d.get("verified", False)) for d in organization.get("domains", [])),
                 "members": sorted((m["username"], m.get("membershipType")) for m in members),
-                "attributes": {
-                    key: sorted(names_by_id.get(value, value) for value in values)
-                    for key, values in (organization.get("attributes") or {}).items()
+                "attributes": organization.get("attributes") or {},
+                "groups": {
+                    group["name"]: {
+                        "members": sorted(m["username"] for m in _list(http, f"{base}/groups/{group['id']}/members")),
+                        "role mappings": _get(http, f"{base}/groups/{group['id']}/role-mappings"),
+                        "subgroups": group.get("subGroupCount", len(group.get("subGroups", []))),
+                    }
+                    for group in _list(http, f"{base}/groups", briefRepresentation="false")
                 },
             }
 
+        realm_groups = {group["path"]: group.get("subGroupCount", 0) for group in _get(http, "/groups")}
+
     return {
         "realm": {key: settings.get(key, ABSENT) for key in REALM_SETTINGS},
+        "realm attributes": {key: (settings.get("attributes") or {}).get(key, ABSENT) for key in REALM_ATTRIBUTES},
+        "events": {key: _sorted(events.get(key, ABSENT)) for key in EVENT_SETTINGS},
         "clients": clients,
         "users": users,
+        "realm groups": realm_groups,
         "organizations": organizations,
     }
+
+
+def _client_roles_of(http: httpx.Client, client_uuid: str, names_by_id: dict[str, str]) -> dict:
+    """A client's roles: each one's composites, and the users and groups that hold it directly."""
+    roles = {}
+    for role in _get(http, f"/clients/{client_uuid}/roles", briefRepresentation="false"):
+        composites = _get(http, f"/roles-by-id/{role['id']}/composites") if role.get("composite") else []
+        roles[role["name"]] = {
+            "composites": sorted(composite["name"] for composite in composites),
+            "users": sorted(
+                names_by_id.get(user["id"], user["username"])
+                for user in _get(http, f"/clients/{client_uuid}/roles/{role['name']}/users")
+            ),
+            "groups": sorted(
+                group["path"] for group in _get(http, f"/clients/{client_uuid}/roles/{role['name']}/groups")
+            ),
+        }
+    return roles
+
+
+def _admin_permissions(http: httpx.Client, client_uuid: str) -> dict:
+    """The fine-grained admin permissions: each one's resource type, clients, scopes and the users its policies name."""
+    server = f"/clients/{client_uuid}/authz/resource-server"
+    clients_by_uuid = {client["id"]: client["clientId"] for client in _get(http, "/clients")}
+    permissions = {}
+    for permission in _get(http, f"{server}/permission"):
+        policies = _get(http, f"{server}/policy/{permission['id']}/associatedPolicies")
+        permissions[permission["name"]] = {
+            "resource type": permission.get("resourceType", ABSENT),
+            "clients": sorted(
+                clients_by_uuid.get(resource["name"], resource["name"])
+                for resource in _get(http, f"{server}/permission/{permission['id']}/resources")
+            ),
+            "scopes": sorted(scope["name"] for scope in _get(http, f"{server}/permission/{permission['id']}/scopes")),
+            "policies": {
+                # By username: a service account's user is not in the /users listing.
+                policy["name"]: sorted(
+                    _get(http, f"/users/{user}")["username"]
+                    for user in _get(http, f"{server}/policy/user/{policy['id']}")["users"]
+                )
+                for policy in policies
+                if policy["type"] == "user"
+            },
+            "other policies": sorted(policy["name"] for policy in policies if policy["type"] != "user"),
+        }
+    return {"permissions": permissions}
 
 
 def _realm_roles(http: httpx.Client, realm: Realm, user_id: str) -> list[str]:
@@ -232,17 +333,23 @@ def _client_roles(http: httpx.Client, user_id: str) -> dict[str, list[str]]:
     return {name: sorted(role["name"] for role in mapping["mappings"]) for name, mapping in mappings.items()}
 
 
+def _audiences(claims: dict) -> list[str]:
+    aud = claims.get("aud", [])
+    return [aud] if isinstance(aud, str) else list(aud)
+
+
 def token_shape(source: KeycloakTokenSource, token: str) -> dict:
     _header, claims = decode_unverified(token)
     iss = claims.get("iss", ABSENT)
     return {
         "iss": "<issuer>" if iss == source.issuer else iss,
+        "typ": claims.get("typ", ABSENT),
         "aud": claims.get("aud", ABSENT),
         "azp": claims.get("azp", ABSENT),
         "organization": _sorted(claims.get("organization", ABSENT)),
-        "resource_access": {client: sorted(entry["roles"]) for client, entry in claims["resource_access"].items()}
-        if "resource_access" in claims
-        else ABSENT,
+        "resource_access": claims.get("resource_access", ABSENT),
+        "realm_access": claims.get("realm_access", ABSENT),
+        "email_verified": claims.get("email_verified", ABSENT),
         "scope": sorted(claims.get("scope", "").split()),
         "claim names": sorted(claims),
     }
@@ -259,6 +366,47 @@ def login_shapes(realm: Realm) -> dict:
     return shapes
 
 
+def token_binding(label: str, shapes: dict) -> list[str]:
+    """What the backend's binding needs from each realm's tokens (S2): typ, aud, azp, no role claims."""
+    found = []
+    for key, shape in shapes.items():
+        access = key.endswith(": access token")
+        spa = f" via {SPA_CLIENT} " in key
+        audiences = [shape["aud"]] if isinstance(shape["aud"], str) else shape["aud"]
+        expected_typ = "Bearer" if access else "ID"
+        if shape["typ"] != expected_typ:
+            found.append(f"{label} {key}: typ {shape['typ']!r}, expected {expected_typ!r}")
+        for claim in ("resource_access", "realm_access"):
+            if shape[claim] != ABSENT:
+                found.append(f"{label} {key}: carries {claim} {shape[claim]!r}")
+        if shape["email_verified"] is not True:
+            found.append(f"{label} {key}: email_verified {shape['email_verified']!r}")
+        if access and spa and (API_CLIENT not in audiences or shape["azp"] != SPA_CLIENT):
+            found.append(
+                f"{label} {key}: aud {shape['aud']!r}, azp {shape['azp']!r}; expected {API_CLIENT} and {SPA_CLIENT}"
+            )
+        if access and not spa and API_CLIENT in audiences:
+            found.append(f"{label} {key}: another client's token carries the API audience")
+    return found
+
+
+def nothing_grants_api_roles(label: str, description: dict) -> list[str]:
+    """No user or group holds an API client role, and no group maps any role."""
+    found = []
+    for role, holders in description["clients"][API_CLIENT]["roles"].items():
+        if holders["users"] or holders["groups"]:
+            found.append(f"{label} API client role {role!r} is held by {holders['users']} {holders['groups']}")
+    for alias, organization in description["organizations"].items():
+        for name, group in organization["groups"].items():
+            if group["role mappings"]:
+                found.append(f"{label} organization {alias} group {name} maps roles {group['role mappings']!r}")
+    if description["realm groups"]:
+        found.append(
+            f"{label} has realm groups {sorted(description['realm groups'])}: role assignments are organization groups"
+        )
+    return found
+
+
 def guarded_mappers(realm: Realm) -> list[str]:
     """Every protocol mapper that writes user data into a guarded claim."""
     found = []
@@ -273,26 +421,90 @@ def guarded_mappers(realm: Realm) -> list[str]:
     return found
 
 
-def directory_reads_organizations(realm: Realm, secret: str, user_id: str) -> list[str]:
-    response = httpx.post(
-        f"{realm.source.issuer}/protocol/openid-connect/token",
-        data={"grant_type": "client_credentials"},
-        auth=(DIRECTORY_CLIENT, secret),
-        timeout=20,
-    )
-    response.raise_for_status()
-    token = response.json()["access_token"]
-    response = httpx.get(
-        f"{realm.source.base_url}/admin/realms/{realm.source.realm}/organizations/members/{user_id}/organizations",
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=20,
-    )
-    response.raise_for_status()
-    return sorted(organization["alias"] for organization in response.json())
+def fixture_claim_names(realm: Realm) -> list[str]:
+    """The Terraform realm's tokens have the claim names of the recorded fixtures."""
+    found = []
+    bob = KeycloakUser(BOB.username, realm.passwords[BOB.username], BOB.id)
+    spa = realm.source.login(bob, client_id=SPA_CLIENT, scope=ACME_SCOPE)
+    other = realm.source.login(bob, client_id=OTHER_CLIENT, scope=ACME_SCOPE)
+    for path, token in (
+        (FIXTURE_ACCESS_TOKEN, spa.access_token),
+        (FIXTURE_ID_TOKEN, spa.id_token),
+        (FIXTURE_OTHER_CLIENT_TOKEN, other.access_token),
+    ):
+        recorded = sorted(json.loads(path.read_text())["claims"])
+        _header, claims = decode_unverified(token)
+        if sorted(claims) != recorded:
+            found.append(f"fixture {path.name} claim names {recorded!r}, terraform token {sorted(claims)!r}")
+    return found
 
 
-def admin_client_reaches_admin_api(realm: Realm, secret: str) -> int:
-    """The status of the read the backend makes at startup with the admin client's credential."""
+def outputs_name_the_realm(realm: Realm, outputs: dict) -> list[str]:
+    backend = outputs["backend_environment"]
+    frontend = outputs["frontend_environment"]
+    tenants = sorted(json.loads(FIXTURE_TENANTS.read_text())["tenants"])
+    expected = {
+        "issuer_url": realm.source.issuer,
+        "backend KEYCLOAK_ISSUER_URL": realm.source.issuer,
+        "frontend VITE_OIDC_AUTHORITY": realm.source.issuer,
+        "api_audience": API_CLIENT,
+        "backend KEYCLOAK_AUDIENCE": API_CLIENT,
+        "spa_client_id": SPA_CLIENT,
+        "backend KEYCLOAK_CLIENT_ID": SPA_CLIENT,
+        "frontend VITE_OIDC_CLIENT_ID": SPA_CLIENT,
+        "other_client_id": OTHER_CLIENT,
+        "backend KEYCLOAK_ADMIN_CLIENT_ID": ADMIN_CLIENT,
+        "organization_aliases": {tenant: tenant for tenant in tenants},
+        "test_credentials clients": {},
+    }
+    actual = {
+        "issuer_url": outputs["issuer_url"],
+        "backend KEYCLOAK_ISSUER_URL": backend["KEYCLOAK_ISSUER_URL"],
+        "frontend VITE_OIDC_AUTHORITY": frontend["VITE_OIDC_AUTHORITY"],
+        "api_audience": outputs["api_audience"],
+        "backend KEYCLOAK_AUDIENCE": backend["KEYCLOAK_AUDIENCE"],
+        "spa_client_id": outputs["spa_client_id"],
+        "backend KEYCLOAK_CLIENT_ID": backend["KEYCLOAK_CLIENT_ID"],
+        "frontend VITE_OIDC_CLIENT_ID": frontend["VITE_OIDC_CLIENT_ID"],
+        "other_client_id": outputs["other_client_id"],
+        "backend KEYCLOAK_ADMIN_CLIENT_ID": backend["KEYCLOAK_ADMIN_CLIENT_ID"],
+        "organization_aliases": outputs["organization_aliases"],
+        "test_credentials clients": outputs["test_credentials"]["clients"],
+    }
+    return [
+        f"output {key} is {actual[key]!r}, expected {value!r}"
+        for key, value in expected.items()
+        if actual[key] != value
+    ]
+
+
+def frontend_login(realm: Realm, frontend_environment: dict) -> list[str]:
+    """A member of one organization, logged in with the SPA's scope, gets a token naming it."""
+    scope = frontend_environment["VITE_OIDC_SCOPE"]
+    user = FRONTEND_LOGIN_USER
+    login_as = KeycloakUser(user.username, realm.passwords[user.username], user.id)
+    tokens = realm.source.login(login_as, client_id=frontend_environment["VITE_OIDC_CLIENT_ID"], scope=scope)
+    _header, claims = decode_unverified(tokens.access_token)
+    if claims.get("organization") != ["acme"]:
+        organization = claims.get("organization", ABSENT)
+        return [f"{user.username} with output VITE_OIDC_SCOPE {scope!r}: organization {organization!r}"]
+    return []
+
+
+# The admin service account's realm-management roles, which it reads back at startup.
+ADMIN_CLIENT_ROLES = sorted(["manage-organizations", "manage-users", "query-clients", "view-events"])
+# What the admin service account must be able to read (200), and the SPA client it must not (403).
+ADMIN_CLIENT_READS = (
+    ("/organizations", httpx.codes.OK),
+    ("/admin-events", httpx.codes.OK),
+    ("/events", httpx.codes.OK),
+    ("/clients/{api}/roles", httpx.codes.OK),
+    ("/clients/{spa}", httpx.codes.FORBIDDEN),
+)
+
+
+def admin_client_reads(realm: Realm, secret: str) -> list[str]:
+    """The admin client's reads with its own credential, as the backend makes them."""
     response = httpx.post(
         f"{realm.source.issuer}/protocol/openid-connect/token",
         data={"grant_type": "client_credentials"},
@@ -300,51 +512,25 @@ def admin_client_reaches_admin_api(realm: Realm, secret: str) -> int:
         timeout=20,
     )
     response.raise_for_status()
-    response = httpx.get(
-        f"{realm.source.base_url}/admin/realms/{realm.source.realm}/organizations",
-        params={"first": 0, "max": 1},
-        headers={"Authorization": f"Bearer {response.json()['access_token']}"},
+    token = response.json()["access_token"]
+    with realm.admin() as http:
+        ids = {client["clientId"]: client["id"] for client in _get(http, "/clients")}
+        (account,) = _get(http, "/users", username=f"service-account-{ADMIN_CLIENT}", exact="true")
+    found = []
+    base = f"{realm.source.base_url}/admin/realms/{realm.source.realm}"
+    own_roles = httpx.get(
+        f"{base}/users/{account['id']}/role-mappings/clients/{ids[REALM_MANAGEMENT_CLIENT]}/composite",
+        headers={"Authorization": f"Bearer {token}"},
         timeout=20,
     )
-    return response.status_code
-
-
-def app_clients(backend_environment: dict) -> list[str]:
-    """The app clients output ``KEYCLOAK_APP_CLIENTS`` names, from its ``<type client>=<app client>`` pairs."""
-    return sorted(pair.split("=", 1)[1] for pair in backend_environment["KEYCLOAK_APP_CLIENTS"].split(","))
-
-
-def frontend_logins(realm: Realm, frontend_environment: dict, clients: list[str]) -> list[str]:
-    """Log in through each app client with the scope output ``frontend_environment`` gives the SPA.
-
-    The SPA is built for one app client (``VITE_OIDC_CLIENT_ID``, the member
-    type's); the others take the same scope. The user is a member of one
-    organization, so the token must name it: an organization-bound type is
-    refused without an ``organization`` claim.
-    """
-    found = []
-    scope = frontend_environment["VITE_OIDC_SCOPE"]
-    if frontend_environment["VITE_OIDC_CLIENT_ID"] != MEMBER_APP_CLIENT:
-        found.append(
-            f"output frontend_environment builds the SPA for {frontend_environment['VITE_OIDC_CLIENT_ID']!r}, "
-            f"expected {MEMBER_APP_CLIENT!r}"
-        )
-    for client_id in clients:
-        user = FRONTEND_LOGIN_USERS.get(client_id)
-        if user is None:
-            found.append(
-                f"app client {client_id} in output KEYCLOAK_APP_CLIENTS has no login user: "
-                "add one of its type, member of acme only, to FRONTEND_LOGIN_USERS"
-            )
-            continue
-        login_as = KeycloakUser(user.username, realm.passwords[user.username], user.id)
-        tokens = realm.source.login(login_as, client_id=client_id, scope=scope)
-        _header, claims = decode_unverified(tokens.access_token)
-        if claims.get("organization") != ["acme"]:
-            found.append(
-                f"{user.username} via {client_id} with output VITE_OIDC_SCOPE {scope!r}: "
-                f"organization {claims.get('organization', ABSENT)!r}, expected ['acme']"
-            )
+    held = sorted(role["name"] for role in own_roles.json()) if own_roles.status_code == httpx.codes.OK else []
+    if held != ADMIN_CLIENT_ROLES:
+        found.append(f"admin client reads its own realm-management roles as {held!r} ({own_roles.status_code})")
+    for path, expected in ADMIN_CLIENT_READS:
+        url = base + path.format(api=ids[API_CLIENT], spa=ids[SPA_CLIENT])
+        status = httpx.get(url, params={"first": 0, "max": 1}, headers={"Authorization": f"Bearer {token}"}, timeout=20)
+        if status.status_code != expected:
+            found.append(f"admin client GET {path}: {status.status_code}, expected {expected}")
     return found
 
 
@@ -359,10 +545,8 @@ def differences(path: str, left: object, right: object) -> list[str]:
 
 # Clients Keycloak creates in every realm.
 BUILT_IN_CLIENTS = frozenset(
-    {"account", "account-console", "admin-cli", "broker", "realm-management", "security-admin-console"}
+    {"account", "account-console", "admin-cli", "broker", REALM_MANAGEMENT_CLIENT, "security-admin-console"}
 )
-DIRECTORY_CLIENT = "identity-stack-directory"
-ADMIN_CLIENT = "identity-stack-admin"
 
 
 def main() -> int:
@@ -395,35 +579,21 @@ def main() -> int:
 
 def compare(imported: Realm, built: Realm, outputs: dict, failures: list[str]) -> None:
     """Append every difference to ``failures`` as it is found."""
-    failures += differences("realm", describe(imported), describe(built))
-    failures += differences("tokens", login_shapes(imported), login_shapes(built))
+    imported_description, built_description = describe(imported), describe(built)
+    failures += differences("realm", imported_description, built_description)
+    failures += nothing_grants_api_roles("import", imported_description)
+    failures += nothing_grants_api_roles("terraform", built_description)
 
-    fixture_claims = sorted(json.loads(FIXTURE_TOKEN.read_text())["claims"])
-    bob = KeycloakUser(BOB.username, built.passwords[BOB.username], BOB.id)
-    _header, claims = decode_unverified(built.source.login(bob, client_id=MEMBER_APP_CLIENT).access_token)
-    if sorted(claims) != fixture_claims:
-        failures.append(f"fixture claim names {fixture_claims!r}, terraform token {sorted(claims)!r}")
-    backend = outputs["backend_environment"]
-    frontend = outputs["frontend_environment"]
-    if claims["iss"] != backend["KEYCLOAK_ISSUER_URL"]:
-        failures.append(f"token iss {claims['iss']!r} is not output KEYCLOAK_ISSUER_URL")
-    if frontend["VITE_OIDC_AUTHORITY"] != backend["KEYCLOAK_ISSUER_URL"]:
-        failures.append(f"output VITE_OIDC_AUTHORITY {frontend['VITE_OIDC_AUTHORITY']!r} is not KEYCLOAK_ISSUER_URL")
+    imported_shapes, built_shapes = login_shapes(imported), login_shapes(built)
+    failures += differences("tokens", imported_shapes, built_shapes)
+    failures += token_binding("import", imported_shapes)
+    failures += token_binding("terraform", built_shapes)
+    failures += fixture_claim_names(built)
 
     failures += guarded_mappers(built)
-    failures += frontend_logins(built, frontend, app_clients(backend))
-    if outputs["test_credentials"]["clients"] != {}:
-        failures.append(f"output test_credentials lists clients {sorted(outputs['test_credentials']['clients'])}")
-
-    organizations = directory_reads_organizations(
-        built, backend["KEYCLOAK_DIRECTORY_CLIENT_SECRET"], outputs["user_ids"][BOB.username]
-    )
-    if organizations != ["acme", "globex"]:
-        failures.append(f"directory client read bob's organizations as {organizations!r}")
-
-    status = admin_client_reaches_admin_api(built, backend["KEYCLOAK_ADMIN_CLIENT_SECRET"])
-    if status != 200:
-        failures.append(f"admin client's Admin API read answered {status}")
+    failures += outputs_name_the_realm(built, outputs)
+    failures += frontend_login(built, outputs["frontend_environment"])
+    failures += admin_client_reads(built, outputs["backend_environment"]["KEYCLOAK_ADMIN_CLIENT_SECRET"])
 
 
 if __name__ == "__main__":

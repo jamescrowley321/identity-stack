@@ -2,9 +2,9 @@
 
 The provider Terraform roots build their tenants, users and memberships from the
 fixture. The Keycloak realm import is a file of its own, so this pins it to the
-fixture: the same users, organizations and members, and the record of each
-organization-bound type (``type:tenant-admin``) on exactly the fixture users
-whose role there binds them to it (owners and admins).
+fixture: the same users, organizations and members, and each member's canonical
+role in each organization as membership of that organization's group for the
+role (a group of each canonical role in every organization, mapping no role).
 """
 
 import copy
@@ -13,6 +13,7 @@ import json
 import pytest
 
 from tests.helpers.identity_fixture import (
+    CANONICAL_ROLES,
     FIXTURE_PATH,
     IDENTITIES,
     IdentityFixtureInvalid,
@@ -22,9 +23,6 @@ from tests.helpers.keycloak_target import REALM_IMPORT_PATH, import_users
 
 RAW = json.loads(FIXTURE_PATH.read_text())
 REALM = json.loads(REALM_IMPORT_PATH.read_text())
-# Each organization-bound type's attribute, to the canonical roles the Keycloak realm records
-# under it (infra/keycloak main.tf local.organization_bound_roles).
-ORGANIZATION_BOUND_ROLES = {"type:tenant-admin": frozenset({"owner", "admin"})}
 
 
 def _members(tenant: str) -> set[str]:
@@ -111,25 +109,48 @@ def test_the_realm_import_organizations_have_the_fixture_members():
     assert imported == {tenant: _members(tenant) for tenant in IDENTITIES.tenants}
 
 
-def test_the_realm_import_records_the_holders_of_every_organization_bound_type():
-    ids = {username: user.id for username, user in import_users(REALM).items()}
+def _organization(alias: str) -> dict:
+    (organization,) = [organization for organization in REALM["organizations"] if organization["alias"] == alias]
+    return organization
+
+
+def test_every_realm_import_organization_has_one_group_per_canonical_role_mapping_no_role():
     imported = {
-        organization["alias"]: {
-            attribute: set(holders)
-            for attribute, holders in organization.get("attributes", {}).items()
-            if attribute.startswith("type:")
-        }
+        organization["alias"]: sorted(
+            (group["name"], group.get("realmRoles", []), group.get("clientRoles", {}), group.get("subGroups", []))
+            for group in organization.get("groups", [])
+        )
         for organization in REALM["organizations"]
     }
 
+    assert imported == {tenant: sorted((role, [], {}, []) for role in CANONICAL_ROLES) for tenant in IDENTITIES.tenants}
+
+
+def test_the_realm_import_records_each_members_role_as_membership_of_the_organizations_group_for_it():
+    imported = {}
+    for alias in IDENTITIES.tenants:
+        organization = _organization(alias)
+        role_by_group = {group["id"]: group["name"] for group in organization["groups"]}
+        imported[alias] = {
+            member["username"]: [role_by_group[group] for group in member.get("groups", [])]
+            for member in organization["members"]
+        }
+
     assert imported == {
         tenant: {
-            attribute: {ids[key] for key, user in IDENTITIES.users.items() if user.roles.get(tenant) in roles}
-            for attribute, roles in ORGANIZATION_BOUND_ROLES.items()
-            if any(user.roles.get(tenant) in roles for user in IDENTITIES.users.values())
+            key: [user.roles[tenant]] if user.roles[tenant] else []
+            for key, user in IDENTITIES.users.items()
+            if tenant in user.roles
         }
         for tenant in IDENTITIES.tenants
     }
+
+
+def test_the_realm_import_has_no_realm_groups_and_maps_no_role_to_a_user():
+    holders = [user["username"] for user in REALM["users"] if user.get("clientRoles") or user.get("realmRoles")]
+
+    assert REALM.get("groups", []) == []
+    assert holders == [user["username"] for user in REALM["users"] if "serviceAccountClientId" in user]
 
 
 # --- A fixture that contradicts itself is refused ---------------------------------

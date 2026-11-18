@@ -97,6 +97,33 @@ def test_root_gives_the_common_outputs(root: str) -> None:
     assert sensitive == sorted(SENSITIVE_OUTPUTS)
 
 
+# What tests and set-up read from each root besides the environment maps: the issuer, the SPA's
+# client id, another client's id for negative tests, the API audience and the tenants'
+# organizations. Zitadel's audience is the project id and its organizations are keyed ids;
+# Keycloak's audience is the API client id and a token names organizations by alias.
+ROOT_IDENTIFIERS = {
+    "keycloak": ("issuer_url", "spa_client_id", "other_client_id", "api_audience", "organization_aliases"),
+    "zitadel": ("issuer_url", "spa_client_id", "other_client_id", "project_id", "organization_ids"),
+}
+# The backend settings that bind a token to the SPA: the issuer, the audience and the client id.
+TOKEN_BINDING_SETTINGS = ("ISSUER_URL", "AUDIENCE", "CLIENT_ID")
+
+
+@pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
+def test_root_names_the_issuer_clients_audience_and_organizations(root: str) -> None:
+    declared = set(re.findall(r'^output "([a-z_]+)"', _root_text(root), re.MULTILINE))
+
+    assert sorted(set(ROOT_IDENTIFIERS[root]) - declared) == []
+
+
+@pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
+def test_backend_environment_binds_tokens_to_the_spa(root: str) -> None:
+    keys = _map_keys(_block(_root_text(root), "output", "backend_environment"))
+    expected = {f"{LOCAL_ROOTS[root]}{name}" for name in TOKEN_BINDING_SETTINGS}
+
+    assert sorted(expected - keys) == []
+
+
 @pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
 @pytest.mark.parametrize("output", sorted(DOC_SECTIONS))
 def test_environment_keys_are_variables_the_app_reads(root: str, output: str) -> None:
@@ -315,7 +342,6 @@ KEYCLOAK_TEST_SETTINGS = (
     "KEYCLOAK_TEST_REALM",
     "KEYCLOAK_TEST_USER_IDS",
     "KEYCLOAK_TEST_USER_PASSWORDS",
-    "KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET",
     "KEYCLOAK_TEST_ADMIN_CLIENT_SECRET",
 )
 
@@ -323,7 +349,6 @@ KEYCLOAK_TEST_SETTINGS = (
 def _keycloak_outputs() -> dict:
     backend = _sample_environment("keycloak", "backend_environment")
     backend["KEYCLOAK_ISSUER_URL"] = KEYCLOAK_DEFAULT_ISSUER
-    backend["KEYCLOAK_DIRECTORY_CLIENT_SECRET"] = "directory 'secret'"
     backend["KEYCLOAK_ADMIN_CLIENT_SECRET"] = "admin $secret"
     return {
         "backend_environment": {"sensitive": True, "value": backend},
@@ -372,7 +397,6 @@ def test_e2e_keycloak_target_gives_the_suite_the_applied_realm(tmp_path: Path) -
         "KEYCLOAK_TEST_REALM": "identity-stack-terraform",
         "KEYCLOAK_TEST_USER_IDS": json.dumps({"alice": "id-a"}, separators=(",", ":")),
         "KEYCLOAK_TEST_USER_PASSWORDS": json.dumps({"alice": "pw 'a'"}, separators=(",", ":")),
-        "KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET": "directory 'secret'",
         "KEYCLOAK_TEST_ADMIN_CLIENT_SECRET": "admin $secret",
     }
 
@@ -401,15 +425,11 @@ def _issuer(value: str):
         (_without(("backend_environment",)), "backend_environment"),
         (_issuer("http://keycloak.localhost:8180/identity-stack-terraform"), "KEYCLOAK_ISSUER_URL"),
         (_issuer("http://keycloak.localhost:8180//realms/identity-stack-terraform"), "KEYCLOAK_ISSUER_URL"),
-        (
-            _without(("backend_environment", "value", "KEYCLOAK_DIRECTORY_CLIENT_SECRET")),
-            "KEYCLOAK_DIRECTORY_CLIENT_SECRET",
-        ),
         (_without(("backend_environment", "value", "KEYCLOAK_ADMIN_CLIENT_SECRET")), "KEYCLOAK_ADMIN_CLIENT_SECRET"),
         (_without(("user_ids",)), "user_ids"),
         (_without(("test_credentials", "value", "users")), "test_credentials"),
     ],
-    ids=["no-backend", "issuer-without-realm", "issuer-double-slash", "no-directory", "no-admin", "no-ids", "no-users"],
+    ids=["no-backend", "issuer-without-realm", "issuer-double-slash", "no-admin", "no-ids", "no-users"],
 )
 def test_e2e_keycloak_target_refuses_outputs_it_cannot_read(change, named: str, tmp_path: Path) -> None:
     """A missing output or setting fails the target naming it, before the suite runs with a ``null``."""

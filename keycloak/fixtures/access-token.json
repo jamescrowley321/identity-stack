@@ -2,31 +2,24 @@
   "header": {
     "alg": "RS256",
     "typ": "JWT",
-    "kid": "YQbYc-y1Wc99uz4TI6OFo9bz-GRD-90i_srrOX3dbAo"
+    "kid": "gWSNkGmbdDYdof641m-aKP-_hD8kmf2MRPojC35CLic"
   },
   "claims": {
-    "exp": 1794784188,
-    "iat": 1794783888,
-    "auth_time": 1794783888,
-    "jti": "onrtac:8101c78a-e58a-7ee4-3be0-0bc13867c390",
-    "iss": "http://keycloak.localhost:8180/realms/identity-stack",
-    "aud": "member",
-    "sub": "86990099-812e-41e9-9464-51412bb49784",
+    "exp": 1795032710,
+    "iat": 1795032410,
+    "auth_time": 1795032410,
+    "jti": "onrtac:9e4d3c23-5f29-0f16-b7f5-d5c4ad889167",
+    "iss": "http://keycloak-test.localhost:18180/realms/identity-stack",
+    "aud": "identity-stack-api",
+    "sub": "b0b00000-0000-4000-8000-000000000002",
     "typ": "Bearer",
-    "azp": "member-app",
-    "sid": "Yf-8iMlAF2Tp6JllA477nQ6m",
+    "azp": "identity-stack-spa",
+    "sid": "meUaZNxKZVdxCpkov7hT9vfk",
     "acr": "1",
     "allowed-origins": [
       "http://localhost:3000"
     ],
-    "resource_access": {
-      "member": {
-        "roles": [
-          "documents:read"
-        ]
-      }
-    },
-    "scope": "openid profile email organization:acme",
+    "scope": "openid organization:acme email profile",
     "email_verified": true,
     "organization": [
       "acme"

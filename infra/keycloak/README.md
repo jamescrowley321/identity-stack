@@ -10,37 +10,51 @@ and git-ignored; `.terraform.lock.hcl` is committed.
 
 ## What it creates
 
+The model: the token says who the caller is, and the canonical store (the backend database) says
+what the caller may do. No role the realm holds reaches a token.
+
 | Resource | What |
 |---|---|
-| `keycloak_realm.this` | The realm (default name `identity-stack-terraform`): Organizations on, registration off, unique emails, `verifyEmail` on, brute-force detection on with temporary lockouts (30 failures, wait growing from 60 s to 15 min), SSL mode `var.ssl_required` (`none` for the local container). |
-| `keycloak_openid_client.type` | Type clients `member` and `tenant-admin`: confidential, no flows, full scope off. |
-| `keycloak_role.client` | Their client roles, the permissions: `member` has `documents:read`, `documents:write`; `tenant-admin` has `members:invite`, `members:remove`, `settings:manage`. |
-| `keycloak_openid_client.app` | App clients `member-app` and `tenant-admin-app`: public, standard flow only, PKCE `S256`, full scope off, redirect URI and web origin `var.frontend_url`, post-logout redirect `<frontend_url>/login`. |
-| `keycloak_openid_client_default_scopes.app`, `keycloak_openid_client_optional_scopes.app` | App client scopes: default `basic`, `roles`, `profile`, `email`, `web-origins`, `acr`; optional `organization`, `offline_access`. |
-| `keycloak_generic_role_mapper.app` | Scope mappings: each app client to its own type client's roles only. A token's `aud` is then that type client and its `resource_access` holds that type client alone. |
-| `keycloak_user.this`, `keycloak_user_roles.this`, `random_password.user` | One user per user of the shared fixture ([`../fixtures/test-identities.json`](../fixtures/README.md)): `alice` to `grace`, email `<user>@<home tenant's domain>`, the fixture's names. Client roles follow the user's canonical roles (`local.role_client_roles`: `admin` gives the three `tenant-admin` roles, `member` both `member` roles, `viewer` `documents:read`), except a Keycloak-only case's user (`local.case_client_roles`: `write_only` holds `documents:write` alone). `keycloak_user_roles` is exhaustive: a user holds exactly those client roles and no realm role, as in the import. |
-| `keycloak_organization.this` | One organization per fixture tenant: `acme` (domain `acme.test`), `globex` (`globex.test`) and `unlinked` (`unlinked.test`). An organization where a fixture user is `owner` or `admin` carries the attribute `type:tenant-admin` listing those users' ids (`local.organization_bound_roles`): `acme` lists `bob`, `dave` and `frank`. |
-| `keycloak_organization_memberships.this` | Members: each fixture user in each tenant their fixture roles name. `acme` has six users, `globex` has `bob`, `unlinked` has `grace`. |
-| `keycloak_openid_client.directory` and its scopes, roles and scope mappings | `identity-stack-directory`, the backend's read-only service account for the organization lookup: client scope `kc-admin-api`; its service account holds exactly `realm-management` roles `view-users` and `view-organizations` and no realm role (`keycloak_user_roles.directory`, exhaustive), as in the import. |
-| `keycloak_openid_client.admin` and its scopes, roles and scope mappings | `identity-stack-admin`, the backend's service account for the Keycloak admin adapter (`SYNC_PROVIDER=keycloak`): client scope `kc-admin-api`; its service account holds exactly `realm-management` roles `manage-users` and `manage-organizations` and no realm role (`keycloak_user_roles.admin`, exhaustive), as in the import. |
+| `keycloak_realm.this` | The realm (default name `identity-stack-terraform`): Organizations on, registration off, unique emails, `verifyEmail` on, fine-grained admin permissions (v2) on, brute-force detection on with temporary lockouts (30 failures, wait growing from 60 s to 15 min), SSL mode `var.ssl_required` (`none` for the local container), admin events kept 7 days (realm attribute `adminEventsExpiration`). |
+| `keycloak_realm_events.this` | User events and admin events on, admin events with representations, user events kept 7 days (`local.events_expiration_seconds`), listener `jboss-logging`. 7 days outlasts the interval between reconciliation passes. |
+| `keycloak_openid_client.api` | `identity-stack-api`: confidential, no flows, full scope off. Its client id is the API audience. |
+| `keycloak_role.permission`, `keycloak_role.role` | The API client's roles: the canonical permissions `<domain>:<action>` (`local.permissions`, twelve) and the canonical roles `owner`, `admin`, `member`, `viewer` (`local.roles`), each a composite of its permissions. No user and no group is mapped to any of them. |
+| `keycloak_openid_client.public` | `identity-stack-spa` (the SPA) and `identity-stack-other` (another client, for tests that its tokens are refused): public, standard flow only, PKCE `S256`, full scope off, redirect URI and web origin `var.frontend_url`, post-logout redirect `<frontend_url>/login`. |
+| `keycloak_openid_client_default_scopes.public`, `keycloak_openid_client_optional_scopes.public` | Their client scopes: default `basic`, `profile`, `email`, `web-origins`, `acr` (no `roles`, so no token carries `resource_access` or `realm_access`); optional `organization`, `offline_access`. |
+| `keycloak_openid_audience_protocol_mapper.spa_api_audience` | Puts `identity-stack-api` in the SPA's access tokens' `aud` (not its ID tokens'). `identity-stack-other` has no such mapper. |
+| `keycloak_user.this`, `keycloak_user_roles.this`, `random_password.user` | One user per user of the shared fixture ([`../fixtures/test-identities.json`](../fixtures/README.md)): `alice` to `grace`, email `<user>@<home tenant's domain>`, the fixture's names. `keycloak_user_roles` is exhaustive and empty: no user holds a role, as in the import. |
+| `keycloak_organization.this`, `keycloak_organization_memberships.this` | One organization per fixture tenant: `acme` (domain `acme.test`), `globex` (`globex.test`) and `unlinked` (`unlinked.test`), with each fixture user in each tenant their fixture roles name. `acme` has six users, `globex` has `bob`, `unlinked` has `grace`. |
+| `keycloak_group.role` | Role assignments: four groups owned by each organization (`organization_id`), one per canonical role, mapping no role. |
+| `terraform_data.role_assignment` | Each fixture user's role in each tenant, as membership of that organization's group for the role (`local.role_assignments`). |
+| `keycloak_openid_client.admin` and its scopes, roles and scope mappings | `identity-stack-admin`, the backend's service account for the Keycloak admin adapter: client scope `kc-admin-api`; its service account holds exactly `realm-management` roles `manage-users`, `manage-organizations`, `query-clients` and `view-events` and no realm role (`keycloak_user_roles.admin`, exhaustive), as in the import. |
+| `keycloak_openid_client_user_policy.admin`, `keycloak_openid_client_admin_permissions.admin_api_client`, `keycloak_openid_client_admin_permissions.admin_realm_management` | Its fine-grained admin permissions: `view`, `manage` and `map-roles-composite` on `identity-stack-api`, and `view` on `realm-management` (so it can read its own roles back). Each grant is probed and recorded in [`keycloak/fixtures/README.md`](../../keycloak/fixtures/README.md#the-admin-service-account). |
 
-The root declares no protocol mapper. Keycloak's built-in client scopes write `aud`,
-`organization` and `resource_access` from client roles and memberships, and Keycloak sets `azp`
-itself; no mapper copies a user attribute or property into those claims, or into `dct` or
-`tenants`.
+The root declares one protocol mapper, the audience mapper above. Keycloak's built-in client scopes
+write `organization` from memberships, and Keycloak sets `azp` itself; no mapper copies a user
+attribute or property into `aud`, `azp`, `organization`, `resource_access`, `dct` or `tenants`.
+
+Two things are done outside the provider, with `bash`, `curl` and `jq` and the bootstrap admin login
+the provider uses (`KEYCLOAK_USER`, `KEYCLOAK_PASSWORD`):
+
+- **Organization group members.** Keycloak manages an organization's groups through the
+  Organization API only, and the provider has no resource for their members. Each
+  `terraform_data.role_assignment` adds its user with
+  `PUT /admin/realms/{realm}/organizations/{id}/groups/{group}/members/{user}` when created and
+  removes it on destroy. Unlike the other resources, it does not see a member added or removed by
+  hand: `make keycloak-terraform-check` does.
+- **The admin-permissions client's id.** The provider's `keycloak_openid_client` data source also
+  reads a client's secret, which Keycloak 26.8 refuses for `admin-permissions` (403), so
+  `data.external.admin_permissions_client` reads the id from the realm (`adminPermissionsClient`).
 
 Two things differ from the import, by necessity:
 
-- **User ids.** The provider cannot set a user's id, so Keycloak picks them and a token's `sub`
-  is not the import's fixed id. The output `user_ids` lists them.
+- **User and group ids.** The provider cannot set a user's id, so Keycloak picks them and a
+  token's `sub` is not the import's fixed id. The output `user_ids` lists them. The same holds for
+  the organization groups' ids, which the import also fixes.
 - **Credentials.** The import's fixture passwords and client secrets are not repeated here.
-  User passwords are generated (`random_password`) and the directory and admin clients'
-  secrets are generated by Keycloak. Both are sensitive outputs, kept in local state only. The type
-  clients' secrets are never used (they have no flows) and are not output.
-
-The backend's token model for the realm (`member` portable with `documents:read`,
-`tenant-admin` organization-bound) is not part of the realm; it is in `local.type_clients` and
-comes out in `backend_environment`.
+  User passwords are generated (`random_password`) and the admin client's secret is generated by
+  Keycloak. Both are sensitive outputs, kept in local state only. The API client's secret is never
+  used (it has no flows) and is not output.
 
 ## Run it
 
@@ -89,17 +103,27 @@ Variables (all have defaults for the compose `keycloak` service). `issuer_url` a
 
 | Output | Feeds |
 |---|---|
-| `backend_environment` (sensitive) | Every backend Keycloak setting: `KEYCLOAK_ISSUER_URL`, `KEYCLOAK_AUDIENCES`, `KEYCLOAK_APP_CLIENTS`, `KEYCLOAK_PORTABLE_TYPES`, `KEYCLOAK_ORGANIZATION_BOUND_TYPES`, `KEYCLOAK_PORTABLE_PERMISSIONS`, `KEYCLOAK_REQUIRE_HTTPS`, `KEYCLOAK_POST_LOGOUT_REDIRECT_URI`, `KEYCLOAK_DIRECTORY_CLIENT_ID`, `KEYCLOAK_DIRECTORY_CLIENT_SECRET`, `KEYCLOAK_ADMIN_CLIENT_ID`, `KEYCLOAK_ADMIN_CLIENT_SECRET` ([`docs/environment-variables.md`](../../docs/environment-variables.md)). Sensitive for the two secrets. |
-| `frontend_environment` | Frontend `VITE_OIDC_AUTHORITY`, `VITE_OIDC_CLIENT_ID`, `VITE_OIDC_REDIRECT_URI`, `VITE_OIDC_SCOPE` for the SPA's app client, `member-app` (the portable `member` type). The other app clients take the same settings with their own client id (`KEYCLOAK_APP_CLIENTS`). The scope is `openid profile email organization`: `organization` is optional on the app clients, and without it the token carries no `organization` claim, so an organization-bound type (`tenant-admin`) is refused. Keycloak asks a member of several organizations which one to use. |
-| `test_credentials` (sensitive) | `users`: each fixture user's login password. `clients`: empty, no client is for tests only. |
+| `issuer_url` | The realm's issuer, the `iss` of its tokens. |
+| `api_audience` | `identity-stack-api`, the audience the SPA's access tokens carry. |
+| `spa_client_id` | `identity-stack-spa`, the `azp` of the SPA's tokens. |
+| `other_client_id` | `identity-stack-other`, whose tokens lack the API audience. |
+| `organization_aliases` | Each fixture tenant's organization alias, the value of the token's `organization` claim. |
 | `user_ids` | Each user's id (token `sub`). |
+| `backend_environment` (sensitive) | Every backend Keycloak setting: `KEYCLOAK_ISSUER_URL`, `KEYCLOAK_AUDIENCE`, `KEYCLOAK_CLIENT_ID`, `KEYCLOAK_REQUIRE_HTTPS`, `KEYCLOAK_POST_LOGOUT_REDIRECT_URI`, `KEYCLOAK_ADMIN_CLIENT_ID`, `KEYCLOAK_ADMIN_CLIENT_SECRET` ([`docs/environment-variables.md`](../../docs/environment-variables.md)). Sensitive for the secret. |
+| `frontend_environment` | Frontend `VITE_OIDC_AUTHORITY`, `VITE_OIDC_CLIENT_ID`, `VITE_OIDC_REDIRECT_URI`, `VITE_OIDC_SCOPE` for the SPA's client. The scope is `openid profile email organization`: `organization` is optional on the client, and without it the token carries no `organization` claim. Keycloak asks a member of several organizations which one to use. |
+| `test_credentials` (sensitive) | `users`: each fixture user's login password. `clients`: empty, no client is for tests only. |
 
-## Members added by hand are removed
+The Zitadel root gives the same names where the providers agree (`issuer_url`, `spa_client_id`,
+`other_client_id`); its audience is the project (`project_id`) and its organizations are ids
+(`organization_ids`).
+
+## Members and role assignments added by hand
 
 `keycloak_organization_memberships` is authoritative over an organization's members. A member
 added to `acme` or `globex` in the admin console or through the Admin API shows up as a change in
 the next `terraform plan`, and the next `terraform apply` removes them. Add members here instead.
-`keycloak_user_roles` is authoritative in the same way over each user's roles.
+`keycloak_user_roles` is authoritative in the same way over each user's roles. Organization group
+members are not (see above): `terraform plan` does not show one added or removed by hand.
 
 ## Keeping it the same as the import
 
@@ -117,22 +141,27 @@ recreate it with `make test-down && make test-up-keycloak`, as a failed comparis
    `${XDG_CACHE_HOME:-~/.cache}/identity-stack-keycloak-terraform-check/`;
 2. runs `terraform plan` again and fails unless it is empty;
 3. runs [`scripts/check_realm.py`](scripts/check_realm.py), which compares, in both
-   directions, the realm settings, every client (Keycloak's built-in ones by name only), client
-   roles, scope mappings, the directory service account's client and realm roles, every user and
-   their client and realm roles, organizations, domains, members and `type:` attributes through
-   the Admin API; logs the users in to both realms and compares
-   the tokens' `iss`, `aud`, `azp`, `organization`, `resource_access`, `scope` and claim names;
-   compares the claim names with [`keycloak/fixtures/access-token.json`](../../keycloak/fixtures/access-token.json);
-   fails on any protocol mapper that writes a user attribute or property to `aud`, `azp`,
-   `organization`, `resource_access`, `dct` or `tenants`; logs in through each app client with
-   the output `VITE_OIDC_SCOPE` and fails unless the token names the user's organization; and reads `bob`'s organizations
-   with the directory client's generated secret and checks the admin client's generated secret
-   against the Admin API. Users, organizations and members are read
-   one page of `LISTING_PAGE_SIZE` at a time, and a full page fails the check as possibly cut off;
+   directions, the realm and event settings, every client (Keycloak's built-in ones by name only)
+   with its protocol mappers, the API client's roles, their composites and who holds them, the
+   admin service account's roles and fine-grained admin permission, every user and their roles
+   and realm groups, organizations, domains, members, attributes and organization groups with
+   their members and role mappings, through the Admin API; logs users in to both realms and
+   compares the tokens' `iss`, `typ`, `aud`, `azp`, `organization`, `resource_access`,
+   `realm_access`, `email_verified`, `scope` and claim names; fails unless the SPA's access
+   tokens are `Bearer` with the API audience and no `resource_access` or `realm_access`, its ID
+   tokens are `ID`, the other client's tokens lack the API audience, and no user or group holds
+   an API client role; compares the claim names with the recorded tokens in
+   [`keycloak/fixtures/`](../../keycloak/fixtures/README.md); fails on any protocol mapper that
+   writes a user attribute or property to `aud`, `azp`, `organization`, `resource_access`, `dct`
+   or `tenants`; checks every output against the realm and logs in with the output
+   `VITE_OIDC_SCOPE`; and checks the admin client's generated secret against the Admin API (it
+   reads organizations, events and the API client's roles, and is refused the SPA client). Users,
+   organizations and members are read one page of `LISTING_PAGE_SIZE` at a time, and a full page
+   fails the check as possibly cut off;
 4. with `--integration-tests` (`make keycloak-terraform-integration`), runs the backend's
    Keycloak integration tests (`backend/tests/integration/test_keycloak_*.py`) against the
-   built realm, logging in with the generated user ids and passwords and asking the directory
-   and the admin adapter with their generated secrets (`backend/tests/helpers/keycloak_target.py`). They need the rest of
+   built realm, logging in with the generated user ids and passwords and asking the admin
+   adapter with its generated secret (`backend/tests/helpers/keycloak_target.py`). They need the rest of
    the test stack up and, for one test, a Descope client (`DESCOPE_PROJECT_ID`,
    `DESCOPE_CLIENT_ID`, `DESCOPE_CLIENT_SECRET`, read from `backend/.env` when present);
 5. destroys the realm. The run's state directory holds the generated passwords and client
@@ -141,15 +170,15 @@ recreate it with `make test-down && make test-up-keycloak`, as a failed comparis
    or was killed with.
 
 The comparison covers the fields the import file uses today, listed at the top of
-`check_realm.py` (`REALM_SETTINGS`, `CLIENT_SETTINGS`, `CLIENT_ATTRIBUTES`, `USER_SETTINGS`). A
-change that makes the import use a field outside those lists (a user attribute, a required
-action, another client attribute, a realm role or a group) adds the field to the list in the
-same change; the check does not notice an uncompared field by itself.
+`check_realm.py` (`REALM_SETTINGS`, `REALM_ATTRIBUTES`, `EVENT_SETTINGS`, `CLIENT_SETTINGS`,
+`CLIENT_ATTRIBUTES`, `MAPPER_CONFIG`, `USER_SETTINGS`). A change that makes the import use a field
+outside those lists (a user attribute, a required action, another client attribute or mapper
+setting, a realm role) adds the field to the list in the same change; the check does not notice an uncompared field by itself.
 
 It copies only the root's `.tf` files git does not ignore into its working directory, so a local
 `override.tf` or `*_override.tf` never changes what it applies.
 
-It needs `terraform`, `curl`, `jq` and the backend virtual environment
+It needs `bash`, `terraform`, `curl`, `jq` and the backend virtual environment
 (`cd backend && uv sync --locked --extra dev`), and checks for each before it does anything.
 Neither the script nor `make keycloak-terraform-check` starts, stops or removes keycloak-test:
 bring it up first with `make test-up-keycloak`; the script fails when it is not answering. It runs on Linux. CI
