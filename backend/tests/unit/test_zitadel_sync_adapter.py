@@ -639,8 +639,7 @@ class TestSyncUserStatus:
     ):
         """A status change reaches only a Zitadel user of the organization of the tenant it was made in.
 
-        A tenant admin can give a user of another tenant a role (``ends_memberships`` is
-        false, so nothing refuses a non-member), and then deactivate them: the change stays
+        A status change made in a tenant whose organization the user is not in stays
         canonical and is not pushed to the user's Zitadel account in the other tenant's
         organization. A user planted with the canonical id in a foreign organization is
         left alone the same way.
