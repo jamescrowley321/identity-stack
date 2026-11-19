@@ -624,8 +624,10 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush, Custom
             account = await self._api.get_user(subject)
             if account is None or _is_service_account(account):
                 raise _Refused(Refusal.USER_NOT_IN_KEYCLOAK)
-            wanted = {"firstName": data.get("given_name") or "", "lastName": data.get("family_name") or ""}
-            if all(account.get(key, "") == value for key, value in wanted.items()):
+            # A blank name is not sent: the realm's user profile requires both, and an
+            # account without one is asked for it again at its next sign-in.
+            wanted = {key: value for key, value in names.items() if account.get(key) != value}
+            if not wanted:
                 return
             sent = {field: held for field, held in account.items() if field not in _KEPT_ON_A_USER_PUT}
             await self._api.update_user(account["id"], {**sent, **wanted})

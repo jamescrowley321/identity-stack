@@ -265,7 +265,7 @@ async def test_update_profile_without_a_canonical_user_is_404(mock_validate, cli
     mock_validate.return_value = ADMIN_CLAIMS
     resolver.resolve.return_value = Error(NotFound(message="No identity"))
 
-    response = await client.patch("/api/profile", headers=BEARER, json={"given_name": "Test"})
+    response = await client.patch("/api/profile", headers=BEARER, json={"given_name": "Test", "family_name": "User"})
 
     assert (response.status_code, response.json()) == (404, {"detail": "Identity not found"})
     users.update_own_names.assert_not_awaited()
@@ -275,13 +275,34 @@ async def test_update_profile_without_a_canonical_user_is_404(mock_validate, cli
 @pytest.mark.parametrize(
     "body",
     [
-        {"given_name": "   "},
-        {"given_name": "x" * 256},
+        {"given_name": "   ", "family_name": "User"},
+        {"given_name": "Test", "family_name": ""},
+        {"given_name": "Test"},
+        {"given_name": "x" * 256, "family_name": "User"},
         {"given_name": "Test", "family_name": "y" * 256},
-        {"given_name": "Test", "email": "new@example.com"},
+        # 128 emoji are 256 UTF-16 code units, which is how Keycloak counts.
+        {"given_name": "\U0001f600" * 128, "family_name": "User"},
+        {"given_name": "Smith (Jr)", "family_name": "User"},
+        {"given_name": "Test", "family_name": "A&B"},
+        {"given_name": "Test", "family_name": "Back\\slash"},
+        {"given_name": "Test", "family_name": "Tab\tbed"},
+        {"given_name": "Test", "family_name": "User", "email": "new@example.com"},
         {"key": "department", "value": "Product"},
     ],
-    ids=["blank given name", "long given name", "long family name", "an email", "an attribute"],
+    ids=[
+        "blank given name",
+        "blank family name",
+        "no family name",
+        "long given name",
+        "long family name",
+        "emoji over 255 UTF-16 units",
+        "parentheses",
+        "ampersand",
+        "backslash",
+        "control character",
+        "an email",
+        "an attribute",
+    ],
 )
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_update_profile_refuses_a_body_that_is_not_names(mock_validate, client, users, body):
@@ -294,8 +315,28 @@ async def test_update_profile_refuses_a_body_that_is_not_names(mock_validate, cl
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("given_name", "family_name"),
+    [("\U0001f600" * 127, "User"), ("Zoë", "O'Brien-Núñez"), ("x" * 255, "y" * 255)],
+    ids=["emoji within 255 UTF-16 units", "accents and an apostrophe", "255 characters"],
+)
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_update_profile_takes_a_name_every_provider_takes(mock_validate, client, users, given_name, family_name):
+    mock_validate.return_value = ADMIN_CLAIMS
+
+    response = await client.patch(
+        "/api/profile", headers=BEARER, json={"given_name": given_name, "family_name": family_name}
+    )
+
+    assert (response.status_code, response.json()) == (
+        200,
+        {**UPDATED, "name": f"{given_name} {family_name}", "given_name": given_name, "family_name": family_name},
+    )
+
+
+@pytest.mark.anyio
 async def test_update_profile_rejects_unauthenticated(client):
-    response = await client.patch("/api/profile", json={"given_name": "Test"})
+    response = await client.patch("/api/profile", json={"given_name": "Test", "family_name": "User"})
 
     assert (response.status_code, response.json()) == (401, {"detail": "Missing or invalid authorization header"})
 

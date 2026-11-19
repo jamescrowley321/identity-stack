@@ -442,6 +442,28 @@ class TestAProvidersOwnPrincipalReachesItsAdapter:
         adapter.user_attributes.assert_awaited_once_with(subject=KEYCLOAK_MEMBER["sub"])
         resolver.resolve.assert_awaited_once_with(provider="keycloak", sub=KEYCLOAK_MEMBER["sub"])
 
+    def test_the_profile_loads_when_the_adapter_cannot_be_built(self, client, monkeypatch):
+        """The profile is informational: an adapter that fails to build leaves it without custom attributes."""
+
+        def broken(_state, _session):
+            raise RuntimeError("Keycloak admin client not initialized")
+
+        registration = SYNC_ADAPTERS["keycloak"]
+        monkeypatch.setitem(
+            SYNC_ADAPTERS, "keycloak", SyncAdapterRegistration(registration.adapter, broken, registration.own_principal)
+        )
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        resolver = AsyncMock()
+        resolver.resolve.return_value = Ok({"user": CANONICAL_USER})
+        client.app.dependency_overrides[get_identity_resolution_service] = lambda: resolver
+
+        response = client.get("/api/profile", headers=_bearer(KEYCLOAK_MEMBER))
+
+        assert (response.status_code, response.json()) == (
+            200,
+            {**CANONICAL_PROFILE, "user_id": KEYCLOAK_MEMBER["sub"]},
+        )
+
     def test_the_profile_writes_an_attribute_by_the_callers_subject(self, client, adapter):
         adapter.set_user_attribute.return_value = Ok(None)
 

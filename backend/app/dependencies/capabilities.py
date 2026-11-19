@@ -17,9 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import identity
 from app.errors.identity import CapabilityMissing, IdentityErrorRaised
+from app.logbook import logbook
 from app.models.database import get_async_session
 from app.services.adapters.base import Capability, CustomAttributes
 from app.services.relationship_store import RelationshipStoreKind
+
+logger = logbook(__name__)
 
 
 @dataclass(frozen=True)
@@ -85,6 +88,23 @@ async def custom_attributes_if_served(
         return None
     adapter = identity.get_sync_adapter(request, session)
     return adapter if isinstance(adapter, CustomAttributes) else None
+
+
+async def custom_attributes_if_available(
+    request: Request, session: AsyncSession = Depends(get_async_session)
+) -> CustomAttributes | None:
+    """As ``custom_attributes_if_served``, for an informational read: an adapter that cannot be built is ``None``.
+
+    A refusal (401, a capability error) still answers; any other failure to build the
+    adapter is logged and leaves the read without custom attributes.
+    """
+    try:
+        return await custom_attributes_if_served(request, session)
+    except (HTTPException, IdentityErrorRaised):
+        raise
+    except Exception:
+        logger.exception("the sync adapter's custom attributes could not be built")
+        return None
 
 
 async def get_custom_attributes(

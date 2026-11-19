@@ -1,13 +1,14 @@
+import re
 import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from py_identity_model.identity import ClaimsPrincipal
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints
 
 from app.dependencies.auth import get_claims, get_current_user
 from app.dependencies.capabilities import (
-    custom_attributes_if_served,
+    custom_attributes_if_available,
     get_custom_attributes,
     require_custom_attributes,
     sync_provider_subject,
@@ -53,13 +54,37 @@ class UpdateTenantSettingsRequest(BaseModel):
     custom_attributes: dict[str, AttributeValueIn]
 
 
+# The characters Keycloak's ``person-name-prohibited-characters`` validator refuses in a
+# name (the realm's user profile), control characters included. A name the provider
+# would refuse is refused here, before the canonical user changes: otherwise the save
+# answers 200, the push fails, and the next pull restores the old name.
+_PROHIBITED_IN_A_NAME = re.compile(r"[<>&\"$%!#?§;*~/\\|^=\[\]{}()\x00-\x1f]")
+
+
+def _person_name(value: str) -> str:
+    """A name every sync provider takes: no prohibited character, at most 255 UTF-16 code units.
+
+    Keycloak counts a name's length in UTF-16 code units, so an emoji counts twice.
+    """
+    if _PROHIBITED_IN_A_NAME.search(value):
+        raise ValueError('A name may not contain any of <>&"$%!#?§;*~/\\|^=[]{}() or a control character')
+    if len(value.encode("utf-16-le")) // 2 > MAX_NAME_LENGTH:
+        raise ValueError(f"A name may be at most {MAX_NAME_LENGTH} characters (UTF-16 code units)")
+    return value
+
+
+# Required and not blank: Keycloak's user profile requires both names of a user, and a
+# blank one would have them asked for again at their next sign-in.
+PersonName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1), AfterValidator(_person_name)]
+
+
 class UpdateProfileRequest(BaseModel):
     """The caller's own names. The email is not here: sign-in and sync link accounts by it."""
 
     model_config = ConfigDict(extra="forbid")
 
-    given_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_NAME_LENGTH)]
-    family_name: Annotated[str, StringConstraints(strip_whitespace=True, max_length=MAX_NAME_LENGTH)] = ""
+    given_name: PersonName
+    family_name: PersonName
 
 
 def _allowed(attributes: dict[str, AttributeValue], allowed: set[str]) -> dict[str, AttributeValue]:
@@ -90,7 +115,7 @@ async def get_profile(
     principal: ClaimsPrincipal = Depends(get_current_user),
     claims: dict = Depends(get_claims),
     resolver: IdentityResolutionService = Depends(get_identity_resolution_service),
-    adapter: CustomAttributes | None = Depends(custom_attributes_if_served),
+    adapter: CustomAttributes | None = Depends(custom_attributes_if_available),
 ):
     """The caller's canonical names and email, and their custom attributes where the capability serves them.
 

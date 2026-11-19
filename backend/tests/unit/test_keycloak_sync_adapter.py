@@ -823,6 +823,15 @@ class TestOwnNames:
         assert await adapter(api).sync_user(user_id=USER, data=data) == Ok(None)
         assert writes(api) == []
 
+    async def test_a_blank_name_is_not_sent(self):
+        """The realm requires both names: a blank one would have the user asked for it at their next sign-in."""
+        api = RecordedAdminApi(["token", httpx.Response(200, json=self.ACCOUNT), NO_CONTENT])
+
+        result = await adapter(api).sync_user(user_id=USER, data={**self.OWN, "family_name": ""})
+
+        assert result == Ok(None)
+        assert sent_to(api, "PUT", ACCOUNT_PATH).body == {**self.ACCOUNT, "firstName": "Robert"}
+
     async def test_a_service_account_is_refused(self):
         service = {**self.ACCOUNT, "username": "service-account-identity-stack-admin"}
         api = RecordedAdminApi(["token", httpx.Response(200, json=service)])
