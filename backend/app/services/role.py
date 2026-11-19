@@ -16,7 +16,7 @@ from opentelemetry import trace
 
 from app.domain import access
 from app.errors.access import identity_error
-from app.errors.identity import Conflict, Forbidden, IdentityError
+from app.errors.identity import Conflict, Forbidden, IdentityError, ValidationError
 from app.logbook import logbook
 from app.repositories.assignment import UserTenantRoleRepository, assignment_from_row, assignment_to_row
 from app.repositories.base import RepositoryConflictError
@@ -52,6 +52,9 @@ _INVALIDATIONS: dict[type[access.AccessEvent], str] = {
 # a role in the tenant. The first membership comes from sign-in provisioning, as
 # #592 has it for every provider.
 NOT_A_MEMBER_OF_THE_TENANT = "The user is not a member of the tenant: a role is assigned only to a member"
+# An invitation (``enrol_member``) makes the membership; it does not add to one.
+ALREADY_A_MEMBER_OF_THE_TENANT = "The user is already a member of the tenant"
+NO_ROLES_TO_ENROL = "A member is given at least one role"
 
 
 def _now() -> datetime:
@@ -265,51 +268,107 @@ class RoleService:
                 user_id, tenant_id
             ):
                 return Error(Forbidden(message=NOT_A_MEMBER_OF_THE_TENANT))
+            return await self._assign(user_id=user_id, tenant_id=tenant_id, role_id=role_id, assigned_by=assigned_by)
 
-            row = await self._repository.get(role_id)
-            held_row = None if row is None else await self._assignment_repository.get(user_id, tenant_id, role_id)
-            decision = access.assign_role(
-                None if row is None else role_from_row(row),
-                None if held_row is None else assignment_from_row(held_row),
-                access.AssignRole(user_id=user_id, tenant_id=tenant_id, role_id=role_id, assigned_by=assigned_by),
-                now=_now(),
+    async def _assign(
+        self,
+        *,
+        user_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        role_id: uuid.UUID,
+        assigned_by: uuid.UUID | None = None,
+    ) -> Result[dict, IdentityError]:
+        """Assign the role and push it, whether or not the user is a member of the tenant yet."""
+        row = await self._repository.get(role_id)
+        held_row = None if row is None else await self._assignment_repository.get(user_id, tenant_id, role_id)
+        decision = access.assign_role(
+            None if row is None else role_from_row(row),
+            None if held_row is None else assignment_from_row(held_row),
+            access.AssignRole(user_id=user_id, tenant_id=tenant_id, role_id=role_id, assigned_by=assigned_by),
+            now=_now(),
+        )
+        if decision.is_error():
+            return Error(identity_error(decision.error))
+        decided, assigned = decision.ok
+
+        try:
+            assignment_row = await self._assignment_repository.create(assignment_to_row(decided))
+        except RepositoryConflictError:
+            await self._assignment_repository.rollback()
+            return Error(
+                identity_error(access.RoleAlreadyAssigned(user_id=user_id, tenant_id=tenant_id, role_id=role_id))
             )
-            if decision.is_error():
-                return Error(identity_error(decision.error))
-            decided, assigned = decision.ok
+        assignment = assignment_from_row(assignment_row)
+        await self._assignment_repository.commit()
 
-            try:
-                assignment_row = await self._assignment_repository.create(assignment_to_row(decided))
-            except RepositoryConflictError:
-                await self._assignment_repository.rollback()
-                return Error(
-                    identity_error(access.RoleAlreadyAssigned(user_id=user_id, tenant_id=tenant_id, role_id=role_id))
+        await self._invalidate(assigned, role_id, tenant_id)
+
+        self._log_sync_failure(
+            await self._adapter.sync_role_assignment(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                role_id=role_id,
+                data={"role_name": assigned.role_name},
+            ),
+            role_id,
+            "assign_role_to_user",
+        )
+
+        return Ok(
+            {
+                "user_id": str(assignment.user_id),
+                "tenant_id": str(assignment.tenant_id),
+                "role_id": str(assignment.role_id),
+                "assigned_by": str(assignment.assigned_by) if assignment.assigned_by else None,
+                "assigned_at": assignment.assigned_at.isoformat() if assignment.assigned_at else None,
+            }
+        )
+
+    async def assignable_roles(
+        self, *, tenant_id: uuid.UUID, role_names: list[str]
+    ) -> Result[list[uuid.UUID], IdentityError]:
+        """The id of each named role assignable in the tenant: the tenant's own of that name, else the global one.
+
+        ``ValidationError`` for a name the tenant has no role of; nothing is written.
+        """
+        with tracer.start_as_current_span("RoleService.assignable_roles") as span:
+            span.set_attribute("tenant.id", str(tenant_id))
+            role_ids: list[uuid.UUID] = []
+            for name in dict.fromkeys(role_names):
+                row = await self._repository.get_by_name(name, tenant_id) or await self._repository.get_by_name(name)
+                if row is None:
+                    return Error(ValidationError(message=f"Role '{name}' not found"))
+                role_ids.append(row.id)
+            return Ok(role_ids)
+
+    async def enrol_member(
+        self,
+        *,
+        user_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        role_ids: list[uuid.UUID],
+        assigned_by: uuid.UUID | None = None,
+    ) -> Result[dict, IdentityError]:
+        """Make the user a member of the tenant with these roles, and push each (Keycloak: organization member).
+
+        For an invitation: ``assign_role_to_user`` gives a role only to a member,
+        this makes the member. A user who already holds a role in the tenant is
+        ``Conflict``, whatever the adapter, and is given nothing.
+        """
+        with tracer.start_as_current_span("RoleService.enrol_member") as span:
+            span.set_attribute("user.id", str(user_id))
+            span.set_attribute("tenant.id", str(tenant_id))
+            if not role_ids:
+                return Error(ValidationError(message=NO_ROLES_TO_ENROL))
+            if await self._assignment_repository.list_by_user_tenant(user_id, tenant_id):
+                return Error(Conflict(message=ALREADY_A_MEMBER_OF_THE_TENANT))
+            for role_id in role_ids:
+                assigned = await self._assign(
+                    user_id=user_id, tenant_id=tenant_id, role_id=role_id, assigned_by=assigned_by
                 )
-            assignment = assignment_from_row(assignment_row)
-            await self._assignment_repository.commit()
-
-            await self._invalidate(assigned, role_id, tenant_id)
-
-            self._log_sync_failure(
-                await self._adapter.sync_role_assignment(
-                    user_id=user_id,
-                    tenant_id=tenant_id,
-                    role_id=role_id,
-                    data={"role_name": assigned.role_name},
-                ),
-                role_id,
-                "assign_role_to_user",
-            )
-
-            return Ok(
-                {
-                    "user_id": str(assignment.user_id),
-                    "tenant_id": str(assignment.tenant_id),
-                    "role_id": str(assignment.role_id),
-                    "assigned_by": str(assignment.assigned_by) if assignment.assigned_by else None,
-                    "assigned_at": assignment.assigned_at.isoformat() if assignment.assigned_at else None,
-                }
-            )
+                if assigned.is_error():
+                    return assigned
+            return Ok({"user_id": str(user_id), "tenant_id": str(tenant_id), "role_ids": [str(r) for r in role_ids]})
 
     async def list_roles(
         self,

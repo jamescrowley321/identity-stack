@@ -359,8 +359,10 @@ from its claims, a canonical principal's from the canonical model.
 A route whose service pushes its writes to the configured sync adapter (`SYNC_PROVIDER`)
 **MUST** depend on `app.dependencies.sync_provider.require_sync_provider_principal` and be
 listed in `SYNC_PROVIDER_TENANT_ROUTES` or `SYNC_PROVIDER_PROJECT_ROUTES` in the same test
-file: the role assignment routes (`POST /api/roles/assign`, `/api/roles/remove`) and the
-role and permission definition routes (`/api/roles`, `/api/roles/{name}`,
+file: the role assignment routes (`POST /api/roles/assign`, `/api/roles/remove`), the
+member routes (`GET /api/members`, `POST /api/members/invite`,
+`POST /api/members/{user_id}/deactivate` and `/activate`, `DELETE /api/members/{user_id}`)
+and the role and permission definition routes (`/api/roles`, `/api/roles/{name}`,
 `/api/permissions`, `/api/permissions/{name}`). The adapter takes the request's tenant id
 and the user ids as its provider's, so the guard refuses (403, `This route serves
 <provider> principals only`) every principal whose provider is not the sync provider,
@@ -368,7 +370,16 @@ before the tenant is resolved and before anything is written. These routes left 
 Descope registers (#676): `RoleService` and `PermissionService` write to Postgres and push
 through whichever adapter the deployment configures, so the routes are not Descope's, and
 fencing them on the caller's provider refused a Keycloak or Zitadel admin in a deployment
-that syncs to Keycloak or Zitadel. In a Descope deployment (`SYNC_PROVIDER=descope`, the
+that syncs to Keycloak or Zitadel. The member routes left them too (#677): they take their
+members from `app.dependencies.identity.get_member_directory`, which in a Descope deployment
+is the Descope management adapter, as before, and otherwise `MemberService` over the
+canonical users and memberships, whose changes the sync adapter pushes (Keycloak:
+organization membership and the role's organization group). They stay
+`require_role("owner", "admin")` in the request's tenant. An invitation creates the
+membership, so it is refused for a user who already holds a role in the tenant, whatever
+the adapter. A member's status is the account's, so it is set only for a user whose sole
+tenant is the request's (409 otherwise), and a user who is no member of the tenant reads
+the same whether or not it exists. In a Descope deployment (`SYNC_PROVIDER=descope`, the
 default) the guard passes exactly the `descope_managed` principals `require_descope_principal`
 passes, with the same body. The definitions belong to no tenant and every tenant's grants read
 them, so their routes are gated by `app.dependencies.rbac.require_definitions_role`

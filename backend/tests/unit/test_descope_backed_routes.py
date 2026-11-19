@@ -31,6 +31,7 @@ the ``X-Tenant-ID`` header. Every role-gated route is held to one of these
 shapes, so a new one has to choose.
 """
 
+import asyncio
 import base64
 import json
 import time
@@ -50,6 +51,7 @@ from slowapi.errors import RateLimitExceeded
 from app.dependencies import identity, rbac
 from app.dependencies.descope import NOT_A_DESCOPE_PRINCIPAL, get_descope_management, require_descope_principal
 from app.dependencies.identity import (
+    get_member_directory,
     get_permission_service,
     get_provider_service,
     get_role_service,
@@ -72,6 +74,8 @@ from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.providers import ProviderTokenConfig, TenantClaims, descope_config, keycloak_config, ory_config
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.models.database import get_async_session
+from app.services.descope_management import DescopeManagementAdapter
+from app.services.members import MemberService
 from app.services.permission import PermissionService
 from app.services.provider import ProviderService
 from app.services.role import RoleService
@@ -107,11 +111,6 @@ DESCOPE_TENANT_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("DELETE", "/api/documents/{document_id}"),
         ("POST", "/api/documents/{document_id}/share"),
         ("DELETE", "/api/documents/{document_id}/share/{target_user_id}"),
-        ("GET", "/api/members"),
-        ("POST", "/api/members/invite"),
-        ("POST", "/api/members/{user_id}/deactivate"),
-        ("POST", "/api/members/{user_id}/activate"),
-        ("DELETE", "/api/members/{user_id}"),
         ("POST", "/api/keys"),
         ("GET", "/api/keys"),
         ("GET", "/api/keys/{key_id}"),
@@ -151,6 +150,11 @@ SYNC_PROVIDER_TENANT_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
         ("POST", "/api/roles/assign"),
         ("POST", "/api/roles/remove"),
+        ("GET", "/api/members"),
+        ("POST", "/api/members/invite"),
+        ("POST", "/api/members/{user_id}/deactivate"),
+        ("POST", "/api/members/{user_id}/activate"),
+        ("DELETE", "/api/members/{user_id}"),
     }
 )
 
@@ -1055,6 +1059,115 @@ class TestOnlyAnOperatorChangesTheOperatorDefinition:
         response = client.delete("/api/roles/editor", headers=_bearer(DESCOPE_ADMIN))
 
         assert (response.status_code, response.json()) == (200, {"status": "deleted", "name": "editor"})
+
+
+MEMBER_ID = "55555555-5555-5555-5555-555555555555"
+MEMBER_ROUTE_CALLS = {
+    ("GET", "/api/members"): ("list_members", (TENANT_A,), {}),
+    ("POST", "/api/members/invite"): (
+        "invite_member",
+        (),
+        {"email": "new@example.com", "tenant_id": TENANT_A, "role_names": ["member"]},
+    ),
+    ("POST", "/api/members/{user_id}/deactivate"): ("set_member_status", (MEMBER_ID, TENANT_A, "disabled"), {}),
+    ("POST", "/api/members/{user_id}/activate"): ("set_member_status", (MEMBER_ID, TENANT_A, "enabled"), {}),
+    ("DELETE", "/api/members/{user_id}"): ("remove_member", (MEMBER_ID, TENANT_A), {}),
+}
+MEMBER_ROUTE_ANSWERS = {
+    ("GET", "/api/members"): {"members": []},
+    ("POST", "/api/members/invite"): {"status": "invited"},
+    ("POST", "/api/members/{user_id}/deactivate"): {"status": "deactivated", "user_id": MEMBER_ID},
+    ("POST", "/api/members/{user_id}/activate"): {"status": "activated", "user_id": MEMBER_ID},
+    ("DELETE", "/api/members/{user_id}"): {"status": "removed", "user_id": MEMBER_ID},
+}
+
+
+class TestTheMemberRoutesServeTheSyncProvidersPrincipals:
+    """Where Keycloak is synced, its tenant admins manage the tenant's canonical members (#677)."""
+
+    @pytest.fixture
+    def keycloak_sync(self, monkeypatch, store):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        monkeypatch.setattr(rbac, "CANONICAL_RBAC_PROVIDERS", frozenset({"ory", "keycloak"}))
+        store.roles = SOLE_ADMIN
+        return store
+
+    @pytest.fixture
+    def members(self, client) -> AsyncMock:
+        directory = AsyncMock(spec=MemberService)
+        directory.list_members.return_value = Ok({"members": []})
+        directory.invite_member.return_value = Ok({"status": "invited"})
+        directory.set_member_status.return_value = Ok({})
+        directory.remove_member.return_value = Ok({"status": "removed", "user_id": MEMBER_ID})
+        client.app.dependency_overrides[get_member_directory] = lambda: directory
+        return directory
+
+    @staticmethod
+    def _call(client, method: str, path: str, headers: dict):
+        body = {"email": "new@example.com"} if path.endswith("/invite") else None
+        return client.request(method, path.replace("{user_id}", MEMBER_ID), json=body, headers=headers)
+
+    @pytest.mark.parametrize(("method", "path"), sorted(MEMBER_ROUTE_CALLS))
+    def test_a_keycloak_admin_manages_the_members_of_its_tenant(self, keycloak_sync, client, members, method, path):
+        response = self._call(client, method, path, {**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A})
+
+        assert (response.status_code, response.json()) == (200, MEMBER_ROUTE_ANSWERS[(method, path)])
+        name, args, kwargs = MEMBER_ROUTE_CALLS[(method, path)]
+        getattr(members, name).assert_awaited_once_with(*args, **kwargs)
+
+    @pytest.mark.parametrize(("method", "path"), sorted(MEMBER_ROUTE_CALLS))
+    def test_a_keycloak_member_is_refused_as_today(self, keycloak_sync, client, members, method, path):
+        keycloak_sync.roles = [{"tenant_id": TENANT_A, "role_name": "member", "permissions": []}]
+
+        response = self._call(client, method, path, {**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A})
+
+        assert (response.status_code, response.json()) == (403, NOT_GRANTED)
+        assert members.mock_calls == []
+
+    def test_a_keycloak_admin_cannot_name_another_tenant(self, keycloak_sync, client, members):
+        response = client.get("/api/members", headers={**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_B})
+
+        assert response.status_code == 403
+        assert members.mock_calls == []
+
+    def test_an_admin_cannot_invite_an_owner(self, keycloak_sync, client, members):
+        response = client.post(
+            "/api/members/invite",
+            json={"email": "new@example.com", "role_names": ["owner"]},
+            headers={**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A},
+        )
+
+        assert (response.status_code, response.json()) == (403, {"detail": "Only owners can assign the owner role"})
+        assert members.mock_calls == []
+
+    def test_a_revocation_keycloak_did_not_take_is_told(self, keycloak_sync, client, members):
+        members.set_member_status.return_value = Ok({"email": "m@acme.test", "provider_sync": "failed"})
+
+        response = client.post(
+            f"/api/members/{MEMBER_ID}/deactivate", headers={**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A}
+        )
+
+        assert (response.status_code, response.json()) == (
+            200,
+            {"status": "deactivated", "user_id": MEMBER_ID, "provider_sync": "failed"},
+        )
+
+    def test_the_directory_is_the_canonical_one_where_keycloak_is_synced(self, monkeypatch):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(keycloak_admin=MagicMock(), cache_publisher=MagicMock()))
+        )
+
+        directory = asyncio.run(get_member_directory(request, MagicMock()))
+
+        assert isinstance(directory, MemberService)
+
+    def test_the_directory_is_descope_where_descope_is_synced(self):
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(descope_client=MagicMock())))
+
+        directory = asyncio.run(get_member_directory(request, MagicMock()))
+
+        assert isinstance(directory, DescopeManagementAdapter)
 
 
 class TestTheSyncProviderGuard:

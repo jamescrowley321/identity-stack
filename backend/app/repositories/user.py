@@ -11,6 +11,7 @@ import uuid
 import sqlalchemy as sa
 
 from app.models.identity.assignment import UserTenantRole
+from app.models.identity.role import Role
 from app.models.identity.user import User, UserStatus
 from app.repositories.base import BaseRepository
 
@@ -94,6 +95,18 @@ class UserRepository(BaseRepository[User]):
             stmt = stmt.where(User.status == status)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def list_tenant_members(self, tenant_id: uuid.UUID) -> list[tuple[User, str]]:
+        """Each (user, role name) the tenant's role assignments hold, by email, then role name."""
+        stmt = (
+            sa.select(User, Role.name)
+            .join(UserTenantRole, UserTenantRole.user_id == User.id)
+            .join(Role, Role.id == UserTenantRole.role_id)
+            .where(UserTenantRole.tenant_id == tenant_id)
+            .order_by(User.email, Role.name)
+        )
+        result = await self._session.execute(stmt)
+        return [(user, role_name) for user, role_name in result.all()]
 
     async def exists_in_tenant(self, user_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
         """Check if a user has any role assignment in the given tenant."""

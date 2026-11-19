@@ -23,6 +23,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import State
 
+from app.dependencies.descope import require_descope_management
 from app.dependencies.keycloak_reconciliation import build_keycloak_reconciliation
 from app.dependencies.keycloak_sync import build_keycloak_sync_adapter
 from app.dependencies.zitadel_sync import build_zitadel_sync_adapter
@@ -46,6 +47,7 @@ from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
 from app.services.idp_link import IdPLinkService
 from app.services.inbound_sync import InboundSyncService
+from app.services.members import MemberDirectory, MemberService
 from app.services.permission import PermissionService
 from app.services.provider import ProviderService
 from app.services.reconciliation import ProviderReconciliation, ReconciliationService
@@ -187,6 +189,25 @@ async def get_role_service(
         assignment_repository=assignment_repository,
         adapter=adapter,
         publisher=request.app.state.cache_publisher,
+    )
+
+
+async def get_member_directory(
+    request: Request,
+    session: AsyncSession = Depends(get_async_session),
+) -> MemberDirectory:
+    """The tenant members the ``/api/members`` routes read and change, by ``SYNC_PROVIDER``.
+
+    Descope (the default): the Descope management adapter, which keeps members in
+    Descope under the Descope tenant and user ids its principals carry (503 until
+    the client is built). Every other provider: ``MemberService`` over the
+    canonical users and memberships, pushed through the provider's sync adapter.
+    """
+    if SYNC_PROVIDER == "descope":
+        return require_descope_management(request)
+    return MemberService(
+        users=await get_user_service(request, session),
+        roles=await get_role_service(request, session),
     )
 
 

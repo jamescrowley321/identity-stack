@@ -2,16 +2,22 @@ from expression import Ok
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
 
-from app.dependencies.descope import require_descope_management, require_descope_principal
+from app.dependencies.identity import get_member_directory
 from app.dependencies.rbac import require_role
+from app.dependencies.sync_provider import require_sync_provider_principal
 from app.dependencies.tenant import get_tenant_id
-from app.errors.identity import Conflict, IdentityError, ValidationError
+from app.errors.identity import Conflict, Forbidden, IdentityError, ValidationError
 from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
+from app.services.adapters.base import PROVIDER_SYNC
+from app.services.members import MemberDirectory
+from app.services.user import MemberStatus
 
-# Every route here hands the tenant id or the caller's ``sub`` to Descope, so the
-# router serves Descope principals only (conventions §18).
-router = APIRouter(tags=["Users"], dependencies=[Depends(require_descope_principal)])
+# The members live where the deployment syncs to (``get_member_directory``): in
+# Descope under Descope's ids, or in the canonical model, whose changes the sync
+# adapter pushes and takes the request's tenant and user ids as its provider's. So
+# the router serves the sync provider's principals only (conventions §18).
+router = APIRouter(tags=["Users"], dependencies=[Depends(require_sync_provider_principal)])
 
 
 class InviteUserRequest(BaseModel):
@@ -19,17 +25,37 @@ class InviteUserRequest(BaseModel):
     role_names: list[str] = Field(default_factory=lambda: ["member"])
 
 
-# Descope keeps one status per account, not per tenant membership (#581).
+# A status is the account's, not one tenant membership's, in Descope and in the
+# canonical model alike (#581).
 _SHARED_ACCOUNT_DETAIL = (
     "Status applies to the member's whole account, which also belongs to another tenant. "
     "Remove the member from this tenant instead."
 )
 
 
-def _refuse_shared_account(error: IdentityError) -> None:
-    """Answer 409 when the member's account is shared with another tenant."""
+def _refusal(error: IdentityError, failed: str, conflict_detail: str | None = None) -> HTTPException:
+    """The answer to a member operation that did not happen.
+
+    400 for a request the directory rejects, 403 for a user who is no member of
+    the tenant, 409 for a conflict (``conflict_detail`` when given), and 502 with
+    ``failed`` for anything else: the provider failed, or (Descope) reads an
+    outsider like an unknown user.
+    """
+    if isinstance(error, ValidationError):
+        return HTTPException(status_code=400, detail=error.message)
+    if isinstance(error, Forbidden):
+        return HTTPException(status_code=403, detail=error.message)
     if isinstance(error, Conflict):
-        raise HTTPException(status_code=409, detail=_SHARED_ACCOUNT_DETAIL)
+        return HTTPException(status_code=409, detail=conflict_detail or error.message)
+    return HTTPException(status_code=502, detail=failed)
+
+
+def _answer(status: str, user_id: str, outcome: dict | None) -> dict:
+    """The answer to a status change or a removal, with ``provider_sync`` when the service reported one."""
+    answer = {"status": status, "user_id": user_id}
+    if outcome and PROVIDER_SYNC in outcome:
+        answer[PROVIDER_SYNC] = outcome[PROVIDER_SYNC]
+    return answer
 
 
 @router.get("/members")
@@ -37,11 +63,12 @@ async def list_members(
     request: Request,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    members: MemberDirectory = Depends(get_member_directory),
 ):
-    """List all members in the current tenant via Descope Management API."""
-    result = await require_descope_management(request).list_members(tenant_id)
+    """List the members of the current tenant, each with its roles there."""
+    result = await members.list_members(tenant_id)
     if result.is_error():
-        raise HTTPException(status_code=502, detail="Failed to list members from Descope")
+        raise _refusal(result.error, "Failed to list members")
     return result_to_response(result, request)
 
 
@@ -52,20 +79,15 @@ async def invite_member(
     body: InviteUserRequest,
     tenant_id: str = Depends(get_tenant_id),
     caller_roles: list[str] = Depends(require_role("owner", "admin")),
+    members: MemberDirectory = Depends(get_member_directory),
 ):
     """Invite a user to the current tenant by email with specified roles."""
     if "owner" in body.role_names and "owner" not in caller_roles:
         raise HTTPException(status_code=403, detail="Only owners can assign the owner role")
 
-    result = await require_descope_management(request).invite_member(
-        email=body.email,
-        tenant_id=tenant_id,
-        role_names=body.role_names,
-    )
+    result = await members.invite_member(email=body.email, tenant_id=tenant_id, role_names=body.role_names)
     if result.is_error():
-        if isinstance(result.error, ValidationError):
-            raise HTTPException(status_code=400, detail=result.error.message)
-        raise HTTPException(status_code=502, detail="Failed to invite member via Descope")
+        raise _refusal(result.error, "Failed to invite member")
     return result_to_response(result, request)
 
 
@@ -75,13 +97,13 @@ async def deactivate_member(
     user_id: str,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    members: MemberDirectory = Depends(get_member_directory),
 ):
     """Deactivate a member. They will not be able to log in."""
-    result = await require_descope_management(request).set_member_status(user_id, tenant_id, "disabled")
+    result = await members.set_member_status(user_id, tenant_id, MemberStatus.DISABLED)
     if result.is_error():
-        _refuse_shared_account(result.error)
-        raise HTTPException(status_code=502, detail="Failed to deactivate member via Descope")
-    return result_to_response(Ok({"status": "deactivated", "user_id": user_id}), request)
+        raise _refusal(result.error, "Failed to deactivate member", _SHARED_ACCOUNT_DETAIL)
+    return result_to_response(Ok(_answer("deactivated", user_id, result.ok)), request)
 
 
 @router.post("/members/{user_id}/activate")
@@ -90,13 +112,13 @@ async def activate_member(
     user_id: str,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    members: MemberDirectory = Depends(get_member_directory),
 ):
     """Reactivate a previously deactivated member."""
-    result = await require_descope_management(request).set_member_status(user_id, tenant_id, "enabled")
+    result = await members.set_member_status(user_id, tenant_id, MemberStatus.ENABLED)
     if result.is_error():
-        _refuse_shared_account(result.error)
-        raise HTTPException(status_code=502, detail="Failed to activate member via Descope")
-    return result_to_response(Ok({"status": "activated", "user_id": user_id}), request)
+        raise _refusal(result.error, "Failed to activate member", _SHARED_ACCOUNT_DETAIL)
+    return result_to_response(Ok(_answer("activated", user_id, result.ok)), request)
 
 
 @router.delete("/members/{user_id}")
@@ -105,9 +127,10 @@ async def remove_member(
     user_id: str,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    members: MemberDirectory = Depends(get_member_directory),
 ):
     """Remove a member from the current tenant."""
-    result = await require_descope_management(request).remove_member(user_id, tenant_id)
+    result = await members.remove_member(user_id, tenant_id)
     if result.is_error():
-        raise HTTPException(status_code=502, detail="Failed to remove member via Descope")
-    return result_to_response(Ok({"status": "removed", "user_id": user_id}), request)
+        raise _refusal(result.error, "Failed to remove member")
+    return result_to_response(Ok(_answer("removed", user_id, result.ok)), request)
