@@ -1,6 +1,6 @@
 # Architecture
 
-identity-stack is an identity platform built around a **canonical identity store** (PostgreSQL) that the application owns, kept in sync with an external identity provider (Descope). Ory can be configured as a second token provider (`ORY_ISSUER_URL`). The application is provider-agnostic at its boundaries — token validation and the data model are written against OIDC/OAuth2 concepts, not a specific vendor SDK.
+identity-stack is an identity platform built around a **canonical identity store** (PostgreSQL) that the application owns, kept in sync with one external identity provider, the sync provider (`SYNC_PROVIDER`: Descope by default, or Keycloak or Zitadel). Descope, Ory, Zitadel and Keycloak can each be configured as a token provider. The application is provider-agnostic at its boundaries — token validation and the data model are written against OIDC/OAuth2 concepts, not a specific vendor SDK.
 
 ## Components
 
@@ -72,6 +72,34 @@ their accounts.
 
 The backend refuses to start with a half-configured Keycloak provider: see the `KEYCLOAK_*`
 rows of [environment-variables.md](environment-variables.md).
+
+## Routes, capabilities and the relationship store
+
+A route the SPA calls serves every provider ([ADR-0012](adr/0012-routes-speak-canonical.md)). It
+reads and writes canonical services; a provider is reached only through the sync adapter
+(`backend/app/services/adapters/`) or the relationship store. How each route keeps one provider's
+ids from another is in [conventions §18](conventions.md#18-one-resolver-decides-the-tenant-and-the-grants).
+
+- **Routes whose writes go to the sync provider** (role assignment, members, role and permission
+  definitions) serve the sync provider's principals only (`require_sync_provider_principal`). A
+  machine credential's token is refused on them and on `/api/keys`.
+- **Capabilities.** A sync adapter declares the optional capabilities it implements (`Capability`
+  in `adapters/base.py`). `GET /api/capabilities` reports the capabilities and the relationship
+  store that serve the caller (`capabilities.served`), and the SPA shows a page only when its
+  capability is there. A route whose capability does not serve the caller answers 404
+  (`/errors/capability-missing`).
+
+  | Capability | Pages | Descope | Keycloak | Zitadel |
+  |---|---|---|---|---|
+  | `machine_credentials` | Access Keys (`/api/keys`) | Access keys, for Descope principals | Service-account clients, kept in the canonical model: every principal ([keycloak.md](keycloak.md#machine-credentials)) | — |
+  | `custom_attributes` | Tenant Settings; the profile's attributes | User and tenant custom attributes, for Descope principals | User and organization attributes, for Keycloak principals | — (Zitadel metadata: #703) |
+
+- **The relationship store** (`RELATIONSHIP_STORE`, `backend/app/services/relationship_store.py`)
+  holds the FGA relations and the documents' sharing. Descope's FGA store serves Descope
+  principals, keyed on Descope's ids; OpenFGA serves the principals of `CANONICAL_RBAC_PROVIDERS`,
+  keyed on canonical ids, with its model in Terraform (`infra/openfga`). Unset, it is the sync
+  provider's: Descope's for Descope, OpenFGA for Keycloak and Zitadel; an Ory deployment sets
+  `openfga`. The FGA and Documents pages show when a store serves the caller.
 
 ## Sync flows
 

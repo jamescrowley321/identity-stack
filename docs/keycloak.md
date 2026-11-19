@@ -269,7 +269,9 @@ expired or deleted credential's tokens are refused at once, before they expire; 
 new ones to a deactivated or deleted client. A credential must carry at least one role, only roles
 its creator holds in the tenant, and never `operator` (which would open every tenant's state to it
 through `require_global_role`); it expires at most 365 days ahead. A machine's own token is refused
-(403) on every `/api/keys` route, so no credential creates, renews or manages credentials.
+(403) on every `/api/keys` route, so no credential creates, renews or manages credentials, and on
+the role assignment, role and permission definition and member routes, so no credential changes
+which people hold which roles or belong to its tenant.
 
 | Limit | What happens |
 |---|---|
