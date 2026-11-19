@@ -127,7 +127,7 @@ export default function UserProfile() {
                   onChange={(e) => setFamilyName(e.target.value)}
                   className="max-w-xs"
                 />
-                <Button size="sm" onClick={handleSaveName} disabled={!givenName.trim()}>Save</Button>
+                <Button size="sm" onClick={handleSaveName} disabled={!givenName.trim() || !familyName.trim()}>Save</Button>
                 <Button variant="outline" size="sm" onClick={() => setEditingName(false)}>Cancel</Button>
               </div>
             ) : (

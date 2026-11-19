@@ -425,7 +425,9 @@ configuration at startup (`refuse_canonical_descope_managed`).
 - Exception: `GET` and `PATCH /api/profile` carry no capability gate, because every
   provider's session loads and saves it. Names and email are the canonical user's
   (`GET /api/identity`'s resolution); `PATCH` saves the caller's own given and family
-  names there (never the email: sign-in and sync link accounts by it) and pushes them,
+  names there (never the email: sign-in and sync link accounts by it; both names are
+  required and held to Keycloak's person-name rules, which every sync provider takes,
+  so a name a provider would refuse is a 422, not a save the next pull undoes) and pushes them,
   with `OWN_PROFILE_OF`, only to the caller's own account at the sync provider, and only
   when the caller is its principal (`capabilities.sync_provider_subject`). The custom
   attributes are asked of the sync adapter only for a caller its `custom_attributes`
