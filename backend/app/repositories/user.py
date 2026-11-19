@@ -108,6 +108,14 @@ class UserRepository(BaseRepository[User]):
         result = await self._session.execute(stmt)
         return [(user, role_name) for user, role_name in result.all()]
 
+    async def lock(self, user_id: uuid.UUID) -> None:
+        """Hold the user's row (``FOR UPDATE``) until the transaction ends.
+
+        A new assignment of the user checks its foreign key against this row and
+        waits, so the user's tenants cannot change until the transaction commits.
+        """
+        await self._session.execute(sa.select(User.id).where(User.id == user_id).with_for_update())
+
     async def exists_in_tenant(self, user_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
         """Check if a user has any role assignment in the given tenant."""
         stmt = sa.select(

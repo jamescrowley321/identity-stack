@@ -27,7 +27,7 @@ class InviteUserRequest(BaseModel):
 
 # A status is the account's, not one tenant membership's, in Descope and in the
 # canonical model alike (#581).
-_SHARED_ACCOUNT_DETAIL = (
+SHARED_ACCOUNT_DETAIL = (
     "Status applies to the member's whole account, which also belongs to another tenant. "
     "Remove the member from this tenant instead."
 )
@@ -104,7 +104,7 @@ async def deactivate_member(
     """Deactivate a member. They will not be able to log in."""
     result = await members.set_member_status(user_id, tenant_id, MemberStatus.DISABLED)
     if result.is_error():
-        raise _refusal(result.error, "Failed to deactivate member", _SHARED_ACCOUNT_DETAIL)
+        raise _refusal(result.error, "Failed to deactivate member", SHARED_ACCOUNT_DETAIL)
     return result_to_response(Ok(_answer("deactivated", user_id, result.ok)), request)
 
 
@@ -119,7 +119,7 @@ async def activate_member(
     """Reactivate a previously deactivated member."""
     result = await members.set_member_status(user_id, tenant_id, MemberStatus.ENABLED)
     if result.is_error():
-        raise _refusal(result.error, "Failed to activate member", _SHARED_ACCOUNT_DETAIL)
+        raise _refusal(result.error, "Failed to activate member", SHARED_ACCOUNT_DETAIL)
     return result_to_response(Ok(_answer("activated", user_id, result.ok)), request)
 
 

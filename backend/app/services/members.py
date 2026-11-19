@@ -17,7 +17,7 @@ from opentelemetry import trace
 from app.errors.identity import Forbidden, IdentityError, NotFound
 from app.services.descope_management import DescopeManagementAdapter
 from app.services.role import RoleService
-from app.services.user import MEMBER_NOT_IN_TENANT, MemberStatus, UserService
+from app.services.user import MemberRefusal, MemberStatus, UserService
 
 tracer = trace.get_tracer(__name__)
 
@@ -32,7 +32,7 @@ def _uuid(value: str) -> uuid.UUID | None:
 def _not_a_member(result: Result) -> Result:
     """A user the tenant does not have reads the same whether or not the user exists."""
     if result.is_error() and isinstance(result.error, NotFound):
-        return Error(Forbidden(message=MEMBER_NOT_IN_TENANT))
+        return Error(Forbidden(message=MemberRefusal.NOT_IN_TENANT))
     return result
 
 
@@ -54,29 +54,34 @@ class MemberService:
             return listed.map(lambda members: {"members": members})
 
     async def invite_member(self, *, email: str, tenant_id: str, role_names: list[str]) -> Result[dict, IdentityError]:
-        """Find or create the user with ``email`` and make it a member of the tenant with ``role_names``.
+        """Create the user with ``email`` as a member of the tenant with ``role_names``, then push both.
 
-        The roles are checked first, so an unknown role creates nobody. A user
-        who is already a member is refused (``Conflict``) and given nothing.
+        The roles are checked first, so an unknown role creates nobody. The user
+        and its assignments commit together or not at all. An account with that
+        email already exists is ``Conflict``, whichever tenant holds it, and is
+        neither enrolled nor described.
         """
         with tracer.start_as_current_span("MemberService.invite_member") as span:
             span.set_attribute("tenant.id", tenant_id)
             tenant = _uuid(tenant_id)
             if tenant is None:
-                return Error(Forbidden(message=MEMBER_NOT_IN_TENANT))
+                return Error(Forbidden(message=MemberRefusal.NOT_IN_TENANT))
             role_ids = await self._roles.assignable_roles(tenant_id=tenant, role_names=role_names)
             if role_ids.is_error():
                 return Error(role_ids.error)
-            user = await self._users.get_or_create_user(tenant_id=tenant, email=email)
-            if user.is_error():
-                return Error(user.error)
-            enrolled = await self._roles.enrol_member(
-                user_id=uuid.UUID(user.ok["userId"]), tenant_id=tenant, role_ids=role_ids.ok
+            created = await self._users.create_member(
+                tenant_id=tenant,
+                email=email,
+                stage_memberships=lambda user_id: self._roles.stage_member_roles(
+                    user_id=user_id, tenant_id=tenant, role_ids=role_ids.ok
+                ),
             )
-            if enrolled.is_error():
-                return Error(enrolled.error)
-            member = {**user.ok, "id": user.ok["userId"], "roleNames": list(dict.fromkeys(role_names))}
-            return Ok({"status": "invited", "email": email, "user": member})
+            if created.is_error():
+                return Error(created.error)
+            member, assigned = created.ok
+            await self._roles.push_member_roles(assigned)
+            user = {**member, "roleNames": list(dict.fromkeys(role_names))}
+            return Ok({"status": "invited", "email": email, "user": user})
 
     async def set_member_status(
         self, user_id: str, tenant_id: str, status: MemberStatus
@@ -86,7 +91,7 @@ class MemberService:
             span.set_attribute("tenant.id", tenant_id)
             user, tenant = _uuid(user_id), _uuid(tenant_id)
             if user is None or tenant is None:
-                return Error(Forbidden(message=MEMBER_NOT_IN_TENANT))
+                return Error(Forbidden(message=MemberRefusal.NOT_IN_TENANT))
             return _not_a_member(await self._users.set_member_status(tenant_id=tenant, user_id=user, status=status))
 
     async def remove_member(self, user_id: str, tenant_id: str) -> Result[dict | None, IdentityError]:
@@ -95,7 +100,7 @@ class MemberService:
             span.set_attribute("tenant.id", tenant_id)
             user, tenant = _uuid(user_id), _uuid(tenant_id)
             if user is None or tenant is None:
-                return Error(Forbidden(message=MEMBER_NOT_IN_TENANT))
+                return Error(Forbidden(message=MemberRefusal.NOT_IN_TENANT))
             return _not_a_member(await self._users.remove_user_from_tenant(tenant_id=tenant, user_id=user))
 
 

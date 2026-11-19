@@ -375,10 +375,12 @@ members from `app.dependencies.identity.get_member_directory`, which in a Descop
 is the Descope management adapter, as before, and otherwise `MemberService` over the
 canonical users and memberships, whose changes the sync adapter pushes (Keycloak:
 organization membership and the role's organization group). They stay
-`require_role("owner", "admin")` in the request's tenant. An invitation creates the
-membership, so it is refused for a user who already holds a role in the tenant, whatever
-the adapter. A member's status is the account's, so it is set only for a user whose sole
-tenant is the request's (409 otherwise), and a user who is no member of the tenant reads
+`require_role("owner", "admin")` in the request's tenant. An invitation **MUST** only
+create: the user and its memberships commit together, and an email any canonical user
+already has is refused (409, `MemberRefusal.ACCOUNT_EXISTS`) whatever tenant holds it, so
+an admin can neither enrol another tenant's account nor learn about it. A member's status
+is the account's (the model keeps no status per membership), so it is set only for a user
+whose sole tenant is the request's, under a lock on the user's row (409 otherwise), and a user who is no member of the tenant reads
 the same whether or not it exists. In a Descope deployment (`SYNC_PROVIDER=descope`, the
 default) the guard passes exactly the `descope_managed` principals `require_descope_principal`
 passes, with the same body. The definitions belong to no tenant and every tenant's grants read

@@ -14,11 +14,11 @@ from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.permission import PermissionRepository
 from app.repositories.role import RoleRepository
 from app.repositories.user import UserRepository
-from app.services.adapters.base import CHANGED_IN_TENANT, STATUS_CHANGED, IdentityProviderAdapter
+from app.services.adapters.base import CHANGED_IN_TENANT, CREATED_IN_TENANT, STATUS_CHANGED, IdentityProviderAdapter
 from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.members import MemberService
-from app.services.role import ALREADY_A_MEMBER_OF_THE_TENANT, RoleService
-from app.services.user import MEMBER_IN_ANOTHER_TENANT, MEMBER_NOT_IN_TENANT, MemberStatus, UserService
+from app.services.role import RoleService
+from app.services.user import MemberRefusal, MemberStatus, UserService
 
 TENANT = uuid.UUID("11111111-1111-1111-1111-111111111111")
 OTHER_TENANT = uuid.UUID("22222222-2222-2222-2222-222222222222")
@@ -94,8 +94,6 @@ class TestListMembers:
                         "name": "Alice Smith",
                         "status": MemberStatus.ENABLED,
                         "roleNames": ["admin", "member"],
-                        "created_at": alice.created_at.isoformat(),
-                        "updated_at": alice.updated_at.isoformat(),
                     },
                     {
                         "userId": str(bob.id),
@@ -103,8 +101,6 @@ class TestListMembers:
                         "name": "bob",
                         "status": MemberStatus.DISABLED,
                         "roleNames": ["viewer"],
-                        "created_at": bob.created_at.isoformat(),
-                        "updated_at": bob.updated_at.isoformat(),
                     },
                 ]
             }
@@ -112,18 +108,20 @@ class TestListMembers:
         deployment.users.list_tenant_members.assert_awaited_once_with(TENANT)
 
 
+def _roles_named(*roles: Role):
+    """``RoleRepository.get_by_name`` over global roles."""
+    by_name = {role.name: role for role in roles}
+    return lambda name, tenant_id=None: by_name.get(name) if tenant_id is None else None
+
+
 class TestInviteMember:
-    async def test_a_new_email_creates_the_user_in_the_tenant_and_makes_it_a_member(self, deployment):
+    async def test_a_new_email_creates_the_user_and_its_membership_in_one_commit_then_pushes_both(self, deployment):
         member_role = Role(id=uuid.uuid4(), name="member")
         created = _user(email="new@example.com", user_name="new@example.com", given_name="", family_name="")
-        deployment.roles.get_by_name.side_effect = lambda name, tenant_id=None: (
-            member_role if tenant_id is None else None
-        )
+        deployment.roles.get_by_name.side_effect = _roles_named(member_role)
         deployment.roles.get.return_value = member_role
         deployment.users.get_by_email.return_value = None
         deployment.users.create.return_value = created
-        deployment.users.get.return_value = created
-        deployment.assignments.list_by_user_tenant.return_value = []
         deployment.assignments.get.return_value = None
         deployment.assignments.create.side_effect = lambda row: row
 
@@ -131,36 +129,66 @@ class TestInviteMember:
             email="new@example.com", tenant_id=str(TENANT), role_names=["member"]
         )
 
-        assert invited.is_ok(), invited
-        assert invited.ok["user"]["userId"] == str(created.id)
-        assert invited.ok["user"]["roleNames"] == ["member"]
-        sync_user = deployment.adapter.sync_user.await_args.kwargs
-        assert (sync_user["user_id"], sync_user["data"]["email"]) == (created.id, "new@example.com")
+        assert invited == Ok(
+            {
+                "status": "invited",
+                "email": "new@example.com",
+                "user": {"userId": str(created.id), "email": "new@example.com", "roleNames": ["member"]},
+            }
+        )
+        deployment.users.commit.assert_awaited_once()
+        deployment.assignments.commit.assert_not_awaited()
+        deployment.adapter.sync_user.assert_awaited_once_with(
+            user_id=created.id,
+            data={"email": "new@example.com", "status": "active", CREATED_IN_TENANT: str(TENANT)},
+        )
         deployment.adapter.sync_role_assignment.assert_awaited_once_with(
             user_id=created.id, tenant_id=TENANT, role_id=member_role.id, data={"role_name": "member"}
         )
 
-    async def test_an_existing_user_of_another_tenant_is_found_not_created(self, deployment):
+    async def test_an_existing_account_is_refused_and_given_nothing_whatever_the_adapter(self, deployment):
+        """Another tenant's account is neither enrolled nor described (the #693 hole is not repeated here)."""
         member_role = Role(id=uuid.uuid4(), name="member")
-        existing = _user()
-        deployment.roles.get_by_name.side_effect = lambda name, tenant_id=None: (
-            member_role if tenant_id is None else None
+        deployment.roles.get_by_name.side_effect = _roles_named(member_role)
+        deployment.users.get_by_email.return_value = _user()
+
+        invited = await deployment.members.invite_member(
+            email="alice@example.com", tenant_id=str(TENANT), role_names=["member"]
         )
-        deployment.roles.get.return_value = member_role
-        deployment.users.get_by_email.return_value = existing
-        deployment.assignments.list_by_user_tenant.return_value = []
+
+        assert invited == Error(Conflict(message=MemberRefusal.ACCOUNT_EXISTS))
+        deployment.users.create.assert_not_awaited()
+        deployment.assignments.create.assert_not_awaited()
+        deployment.users.commit.assert_not_awaited()
+        deployment.adapter.sync_user.assert_not_awaited()
+        deployment.adapter.sync_role_assignment.assert_not_awaited()
+
+    async def test_a_role_that_fails_leaves_neither_the_user_nor_any_role(self, deployment):
+        """The second role is out of the tenant's scope: the whole invitation rolls back."""
+        member_role = Role(id=uuid.uuid4(), name="member")
+        other_tenants = Role(id=uuid.uuid4(), name="editor", tenant_id=OTHER_TENANT)
+        created = _user(email="new@example.com")
+        roles = {member_role.id: member_role, other_tenants.id: other_tenants}
+        deployment.roles.get.side_effect = roles.get
+        deployment.users.get_by_email.return_value = None
+        deployment.users.create.return_value = created
         deployment.assignments.get.return_value = None
         deployment.assignments.create.side_effect = lambda row: row
 
-        invited = await deployment.members.invite_member(
-            email=existing.email, tenant_id=str(TENANT), role_names=["member"]
+        created_member = await deployment.user_service.create_member(
+            tenant_id=TENANT,
+            email="new@example.com",
+            stage_memberships=lambda user_id: deployment.role_service.stage_member_roles(
+                user_id=user_id, tenant_id=TENANT, role_ids=[member_role.id, other_tenants.id]
+            ),
         )
 
-        assert invited.is_ok(), invited
-        deployment.users.create.assert_not_awaited()
-        deployment.adapter.sync_role_assignment.assert_awaited_once_with(
-            user_id=existing.id, tenant_id=TENANT, role_id=member_role.id, data={"role_name": "member"}
-        )
+        assert created_member.is_error()
+        deployment.users.rollback.assert_awaited_once()
+        deployment.users.commit.assert_not_awaited()
+        deployment.assignments.commit.assert_not_awaited()
+        deployment.adapter.sync_user.assert_not_awaited()
+        deployment.adapter.sync_role_assignment.assert_not_awaited()
 
     async def test_an_unknown_role_creates_nobody(self, deployment):
         deployment.roles.get_by_name.return_value = None
@@ -172,24 +200,6 @@ class TestInviteMember:
         assert invited == Error(ValidationError(message="Role 'nope' not found"))
         deployment.users.create.assert_not_awaited()
         deployment.adapter.sync_user.assert_not_awaited()
-
-    async def test_a_member_already_is_given_nothing_whatever_the_adapter(self, deployment):
-        """The membership check is the invitation's own, not the adapter's (unlike #693's role assignment)."""
-        member_role = Role(id=uuid.uuid4(), name="member")
-        existing = _user()
-        deployment.roles.get_by_name.side_effect = lambda name, tenant_id=None: (
-            member_role if tenant_id is None else None
-        )
-        deployment.users.get_by_email.return_value = existing
-        deployment.assignments.list_by_user_tenant.return_value = [_assignment(existing, TENANT, member_role)]
-
-        invited = await deployment.members.invite_member(
-            email=existing.email, tenant_id=str(TENANT), role_names=["member"]
-        )
-
-        assert invited == Error(Conflict(message=ALREADY_A_MEMBER_OF_THE_TENANT))
-        deployment.assignments.create.assert_not_awaited()
-        deployment.adapter.sync_role_assignment.assert_not_awaited()
 
     async def test_the_tenants_own_role_is_preferred_to_a_global_one_of_that_name(self, deployment):
         own = Role(id=uuid.uuid4(), name="editor", tenant_id=TENANT)
@@ -212,6 +222,8 @@ class TestSetMemberStatus:
         changed = await deployment.members.set_member_status(str(user.id), str(TENANT), status)
 
         assert changed.is_ok(), changed
+        # The user's row is held from the tenant check to the status commit.
+        deployment.users.lock.assert_awaited_once_with(user.id)
         deployment.adapter.sync_user.assert_awaited_once_with(
             user_id=user.id,
             data={"email": user.email, "status": pushed, STATUS_CHANGED: True, CHANGED_IN_TENANT: str(TENANT)},
@@ -227,7 +239,7 @@ class TestSetMemberStatus:
 
         changed = await deployment.members.set_member_status(str(user.id), str(TENANT), status)
 
-        assert changed == Error(Conflict(message=MEMBER_IN_ANOTHER_TENANT))
+        assert changed == Error(Conflict(message=MemberRefusal.IN_ANOTHER_TENANT))
         deployment.users.update.assert_not_awaited()
         deployment.adapter.sync_user.assert_not_awaited()
 
@@ -238,7 +250,7 @@ class TestSetMemberStatus:
 
         changed = await deployment.members.set_member_status(user_id, str(TENANT), status)
 
-        assert changed == Error(Forbidden(message=MEMBER_NOT_IN_TENANT))
+        assert changed == Error(Forbidden(message=MemberRefusal.NOT_IN_TENANT))
         deployment.adapter.sync_user.assert_not_awaited()
 
     async def test_invited_is_not_a_status_a_member_is_set_to(self, deployment):
@@ -253,7 +265,7 @@ class TestRemoveMember:
 
         removed = await deployment.members.remove_member(str(uuid.uuid4()), str(TENANT))
 
-        assert removed == Error(Forbidden(message=MEMBER_NOT_IN_TENANT))
+        assert removed == Error(Forbidden(message=MemberRefusal.NOT_IN_TENANT))
 
     async def test_a_member_leaves_the_tenant_and_the_provider_is_told(self, deployment):
         user = _user()
@@ -276,4 +288,6 @@ async def test_not_found_from_the_service_is_never_a_404_of_its_own():
     users.remove_user_from_tenant.return_value = Error(NotFound(message="User 'x' not found"))
     members = MemberService(users=users, roles=AsyncMock(spec=RoleService))
 
-    assert await members.remove_member(str(uuid.uuid4()), str(TENANT)) == Error(Forbidden(message=MEMBER_NOT_IN_TENANT))
+    assert await members.remove_member(str(uuid.uuid4()), str(TENANT)) == Error(
+        Forbidden(message=MemberRefusal.NOT_IN_TENANT)
+    )

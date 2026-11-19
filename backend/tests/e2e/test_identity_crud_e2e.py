@@ -11,6 +11,7 @@ Auth tiers:
 """
 
 import contextlib
+import os
 import uuid
 
 import pytest
@@ -18,7 +19,7 @@ from playwright.sync_api import APIRequestContext
 
 from tests.e2e.helpers.api import unique_name
 from tests.e2e.helpers.auth import cleanup_test_user
-from tests.e2e.not_applicable import descope_credentials_missing
+from tests.e2e.not_applicable import DESCOPE, descope_credentials_missing, selected_provider
 
 pytestmark = pytest.mark.skipif(
     descope_credentials_missing("DESCOPE_MANAGEMENT_KEY"),
@@ -412,9 +413,15 @@ class TestMemberCrud:
                 pytest.fail(f"Invite returned 207 — the Descope sync failed: {body}")
             assert "user" in body, f"Missing 'user' key in invite response: {body.keys()}"
             user = body["user"]
-            assert "id" in user, f"Missing 'id' in user response: {user}"
-            assert "created_at" in user, f"Missing 'created_at' in user response: {user}"
-            created_user_id = str(user["id"])
+            if selected_provider(os.environ) == DESCOPE:
+                assert "id" in user, f"Missing 'id' in user response: {user}"
+                assert "created_at" in user, f"Missing 'created_at' in user response: {user}"
+                created_user_id = str(user["id"])
+            else:
+                # The canonical invitation names the new member and nothing else of the account (#677).
+                assert set(user) == {"userId", "email", "roleNames"}, f"Unexpected user response: {user}"
+                assert (user["email"], user["roleNames"]) == (test_email, ["member"])
+                created_user_id = str(user["userId"])
         finally:
             if created_user_id:
                 with contextlib.suppress(Exception):
@@ -438,8 +445,9 @@ class TestMemberCrud:
             # Router returns 200 (no status_code=201 on decorator) or 207 (sync failed)
             assert resp.status in (200, 207), f"Invite failed: {resp.status}"
             body = resp.json()
-            if resp.status != 207 and "user" in body and "id" in body["user"]:
-                created_user_id = str(body["user"]["id"])
+            # ``userId`` is in both the Descope and the canonical answer.
+            if resp.status != 207 and "user" in body and "userId" in body["user"]:
+                created_user_id = str(body["user"]["userId"])
 
             if not created_user_id:
                 pytest.fail(f"Invite response carried no user id — status {resp.status}, body {body}")

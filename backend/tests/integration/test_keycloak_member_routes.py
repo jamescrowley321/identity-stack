@@ -26,8 +26,10 @@ from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.providers import keycloak_config
 from app.middleware.rate_limit import limiter
 from app.models.database import get_async_session
+from app.models.identity.assignment import UserTenantRole
 from app.models.identity.user import User
 from app.routers import users
+from app.routers.users import SHARED_ACCOUNT_DETAIL
 from app.services.keycloak_admin import (
     ADMIN_CLIENT_ID_VARIABLE,
     ADMIN_CREDENTIAL_VARIABLE,
@@ -36,6 +38,7 @@ from app.services.keycloak_admin import (
     ISSUER_VARIABLE,
     connect_keycloak_admin,
 )
+from app.services.user import MemberRefusal
 from tests.helpers.keycloak import DAVE, FRANK, KeycloakTokenSource
 from tests.helpers.keycloak_model import ADMIN_CLIENT_ID, ADMIN_CLIENT_SECRET, API_AUDIENCE, SPA_CLIENT_ID
 from tests.integration.test_keycloak_role_routes import (
@@ -131,10 +134,15 @@ class TestKeycloakTenantAdminsManageMembers:
 
         sent = await client.post("/api/members/invite", json={"email": email, "role_names": ["member"]}, headers=admin)
         assert sent.status_code == 200, sent.text
-        user_id = sent.json()["user"]["userId"]
-        invited.append(user_id)
         canonical = (await db_session.execute(select(User).where(User.email == email))).scalar_one()
-        assert str(canonical.id) == user_id
+        user_id = str(canonical.id)
+        invited.append(user_id)
+        # The answer names the new member and nothing else of the account.
+        assert sent.json() == {
+            "status": "invited",
+            "email": email,
+            "user": {"userId": user_id, "email": email, "roleNames": ["member"]},
+        }
         # The account is created under the canonical id, enabled, a member of acme and of its member group.
         account = find_user(realm, canonical.id)
         assert (account["email"], account["enabled"]) == (email, True)
@@ -149,12 +157,10 @@ class TestKeycloakTenantAdminsManageMembers:
             "name": email,
             "status": "enabled",
             "roleNames": ["member"],
-            "created_at": canonical.created_at.isoformat(),
-            "updated_at": canonical.updated_at.isoformat(),
         }
 
         again = await client.post("/api/members/invite", json={"email": email}, headers=admin)
-        assert (again.status_code, again.json()) == (409, {"detail": "The user is already a member of the tenant"})
+        assert (again.status_code, again.json()) == (409, {"detail": MemberRefusal.ACCOUNT_EXISTS})
 
         deactivated = await client.post(f"/api/members/{user_id}/deactivate", headers=admin)
         assert (deactivated.status_code, deactivated.json()) == (200, {"status": "deactivated", "user_id": user_id})
@@ -170,7 +176,7 @@ class TestKeycloakTenantAdminsManageMembers:
         relisted = await client.get("/api/members", headers=admin)
         assert user_id not in {member["userId"] for member in relisted.json()["members"]}
 
-    async def test_inviting_a_user_the_realm_has_makes_its_account_a_member(
+    async def test_inviting_another_tenants_account_is_refused_and_enrols_nothing(
         self,
         keycloak_deployment,
         client,
@@ -178,7 +184,7 @@ class TestKeycloakTenantAdminsManageMembers:
         db_session,
         account,
     ):
-        """The canonical user is found by email and its linked account joins the organization; none is created."""
+        """An invitation only creates: globex's account is neither enrolled in acme nor described to its admin."""
         provider = await _provider(db_session, keycloak_deployment.issuer)
         acme = await _tenant(db_session, provider, "acme")
         globex = await _tenant(db_session, provider, "globex")
@@ -192,14 +198,32 @@ class TestKeycloakTenantAdminsManageMembers:
             "/api/members/invite", json={"email": account["email"], "role_names": ["viewer"]}, headers=admin
         )
 
-        assert sent.status_code == 200, sent.text
-        assert sent.json()["user"]["userId"] == str(existing.id)
-        assert account["username"] in members(realm, organization)
-        assert account["username"] in groups(realm, organization)["viewer"]["members"]
+        assert (sent.status_code, sent.json()) == (409, {"detail": MemberRefusal.ACCOUNT_EXISTS})
+        held = (await db_session.execute(select(UserTenantRole).where(UserTenantRole.user_id == existing.id))).scalars()
+        assert {row.tenant_id for row in held} == {globex.id}
+        assert account["username"] not in members(realm, organization)
         assert find_user(realm, existing.id) is None
-        # Its account also belongs to globex: this tenant alone does not decide its status.
-        refused = await client.post(f"/api/members/{existing.id}/deactivate", headers=admin)
-        assert refused.status_code == 409
+
+    async def test_a_member_who_also_belongs_to_another_tenant_keeps_its_status(
+        self,
+        keycloak_deployment,
+        client,
+        realm,
+        db_session,
+        account,
+    ):
+        """The status is the account's: acme alone does not decide it while globex holds the account too."""
+        provider = await _provider(db_session, keycloak_deployment.issuer)
+        acme = await _tenant(db_session, provider, "acme")
+        globex = await _tenant(db_session, provider, "globex")
+        admin = await _signed_in(db_session, provider, keycloak_deployment, DAVE, acme, "admin")
+        shared = await _linked_user(db_session, provider, account["id"], account["email"], account["username"])
+        await _assign(db_session, shared, acme, "member")
+        await _assign(db_session, shared, globex, "member")
+
+        refused = await client.post(f"/api/members/{shared.id}/deactivate", headers=admin)
+
+        assert (refused.status_code, refused.json()) == (409, {"detail": SHARED_ACCOUNT_DETAIL})
         assert realm.get(f"/users/{account['id']}").json()["enabled"] is True
 
     async def test_a_member_of_the_tenant_is_refused_every_member_route(
