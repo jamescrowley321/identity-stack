@@ -25,12 +25,13 @@ from fastapi.testclient import TestClient
 from app.dependencies import rbac
 from app.dependencies.identity import get_tenant_service
 from app.dependencies.rbac import get_rbac_session
-from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER
+from app.dependencies.tenant_access import SELECT_A_TENANT_FIRST, TENANT_SELECTOR_HEADER
 from app.main import app as shipped_app
 from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.providers import descope_config, keycloak_config, ory_config, zitadel_config
 from app.models.database import get_async_session
 from app.models.tenant import TenantResource
+from app.routers.tenants import NOT_A_MEMBER
 
 DESCOPE_PROJECT = "P2tenantroutes"
 SUB = "subject-1"
@@ -54,7 +55,9 @@ _BOUND = {
     "zitadel": {"aud": ["project-1"], "client_id": "spa-1"},
 }
 
-NOT_A_MEMBER = {"detail": "Not a member of this tenant"}
+REFUSED_NOT_A_MEMBER = {"detail": NOT_A_MEMBER}
+CREATED = datetime(2026, 11, 18, tzinfo=timezone.utc)
+DOMAINS = {ACME: ["acme.test"], GLOBEX: ["globex.test"]}
 
 # What the caller holds in each of its tenants, the same for every provider.
 EXPECTED_TENANTS = {
@@ -126,12 +129,28 @@ class _Stubs:
         self.tenant_service = MagicMock()
         self.tenant_service.get_tenant = AsyncMock(side_effect=self._get_tenant)
         self.descope_client = AsyncMock()
-        self.descope_client.load_tenant.side_effect = lambda tenant_id: {"id": tenant_id, "name": NAMES[tenant_id]}
+        self.descope_client.load_tenant.side_effect = lambda tenant_id: {
+            "id": tenant_id,
+            "name": NAMES[tenant_id],
+            "selfProvisioningDomains": DOMAINS[tenant_id],
+            "createdTime": int(CREATED.timestamp()),
+            "customAttributes": {"plan_tier": "pro"},
+        }
 
     @staticmethod
     async def _get_tenant(*, tenant_id: uuid.UUID):
-        created = datetime(2026, 11, 18, tzinfo=timezone.utc)
-        return Ok({"id": tenant_id, "name": NAMES[str(tenant_id)], "created_at": created, "updated_at": created})
+        return Ok(
+            {
+                "id": tenant_id,
+                "name": NAMES[str(tenant_id)],
+                "domains": DOMAINS[str(tenant_id)],
+                "external_org_id": "org-alias",
+                "external_org_provider_id": uuid.uuid4(),
+                "status": "active",
+                "created_at": CREATED,
+                "updated_at": CREATED,
+            }
+        )
 
 
 @pytest.fixture
@@ -189,7 +208,7 @@ class TestEveryProvidersPrincipal:
     def test_another_tenants_resources_are_refused(self, client, stubs, provider):
         response = client.get(f"/api/tenants/{INITECH}/resources", headers=_headers(provider, ACME))
 
-        assert (response.status_code, response.json()) == (403, NOT_A_MEMBER)
+        assert (response.status_code, response.json()) == (403, REFUSED_NOT_A_MEMBER)
         stubs.session.execute.assert_not_awaited()
 
     def test_it_creates_a_resource_in_its_own_tenant(self, client, stubs, provider):
@@ -206,15 +225,25 @@ class TestEveryProvidersPrincipal:
             f"/api/tenants/{INITECH}/resources", headers=_headers(provider, ACME), json={"name": "Plans"}
         )
 
-        assert (response.status_code, response.json()) == (403, NOT_A_MEMBER)
+        assert (response.status_code, response.json()) == (403, REFUSED_NOT_A_MEMBER)
         stubs.session.add.assert_not_called()
 
     def test_its_current_tenant_is_served(self, client, provider):
         response = client.get("/api/tenants/current", headers=_headers(provider, ACME))
 
-        assert response.status_code == 200
-        body = response.json()
-        assert (body["tenant_id"], body["tenant"]["id"], body["tenant"]["name"]) == (ACME, ACME, "Acme")
+        assert (response.status_code, response.json()) == (
+            200,
+            {
+                "tenant_id": ACME,
+                "tenant": {
+                    "id": ACME,
+                    "name": "Acme",
+                    "domains": ["acme.test"],
+                    "created_at": CREATED.isoformat(),
+                    "updated_at": CREATED.isoformat(),
+                },
+            },
+        )
 
 
 @pytest.mark.parametrize("provider", sorted(CANONICAL))
@@ -230,13 +259,13 @@ class TestACanonicalPrincipal:
     def test_its_current_tenant_needs_a_selection_among_several(self, client, stubs, provider):
         response = client.get("/api/tenants/current", headers=_headers(provider))
 
-        assert response.status_code == 403
+        assert (response.status_code, response.json()) == (403, {"detail": SELECT_A_TENANT_FIRST})
         stubs.tenant_service.get_tenant.assert_not_awaited()
 
     def test_a_selector_naming_another_tenant_is_refused(self, client, stubs, provider):
         response = client.get("/api/tenants/current", headers=_headers(provider, INITECH))
 
-        assert response.status_code == 403
+        assert (response.status_code, response.json()) == (403, {"detail": SELECT_A_TENANT_FIRST})
         stubs.tenant_service.get_tenant.assert_not_awaited()
 
 
@@ -254,11 +283,16 @@ class TestADescopePrincipal:
         stubs.tenant_service.get_tenant.assert_not_awaited()
 
 
-def test_a_request_without_a_token_gets_401(client):
-    for method, path in [
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
         ("GET", "/api/tenants"),
         ("GET", "/api/tenants/current"),
         ("GET", f"/api/tenants/{ACME}/resources"),
         ("POST", f"/api/tenants/{ACME}/resources"),
-    ]:
-        assert client.request(method, path, json={"name": "x"}).status_code == 401
+    ],
+)
+def test_a_request_without_a_token_gets_401(client, method, path):
+    response = client.request(method, path, json={"name": "x"})
+
+    assert (response.status_code, response.json()) == (401, {"detail": "Missing or invalid authorization header"})

@@ -45,6 +45,7 @@ from app.middleware.providers import (
     zitadel_config,
 )
 from app.models.database import get_async_session
+from app.routers.tenants import NOT_A_MEMBER
 
 DESCOPE_PROJECT = "P2descopeclaimroutes"
 TENANT = "11111111-1111-4111-8111-111111111111"
@@ -191,7 +192,7 @@ class TestForgedTenantsClaimsOnTheTenantRoutesAreNotRead:
             json=body,
         )
 
-        assert (response.status_code, response.json()) == (403, {"detail": "Not a member of this tenant"})
+        assert (response.status_code, response.json()) == (403, {"detail": NOT_A_MEMBER})
         session.add.assert_not_called()
 
 
@@ -214,7 +215,7 @@ class TestADescopePrincipalIsServedAsBefore:
     def test_a_non_member_is_refused_by_the_route(self, client):
         response = _call(client, "GET", f"/api/tenants/{TENANT}/resources", None, _descope_token(tenants={}))
 
-        assert (response.status_code, response.json()) == (403, {"detail": "Not a member of this tenant"})
+        assert (response.status_code, response.json()) == (403, {"detail": NOT_A_MEMBER})
 
     def test_its_roles_in_the_current_tenant(self, client):
         token = _descope_token(tenants={TENANT: {"roles": ["admin"], "permissions": ["p"]}})
