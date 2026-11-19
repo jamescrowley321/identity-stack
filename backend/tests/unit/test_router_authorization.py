@@ -1,7 +1,7 @@
 """Every tenant-scoped route declares its authorization (docs/conventions.md §15).
 
-A route is *tenant-scoped* when its dependency tree contains ``get_tenant_id`` or
-``get_tenant_claims``. Such a route MUST also depend on ``require_role``,
+A route is *tenant-scoped* when its dependency tree contains ``get_tenant_id``,
+``get_tenant_claims`` or ``get_tenant_memberships``. Such a route MUST also depend on ``require_role``,
 ``require_permission`` or ``require_fga``, unless it is listed in
 ``MEMBER_ROUTES`` below: routes any member of the caller's tenant may call, where
 tenant membership *is* the authorization decision.
@@ -21,14 +21,14 @@ from fastapi.routing import APIRoute
 
 from app.dependencies.fga import require_fga
 from app.dependencies.rbac import require_permission, require_role
-from app.dependencies.tenant import get_tenant_claims, get_tenant_id
+from app.dependencies.tenant import get_tenant_claims, get_tenant_id, get_tenant_memberships
 
-TENANT_DEPENDENCIES = (get_tenant_id, get_tenant_claims)
+TENANT_DEPENDENCIES = (get_tenant_id, get_tenant_claims, get_tenant_memberships)
 AUTHORIZATION_FACTORIES = (require_role, require_permission, require_fga)
 
 # (method, path) -> why tenant membership alone authorizes the route.
 MEMBER_ROUTES: dict[tuple[str, str], str] = {
-    ("GET", "/api/tenants"): "lists the caller's own memberships from the token",
+    ("GET", "/api/tenants"): "lists the caller's own memberships (get_tenant_memberships)",
     ("GET", "/api/tenants/current"): "reads the caller's current tenant",
     ("GET", "/api/tenants/{tenant_id}/resources"): "_verify_tenant_membership checks the path tenant",
     ("POST", "/api/tenants/{tenant_id}/resources"): "_verify_tenant_membership checks the path tenant",

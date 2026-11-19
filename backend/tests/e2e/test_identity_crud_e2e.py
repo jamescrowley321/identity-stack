@@ -18,7 +18,8 @@ from playwright.sync_api import APIRequestContext
 
 from tests.e2e.helpers.api import unique_name
 from tests.e2e.helpers.auth import cleanup_test_user
-from tests.e2e.not_applicable import descope_credentials_missing
+from tests.e2e.helpers.providers import MEMBER
+from tests.e2e.not_applicable import DESCOPE, descope_credentials_missing
 
 pytestmark = pytest.mark.skipif(
     descope_credentials_missing("DESCOPE_MANAGEMENT_KEY"),
@@ -205,10 +206,19 @@ class TestTenantAuthEnforcement:
         )
         assert resp.status == 403
 
-    def test_nonadmin_get_current_tenant(self, auth_api_context: APIRequestContext, backend_url: str):
-        """GET /tenants/current requires dct claim — OIDC tokens lack it."""
+    def test_nonadmin_get_current_tenant(self, auth_api_context: APIRequestContext, backend_url: str, e2e_provider):
+        """GET /tenants/current serves the member the tenant the resolver chooses (conventions §18).
+
+        A Descope member's OIDC token carries no ``dct``, so it has no tenant: 403.
+        A Keycloak or Zitadel member is served the tenant its ``X-Tenant-ID`` selects (#673).
+        """
         resp = auth_api_context.get(f"{backend_url}/api/tenants/current")
-        assert resp.status == 403
+        if e2e_provider.name == DESCOPE:
+            assert resp.status == 403
+            return
+        assert resp.status == 200
+        selected = e2e_provider.headers(MEMBER)["X-Tenant-ID"]
+        assert (resp.json()["tenant_id"], resp.json()["tenant"]["id"]) == (selected, selected)
 
 
 # =============================================================================

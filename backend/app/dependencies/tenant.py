@@ -3,7 +3,13 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, Request
 
 from app.dependencies.rbac import canonical_memberships
-from app.dependencies.tenant_access import SELECT_A_TENANT_FIRST, CanonicalMemberships, resolve_tenant_access
+from app.dependencies.tenant_access import (
+    SELECT_A_TENANT_FIRST,
+    CanonicalMemberships,
+    TenantMembership,
+    canonical_tenant_memberships,
+    resolve_tenant_access,
+)
 from app.logbook import logbook
 from app.middleware.providers import ProviderTokenConfig
 
@@ -64,3 +70,37 @@ def get_tenant_claims(request: Request) -> dict:
     any other provider is refused with 403.
     """
     return get_descope_claims(request).get("tenants", {})
+
+
+def _string_tuple(value: object) -> tuple[str, ...]:
+    return tuple(entry for entry in value if isinstance(entry, str)) if isinstance(value, list) else ()
+
+
+def get_tenant_memberships(
+    request: Request,
+    memberships: Annotated[CanonicalMemberships | None, Depends(canonical_memberships)] = None,
+) -> dict[str, TenantMembership]:
+    """Every tenant the caller belongs to, keyed by tenant id, from the tenant resolver's sources (§18).
+
+    A principal from a provider in ``CANONICAL_RBAC_PROVIDERS`` gets its canonical
+    memberships, named by the canonical tenants. A Descope principal gets the
+    tenants of its signed ``tenants`` claim (``get_tenant_claims``), named by
+    their ids: Descope tenant ids name no canonical tenant. A malformed claim
+    names none. A principal of any other provider is refused (403), and a
+    request without claims gets 401.
+    """
+    if memberships is not None:
+        return canonical_tenant_memberships(memberships)
+    claimed = get_tenant_claims(request)
+    if not isinstance(claimed, dict):
+        # A malformed ``tenants`` claim names no membership.
+        return {}
+    return {
+        tenant_id: TenantMembership(
+            tenant_id=tenant_id,
+            name=tenant_id,
+            roles=_string_tuple(info.get("roles")) if isinstance(info, dict) else (),
+            permissions=_string_tuple(info.get("permissions")) if isinstance(info, dict) else (),
+        )
+        for tenant_id, info in claimed.items()
+    }

@@ -21,7 +21,8 @@ by ``app.dependencies.rbac`` and passed in.
 """
 
 import uuid
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 from fastapi import HTTPException, Request
 
@@ -53,10 +54,43 @@ class CanonicalMemberships:
     """Every grant the canonical model holds for the caller, across all their tenants."""
 
     grants: tuple[CanonicalGrant, ...]
+    # Tenant id -> the canonical tenant's name, for the tenants the grants name.
+    tenant_names: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def tenant_ids(self) -> frozenset[str]:
         return frozenset(grant.tenant_id for grant in self.grants)
+
+
+@dataclass(frozen=True)
+class TenantMembership:
+    """One tenant the caller belongs to, its name and what the caller holds in it."""
+
+    tenant_id: str
+    name: str
+    roles: tuple[str, ...]
+    permissions: tuple[str, ...]
+
+
+def canonical_tenant_memberships(memberships: CanonicalMemberships) -> dict[str, TenantMembership]:
+    """Every tenant the caller's canonical grants name, keyed by tenant id.
+
+    A tenant without a recorded name is named by its id.
+    """
+    return {
+        tenant_id: TenantMembership(
+            tenant_id=tenant_id,
+            name=memberships.tenant_names.get(tenant_id, tenant_id),
+            roles=tuple(grant.role_name for grant in memberships.grants if grant.tenant_id == tenant_id),
+            permissions=tuple(
+                permission
+                for grant in memberships.grants
+                if grant.tenant_id == tenant_id
+                for permission in grant.permissions
+            ),
+        )
+        for tenant_id in sorted(memberships.tenant_ids)
+    }
 
 
 @dataclass(frozen=True)
