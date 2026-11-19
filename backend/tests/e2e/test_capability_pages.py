@@ -66,22 +66,24 @@ GATED_PAGES = {
 # that run checks the pages a member sees.
 SPA_ADMIN = {DESCOPE: False, KEYCLOAK: True, ZITADEL: True}
 
-# For the Keycloak and Zitadel runs only: the pages this test does not visit and the
-# API calls whose 403 it does not count, because they still serve Descope principals
-# only. Each names the story and PR that move it onto the canonical model; story #683
-# removes these once they merge. The Descope run has none: any 403 fails it.
-NOT_YET_CANONICAL_PAGES = {
-    "Members": "GET /api/members serves Descope principals only until story #677",
-    "Roles": "/api/roles and /api/permissions serve Descope principals only until story #676 (PR #685)",
+# The pages this test does not visit and the API calls whose 403 it does not count.
+# The member, role and permission routes serve the sync provider's principals
+# (require_sync_provider_principal, #676, #677): the Keycloak run syncs to Keycloak, so
+# the member routes serve its admin; the Zitadel run's backend syncs to Descope, so they
+# refuse its Zitadel admin 403. The role and permission definitions also need
+# ``operator`` from a canonical principal (require_definitions_role, #676), which a
+# tenant admin is not. The tenant list and resources are canonical since #673. The
+# Descope run has none: any 403 fails it.
+ROLES_NEED_OPERATOR = "/api/roles and /api/permissions need operator from a canonical principal (#676)"
+EXCLUDED_PAGES = {
+    DESCOPE: {},
+    KEYCLOAK: {"Roles": ROLES_NEED_OPERATOR},
+    ZITADEL: {
+        "Members": "the Zitadel run syncs to Descope: GET /api/members serves Descope principals only (#677)",
+        "Roles": ROLES_NEED_OPERATOR,
+    },
 }
-NOT_YET_CANONICAL_CALLS = {
-    re.compile(r"^/api/tenants$"): "the Dashboard's tenant list reads Descope's claim until story #673 (PR #687)",
-    re.compile(r"^/api/tenants/[^/]+/resources$"): (
-        "the Dashboard's resources read Descope's claim until story #673 (PR #687)"
-    ),
-}
-EXCLUDED_PAGES = {DESCOPE: {}, KEYCLOAK: NOT_YET_CANONICAL_PAGES, ZITADEL: NOT_YET_CANONICAL_PAGES}
-EXCLUDED_CALLS = {DESCOPE: {}, KEYCLOAK: NOT_YET_CANONICAL_CALLS, ZITADEL: NOT_YET_CANONICAL_CALLS}
+EXCLUDED_CALLS: dict[str, dict[re.Pattern[str], str]] = {DESCOPE: {}, KEYCLOAK: {}, ZITADEL: {}}
 
 
 def _served(admin_api_context) -> dict:
