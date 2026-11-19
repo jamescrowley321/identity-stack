@@ -50,9 +50,13 @@ class CanonicalGrant:
 
 @dataclass(frozen=True)
 class CanonicalMemberships:
-    """Every grant the canonical model holds for the caller, across all their tenants."""
+    """Every grant the canonical model holds for the caller, across all their tenants.
+
+    ``user_id`` is the caller's canonical user id: the subject OpenFGA keys their relations on.
+    """
 
     grants: tuple[CanonicalGrant, ...]
+    user_id: str | None = None
 
     @property
     def tenant_ids(self) -> frozenset[str]:

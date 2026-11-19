@@ -55,6 +55,8 @@ from app.services.keycloak_admin import (
     KeycloakApiClientNotManaged,
     connect_keycloak_admin,
 )
+from app.services.openfga import OPENFGA_TIMEOUT_SECONDS, connect_openfga
+from app.services.relationship_store import RelationshipStoreKind
 from app.telemetry import init_telemetry, shutdown_telemetry
 
 logger = logbook(__name__)
@@ -142,6 +144,31 @@ async def _start_sync_provider(app: FastAPI) -> OutboundClient | None:
     return http
 
 
+async def _start_relationship_store(app: FastAPI, kind: RelationshipStoreKind) -> OutboundClient | None:
+    """Connect the relationship store that needs a client of its own: OpenFGA.
+
+    Reads its settings and its authorization model once (``connect_openfga``), so a
+    missing setting, an unreachable server or a model it does not hold stops
+    startup (``RelationshipStoreNotAvailable``). Returns the client for the
+    lifespan to close, or ``None``.
+    """
+    app.state.openfga = None
+    if kind is not RelationshipStoreKind.OPENFGA:
+        return None
+    http = outbound_client(timeout=OPENFGA_TIMEOUT_SECONDS)
+    try:
+        app.state.openfga = await connect_openfga(http)
+    except Exception:
+        await http.aclose()
+        raise
+    logger.info(
+        "OpenFGA connected: store %s, authorization model %s",
+        app.state.openfga.settings.store_id,
+        app.state.openfga.settings.authorization_model_id,
+    )
+    return http
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
@@ -169,13 +196,18 @@ async def lifespan(app: FastAPI):
     http_client = outbound_client(timeout=30.0)
     base_url = knob("DESCOPE_BASE_URL", "https://api.descope.com")
     app.state.descope_client = DescopeManagementClient(project_id, management_key, base_url, http_client=http_client)
+    sync_http_client: OutboundClient | None = None
     try:
-        # A RELATIONSHIP_STORE no store is built for stops startup (RelationshipStoreNotAvailable).
-        logger.info("Relationship store: %s", identity_dependencies.relationship_store_kind())
+        # A RELATIONSHIP_STORE that names no store stops startup (RelationshipStoreNotAvailable).
+        relationship_store = identity_dependencies.relationship_store_kind()
+        logger.info("Relationship store: %s", relationship_store)
         sync_http_client = await _start_sync_provider(app)
+        relationship_http_client = await _start_relationship_store(app, relationship_store)
     except Exception:
         # Startup stops here: close what was opened before it, each close whatever the one before did.
         try:
+            if sync_http_client is not None:
+                await sync_http_client.aclose()
             await http_client.aclose()
         finally:
             try:
@@ -276,8 +308,11 @@ async def lifespan(app: FastAPI):
                     finally:
                         try:
                             app.state.keycloak_admin = None
+                            app.state.openfga = None
                             if sync_http_client is not None:
                                 await sync_http_client.aclose()
+                            if relationship_http_client is not None:
+                                await relationship_http_client.aclose()
                         except Exception:
                             logger.warning("Sync provider HTTP client close failed", exc_info=True)
                         finally:

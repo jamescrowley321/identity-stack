@@ -75,8 +75,8 @@ response and `UpstreamTransportError` for no response at all. No module in `app/
 [ADR-0006](adr/0006-outbound-http-and-logging-helpers.md).
 
 A router function that calls Descope **MUST** catch both `UpstreamStatusError` and
-`UpstreamTransportError` and answer them with 502, as `documents.py`, `fga.py` and
-`attributes.py::get_profile` do. Otherwise a Descope outage surfaces as an unhandled 500. A
+`UpstreamTransportError` and answer them with 502, as `attributes.py::get_profile` does.
+The FGA and document routes call no provider: their store answers a `RelationshipStoreError` (§18). Otherwise a Descope outage surfaces as an unhandled 500. A
 function that catches `Exception` counts as handling both.
 
 The routes behind `DescopeManagementAdapter` (§5) leave that decision to the adapter, which
@@ -335,7 +335,7 @@ model for any other provider. See
 [ADR-0009](adr/0009-provider-registrations-and-one-tenant-resolver.md).
 
 A route that hands the request's tenant id or the caller's `sub` to Descope's Management
-API or its FGA store **MUST** depend on `app.dependencies.descope.require_descope_principal`,
+API **MUST** depend on `app.dependencies.descope.require_descope_principal`,
 on the route or on its router. The resolver gives a principal of a canonical provider a
 canonical tenant id, which names nothing in Descope, so the guard refuses (403) every
 principal whose provider is not `descope_managed` (§28), before the tenant is resolved and
@@ -363,15 +363,29 @@ that Descope's (its adapter's capabilities, its FGA store) serve only a principa
 `descope_managed` provider, being keyed on Descope's ids. A caller not served answers 404
 (`CapabilityMissing`), not the guard's 403: the route is not there for them.
 `GET /api/capabilities` reports `served`, and the SPA shows a page only when it is there.
+
 The FGA and document routes reach relations only through the `RelationshipStore` interface
 (`app/services/relationship_store.py`, from `get_relationship_store`), which
-`RELATIONSHIP_STORE` selects; only that module calls the Descope client's FGA methods
-(`tests/unit/test_relationship_store.py`).
+`RELATIONSHIP_STORE` selects, and default to the sync provider's store (Descope's for
+Descope, OpenFGA for Keycloak and Zitadel). Only that module calls the Descope client's FGA
+methods (`tests/unit/test_relationship_store.py`). Each store is one entry in
+`app.dependencies.identity.RELATIONSHIP_STORES`, which says whom it serves, how it is built
+and which user directory names its subjects. A store **MUST** serve only the principals whose
+ids it keys on: Descope's store a `descope_managed` principal, keyed on `dct` and `sub`;
+OpenFGA a principal of a provider in `CANONICAL_RBAC_PROVIDERS`, keyed on the resolver's
+canonical tenant id and the caller's canonical user id, never the token's `sub`. So these
+routes carry no `require_descope_principal`: `served` refuses everyone else 404. They take the
+tenant from the resolver (`get_tenant_id`) and the subject from
+`app.dependencies.fga.get_relationship_caller` (`require_fga` resolves both the same way),
+and look a target user up in the store's own directory (`get_user_directory`: Descope's users
+or the canonical ones), never in another provider's. A store reports every failure as a
+`RelationshipStoreError` whose `kind` decides the answer (`store_error_response`). They are
+listed in `RELATIONSHIP_STORE_ROUTES` in `test_descope_backed_routes.py`.
 
 A route over state that belongs to the whole Descope project **MUST** carry the same guard
 and be listed in `DESCOPE_PROJECT_ROUTES` in that file: the role and permission definition
 routes (`/api/roles`, `/api/roles/{name}`, `/api/permissions`, `/api/permissions/{name}`),
-whose services mirror each change to Descope, and `GET` and `PUT /api/fga/schema`.
+whose services mirror each change to Descope.
 `require_role` answers for one tenant, so without the guard a canonical principal who is
 an admin of any one of several tenants would reach them by naming that tenant.
 
@@ -401,9 +415,6 @@ configuration at startup (`refuse_canonical_descope_managed`).
   the resolver, which logs a warning each time. `require_descope_principal` refuses it: the guard passes only a provider
   it knows to be `descope_managed`. Code in `app/` that sets `request.state.claims`
   **MUST** set `request.state.provider` beside it.
-- Exception: `require_fga` (`dependencies/fga.py::_extract_tenant_id`) reads `dct` itself.
-  It checks relations in Descope's FGA store, which is keyed on Descope tenant ids, so it
-  serves Descope principals only.
 - Exception: `get_tenant_claims` returns the Descope `tenants` claim as it is, for the
   routes that list a Descope principal's memberships (`GET /api/tenants`, the
   `/api/tenants/{tenant_id}/resources` routes, `GET /api/roles/me`). It reads the claim
@@ -423,7 +434,8 @@ configuration at startup (`refuse_canonical_descope_managed`).
   of its own; `get_tenant_claims` refuses a principal of another provider (403). A canonical
   principal's tenants are in `GET /api/identity` (#590).
 - Exception: the role and permission definitions and the FGA schema belong to no tenant
-  and are gated by `require_role`, which answers for one tenant. A Descope principal who
+  and are gated by `require_role`, which answers for one tenant. On OpenFGA the schema is
+  read-only: `infra/openfga` holds the model, and `PUT /api/fga/schema` answers 409. A Descope principal who
   holds the role in their current tenant is served there, as before the resolver (#593).
 - Exception: the `/api/users/{user_id}/idp-links` routes are gated by `require_role` and
   take no tenant from `get_tenant_id`. `_require_user_in_tenant` reads `dct` itself and

@@ -98,6 +98,11 @@ def _principal_provider(request: Request) -> str:
     return authentication_type.lower() if isinstance(authentication_type, str) else ""
 
 
+def is_canonical_principal(request: Request) -> bool:
+    """Whether the request's principal is authorized from the canonical model (``CANONICAL_RBAC_PROVIDERS``)."""
+    return _principal_provider(request) in CANONICAL_RBAC_PROVIDERS
+
+
 async def _load_canonical_memberships(
     request: Request,
     claims: dict,
@@ -149,7 +154,9 @@ async def _load_canonical_memberships(
         )
         raise HTTPException(status_code=403, detail=NO_TENANT_CONTEXT)
 
+    user_id = (result.ok.get("user") or {}).get("id")
     return CanonicalMemberships(
+        user_id=user_id if isinstance(user_id, str) and user_id else None,
         grants=tuple(
             CanonicalGrant(
                 tenant_id=grant["tenant_id"],
@@ -157,7 +164,7 @@ async def _load_canonical_memberships(
                 permissions=tuple(grant.get("permissions", [])),
             )
             for grant in result.ok.get("roles", [])
-        )
+        ),
     )
 
 

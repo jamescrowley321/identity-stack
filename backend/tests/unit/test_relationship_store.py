@@ -1,22 +1,44 @@
-"""The relationship store: its selection, the Descope store, and that only the store reaches Descope's FGA methods."""
+"""The relationship stores: selection, startup, the Descope and OpenFGA stores, their user directories and errors."""
 
 import ast
+import json
+import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from fastapi import FastAPI
 
 from app import main
 from app.dependencies import identity
+from app.dependencies.capabilities import served
+from app.dependencies.fga import store_error_response
+from app.middleware.providers import descope_config, ory_config
 from app.services.descope import DescopeManagementClient
+from app.services.openfga import (
+    MODEL_IN_TERRAFORM,
+    OpenFgaApi,
+    OpenFgaRelationshipStore,
+    OpenFgaSettings,
+)
 from app.services.relationship_store import (
     DescopeRelationshipStore,
     Relation,
+    RelationshipStoreError,
+    RelationshipStoreErrorKind,
     RelationshipStoreFault,
     RelationshipStoreKind,
     RelationshipStoreNotAvailable,
 )
+from app.services.relationship_users import (
+    CanonicalUserDirectory,
+    DescopeUserDirectory,
+    DirectoryUser,
+    UserDirectoryUnavailable,
+)
+from tests.helpers.relationship_store_contract import RelationshipStoreContract
 from tests.unit.test_zitadel_sync_selection import _Engine
 
 APP = Path(__file__).resolve().parents[2] / "app"
@@ -143,6 +165,7 @@ DESCOPE_CLIENT_IMPORTERS = frozenset(
         "app/services/descope_management.py",
         "app/services/reconciliation.py",
         "app/services/relationship_store.py",
+        "app/services/relationship_users.py",
     }
 )
 
@@ -162,13 +185,16 @@ def test_no_other_module_imports_the_descope_client():
     assert importers == DESCOPE_CLIENT_IMPORTERS
 
 
+MODEL_JSON = APP.parent.parent / "infra" / "openfga" / "model.json"
+
+
 class TestSelection:
     @pytest.mark.parametrize(
         ("provider", "expected"),
         [
             ("descope", RelationshipStoreKind.DESCOPE),
-            ("keycloak", RelationshipStoreKind.NONE),
-            ("zitadel", RelationshipStoreKind.NONE),
+            ("keycloak", RelationshipStoreKind.OPENFGA),
+            ("zitadel", RelationshipStoreKind.OPENFGA),
         ],
     )
     def test_unset_follows_the_sync_provider(self, monkeypatch, provider, expected):
@@ -176,21 +202,21 @@ class TestSelection:
         monkeypatch.setattr(identity, "SYNC_PROVIDER", provider)
         assert identity.relationship_store_kind() is expected
 
+    @pytest.mark.parametrize("setting", list(RelationshipStoreKind))
     @pytest.mark.parametrize("provider", ["descope", "keycloak"])
-    def test_descope_selects_descopes_store(self, monkeypatch, provider):
-        monkeypatch.setattr(identity, "RELATIONSHIP_STORE", "descope")
+    def test_a_setting_selects_its_store_whatever_the_provider(self, monkeypatch, provider, setting):
+        monkeypatch.setattr(identity, "RELATIONSHIP_STORE", setting.value)
         monkeypatch.setattr(identity, "SYNC_PROVIDER", provider)
-        assert identity.relationship_store_kind() is RelationshipStoreKind.DESCOPE
+        assert identity.relationship_store_kind() is setting
 
-    @pytest.mark.parametrize(
-        ("setting", "fault"),
-        [("openfga", RelationshipStoreFault.NOT_BUILT), ("keto", RelationshipStoreFault.UNKNOWN)],
-    )
-    def test_a_store_not_built_is_refused(self, monkeypatch, setting, fault):
-        monkeypatch.setattr(identity, "RELATIONSHIP_STORE", setting)
+    def test_an_unknown_store_is_refused(self, monkeypatch):
+        monkeypatch.setattr(identity, "RELATIONSHIP_STORE", "keto")
         with pytest.raises(RelationshipStoreNotAvailable) as raised:
             identity.relationship_store_kind()
-        assert (raised.value.fault, raised.value.selected) == (fault, setting)
+        assert (raised.value.fault, raised.value.selected) == (RelationshipStoreFault.UNKNOWN, "keto")
+
+    def test_every_store_but_none_is_registered(self):
+        assert set(identity.RELATIONSHIP_STORES) == set(RelationshipStoreKind) - {RelationshipStoreKind.NONE}
 
     async def test_the_built_store_checks_in_the_descope_client(self, monkeypatch):
         monkeypatch.setattr(identity, "RELATIONSHIP_STORE", "descope")
@@ -206,10 +232,44 @@ class TestSelection:
             "u1",
         )
 
+    def test_each_store_has_the_directory_of_its_subjects(self, monkeypatch):
+        request = MagicMock()
+        for setting, directory in (("descope", DescopeUserDirectory), ("openfga", CanonicalUserDirectory)):
+            monkeypatch.setattr(identity, "RELATIONSHIP_STORE", setting)
+            assert type(identity.get_user_directory(request, session=MagicMock())) is directory
 
-async def test_the_application_does_not_start_with_openfga_selected(monkeypatch):
-    """Selecting OpenFGA before identity-stack#682 stops startup loudly, never falling back."""
-    monkeypatch.setattr(identity, "RELATIONSHIP_STORE", "openfga")
+
+def _principal(provider: str) -> MagicMock:
+    """A request whose recorded provider is ``provider`` (``descope`` or ``ory``)."""
+    request = MagicMock()
+    request.state.claims = {"sub": "s"}
+    request.state.provider = (
+        descope_config("P1") if provider == "descope" else ory_config("https://ory.test", "https://api.test")
+    )
+    request.state.principal.identity.authentication_type = provider
+    return request
+
+
+class TestWhomEachStoreServes:
+    """Each store serves only the principals whose ids it keys on (conventions §18)."""
+
+    @pytest.mark.parametrize(
+        ("setting", "provider", "expected"),
+        [
+            ("descope", "descope", RelationshipStoreKind.DESCOPE),
+            ("descope", "ory", RelationshipStoreKind.NONE),
+            ("openfga", "descope", RelationshipStoreKind.NONE),
+            ("openfga", "ory", RelationshipStoreKind.OPENFGA),
+            ("none", "ory", RelationshipStoreKind.NONE),
+        ],
+    )
+    def test_served(self, monkeypatch, setting, provider, expected):
+        monkeypatch.setattr(identity, "RELATIONSHIP_STORE", setting)
+        assert served(_principal(provider)).relationship_store is expected
+
+
+def _lifespan_environment(monkeypatch, setting: str) -> None:
+    monkeypatch.setattr(identity, "RELATIONSHIP_STORE", setting)
     monkeypatch.setattr(identity, "SYNC_PROVIDER", "descope")
     monkeypatch.setenv("DESCOPE_PROJECT_ID", "P-local-test")
     monkeypatch.setenv("DESCOPE_MANAGEMENT_KEY", "local-test-key")
@@ -217,15 +277,99 @@ async def test_the_application_does_not_start_with_openfga_selected(monkeypatch)
     monkeypatch.setattr(_Engine, "instances", [])
     monkeypatch.setattr(main, "get_engine", _Engine)
     monkeypatch.setattr(main, "init_telemetry", lambda **_kwargs: None)
-    served = []
 
-    with pytest.raises(RelationshipStoreNotAvailable) as raised:
-        async with main.lifespan(FastAPI()):
-            served.append(True)
 
-    assert served == []
-    assert raised.value.fault is RelationshipStoreFault.NOT_BUILT
-    assert [engine.disposed for engine in _Engine.instances] == [True]
+OPENFGA_ENVIRONMENT = {
+    "OPENFGA_API_URL": "http://openfga.test/",
+    "OPENFGA_STORE_ID": "store-1",
+    "OPENFGA_AUTHORIZATION_MODEL_ID": "model-1",
+}
+
+
+class TestStartup:
+    async def test_an_unknown_store_stops_startup(self, monkeypatch):
+        _lifespan_environment(monkeypatch, "keto")
+        served_requests = []
+
+        with pytest.raises(RelationshipStoreNotAvailable) as raised:
+            async with main.lifespan(FastAPI()):
+                served_requests.append(True)
+
+        assert served_requests == []
+        assert raised.value.fault is RelationshipStoreFault.UNKNOWN
+        assert [engine.disposed for engine in _Engine.instances] == [True]
+
+    @pytest.mark.parametrize("unset", sorted(OPENFGA_ENVIRONMENT))
+    async def test_openfga_without_a_setting_stops_startup_naming_it(self, monkeypatch, unset):
+        _lifespan_environment(monkeypatch, "openfga")
+        for name, value in OPENFGA_ENVIRONMENT.items():
+            monkeypatch.setenv(name, value)
+        monkeypatch.delenv(unset)
+
+        with pytest.raises(RelationshipStoreNotAvailable, match=unset) as raised:
+            async with main.lifespan(FastAPI()):
+                pass
+
+        assert raised.value.fault is RelationshipStoreFault.MISSING_SETTING
+        assert [engine.disposed for engine in _Engine.instances] == [True]
+
+    @pytest.mark.parametrize(("status", "body"), [(404, {"code": "authorization_model_not_found"}), (500, {})])
+    async def test_openfga_without_the_model_stops_startup(self, monkeypatch, status, body):
+        _lifespan_environment(monkeypatch, "openfga")
+        for name, value in OPENFGA_ENVIRONMENT.items():
+            monkeypatch.setenv(name, value)
+        clients = _mock_clients(monkeypatch, lambda _request: httpx.Response(status, json=body))
+
+        with pytest.raises(RelationshipStoreNotAvailable, match="model-1") as raised:
+            async with main.lifespan(FastAPI()):
+                pass
+
+        assert raised.value.fault is RelationshipStoreFault.UNREACHABLE
+        assert [client.is_closed for client in clients] == [True, True]
+
+    async def test_openfga_reads_the_configured_model_once_and_is_closed_at_shutdown(self, monkeypatch):
+        _lifespan_environment(monkeypatch, "openfga")
+        for name, value in OPENFGA_ENVIRONMENT.items():
+            monkeypatch.setenv(name, value)
+        monkeypatch.setenv("OPENFGA_API_TOKEN", "local-test-preshared")
+        seen: list[httpx.Request] = []
+
+        def answer(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json={"authorization_model": {"id": "model-1"}})
+
+        clients = _mock_clients(monkeypatch, answer)
+        app = FastAPI()
+
+        async with main.lifespan(app):
+            assert app.state.openfga.settings == OpenFgaSettings(
+                "http://openfga.test", "store-1", "model-1", "local-test-preshared"
+            )
+
+        assert [(r.method, str(r.url), r.headers["authorization"]) for r in seen] == [
+            ("GET", "http://openfga.test/stores/store-1/authorization-models/model-1", "Bearer local-test-preshared")
+        ]
+        assert [client.is_closed for client in clients] == [True, True]
+
+
+def _mock_clients(monkeypatch, handler) -> list[httpx.AsyncClient]:
+    """Every client the lifespan builds answers with ``handler``; returns them as built."""
+    built: list[httpx.AsyncClient] = []
+
+    def build(*, timeout: float) -> httpx.AsyncClient:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=timeout)
+        built.append(client)
+        return client
+
+    monkeypatch.setattr(main, "outbound_client", build)
+    return built
+
+
+def _status_error(status: int, text: str = "error") -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://api.descope.com/v1/mgmt/authz/re/save")
+    return httpx.HTTPStatusError(
+        str(status), request=request, response=httpx.Response(status, request=request, text=text)
+    )
 
 
 class TestDescopeStore:
@@ -267,3 +411,252 @@ class TestDescopeStore:
     async def test_an_unset_schema_reads_empty(self, client):
         client.get_fga_schema.return_value = None
         assert await DescopeRelationshipStore(client).read_schema() == ""
+
+    @pytest.mark.parametrize(
+        ("raised", "kind", "status"),
+        [
+            (ValueError("target contains invalid characters"), RelationshipStoreErrorKind.INVALID, 422),
+            (json.JSONDecodeError("bad", "x", 0), RelationshipStoreErrorKind.UNAVAILABLE, 502),
+            (_status_error(400, '{"message": "unknown relation"}'), RelationshipStoreErrorKind.REFUSED, 400),
+            (_status_error(404), RelationshipStoreErrorKind.ABSENT, 502),
+            (_status_error(503), RelationshipStoreErrorKind.UNAVAILABLE, 502),
+            (
+                httpx.ConnectError("refused", request=httpx.Request("POST", "https://api.descope.com")),
+                RelationshipStoreErrorKind.UNAVAILABLE,
+                502,
+            ),
+        ],
+    )
+    async def test_every_failure_is_a_typed_store_error(self, client, raised, kind, status):
+        client.create_relation.side_effect = raised
+
+        with pytest.raises(RelationshipStoreError) as caught:
+            await DescopeRelationshipStore(client).write("t1", "document", "d1", "owner", "u1")
+
+        assert (caught.value.kind, store_error_response(caught.value).status_code) == (kind, status)
+
+
+# Descope's document schema (infra/fga.tf): the permissions each relation gives.
+_DERIVED = {"can_view": {"viewer", "editor", "owner"}, "can_edit": {"editor", "owner"}, "can_delete": {"owner"}}
+
+
+class FakeDescopeFga:
+    """Descope's FGA methods over an in-memory tuple set, with the schema's derivations."""
+
+    def __init__(self) -> None:
+        self.tuples: set[tuple[str, str, str, str]] = set()
+
+    async def create_relation(self, resource_type, resource, relation, target):
+        self.tuples.add((resource_type, resource, relation, target))
+
+    async def delete_relation(self, resource_type, resource, relation, target):
+        self.tuples.discard((resource_type, resource, relation, target))
+
+    async def check_permission(self, resource_type, resource, relation, target):
+        held = _DERIVED.get(relation, {relation})
+        return any((resource_type, resource, r, target) in self.tuples for r in held)
+
+    def _dicts(self, resource_type, resource, relation=None):
+        return [
+            {"resource": res, "relationDefinition": rel, "target": target}
+            for (rt, res, rel, target) in sorted(self.tuples)
+            if rt == resource_type and res == resource and (relation is None or rel == relation)
+        ]
+
+    async def list_relations(self, resource_type, resource, relation=None):
+        return self._dicts(resource_type, resource, relation)
+
+    async def list_all_relations(self, resource_type, resource):
+        return self._dicts(resource_type, resource)
+
+    async def list_user_resources(self, resource_type, relation, target):
+        resources = {res for (rt, res, _rel, _target) in self.tuples if rt == resource_type}
+        return [
+            {"resource": res}
+            for res in sorted(resources)
+            if await self.check_permission(resource_type, res, relation, target)
+        ]
+
+    async def get_fga_schema(self):
+        return (APP.parent.parent / "infra" / "fga.tf").read_text()
+
+
+class TestDescopeStoreContract(RelationshipStoreContract):
+    """The contract, with Descope's client replaced at its FGA methods."""
+
+    @pytest.fixture
+    def store(self):
+        return DescopeRelationshipStore(FakeDescopeFga())
+
+
+def _openfga(handler) -> OpenFgaRelationshipStore:
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=1.0)
+    return OpenFgaRelationshipStore(OpenFgaApi(OpenFgaSettings("http://openfga.test", "store-1", "model-1"), http))
+
+
+class TestOpenFgaStore:
+    """The requests the store sends and how it reads the answers. The contract runs against a real server."""
+
+    async def test_a_tuple_names_the_tenant_in_the_object_and_the_user_type(self):
+        seen: list[tuple[str, dict]] = []
+
+        def answer(request: httpx.Request) -> httpx.Response:
+            seen.append((request.url.path, json.loads(request.content)))
+            return httpx.Response(200, json={"allowed": True} if request.url.path.endswith("/check") else {})
+
+        store = _openfga(answer)
+        assert await store.check("t1", "document", "d1", "can_view", "u1") is True
+        await store.write("t1", "document", "d1", "owner", "u1")
+        await store.delete("t1", "document", "d1", "owner", "user:u1")
+
+        key = {"user": "user:u1", "relation": "owner", "object": "document:t1/d1"}
+        assert seen == [
+            (
+                "/stores/store-1/check",
+                {"authorization_model_id": "model-1", "tuple_key": {**key, "relation": "can_view"}},
+            ),
+            (
+                "/stores/store-1/write",
+                {"authorization_model_id": "model-1", "writes": {"tuple_keys": [key], "on_duplicate": "ignore"}},
+            ),
+            (
+                "/stores/store-1/write",
+                {"authorization_model_id": "model-1", "deletes": {"tuple_keys": [key], "on_missing": "ignore"}},
+            ),
+        ]
+
+    async def test_relations_are_read_page_by_page_as_user_ids(self):
+        pages = {
+            "": {
+                "tuples": [
+                    {"key": {"user": "user:u1", "relation": "owner", "object": "document:t1/d1"}},
+                    {"key": {"user": "group:g#member", "relation": "viewer", "object": "document:t1/d1"}},
+                ],
+                "continuation_token": "next",
+            },
+            "next": {
+                "tuples": [{"key": {"user": "user:u2", "relation": "viewer", "object": "document:t1/d1"}}],
+                "continuation_token": "",
+            },
+        }
+        bodies: list[dict] = []
+
+        def answer(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            bodies.append(body)
+            return httpx.Response(200, json=pages[body.get("continuation_token", "")])
+
+        assert await _openfga(answer).all_relations("t1", "document", "d1") == [
+            Relation("owner", "u1"),
+            Relation("viewer", "u2"),
+        ]
+        assert [body["tuple_key"] for body in bodies] == [{"object": "document:t1/d1"}] * 2
+
+    async def test_objects_are_the_tenants_own_ids(self):
+        def answer(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, json={"objects": ["document:t1/d1", "document:t2/d2", "document:t1/", "folder:t1/f"]}
+            )
+
+        assert await _openfga(answer).objects("t1", "document", "can_view", "u1") == ["d1"]
+
+    async def test_the_schema_is_read_only(self):
+        with pytest.raises(RelationshipStoreError) as caught:
+            await _openfga(lambda _request: httpx.Response(500)).write_schema("model\n  schema 1.1")
+
+        assert (caught.value.kind, caught.value.detail) == (
+            RelationshipStoreErrorKind.SCHEMA_READ_ONLY,
+            MODEL_IN_TERRAFORM,
+        )
+        assert store_error_response(caught.value).status_code == 409
+
+    @pytest.mark.parametrize(
+        ("answer", "kind"),
+        [
+            (
+                httpx.Response(400, json={"code": "validation_error", "message": "relation 'x' not found"}),
+                RelationshipStoreErrorKind.REFUSED,
+            ),
+            (httpx.Response(404, json={"code": "store_id_not_found"}), RelationshipStoreErrorKind.UNAVAILABLE),
+            (httpx.Response(500, text="boom"), RelationshipStoreErrorKind.UNAVAILABLE),
+            (httpx.Response(200, text="not json"), RelationshipStoreErrorKind.UNAVAILABLE),
+            (httpx.Response(200, json=["not", "an", "object"]), RelationshipStoreErrorKind.UNAVAILABLE),
+        ],
+    )
+    async def test_every_failure_is_a_typed_store_error(self, answer, kind):
+        with pytest.raises(RelationshipStoreError) as caught:
+            await _openfga(lambda _request: answer).check("t1", "document", "d1", "x", "u1")
+
+        assert caught.value.kind is kind
+
+    async def test_a_refusal_carries_openfgas_message(self):
+        answer = httpx.Response(400, json={"code": "validation_error", "message": "relation 'x' not found"})
+        with pytest.raises(RelationshipStoreError) as caught:
+            await _openfga(lambda _request: answer).check("t1", "document", "d1", "x", "u1")
+
+        assert caught.value.detail == "Validation error: relation 'x' not found"
+
+    async def test_no_answer_is_unavailable(self):
+        def refuse(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("refused", request=request)
+
+        with pytest.raises(RelationshipStoreError) as caught:
+            await _openfga(refuse).check("t1", "document", "d1", "can_view", "u1")
+
+        assert (caught.value.kind, caught.value.detail) == (
+            RelationshipStoreErrorKind.UNAVAILABLE,
+            "Failed to reach OpenFGA",
+        )
+
+    def test_the_model_file_defines_the_descope_schemas_relations(self):
+        model = json.loads(MODEL_JSON.read_text())
+        document = {t["type"]: t for t in model["type_definitions"]}["document"]
+
+        assert set(document["relations"]) == {"owner", "editor", "viewer"} | set(_DERIVED)
+
+
+class TestDescopeUserDirectory:
+    async def test_a_user_with_their_tenants(self):
+        client = MagicMock()
+        client.load_user = AsyncMock(
+            return_value={"userId": "U1", "userTenants": [{"tenantId": "t1"}, {"tenantId": ""}, "junk"]}
+        )
+        assert await DescopeUserDirectory(client).find("a@example.test") == DirectoryUser("U1", frozenset({"t1"}))
+
+    @pytest.mark.parametrize("answer", [{}, None, {"userTenants": []}])
+    async def test_no_user_id_is_no_user(self, answer):
+        client = MagicMock()
+        client.load_user = AsyncMock(return_value=answer)
+        assert await DescopeUserDirectory(client).find("x") is None
+
+    async def test_a_404_is_no_user_and_any_other_failure_is_unavailable(self):
+        client = MagicMock()
+        client.load_user = AsyncMock(side_effect=_status_error(404))
+        assert await DescopeUserDirectory(client).find("x") is None
+        client.load_user = AsyncMock(side_effect=_status_error(500))
+        with pytest.raises(UserDirectoryUnavailable):
+            await DescopeUserDirectory(client).find("x")
+
+
+class TestCanonicalUserDirectory:
+    USER_ID = uuid.UUID("00000000-0000-4000-8000-0000000000aa")
+    TENANT = uuid.UUID("00000000-0000-4000-8000-0000000000bb")
+
+    @pytest.fixture
+    def repositories(self):
+        users = MagicMock()
+        user = SimpleNamespace(id=self.USER_ID)
+        users.get = AsyncMock(side_effect=lambda user_id: user if user_id == self.USER_ID else None)
+        users.get_by_email = AsyncMock(side_effect=lambda email: user if email == "a@example.test" else None)
+        assignments = MagicMock()
+        assignments.list_by_user = AsyncMock(return_value=[SimpleNamespace(tenant_id=self.TENANT)] * 2)
+        return users, assignments
+
+    @pytest.mark.parametrize("identifier", [str(USER_ID), str(USER_ID).upper(), "a@example.test", " a@example.test "])
+    async def test_by_id_or_email(self, repositories, identifier):
+        expected = DirectoryUser(str(self.USER_ID), frozenset({str(self.TENANT)}))
+        assert await CanonicalUserDirectory(*repositories).find(identifier) == expected
+
+    @pytest.mark.parametrize("identifier", [str(uuid.UUID(int=1)), "nobody@example.test", "a-username"])
+    async def test_anyone_else_is_no_user(self, repositories, identifier):
+        assert await CanonicalUserDirectory(*repositories).find(identifier) is None

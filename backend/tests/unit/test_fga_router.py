@@ -963,13 +963,13 @@ def test_prefix_resource_id():
 
 
 def test_sanitize_error_detail_json():
-    from app.routers.fga import _sanitize_error_detail
+    from app.services.relationship_store import _refusal_detail as _sanitize_error_detail
 
     assert _sanitize_error_detail('{"message": "bad input"}') == "Validation error: bad input"
 
 
 def test_sanitize_error_detail_plain_text():
-    from app.routers.fga import _sanitize_error_detail
+    from app.services.relationship_store import _refusal_detail as _sanitize_error_detail
 
     result = _sanitize_error_detail("some raw error text")
     assert result.startswith("Validation error:")
@@ -977,7 +977,7 @@ def test_sanitize_error_detail_plain_text():
 
 
 def test_sanitize_error_detail_truncates():
-    from app.routers.fga import _sanitize_error_detail
+    from app.services.relationship_store import _refusal_detail as _sanitize_error_detail
 
     long_text = "x" * 500
     result = _sanitize_error_detail(long_text)

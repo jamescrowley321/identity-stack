@@ -36,7 +36,9 @@ def served(request: Request) -> Served:
 
     Descope's capabilities and its FGA store are keyed on Descope's own tenant and
     user ids, so they serve only a principal of a ``descope_managed`` provider
-    (conventions §18): any other principal is served neither.
+    (conventions §18). OpenFGA is keyed on canonical ids, so it serves only a
+    principal authorized from the canonical model. Each store says whom it serves
+    (``identity.RELATIONSHIP_STORES``).
     """
     if getattr(request.state, "claims", None) is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -45,7 +47,8 @@ def served(request: Request) -> Served:
     if identity.SYNC_ADAPTERS[identity.SYNC_PROVIDER].adapter is DescopeSyncAdapter and not descope_principal:
         capabilities = frozenset()
     store = identity.relationship_store_kind()
-    if store is RelationshipStoreKind.DESCOPE and not descope_principal:
+    registration = identity.RELATIONSHIP_STORES.get(store)
+    if registration is None or not registration.serves(request):
         store = RelationshipStoreKind.NONE
     return Served(capabilities, store)
 

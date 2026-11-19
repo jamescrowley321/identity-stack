@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.dependencies.fga import extract_user_id, require_fga, resolve_fga_user_target
+from app.services.relationship_users import DescopeUserDirectory
 
 
 def _make_request(claims, path_params=None, descope_client=None):
@@ -206,15 +207,16 @@ VICTIM_USER_ID = "U3JvictimInternalId"
 
 
 def _client_returning(user):
+    """Descope's user directory over a client whose ``load_user`` answers ``user``."""
     client = MagicMock()
     client.load_user = AsyncMock(return_value=user)
-    return client
+    return DescopeUserDirectory(client)
 
 
 def _client_raising(exc):
     client = MagicMock()
     client.load_user = AsyncMock(side_effect=exc)
-    return client
+    return DescopeUserDirectory(client)
 
 
 class TestResolveFgaUserTargetTenantScoping:
