@@ -5,7 +5,7 @@ source-of-truth. It inventories every provider, every credential the system
 uses, where each one comes from, and what is still manual. Values are never
 recorded here — only names and sources.
 
-There are **four separate Terraform roots**, each with its own state:
+There are **five separate Terraform roots**, each with its own state:
 
 | Root | Providers | TFC workspace | State in-repo? |
 |------|-----------|---------------|----------------|
@@ -13,6 +13,7 @@ There are **four separate Terraform roots**, each with its own state:
 | `infra/ory/` | ory (`ory/ory` `~>26.3`) | `auth-stack` (comment only) | **no `cloud{}`/`backend{}` block** — effectively local state |
 | `infra/keycloak/` | keycloak (`keycloak/keycloak` `~>5.10`), random (`hashicorp/random` `~>3.6`) | none | **no** — local state, git-ignored; targets the compose Keycloak only |
 | `infra/zitadel/` | zitadel (`zitadel/zitadel` `~>3.8`), random (`hashicorp/random` `~>3.6`) | none | **no** — local state (`infra/zitadel/terraform.tfstate`), git-ignored; targets the compose Zitadel only |
+| `infra/openfga/` | openfga (`openfga/openfga` `~>0.5.1`) | none | **no** — local state, git-ignored; targets the compose OpenFGA only (no authentication) |
 
 Provider **auth is entirely out-of-band** (hand-set TFC workspace env vars, not
 codified): Descope `DESCOPE_MANAGEMENT_KEY`; GitHub `GITHUB_TOKEN`/`GH_TOKEN`;
@@ -29,6 +30,7 @@ exported in the shell that runs Terraform. No tfvars file holds a credential.
 - **Ory** (`infra/ory/`): project + config (JWT AT, PKCE), a project admin API key (state-only), the public SPA OAuth2 client, identity schema, optional org.
 - **Shared test fixture** (`infra/fixtures/test-identities.json`): the test tenants, users, memberships and canonical roles. `infra/keycloak` and `infra/zitadel` build theirs from it, and the backend's Keycloak and Zitadel suites take user names from it. It records the Descope tenant each tenant maps to; the Descope and Ory roots are not built from it. See [`fixtures/README.md`](fixtures/README.md).
 - **Keycloak** (`infra/keycloak/`): the identity-stack realm the compose import ships, shaped for the canonical model and the two-way sync: the shared fixture's organizations, members and role assignments (each organization's `owner`, `admin`, `member` and `viewer` groups, which map no role), the SPA's public PKCE client `identity-stack-spa` and the API client `identity-stack-api` (its audience; client roles = canonical permissions, composite client roles = canonical roles, held by no one), `identity-stack-other` for negative tests, the fixture users, admin and user events kept 7 days, and the `identity-stack-admin` service account the backend pushes with and reads events through. The token says who the caller is and the backend's database what the caller may do; with `SYNC_PROVIDER=keycloak` the backend pushes every canonical change to the realm, pulls the realm's changes back from its events and reconciles the two. See [`keycloak/README.md`](keycloak/README.md). Checked in CI against Keycloak 26.8.2: `make keycloak-terraform-check` compares the built realm with the import, and `make keycloak-terraform-integration` runs the backend's Keycloak integration tests against it, which pass as they do against the import. Results, the sync and its limits: [`docs/keycloak.md`](../docs/keycloak.md).
+- **OpenFGA** (`infra/openfga/`): the store and the authorization model (`model.json`) of the relationship store the FGA and document routes use for Keycloak, Zitadel and Ory principals (`RELATIONSHIP_STORE=openfga`). `make openfga-terraform-check` applies it to `openfga-test` and checks the second plan is empty. See [`openfga/README.md`](openfga/README.md).
 - **Zitadel** (`infra/zitadel/`): everything inside the compose Zitadel — instance login policy (registration off) and OIDC settings (15-minute access tokens), organization `identity-stack` and one per fixture tenant (`Acme`/`Globex`/`Unlinked`) with their own login policies, the `identity-stack` project with roles `owner`/`admin`/`member`/`viewer` granted to nobody, project grants to the two tenants, the SPA and a second OIDC application, a test machine user, and one human per fixture user. `make zitadel-seed` links it to canonical tenants. See [`zitadel/README.md`](zitadel/README.md).
 
 ## Common variables and outputs of the local provider roots

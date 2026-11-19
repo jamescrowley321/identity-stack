@@ -124,3 +124,61 @@ services:
       start_period: 20s
     profiles:
       - keycloak
+
+  # OpenFGA, the relationship store of a deployment whose provider has none
+  # (RELATIONSHIP_STORE=openfga), with Postgres storage like a deployment's.
+  # infra/openfga creates the store and the authorization model; the integration
+  # suite creates its own store per run. No authentication: it binds to
+  # loopback and holds only test tuples. Behind a profile: `make test-up` does
+  # not start it, `make test-up-openfga` does.
+  openfga-test-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: openfga
+      POSTGRES_USER: openfga
+      POSTGRES_PASSWORD: openfga-test-only
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openfga -d openfga"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    profiles:
+      - openfga
+
+  # Creates OpenFGA's tables, then exits.
+  openfga-test-migrate:
+    image: openfga/openfga:v1.22.1
+    command: migrate
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://openfga:openfga-test-only@openfga-test-db:5432/openfga?sslmode=disable
+    depends_on:
+      openfga-test-db:
+        condition: service_healthy
+    profiles:
+      - openfga
+
+  openfga-test:
+    image: openfga/openfga:v1.22.1
+    command: run
+    ports:
+      - "127.0.0.1:18380:8080" # HTTP API
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://openfga:openfga-test-only@openfga-test-db:5432/openfga?sslmode=disable
+      OPENFGA_PLAYGROUND_ENABLED: "false"
+      OPENFGA_LOG_LEVEL: warn
+    depends_on:
+      openfga-test-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr=127.0.0.1:8081"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+      start_period: 3s
+    profiles:
+      - openfga

@@ -25,11 +25,15 @@ def _id() -> str:
     return str(uuid.uuid4())
 
 
-class RelationshipStoreContract:
+class FreshIds:
+    """An ``ids`` fixture: fresh tenant, object and subject ids for each test."""
+
     @pytest.fixture
     def ids(self) -> dict[str, str]:
         return {name: _id() for name in ("tenant", "other_tenant", "doc", "other_doc", "alice", "bob")}
 
+
+class RelationshipStoreContract(FreshIds):
     async def test_a_written_relation_holds(self, store: RelationshipStore, ids):
         await store.write(ids["tenant"], DOCUMENT, ids["doc"], "owner", ids["alice"])
 

@@ -5,6 +5,7 @@
 COMPOSE_TEST := docker compose -f docker-compose.test.yml
 TEST_DATABASE_URL := postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
 TEST_REDIS_URL := redis://localhost:16379/0
+TEST_OPENFGA_URL := http://localhost:18380
 
 # The base compose file refuses to parse without these three variables. The
 # Zitadel targets never start the services that read them, so placeholders keep
@@ -32,8 +33,16 @@ test-up: ## bring up postgres+redis for tests (idempotent; leave running between
 test-up-keycloak: ## bring up the test stack plus keycloak-test (http://keycloak-test.localhost:18180)
 	$(COMPOSE_TEST) --profile keycloak up -d --wait
 
-test-down: ## tear down the test stack, keycloak-test included
-	$(COMPOSE_TEST) --profile keycloak down -v
+.PHONY: test-up-openfga
+test-up-openfga: ## bring up the test stack plus openfga-test (http://localhost:18380, Postgres storage)
+	$(COMPOSE_TEST) --profile openfga up -d --wait
+
+test-down: ## tear down the test stack, keycloak-test and openfga-test included
+	$(COMPOSE_TEST) --profile keycloak --profile openfga down -v
+
+.PHONY: openfga-terraform-check
+openfga-terraform-check: ## apply infra/openfga to a running openfga-test (make test-up-openfga) in a scratch copy, check the second plan is empty and the model is model.json, then destroy
+	infra/openfga/scripts/check-against-compose.sh
 
 .PHONY: keycloak-terraform-check
 keycloak-terraform-check: ## apply infra/keycloak to a fresh realm in a running keycloak-test (make test-up-keycloak), check plan is empty and the realm matches the import
@@ -50,9 +59,9 @@ test-unit: test-up ## run backend unit tests (auto-brings-up test stack)
 	cd backend && TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TEST_REDIS_URL='$(TEST_REDIS_URL)' \
 	python -m pytest tests/unit/ -v
 
-test-integration: test-up-keycloak ## run backend integration tests (auto-brings-up test stack, with keycloak-test)
+test-integration: test-up-keycloak test-up-openfga ## run backend integration tests (auto-brings-up test stack, with keycloak-test and openfga-test)
 	set -a; [ -f backend/.env ] && . backend/.env; set +a; \
-	cd backend && TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TEST_REDIS_URL='$(TEST_REDIS_URL)' \
+	cd backend && TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TEST_REDIS_URL='$(TEST_REDIS_URL)' TEST_OPENFGA_URL='$(TEST_OPENFGA_URL)' \
 	python -m pytest tests/integration/ -v
 
 test-frontend: ## run frontend unit tests

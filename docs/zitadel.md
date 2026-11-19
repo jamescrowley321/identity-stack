@@ -120,14 +120,16 @@ VITE_OIDC_SCOPE=openid profile email offline_access urn:zitadel:iam:user:resourc
 Run it with the instance applied and seeded, the backend and the SPA up:
 
 ```bash
-make zitadel-reset && make test-up
+make zitadel-reset && make test-up-openfga
+terraform -chdir=infra/openfga init && terraform -chdir=infra/openfga apply -var api_url=http://localhost:18380
 cd infra/zitadel && export TF_VAR_zitadel_access_token="$(make -s -C ../.. zitadel-admin-pat)" \
   && terraform init && terraform apply -var-file=environments/dev.tfvars && cd ../..
 export DATABASE_URL=postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
 (cd backend && python -m alembic upgrade head) && make zitadel-seed
 # the SPA: npm run build with the frontend lines of `make zitadel-env`,
 #   then `npx vite preview --port 3000 --strictPort`
-# the backend on :8000: the backend lines of `make zitadel-env`, CANONICAL_RBAC_PROVIDERS=zitadel,
+# the backend on :8000: the backend lines of `make zitadel-env`, the backend_environment of
+#   infra/openfga (RELATIONSHIP_STORE=openfga and OPENFGA_*), CANONICAL_RBAC_PROVIDERS=zitadel,
 #   JIT_ENABLED_PROVIDERS=zitadel, FRONTEND_URL=http://localhost:3000, DESCOPE_PROJECT_ID= and
 #   RATE_LIMIT_DEFAULT=2000/minute RATE_LIMIT_AUTH=1000/minute
 #   and INTERNAL_IDENTITY_KEY, DESCOPE_WEBHOOK_SECRET and DESCOPE_FLOW_SYNC_SECRET set to throwaway
