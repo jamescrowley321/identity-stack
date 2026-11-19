@@ -243,6 +243,13 @@ MACHINE_PERMITTED_WRITES: dict[tuple[str, str], str] = {
 }
 _WRITES = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
+# path -> why a route of the application that is not an ``APIRoute`` (which every register
+# here walks) needs no register: FastAPI's own documentation pages, read-only.
+NON_API_ROUTES: dict[str, str] = {
+    "/openapi.json": "FastAPI's OpenAPI document: GET only, no dependency, no principal",
+    "/redoc": "FastAPI's ReDoc page: GET only, no dependency, no principal",
+}
+
 # (method, path) -> what keeps another provider's subject from Descope on a route
 # that is handed the management adapter and carries no guard.
 UNGUARDED_ADAPTER_ROUTES: dict[tuple[str, str], str] = {}
@@ -552,6 +559,19 @@ class TestTheRegisters:
 
     def test_machines_are_refused_on_exactly_the_credential_role_member_and_relation_routes(self):
         assert _routes_depending_on(refuse_machine_principal) == MACHINE_REFUSED_ROUTES
+
+    def test_every_route_the_registers_cannot_see_says_why(self):
+        """A Mount, a WebSocket or another non-APIRoute would slip past every register: none may, unlisted."""
+        unseen = {
+            getattr(route, "path", repr(route)): (
+                type(route).__name__,
+                frozenset(getattr(route, "methods", None) or ()),
+            )
+            for route in shipped_app.routes
+            if not isinstance(route, APIRoute)
+        }
+
+        assert unseen == {path: ("Route", frozenset({"GET", "HEAD"})) for path in NON_API_ROUTES}
 
     def test_every_write_a_machine_may_reach_says_why(self):
         """A new write fails here until it refuses machines or says why a machine may make it."""
