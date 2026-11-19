@@ -18,16 +18,17 @@ from tests.e2e.not_applicable import DESCOPE, KEYCLOAK, ZITADEL, selected_provid
 
 NOTHING = {"capabilities": [], "relationship_store": RelationshipStoreKind.NONE}
 
-# What each run's principals are served. Descope's capabilities and FGA store are
-# keyed on Descope ids, so they serve Descope principals only: the Zitadel run's
-# backend syncs with Descope (SYNC_PROVIDER stays descope, .github/workflows/ci.yml),
-# but serves its Zitadel principals none of them.
+# What each run's principals are served. A sync adapter's capabilities serve its own
+# provider's principals only, and so does Descope's FGA store: the Keycloak run syncs
+# with Keycloak (custom attributes), while the Zitadel run's backend syncs with Descope
+# (SYNC_PROVIDER stays descope, .github/workflows/ci.yml) and serves its Zitadel
+# principals none of Descope's.
 EXPECTED = {
     DESCOPE: {
         "capabilities": sorted([Capability.CUSTOM_ATTRIBUTES, Capability.MACHINE_CREDENTIALS]),
         "relationship_store": RelationshipStoreKind.DESCOPE,
     },
-    KEYCLOAK: NOTHING,
+    KEYCLOAK: {"capabilities": [Capability.CUSTOM_ATTRIBUTES], "relationship_store": RelationshipStoreKind.NONE},
     ZITADEL: NOTHING,
 }
 

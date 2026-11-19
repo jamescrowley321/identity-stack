@@ -11,9 +11,18 @@ from typing import ClassVar
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
+from app.errors.identity import NotFound
 from app.logbook import logbook
-from app.services.adapters.base import Capability, IdentityProviderAdapter, SyncError
+from app.services.adapters.base import (
+    AttributeValue,
+    Capability,
+    CustomAttributes,
+    IdentityProviderAdapter,
+    SyncError,
+    TenantAttributes,
+)
 from app.services.descope import DescopeManagementClient
+from app.services.descope_management import DescopeManagementAdapter
 
 logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
@@ -25,7 +34,7 @@ _STATUS_MAP: dict[str, str] = {
 }
 
 
-class DescopeSyncAdapter(IdentityProviderAdapter):
+class DescopeSyncAdapter(IdentityProviderAdapter, CustomAttributes):
     """Adapter that syncs canonical identity state to Descope.
 
     Each method wraps a DescopeManagementClient call:
@@ -35,7 +44,8 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
     """
 
     # Access keys and user and tenant custom attributes, through the Descope
-    # Management API (DescopeManagementAdapter).
+    # Management API (DescopeManagementAdapter). A subject is a Descope user id and
+    # a tenant a Descope tenant id (CustomAttributes).
     capabilities: ClassVar[frozenset[Capability]] = frozenset(
         {Capability.MACHINE_CREDENTIALS, Capability.CUSTOM_ATTRIBUTES}
     )
@@ -262,4 +272,53 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
         """Delete tenant from Descope. Placeholder."""
         with tracer.start_as_current_span("descope.delete_tenant") as span:
             span.set_attribute("tenant.id", str(tenant_id))
+            return Ok(None)
+
+    # --- custom attributes (CustomAttributes) ---------------------------------------
+
+    def _management(self) -> DescopeManagementAdapter:
+        return DescopeManagementAdapter(self._client)
+
+    async def user_attributes(self, *, subject: str) -> Result[dict[str, AttributeValue], SyncError]:
+        with tracer.start_as_current_span("descope.user_attributes"):
+            try:
+                loaded = await self._management().load_profile(subject)
+            except Exception as exc:
+                return Error(SyncError(message=str(exc), operation="user_attributes"))
+            if loaded.is_error():
+                return Error(SyncError(message=loaded.error.message, operation="user_attributes"))
+            return Ok(loaded.ok["custom_attributes"] or {})
+
+    async def set_user_attribute(self, *, subject: str, key: str, value: AttributeValue) -> Result[None, SyncError]:
+        with tracer.start_as_current_span("descope.set_user_attribute"):
+            try:
+                updated = await self._management().update_profile_attribute(subject, key, value)
+            except Exception as exc:
+                return Error(SyncError(message=str(exc), operation="set_user_attribute"))
+            if updated.is_error():
+                return Error(SyncError(message=updated.error.message, operation="set_user_attribute"))
+            return Ok(None)
+
+    async def tenant_attributes(self, *, tenant: str) -> Result[TenantAttributes | None, SyncError]:
+        with tracer.start_as_current_span("descope.tenant_attributes"):
+            try:
+                loaded = await self._management().load_tenant_settings(tenant)
+            except Exception as exc:
+                return Error(SyncError(message=str(exc), operation="tenant_attributes"))
+            if loaded.is_error():
+                if isinstance(loaded.error, NotFound):
+                    return Ok(None)
+                return Error(SyncError(message=loaded.error.message, operation="tenant_attributes"))
+            return Ok(TenantAttributes(name=loaded.ok["name"], attributes=loaded.ok["custom_attributes"] or {}))
+
+    async def set_tenant_attributes(
+        self, *, tenant: str, attributes: dict[str, AttributeValue]
+    ) -> Result[None, SyncError]:
+        with tracer.start_as_current_span("descope.set_tenant_attributes"):
+            try:
+                updated = await self._management().update_tenant_settings(tenant, attributes)
+            except Exception as exc:
+                return Error(SyncError(message=str(exc), operation="set_tenant_attributes"))
+            if updated.is_error():
+                return Error(SyncError(message=updated.error.message, operation="set_tenant_attributes"))
             return Ok(None)

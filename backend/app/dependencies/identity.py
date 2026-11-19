@@ -23,12 +23,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import State
 
+from app.dependencies.descope import is_descope_principal
 from app.dependencies.keycloak_reconciliation import build_keycloak_reconciliation
 from app.dependencies.keycloak_sync import build_keycloak_sync_adapter
 from app.dependencies.zitadel_sync import build_zitadel_sync_adapter
 from app.errors.identity import Conflict, IdentityErrorRaised
 from app.knobs import knob
 from app.logbook import logbook
+from app.middleware.providers import KEYCLOAK_PROVIDER_NAME, ZITADEL_PROVIDER_NAME, ProviderTokenConfig
 from app.models.database import get_async_session, get_engine
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
@@ -103,23 +105,41 @@ SYNC_PROVIDER = knob("SYNC_PROVIDER", "descope").strip().lower()
 
 @dataclass(frozen=True)
 class SyncAdapterRegistration:
-    """A provider's sync adapter: its class, which declares its capabilities, and how it is built."""
+    """A provider's sync adapter: its class, which declares its capabilities, how it is built,
+    and which principals are the provider's own (their subject and tenant are its ids)."""
 
     adapter: type[IdentityProviderAdapter]
     build: Callable[[State, AsyncSession], IdentityProviderAdapter]
+    own_principal: Callable[[Request], bool]
 
 
-# One entry per provider: its adapter's class and how the adapter is built from the
-# application state and the request's database session.
+def _recorded_as(name: str) -> Callable[[Request], bool]:
+    """Whether a middleware attributed the request's claims to the provider named ``name``."""
+
+    def recorded(request: Request) -> bool:
+        provider = getattr(request.state, "provider", None)
+        return isinstance(provider, ProviderTokenConfig) and provider.name == name
+
+    return recorded
+
+
+# One entry per provider: its adapter's class, how the adapter is built from the
+# application state and the request's database session, and its own principals.
 SYNC_ADAPTERS: dict[str, SyncAdapterRegistration] = {
     "descope": SyncAdapterRegistration(
-        DescopeSyncAdapter, lambda state, _session: DescopeSyncAdapter(client=state.descope_client)
+        DescopeSyncAdapter,
+        lambda state, _session: DescopeSyncAdapter(client=state.descope_client),
+        is_descope_principal,
     ),
     "keycloak": SyncAdapterRegistration(
-        KeycloakSyncAdapter, lambda state, session: build_keycloak_sync_adapter(state.keycloak_admin, session)
+        KeycloakSyncAdapter,
+        lambda state, session: build_keycloak_sync_adapter(state.keycloak_admin, session),
+        _recorded_as(KEYCLOAK_PROVIDER_NAME),
     ),
     "zitadel": SyncAdapterRegistration(
-        ZitadelSyncAdapter, lambda state, session: build_zitadel_sync_adapter(state.zitadel_admin, session)
+        ZitadelSyncAdapter,
+        lambda state, session: build_zitadel_sync_adapter(state.zitadel_admin, session),
+        _recorded_as(ZITADEL_PROVIDER_NAME),
     ),
 }
 
@@ -138,6 +158,11 @@ def get_sync_adapter(request: Request, session: AsyncSession) -> IdentityProvide
 def sync_capabilities() -> frozenset[Capability]:
     """The optional capabilities the configured provider's sync adapter declares."""
     return SYNC_ADAPTERS[SYNC_PROVIDER].adapter.capabilities
+
+
+def is_sync_provider_principal(request: Request) -> bool:
+    """Whether the caller is a principal of the configured provider: its ``sub`` and tenant are that provider's."""
+    return SYNC_ADAPTERS[SYNC_PROVIDER].own_principal(request)
 
 
 # The relationship store of a deployment, by its sync provider: Descope's FGA store

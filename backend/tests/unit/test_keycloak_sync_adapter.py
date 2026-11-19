@@ -12,7 +12,14 @@ import httpx
 import pytest
 from expression import Ok
 
-from app.services.adapters.base import CREATED_IN_TENANT, LAST_ROLE_IN_TENANT, STATUS_CHANGED, UNANSWERED, SyncError
+from app.services.adapters.base import (
+    CREATED_IN_TENANT,
+    LAST_ROLE_IN_TENANT,
+    STATUS_CHANGED,
+    UNANSWERED,
+    SyncError,
+    TenantAttributes,
+)
 from app.services.adapters.keycloak import (
     PERMISSION_ATTRIBUTE,
     ROLE_ATTRIBUTE,
@@ -681,3 +688,105 @@ class TestFailuresAreRecorded:
 
         error = refused(result, "sync_tenant", Refusal.LINK_REFUSED)
         assert error.message == f"{Refusal.LINK_REFUSED.value}: tenant gone"
+
+
+class TestCustomAttributes:
+    """User attributes on the caller's account, organization attributes on the tenant's: JSON values."""
+
+    ACCOUNT = {
+        "id": KEYCLOAK_USER_ID,
+        "username": "bob",
+        "email": "bob@example.test",
+        "firstName": "Bob",
+        "lastName": "Two",
+        "attributes": {"department": ['"Sales"'], "typed_by_admin": ["plain text"], "multi": ["a", "b"]},
+    }
+    ORGANIZATION = {
+        "id": ORGANIZATION_ID,
+        "alias": TENANT_ID,
+        "name": "Recorded Co",
+        "enabled": True,
+        "attributes": {"plan_tier": ['"pro"'], "max_members": ["25"]},
+        "domains": [{"name": "recorded.test", "verified": False}],
+    }
+
+    async def test_the_users_attributes_are_its_single_valued_ones_decoded(self):
+        api = RecordedAdminApi(["token", httpx.Response(200, json=self.ACCOUNT)])
+
+        result = await adapter(api).user_attributes(subject=KEYCLOAK_USER_ID)
+
+        assert result == Ok({"department": "Sales", "typed_by_admin": "plain text"})
+        assert api.calls()[1] == ("GET", admin_path(f"/users/{KEYCLOAK_USER_ID}"))
+
+    async def test_an_attribute_write_sends_the_account_back_whole(self):
+        """Keycloak replaces the profile fields and attributes a PUT sends: nothing read may be dropped."""
+        api = RecordedAdminApi(["token", httpx.Response(200, json=self.ACCOUNT), NO_CONTENT])
+
+        result = await adapter(api).set_user_attribute(subject=KEYCLOAK_USER_ID, key="job_title", value="Lead")
+
+        assert result == Ok(None)
+        assert (api.sent[2].method, api.sent[2].path, api.sent[2].body) == (
+            "PUT",
+            admin_path(f"/users/{KEYCLOAK_USER_ID}"),
+            {**self.ACCOUNT, "attributes": {**self.ACCOUNT["attributes"], "job_title": ['"Lead"']}},
+        )
+
+    async def test_an_attribute_write_leaves_the_accounts_status_to_keycloak(self):
+        """A disable between the read and the write is not undone: the status fields are never sent."""
+        status = {"enabled": True, "emailVerified": True, "requiredActions": []}
+        api = RecordedAdminApi(["token", httpx.Response(200, json={**self.ACCOUNT, **status}), NO_CONTENT])
+
+        await adapter(api).set_user_attribute(subject=KEYCLOAK_USER_ID, key="job_title", value="Lead")
+
+        assert api.sent[2].body == {
+            **self.ACCOUNT,
+            "attributes": {**self.ACCOUNT["attributes"], "job_title": ['"Lead"']},
+        }
+
+    async def test_none_removes_an_attribute(self):
+        api = RecordedAdminApi(["token", httpx.Response(200, json=self.ACCOUNT), NO_CONTENT])
+
+        await adapter(api).set_user_attribute(subject=KEYCLOAK_USER_ID, key="department", value=None)
+
+        assert api.sent[2].body["attributes"] == {"typed_by_admin": ["plain text"], "multi": ["a", "b"]}
+
+    async def test_a_write_to_an_account_keycloak_lacks_is_refused(self):
+        api = RecordedAdminApi(["token", httpx.Response(404, json={"error": "User not found"})])
+
+        result = await adapter(api).set_user_attribute(subject=KEYCLOAK_USER_ID, key="department", value="x")
+
+        refused(result, "set_user_attribute", Refusal.USER_NOT_IN_KEYCLOAK)
+        assert writes(api) == []
+
+    async def test_the_tenants_attributes_are_its_organizations(self):
+        api = RecordedAdminApi(["token", ONE_ORGANIZATION, httpx.Response(200, json=self.ORGANIZATION)])
+
+        result = await adapter(api, Links(aliases={TENANT: TENANT_ID})).tenant_attributes(tenant=TENANT_ID)
+
+        assert result.ok == TenantAttributes("Recorded Co", {"plan_tier": "pro", "max_members": 25})
+
+    async def test_a_tenant_without_an_organization_has_none(self):
+        api = RecordedAdminApi(["token", httpx.Response(200, json=[])])
+
+        assert await adapter(api).tenant_attributes(tenant=TENANT_ID) == Ok(None)
+
+    async def test_a_tenant_attribute_write_sends_the_organization_back_whole(self):
+        api = RecordedAdminApi(["token", ONE_ORGANIZATION, httpx.Response(200, json=self.ORGANIZATION), NO_CONTENT])
+
+        result = await adapter(api, Links(aliases={TENANT: TENANT_ID})).set_tenant_attributes(
+            tenant=TENANT_ID, attributes={"plan_tier": "enterprise", "max_members": None}
+        )
+
+        assert result == Ok(None)
+        assert (api.sent[3].method, api.sent[3].path, api.sent[3].body) == (
+            "PUT",
+            ORGANIZATION,
+            {**self.ORGANIZATION, "attributes": {"plan_tier": ['"enterprise"']}},
+        )
+
+    async def test_a_tenant_id_that_is_no_canonical_id_is_refused(self):
+        api = RecordedAdminApi(["token"])
+
+        result = await adapter(api).set_tenant_attributes(tenant="not-a-uuid", attributes={"plan_tier": "pro"})
+
+        refused(result, "set_tenant_attributes", Refusal.BAD_TENANT_ID)

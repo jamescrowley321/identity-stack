@@ -75,14 +75,10 @@ TENANTS_CLAIM = (
 ID_TOKEN_VALIDATION = (
     "POST /api/validate-id-token validates against the Descope provider only: 503 for this provider (#636)"
 )
-TENANT_SETTINGS = (
-    "the Tenant Settings page loads GET /api/tenants/current/settings, the Descope tenant's custom "
-    "attributes, which serves Descope principals only (#590)"
-)
 ORY_PROVIDER = "proves the Ory provider, which only the Descope run's backend configures"
 NO_CUSTOM_ATTRIBUTES = (
-    "Descope's custom attributes serve Descope principals only, so this run's principals have no "
-    "custom_attributes capability and the SPA no Tenant Settings page (#678)"
+    "this run's backend syncs with Descope, whose custom attributes serve Descope principals only, so "
+    "its principals have no custom_attributes capability and the SPA no Tenant Settings page (#678, #679)"
 )
 NO_MACHINE_CREDENTIALS = (
     "Descope's access keys serve Descope principals only, so this run's principals have no "
@@ -147,10 +143,10 @@ NOT_APPLICABLE: dict[str, dict[str, str]] = {
         ["test_tf_seeded_roles_present", "test_tf_seeded_permissions_present", "test_runtime_role_assignment"],
         _both(DESCOPE_MANAGEMENT_API),
     ),
-    "test_identity_repository_ui.py::test_navigate_to_settings_page": _both(TENANT_SETTINGS),
     # Pages a capability gives (test_capability_pages.py checks each run sees exactly its own)
-    "test_authenticated_ui.py::test_navigate_to_settings": _both(NO_CUSTOM_ATTRIBUTES),
-    "test_page_content.py::test_tenant_settings_handles_no_tenant": _both(NO_CUSTOM_ATTRIBUTES),
+    "test_identity_repository_ui.py::test_navigate_to_settings_page": {ZITADEL: NO_CUSTOM_ATTRIBUTES},
+    "test_authenticated_ui.py::test_navigate_to_settings": {ZITADEL: NO_CUSTOM_ATTRIBUTES},
+    "test_page_content.py::test_tenant_settings_handles_no_tenant": {ZITADEL: NO_CUSTOM_ATTRIBUTES},
     "test_page_content.py::test_access_keys_page_loads": _both(NO_MACHINE_CREDENTIALS),
     "test_identity_repository_ui.py::test_role_created_via_api_is_invisible_to_an_access_key_session": _both(
         DESCOPE_ACCESS_KEY

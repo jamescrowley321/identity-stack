@@ -75,8 +75,7 @@ response and `UpstreamTransportError` for no response at all. No module in `app/
 [ADR-0006](adr/0006-outbound-http-and-logging-helpers.md).
 
 A router function that calls Descope **MUST** catch both `UpstreamStatusError` and
-`UpstreamTransportError` and answer them with 502, as `documents.py`, `fga.py` and
-`attributes.py::get_profile` do. Otherwise a Descope outage surfaces as an unhandled 500. A
+`UpstreamTransportError` and answer them with 502, as `documents.py` and `fga.py` do. Otherwise a Descope outage surfaces as an unhandled 500. A
 function that catches `Exception` counts as handling both.
 
 The routes behind `DescopeManagementAdapter` (§5) leave that decision to the adapter, which
@@ -85,7 +84,9 @@ reports an upstream failure as an `Error`.
 - Exception: the adapter's member methods (`list_members`, `invite_member`,
   `set_member_status`, `remove_member`), plus `update_profile_attribute`,
   `load_tenant_settings` and `update_tenant_settings`. They catch only `UpstreamStatusError`,
-  so a transport failure propagates and the route answers 500. That predates #512, and
+  so a transport failure propagates and the route answers 500 (the last three are called
+  by `DescopeSyncAdapter`'s custom attributes, which answer any failure as `SyncError`, so
+  the profile and tenant settings routes answer it 502). That predates #512, and
   changing those answers to 502 is a behaviour change left for a follow-up.
 - Exception: the adapter's six access-key methods. None of them catches an upstream failure,
   so every Descope error and timeout on the `routers/accesskeys.py` routes surfaces as 500.
@@ -224,9 +225,10 @@ RFC 9457 problem-detail bodies (`application/problem+json`) **MUST** be built on
   for every provider fault in the module.
 - Exception: the handlers in `routers/users.py` and `routers/attributes.py`, and
   `routers/accesskeys.py::_verify_key_tenant`. They answer an `Error` from
-  `DescopeManagementAdapter` with the `{"detail": ...}` 400/403/502 bodies those routes had
-  before the adapter existed, and `get_profile` and `get_tenant_settings` answer one with
-  blank defaults. The member activate and deactivate routes answer a member shared with
+  `DescopeManagementAdapter` (or, in `attributes.py`, a `SyncError` from the sync adapter's
+  custom attributes) with the `{"detail": ...}` 400/403/502 bodies those routes had
+  before the adapter existed, and `get_profile` answers one with no custom attributes and
+  `get_tenant_settings` a tenant the provider lacks with blank defaults. The member activate and deactivate routes answer a member shared with
   another tenant with a 409 in the same style (#581). Moving them to problem details is a
   behaviour change left for a follow-up.
 
@@ -345,8 +347,9 @@ caller. A request with no claims gets 401 from the guard itself (§17). A route 
 handed the management adapter (`get_descope_management`) **MUST** carry the guard or be
 listed, with what keeps another provider's subject from Descope, in the same test's
 `UNGUARDED_ADAPTER_ROUTES`. Every route that depends on `get_tenant_id` **MUST** be listed in
-`backend/tests/unit/test_descope_backed_routes.py`, either in `DESCOPE_TENANT_ROUTES` or,
-with its reason, in `PROVIDER_NEUTRAL_ROUTES`. Adding a route to the second register is a
+`backend/tests/unit/test_descope_backed_routes.py`, in `DESCOPE_TENANT_ROUTES`, with its
+reason in `PROVIDER_NEUTRAL_ROUTES`, or as a route of a sync adapter capability in
+`ADAPTER_CAPABILITY_ROUTES`. Adding a route to the second register is a
 reviewed decision, and a route whose service mirrors its writes to Descope through a sync
 adapter is Descope-backed: `POST /api/roles/assign` and `/api/roles/remove` are, because
 `RoleService` sends each assignment to Descope. The second register holds the two
@@ -358,11 +361,19 @@ A route that serves an optional capability of the sync adapter (`Capability` in
 the tenant settings) or the relationship store (the FGA and document routes) **MUST** depend
 on that capability's dependency in `app/dependencies/capabilities.py` as its first
 dependency, before the guard. What serves the caller is decided by one function,
-`capabilities.served`: the sync adapter's capabilities and the relationship store, except
-that Descope's (its adapter's capabilities, its FGA store) serve only a principal of a
-`descope_managed` provider, being keyed on Descope's ids. A caller not served answers 404
-(`CapabilityMissing`), not the guard's 403: the route is not there for them.
-`GET /api/capabilities` reports `served`, and the SPA shows a page only when it is there.
+`capabilities.served`: the sync adapter's capabilities serve only a principal of the sync
+provider (its registration's `own_principal` in `SYNC_ADAPTERS`; for Descope, a
+`descope_managed` provider), because a capability takes the caller's `sub` and the
+request's tenant as that provider's own ids; Descope's FGA store likewise serves only a
+Descope principal. A caller not served answers 404 (`CapabilityMissing`), not the guard's
+403: the route is not there for them. `GET /api/capabilities` reports `served`, and the SPA
+shows a page only when it is there. A route that reaches the provider only through a sync
+adapter capability (the profile's custom attributes, `GET` and `PATCH
+/api/tenants/current/settings`) carries no Descope guard and calls the adapter, never
+`get_descope_management`; it is listed with its reason in `ADAPTER_CAPABILITY_ROUTES`.
+Adding a capability to an adapter means implementing its interface
+(`CustomAttributes` for `custom_attributes`; `IdentityProviderAdapter.__init_subclass__`
+refuses a declaration without it).
 
 A route over state that belongs to the whole Descope project **MUST** carry the same guard
 and be listed in `DESCOPE_PROJECT_ROUTES` in that file: the role and permission definition
@@ -411,10 +422,10 @@ configuration at startup (`refuse_canonical_descope_managed`).
   (`routers/tenants.py`), which reads a top-level `roles` claim itself and takes no
   tenant. It takes the claims from `get_descope_claims`, so only a Descope principal is
   decided from that claim; every other provider's is refused (403) (#596).
-- Exception: `GET /api/profile` carries no guard, because every provider's session loads
-  it. The handler asks Descope for a Descope principal only (`is_descope_principal`) and
-  answers anyone else with the empty profile, without a call. `PATCH /api/profile` carries
-  the guard.
+- Exception: `GET /api/profile` carries no capability gate, because every provider's
+  session loads it. Name and email are the canonical user's (`GET /api/identity`'s
+  resolution); the custom attributes are asked of the sync adapter only for a caller its
+  `custom_attributes` capability serves, and are empty for anyone else.
 - Exception: `GET /api/tenants` takes no tenant from `get_tenant_id` and carries no guard
   of its own; `get_tenant_claims` refuses a principal of another provider (403). A canonical
   principal's tenants are in `GET /api/identity` (#590).

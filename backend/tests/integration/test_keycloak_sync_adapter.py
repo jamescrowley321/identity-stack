@@ -31,7 +31,7 @@ from app.models.identity.user import LINK_ORIGIN, LINKED_BY_BACKEND, IdPLink, Us
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.permission import PermissionRepository
 from app.repositories.role import RoleRepository
-from app.services.adapters.base import CREATED_IN_TENANT, LAST_ROLE_IN_TENANT, STATUS_CHANGED
+from app.services.adapters.base import CREATED_IN_TENANT, LAST_ROLE_IN_TENANT, STATUS_CHANGED, TenantAttributes
 from app.services.adapters.keycloak import (
     PERMISSION_ATTRIBUTE,
     PROVIDER_NAME,
@@ -353,6 +353,60 @@ async def push_role(sync, role_id, permission_id, *, role_name: str, permission_
     role = {"name": role_name, "description": "Synced", "tenant_id": None, "permission_names": [permission_name]}
     assert await sync.sync_role(role_id=role_id, data=role) == Ok(None)
     return role
+
+
+class TestCustomAttributes:
+    """The custom_attributes capability: user attributes and organization attributes round-trip."""
+
+    async def test_a_users_attributes_round_trip_and_keep_its_profile(self, sync, realm, user_id):
+        await sync.sync_user(
+            user_id=user_id,
+            data={"email": email_of(user_id), "status": "active", "given_name": "Attr", "family_name": "User"},
+        )
+        subject = find_user(realm, user_id)["id"]
+
+        assert await sync.set_user_attribute(subject=subject, key="department", value="Engineering") == Ok(None)
+        assert await sync.set_user_attribute(subject=subject, key="job_title", value="Lead") == Ok(None)
+        assert await sync.user_attributes(subject=subject) == Ok({"department": "Engineering", "job_title": "Lead"})
+
+        assert await sync.set_user_attribute(subject=subject, key="job_title", value=None) == Ok(None)
+        assert await sync.user_attributes(subject=subject) == Ok({"department": "Engineering"})
+        user = find_user(realm, user_id)
+        assert {key: user.get(key) for key in ("email", "firstName", "lastName", "enabled")} == {
+            "email": email_of(user_id),
+            "firstName": "Attr",
+            "lastName": "User",
+            "enabled": True,
+        }
+
+    async def test_an_organizations_attributes_round_trip_and_keep_its_fields(self, sync, realm, links, tenant_id):
+        domain = f"{tenant_id.hex}.test"
+        await sync.sync_tenant(
+            tenant_id=tenant_id, data={"name": f"Attr {tenant_id}", "self_provisioning_domains": [domain]}
+        )
+        tenant = str(tenant_id)
+
+        written = await sync.set_tenant_attributes(tenant=tenant, attributes={"plan_tier": "pro", "max_members": 25})
+        assert written == Ok(None)
+        assert await sync.tenant_attributes(tenant=tenant) == Ok(
+            TenantAttributes(f"Attr {tenant_id}", {"plan_tier": "pro", "max_members": 25})
+        )
+
+        assert await sync.set_tenant_attributes(tenant=tenant, attributes={"plan_tier": None}) == Ok(None)
+        assert await sync.tenant_attributes(tenant=tenant) == Ok(
+            TenantAttributes(f"Attr {tenant_id}", {"max_members": 25})
+        )
+        organization = find_organization(realm, tenant_id)
+        domains = [entry["name"] for entry in organization["domains"]]
+        assert (organization["name"], domains, organization["enabled"]) == (f"Attr {tenant_id}", [domain], True)
+        # A later sync of the tenant keeps the attributes.
+        assert await sync.sync_tenant(tenant_id=tenant_id, data={"name": f"Renamed {tenant_id}"}) == Ok(None)
+        assert await sync.tenant_attributes(tenant=tenant) == Ok(
+            TenantAttributes(f"Renamed {tenant_id}", {"max_members": 25})
+        )
+
+    async def test_a_tenant_without_an_organization_has_no_attributes(self, sync, tenant_id):
+        assert await sync.tenant_attributes(tenant=str(tenant_id)) == Ok(None)
 
 
 class TestPermissionsAndRoles:

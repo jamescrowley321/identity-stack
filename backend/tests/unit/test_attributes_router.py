@@ -1,12 +1,16 @@
 """Unit tests for the attributes router (user profile + tenant settings)."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from expression import Error, Ok
 from httpx import ASGITransport, AsyncClient
 
+from app.dependencies.identity import get_identity_resolution_service
+from app.errors.identity import NotFound
 from app.main import app
+from app.models.database import get_async_session
 
 
 def _make_http_status_error(status_code: int = 500) -> httpx.HTTPStatusError:
@@ -27,11 +31,38 @@ def _set_env(monkeypatch):
     monkeypatch.setenv("DESCOPE_MANAGEMENT_KEY", "test-management-key")
 
 
+CANONICAL_USER = {
+    "id": "canonical-user-1",
+    "email": "test@example.com",
+    "user_name": "test",
+    "given_name": "Test",
+    "family_name": "User",
+    "status": "active",
+}
+
+
 @pytest.fixture
-async def client():
+def resolver() -> AsyncMock:
+    """Stands in for IdentityResolutionService: the caller is the canonical ``CANONICAL_USER``."""
+    resolver = AsyncMock()
+    resolver.resolve.return_value = Ok({"user": CANONICAL_USER})
+    return resolver
+
+
+@pytest.fixture
+async def client(resolver):
+    async def _session():
+        yield MagicMock()
+
+    app.dependency_overrides[get_identity_resolution_service] = lambda: resolver
+    app.dependency_overrides[get_async_session] = _session
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+    finally:
+        app.dependency_overrides.pop(get_identity_resolution_service, None)
+        app.dependency_overrides.pop(get_async_session, None)
 
 
 ADMIN_CLAIMS = {
@@ -75,10 +106,65 @@ async def test_get_profile(mock_validate, client):
     app.state.descope_client = mock_client
 
     response = await client.get("/api/profile", headers={"Authorization": "Bearer valid.token"})
-    assert response.status_code == 200
-    data = response.json()
-    assert data["user_id"] == "user123"
-    assert data["custom_attributes"]["department"] == "Engineering"
+
+    assert (response.status_code, response.json()) == (
+        200,
+        {
+            "user_id": "user123",
+            "name": "Test User",
+            "email": "test@example.com",
+            "custom_attributes": {"department": "Engineering", "job_title": "Developer"},
+        },
+    )
+    mock_client.load_user.assert_awaited_once_with("user123")
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_get_profile_serves_only_the_attributes_the_api_allows(mock_validate, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    mock_client.load_user.return_value = {"customAttributes": {"department": "Engineering", "internal": "x"}}
+    app.state.descope_client = mock_client
+
+    response = await client.get("/api/profile", headers={"Authorization": "Bearer valid.token"})
+
+    assert response.json()["custom_attributes"] == {"department": "Engineering"}
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_get_profile_without_a_canonical_user_is_blank(mock_validate, client, resolver):
+    mock_validate.return_value = ADMIN_CLAIMS
+    resolver.resolve.return_value = Error(NotFound(message="No identity"))
+    mock_client = AsyncMock()
+    mock_client.load_user.return_value = {"customAttributes": {}}
+    app.state.descope_client = mock_client
+
+    response = await client.get("/api/profile", headers={"Authorization": "Bearer valid.token"})
+
+    assert (response.status_code, response.json()) == (
+        200,
+        {"user_id": "user123", "name": "", "email": "", "custom_attributes": {}},
+    )
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_get_profile_degrades_when_the_canonical_user_cannot_be_read(mock_validate, client, resolver):
+    """A database or cache failure leaves name and email blank: the profile is informational."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    resolver.resolve.side_effect = RuntimeError("database unavailable")
+    mock_client = AsyncMock()
+    mock_client.load_user.return_value = {"customAttributes": {"department": "Engineering"}}
+    app.state.descope_client = mock_client
+
+    response = await client.get("/api/profile", headers={"Authorization": "Bearer valid.token"})
+
+    assert (response.status_code, response.json()) == (
+        200,
+        {"user_id": "user123", "name": "", "email": "", "custom_attributes": {"department": "Engineering"}},
+    )
 
 
 @pytest.mark.anyio
@@ -90,12 +176,12 @@ async def test_get_profile_handles_api_failure(mock_validate, client):
     app.state.descope_client = mock_client
 
     response = await client.get("/api/profile", headers={"Authorization": "Bearer valid.token"})
-    # Profile degrades gracefully on Descope API errors — returns 200
-    # with empty data rather than 502, since profile is informational.
-    assert response.status_code == 200
-    data = response.json()
-    assert data["name"] == ""
-    assert data["email"] == ""
+    # Profile degrades gracefully on Descope API errors — returns 200 with the
+    # canonical name and email and no custom attributes, since profile is informational.
+    assert (response.status_code, response.json()) == (
+        200,
+        {"user_id": "user123", "name": "Test User", "email": "test@example.com", "custom_attributes": {}},
+    )
 
 
 @pytest.mark.anyio

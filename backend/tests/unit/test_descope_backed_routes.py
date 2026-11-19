@@ -14,10 +14,11 @@ permission definitions, the FGA schema) take no tenant from ``get_tenant_id``
 but carry the same guard: a canonical principal who is an admin of any one of
 their tenants would otherwise change every tenant's definitions in Descope.
 
-The routes that take the caller's ``sub`` to Descope and no tenant (the profile)
-are held the same way: every route that is handed the Descope management adapter
-carries the guard, or is listed with what keeps another provider's subject from
-reaching Descope.
+Every route that is handed the Descope management adapter carries the guard, or
+is listed with what keeps another provider's subject from reaching Descope. The
+routes of a sync adapter capability (the profile's custom attributes, the tenant
+settings) reach the provider only through ``served``, which serves an adapter's
+capability to that provider's own principals only: they are listed apart.
 
 The routes over state that belongs to no tenant and that Descope does not hold
 (every tenant's users, the provider records, the sync status) are gated by
@@ -49,6 +50,7 @@ from app.dependencies.capabilities import (
 )
 from app.dependencies.descope import NOT_A_DESCOPE_PRINCIPAL, get_descope_management, require_descope_principal
 from app.dependencies.identity import (
+    get_identity_resolution_service,
     get_permission_service,
     get_provider_service,
     get_role_service,
@@ -112,8 +114,6 @@ DESCOPE_TENANT_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/fga/relations"),
         ("POST", "/api/fga/check"),
         ("GET", "/api/tenants/current"),
-        ("GET", "/api/tenants/current/settings"),
-        ("PATCH", "/api/tenants/current/settings"),
         ("GET", "/api/roles/me"),
         # ``RoleService`` mirrors every assignment to Descope (``DescopeSyncAdapter``).
         ("POST", "/api/roles/assign"),
@@ -139,19 +139,28 @@ DESCOPE_PROJECT_ROUTES: frozenset[tuple[str, str]] = frozenset(
     }
 )
 
-# (method, path) of every guarded route that hands Descope the caller's ``sub`` and no tenant.
-DESCOPE_SUBJECT_ROUTES: frozenset[tuple[str, str]] = frozenset({("PATCH", "/api/profile")})
-
-DESCOPE_BACKED_ROUTES = DESCOPE_TENANT_ROUTES | DESCOPE_PROJECT_ROUTES | DESCOPE_SUBJECT_ROUTES
+DESCOPE_BACKED_ROUTES = DESCOPE_TENANT_ROUTES | DESCOPE_PROJECT_ROUTES
 
 # (method, path) -> what keeps another provider's subject from Descope on a route
 # that is handed the management adapter and carries no guard.
-UNGUARDED_ADAPTER_ROUTES: dict[tuple[str, str], str] = {
-    ("GET", "/api/profile"): (
-        "every provider's SPA session loads it: the handler asks Descope for a Descope principal only "
-        "and answers anyone else with the empty profile"
-    ),
+UNGUARDED_ADAPTER_ROUTES: dict[tuple[str, str], str] = {}
+
+_OWN_PRINCIPALS_ONLY = (
+    "the custom_attributes capability (test_capabilities.py) hands the sync adapter the caller's sub "
+    "and tenant only when served() finds the caller a principal of the sync provider (Descope: descope_managed)"
+)
+
+# (method, path) -> why a route of a sync adapter capability hands no other provider's
+# subject or tenant to the provider. Each depends on the capability's gate first.
+ADAPTER_CAPABILITY_ROUTES: dict[tuple[str, str], str] = {
+    ("PATCH", "/api/profile"): _OWN_PRINCIPALS_ONLY,
+    ("GET", "/api/tenants/current/settings"): _OWN_PRINCIPALS_ONLY,
+    ("PATCH", "/api/tenants/current/settings"): _OWN_PRINCIPALS_ONLY,
 }
+# The ones that take the request's tenant: the tenant settings.
+ADAPTER_CAPABILITY_TENANT_ROUTES = frozenset(
+    {("GET", "/api/tenants/current/settings"), ("PATCH", "/api/tenants/current/settings")}
+)
 
 # (method, path) -> why a principal from any provider may use the route's tenant.
 # A route belongs here only when nothing behind it, its service's sync adapter
@@ -404,13 +413,12 @@ class TestTheRegisters:
         assert _routes_depending_on(require_descope_principal) == DESCOPE_BACKED_ROUTES
 
     def test_every_route_that_takes_a_tenant_is_in_one_register(self):
-        assert _routes_depending_on(get_tenant_id) == DESCOPE_TENANT_ROUTES | set(PROVIDER_NEUTRAL_ROUTES)
+        assert _routes_depending_on(get_tenant_id) == (
+            DESCOPE_TENANT_ROUTES | set(PROVIDER_NEUTRAL_ROUTES) | ADAPTER_CAPABILITY_TENANT_ROUTES
+        )
 
     def test_no_project_route_takes_a_tenant(self):
         assert DESCOPE_TENANT_ROUTES & DESCOPE_PROJECT_ROUTES == set()
-
-    def test_no_subject_route_takes_a_tenant(self):
-        assert DESCOPE_SUBJECT_ROUTES & _routes_depending_on(get_tenant_id) == set()
 
     def test_every_route_handed_the_management_adapter_is_guarded_or_says_why(self):
         """A new route that depends on ``get_descope_management`` alone fails here until it chooses."""
@@ -418,9 +426,12 @@ class TestTheRegisters:
 
         assert handed_the_adapter - _routes_depending_on(require_descope_principal) == set(UNGUARDED_ADAPTER_ROUTES)
 
-    def test_every_capability_gated_route_is_descope_backed(self):
+    def test_every_capability_gated_route_is_descope_backed_or_an_adapter_capabilitys(self):
         assert CAPABILITY_GATED_ROUTES
-        assert CAPABILITY_GATED_ROUTES - DESCOPE_BACKED_ROUTES == set()
+        assert CAPABILITY_GATED_ROUTES - DESCOPE_BACKED_ROUTES == set(ADAPTER_CAPABILITY_ROUTES)
+
+    def test_no_adapter_capability_route_is_handed_the_management_adapter(self):
+        assert set(ADAPTER_CAPABILITY_ROUTES) & _routes_depending_on(get_descope_management) == set()
 
     def test_the_refusal_is_not_the_tenant_resolvers(self):
         """Selecting a tenant would not help the refused caller, so the body does not say to."""
@@ -429,6 +440,7 @@ class TestTheRegisters:
 
     def test_no_route_is_in_both(self):
         assert DESCOPE_BACKED_ROUTES & set(PROVIDER_NEUTRAL_ROUTES) == set()
+        assert (DESCOPE_BACKED_ROUTES | set(PROVIDER_NEUTRAL_ROUTES)) & set(ADAPTER_CAPABILITY_ROUTES) == set()
 
     def test_the_global_gate_is_on_exactly_the_global_routes(self):
         assert _routes_gated_by(require_global_role) == GLOBAL_ROLE_ROUTES
@@ -479,42 +491,69 @@ class TestAnotherClaimsProviderIsRefusedToo:
 
 
 class TestTheProfileTakesNoOtherProvidersSubjectToDescope:
-    """``/api/profile`` hands Descope the caller's ``sub``, which is Descope's only for its own principal."""
+    """``/api/profile`` hands Descope the caller's ``sub``, which is Descope's only for its own principal.
 
-    EMPTY_ORY_PROFILE = {"user_id": ORY_SUB, "name": "", "email": "", "custom_attributes": {}}
+    Name and email are the canonical user's for every provider; Descope is asked for
+    the custom attributes of a Descope principal only.
+    """
 
-    def test_an_ory_principal_reads_an_empty_profile_and_descope_is_not_asked(self, client, descope_client):
-        """What an Ory session got before, when Descope answered that it knew no such user."""
+    CANONICAL_USER = {
+        "id": "canonical-user-1",
+        "email": "member@example.test",
+        "given_name": "A",
+        "family_name": "Member",
+    }
+    CANONICAL_PROFILE = {
+        "user_id": ORY_SUB,
+        "name": "A Member",
+        "email": "member@example.test",
+        "custom_attributes": {},
+    }
+
+    @pytest.fixture
+    def resolver(self, client) -> AsyncMock:
+        resolver = AsyncMock()
+        resolver.resolve.return_value = Ok({"user": self.CANONICAL_USER})
+        client.app.dependency_overrides[get_identity_resolution_service] = lambda: resolver
+        return resolver
+
+    def test_an_ory_principal_reads_its_canonical_profile_and_descope_is_not_asked(
+        self, client, descope_client, resolver
+    ):
         response = client.get("/api/profile", headers=_bearer(ORY_OWNER))
 
-        assert response.status_code == 200
-        assert response.json() == self.EMPTY_ORY_PROFILE
+        assert (response.status_code, response.json()) == (200, self.CANONICAL_PROFILE)
+        resolver.resolve.assert_awaited_once_with(provider="ory", sub=ORY_SUB)
         assert descope_client.mock_calls == []
 
-    def test_another_claims_provider_reads_an_empty_profile_too(self, client, descope_client):
+    def test_another_claims_provider_reads_its_canonical_profile_too(self, client, descope_client, resolver):
         response = client.get("/api/profile", headers=_bearer(FAKE_ADMIN))
 
-        assert response.status_code == 200
-        assert response.json() == {**self.EMPTY_ORY_PROFILE, "user_id": FAKE_ADMIN["sub"]}
+        assert (response.status_code, response.json()) == (
+            200,
+            {**self.CANONICAL_PROFILE, "user_id": FAKE_ADMIN["sub"]},
+        )
         assert descope_client.mock_calls == []
 
-    def test_a_descope_principal_reads_its_profile_from_descope(self, client, descope_client):
+    def test_a_descope_principal_reads_its_attributes_from_descope(self, client, descope_client, resolver):
         descope_client.load_user.return_value = {
-            "name": "A Member",
-            "email": "member@example.test",
+            "name": "Descope's name",
+            "email": "descope@example.test",
             "customAttributes": {"department": "Engineering"},
         }
 
         response = client.get("/api/profile", headers=_bearer(DESCOPE_MEMBER))
 
-        assert response.status_code == 200
-        assert response.json() == {
-            "user_id": DESCOPE_MEMBER["sub"],
-            "name": "A Member",
-            "email": "member@example.test",
-            "custom_attributes": {"department": "Engineering"},
-        }
+        assert (response.status_code, response.json()) == (
+            200,
+            {
+                **self.CANONICAL_PROFILE,
+                "user_id": DESCOPE_MEMBER["sub"],
+                "custom_attributes": {"department": "Engineering"},
+            },
+        )
         descope_client.load_user.assert_awaited_once_with(DESCOPE_MEMBER["sub"])
+        resolver.resolve.assert_awaited_once_with(provider="descope", sub=DESCOPE_MEMBER["sub"])
 
     def test_an_ory_principal_cannot_write_an_attribute(self, client, descope_client):
         """A well-formed body with an allowed key: Descope's custom attributes do not serve it."""
@@ -522,7 +561,7 @@ class TestTheProfileTakesNoOtherProvidersSubjectToDescope:
             "/api/profile", json={"key": "department", "value": "Engineering"}, headers=_bearer(ORY_OWNER)
         )
 
-        assert _refused(response, "PATCH", "/api/profile") == _refusal("PATCH", "/api/profile")
+        assert _refused(response, "PATCH", "/api/profile") == (404, CAPABILITY_MISSING_TYPE)
         assert descope_client.mock_calls == []
 
     def test_a_descope_principal_writes_its_attribute(self, client, descope_client):
