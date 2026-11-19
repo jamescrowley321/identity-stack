@@ -87,6 +87,12 @@ class IdentityProviderAdapter(ABC):
     # declares its own set, empty when it implements none.
     capabilities: ClassVar[frozenset[Capability]]
 
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        """Refuse an adapter class that does not declare its ``capabilities``."""
+        super().__init_subclass__(**kwargs)
+        if not isinstance(getattr(cls, "capabilities", None), frozenset):
+            raise TypeError(f"{cls.__name__} must declare capabilities: ClassVar[frozenset[Capability]]")
+
     @abstractmethod
     async def sync_user(self, *, user_id: uuid.UUID, data: dict) -> Result[None, SyncError]: ...
 

@@ -12,6 +12,8 @@ from slowapi.errors import RateLimitExceeded
 
 from app.dependencies import identity
 from app.dependencies.capabilities import (
+    NOTHING,
+    Served,
     require_custom_attributes,
     require_machine_credentials,
     require_relationship_store,
@@ -22,7 +24,7 @@ from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.providers import descope_config, ory_config
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.models.database import get_async_session
-from app.services.adapters.base import Capability
+from app.services.adapters.base import Capability, IdentityProviderAdapter
 from app.services.adapters.descope import DescopeSyncAdapter
 from app.services.adapters.keycloak import KeycloakSyncAdapter
 from app.services.adapters.noop import NoOpSyncAdapter
@@ -41,7 +43,8 @@ from tests.unit.test_descope_backed_routes import (
 
 DESCOPE_CAPABILITIES = frozenset({Capability.MACHINE_CREDENTIALS, Capability.CUSTOM_ATTRIBUTES})
 
-# Each adapter's own declaration: what it implements today.
+# Each adapter's own declaration: what it implements today. Every adapter class
+# in the application must be listed here (``test_every_adapter_is_listed``).
 DECLARED = {
     DescopeSyncAdapter: DESCOPE_CAPABILITIES,
     KeycloakSyncAdapter: frozenset(),
@@ -49,6 +52,8 @@ DECLARED = {
     OrySyncAdapter: frozenset(),
     NoOpSyncAdapter: frozenset(),
 }
+
+DESCOPE_SERVED = Served(DESCOPE_CAPABILITIES, RelationshipStoreKind.DESCOPE)
 
 # (method, path) of every route each capability serves.
 MACHINE_CREDENTIAL_ROUTES = frozenset(
@@ -107,6 +112,13 @@ def _shipped_routes() -> Iterator[tuple[str, APIRoute]]:
                 yield method, route
 
 
+def _response(served: Served) -> dict:
+    return {
+        "capabilities": sorted(capability.value for capability in served.capabilities),
+        "relationship_store": served.relationship_store.value,
+    }
+
+
 def _missing(path: str, detail: str) -> dict:
     return {
         "type": "/errors/capability-missing",
@@ -145,9 +157,24 @@ def client(descope_client) -> TestClient:
     return TestClient(app)
 
 
+def _adapter_classes(base: type = IdentityProviderAdapter) -> set[type]:
+    found = set()
+    for adapter in base.__subclasses__():
+        if adapter.__module__.startswith("app."):
+            found |= {adapter} | _adapter_classes(adapter)
+    return found
+
+
 class TestDeclarations:
+    def test_every_adapter_is_listed(self):
+        assert _adapter_classes() == set(DECLARED)
+
     def test_each_adapter_declares_its_own_set(self):
         assert {adapter: vars(adapter)["capabilities"] for adapter in DECLARED} == DECLARED
+
+    def test_an_adapter_that_declares_none_is_refused(self):
+        with pytest.raises(TypeError, match="Undeclared must declare capabilities"):
+            type("Undeclared", (IdentityProviderAdapter,), {})
 
     def test_every_registration_names_its_adapter(self):
         assert {name: registration.adapter for name, registration in SYNC_ADAPTERS.items()} == {
@@ -170,25 +197,27 @@ class TestDeclarations:
         assert (sync_capabilities(), relationship_store_kind()) == (capabilities, store)
 
 
+# (sync provider, principal) -> what the caller is served. Descope's capabilities and
+# store are keyed on Descope ids: they serve a Descope principal only.
+SERVED_TO = [
+    ("descope", "descope", DESCOPE_SERVED),
+    ("descope", "ory", NOTHING),
+    ("keycloak", "descope", NOTHING),
+    ("keycloak", "ory", NOTHING),
+    ("zitadel", "descope", NOTHING),
+    ("zitadel", "ory", NOTHING),
+]
+PRINCIPALS = {"descope": DESCOPE_MEMBER, "ory": ORY_OWNER}
+
+
 class TestTheCapabilitiesRoute:
-    @pytest.mark.parametrize(
-        ("provider", "expected"),
-        [
-            (
-                "descope",
-                {"capabilities": ["custom_attributes", "machine_credentials"], "relationship_store": "descope"},
-            ),
-            ("keycloak", {"capabilities": [], "relationship_store": "none"}),
-            ("zitadel", {"capabilities": [], "relationship_store": "none"}),
-        ],
-    )
-    @pytest.mark.parametrize("principal", [DESCOPE_MEMBER, ORY_OWNER], ids=["descope", "ory"])
-    def test_any_signed_in_principal_reads_the_deployments(self, client, monkeypatch, provider, expected, principal):
+    @pytest.mark.parametrize(("provider", "principal", "expected"), SERVED_TO)
+    def test_reports_what_serves_the_caller(self, client, monkeypatch, provider, principal, expected):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", provider)
 
-        response = client.get("/api/capabilities", headers=_bearer(principal))
+        response = client.get("/api/capabilities", headers=_bearer(PRINCIPALS[principal]))
 
-        assert (response.status_code, response.json()) == (200, expected)
+        assert (response.status_code, response.json()) == (200, _response(expected))
 
     def test_a_request_with_no_token_gets_401(self, client):
         assert client.get("/api/capabilities").status_code == 401
@@ -216,49 +245,36 @@ class TestTheRegisters:
         assert first == {route: dependency for dependency, routes in GATED.items() for route in routes}
 
 
+MISSING_DETAIL = {
+    **{
+        route: f"This deployment has no {Capability.MACHINE_CREDENTIALS} capability"
+        for route in MACHINE_CREDENTIAL_ROUTES
+    },
+    **{route: f"This deployment has no {Capability.CUSTOM_ATTRIBUTES} capability" for route in CUSTOM_ATTRIBUTE_ROUTES},
+    **{route: "This deployment has no relationship store" for route in RELATIONSHIP_STORE_ROUTES},
+}
+
+
 class TestAMissingCapabilityIs404:
-    """A deployment that syncs with Keycloak has neither capability and no relationship store."""
+    """Every gated route, for every caller the capability does not serve (``SERVED_TO``)."""
 
-    @pytest.mark.parametrize(("method", "path"), sorted(MACHINE_CREDENTIAL_ROUTES))
-    @pytest.mark.parametrize("principal", [DESCOPE_MEMBER, ORY_OWNER], ids=["descope", "ory"])
-    def test_machine_credentials(self, client, monkeypatch, descope_client, method, path, principal):
-        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+    @pytest.mark.parametrize(("method", "path"), sorted(EVERY_GATED_ROUTE))
+    @pytest.mark.parametrize(
+        ("provider", "principal"),
+        [(provider, principal) for provider, principal, served in SERVED_TO if served == NOTHING],
+    )
+    def test_on_every_gated_route(self, client, monkeypatch, descope_client, method, path, provider, principal):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", provider)
         url = _url(path)
 
-        response = client.request(method, url, headers=_bearer(principal))
+        response = client.request(method, url, headers=_bearer(PRINCIPALS[principal]))
 
-        assert (response.status_code, response.json()) == (
-            404,
-            _missing(url, "This deployment has no machine_credentials capability"),
-        )
+        assert (response.status_code, response.json()) == (404, _missing(url, MISSING_DETAIL[(method, path)]))
         assert descope_client.mock_calls == []
 
-    @pytest.mark.parametrize(("method", "path"), sorted(CUSTOM_ATTRIBUTE_ROUTES))
-    @pytest.mark.parametrize("principal", [DESCOPE_MEMBER, ORY_OWNER], ids=["descope", "ory"])
-    def test_custom_attributes(self, client, monkeypatch, descope_client, method, path, principal):
-        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
-
-        response = client.request(method, path, headers=_bearer(principal))
-
-        assert (response.status_code, response.json()) == (
-            404,
-            _missing(path, "This deployment has no custom_attributes capability"),
-        )
-        assert descope_client.mock_calls == []
-
-    @pytest.mark.parametrize(("method", "path"), sorted(RELATIONSHIP_STORE_ROUTES))
-    @pytest.mark.parametrize("principal", [DESCOPE_MEMBER, ORY_OWNER], ids=["descope", "ory"])
-    def test_relationship_store(self, client, monkeypatch, descope_client, method, path, principal):
-        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
-        url = _url(path)
-
-        response = client.request(method, url, headers=_bearer(principal))
-
-        assert (response.status_code, response.json()) == (
-            404,
-            _missing(url, "This deployment has no relationship store"),
-        )
-        assert descope_client.mock_calls == []
+    @pytest.mark.parametrize(("method", "path"), sorted(EVERY_GATED_ROUTE))
+    def test_a_request_with_no_token_still_gets_401(self, client, method, path):
+        assert client.request(method, _url(path)).status_code == 401
 
     def test_the_profile_still_loads(self, client, monkeypatch):
         """Every session loads it: name and email are not a capability."""

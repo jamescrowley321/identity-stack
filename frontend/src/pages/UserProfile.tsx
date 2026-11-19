@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
 import { useApiClient } from "@/hooks/useApiClient";
 import { useCapabilities } from "@/contexts/CapabilitiesContext";
+import { Capability } from "@/lib/capabilities";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -87,7 +88,7 @@ export default function UserProfile() {
           </CardContent>
         </Card>
 
-        {serves("custom_attributes") && (
+        {serves(Capability.CUSTOM_ATTRIBUTES) && (
         <Card>
           <CardHeader>
             <CardTitle>Custom Attributes</CardTitle>

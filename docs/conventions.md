@@ -357,9 +357,12 @@ A route that serves an optional capability of the sync adapter (`Capability` in
 `app/services/adapters/base.py`: the access keys, the custom attributes of the profile and
 the tenant settings) or the relationship store (the FGA and document routes) **MUST** depend
 on that capability's dependency in `app/dependencies/capabilities.py` as its first
-dependency, before the guard. A deployment without it answers 404 (`CapabilityMissing`),
-not the guard's 403: the route is not there for any principal. `GET /api/capabilities`
-reports what the deployment has, and the SPA shows a page only when it is there.
+dependency, before the guard. What serves the caller is decided by one function,
+`capabilities.served`: the sync adapter's capabilities and the relationship store, except
+that Descope's (its adapter's capabilities, its FGA store) serve only a principal of a
+`descope_managed` provider, being keyed on Descope's ids. A caller not served answers 404
+(`CapabilityMissing`), not the guard's 403: the route is not there for them.
+`GET /api/capabilities` reports `served`, and the SPA shows a page only when it is there.
 
 A route over state that belongs to the whole Descope project **MUST** carry the same guard
 and be listed in `DESCOPE_PROJECT_ROUTES` in that file: the role and permission definition

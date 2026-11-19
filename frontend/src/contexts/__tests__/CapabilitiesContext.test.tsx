@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import { CapabilitiesProvider, useCapabilities } from "../CapabilitiesContext";
+import { CAPABILITY_SETS, capabilitiesBody } from "@/test/capabilitySets";
+
+/** What the consumer shows for a loaded set. */
+function shown(name: keyof typeof CAPABILITY_SETS, loading = false) {
+  const { capabilities, relationship_store } = capabilitiesBody(CAPABILITY_SETS[name]);
+  return { loading, capabilities, relationshipStore: relationship_store };
+}
 
 const mockUseAuth = vi.fn();
 vi.mock("react-oidc-context", () => ({
@@ -43,13 +50,13 @@ describe("CapabilitiesProvider", () => {
       </CapabilitiesProvider>,
     );
 
-    expect(state()).toEqual({ loading: true, capabilities: [], relationshipStore: "none" });
+    expect(state()).toEqual(shown("none", true));
     expect(mockApiFetch.mock.calls).toEqual([["/api/capabilities"]]);
   });
 
   it("serves what the backend reports", async () => {
     mockApiFetch.mockReturnValue(
-      answer(200, { capabilities: ["custom_attributes", "machine_credentials"], relationship_store: "descope" }),
+      answer(200, capabilitiesBody(CAPABILITY_SETS.descope)),
     );
     render(
       <CapabilitiesProvider>
@@ -57,13 +64,7 @@ describe("CapabilitiesProvider", () => {
       </CapabilitiesProvider>,
     );
 
-    await waitFor(() =>
-      expect(state()).toEqual({
-        loading: false,
-        capabilities: ["custom_attributes", "machine_credentials"],
-        relationshipStore: "descope",
-      }),
-    );
+    await waitFor(() => expect(state()).toEqual(shown("descope")));
   });
 
   it.each([
@@ -77,7 +78,7 @@ describe("CapabilitiesProvider", () => {
       </CapabilitiesProvider>,
     );
 
-    await waitFor(() => expect(state()).toEqual({ loading: false, capabilities: [], relationshipStore: "none" }));
+    await waitFor(() => expect(state()).toEqual(shown("none")));
   });
 
   it("throws outside a provider", () => {

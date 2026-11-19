@@ -154,8 +154,10 @@ def test_a_user_of_an_organization_no_tenant_names_gets_nothing(
     assert _answer(api(token).get(IDENTITY)) == (403, NOT_LINKED)
     assert database.user_ids_with_email(UNLINKED.email) == []
     expect(page.locator("header").get_by_text("No tenants", exact=True)).to_be_visible()
+    # Descope's tenant settings do not serve a Zitadel principal: the page is not there (#678).
     page.goto(f"{frontend_url}/settings")
-    expect(page.get_by_text("Access Denied", exact=True)).to_be_visible()
+    expect(page).to_have_url(re.compile(rf"^{re.escape(frontend_url)}/?$"))
+    expect(page.locator("[data-sidebar=sidebar]").get_by_role("link", name="Tenant Settings")).to_have_count(0)
 
 
 # --- 4. Self-registration ------------------------------------------------------------

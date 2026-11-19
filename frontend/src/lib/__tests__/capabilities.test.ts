@@ -1,42 +1,42 @@
 import { describe, it, expect } from "vitest";
-import { NO_CAPABILITIES, parseCapabilities, servedBy } from "../capabilities";
-import { CAPABILITY_SETS } from "@/test/capabilitySets";
+import {
+  Capability,
+  NO_CAPABILITIES,
+  RELATIONSHIP_STORE,
+  parseCapabilities,
+  servedBy,
+  type Requirement,
+} from "../capabilities";
+import { CAPABILITY_SETS, capabilitiesBody, type CapabilitySetName } from "@/test/capabilitySets";
+
+const { MACHINE_CREDENTIALS, CUSTOM_ATTRIBUTES } = Capability;
 
 describe("parseCapabilities", () => {
-  it("reads the backend's answer", () => {
-    expect(
-      parseCapabilities({ capabilities: ["custom_attributes", "machine_credentials"], relationship_store: "descope" }),
-    ).toEqual(CAPABILITY_SETS.descope);
-  });
-
-  it("reads a deployment with nothing optional", () => {
-    expect(parseCapabilities({ capabilities: [], relationship_store: "none" })).toEqual(CAPABILITY_SETS.none);
+  it.each(Object.keys(CAPABILITY_SETS) as CapabilitySetName[])("reads the backend's answer for %s", (name) => {
+    expect(parseCapabilities(capabilitiesBody(CAPABILITY_SETS[name]))).toEqual(CAPABILITY_SETS[name]);
   });
 
   it("drops a capability or a store kind the SPA does not know", () => {
-    expect(parseCapabilities({ capabilities: ["teleport", "machine_credentials"], relationship_store: "keto" })).toEqual(
+    expect(parseCapabilities({ capabilities: ["teleport", MACHINE_CREDENTIALS], relationship_store: "keto" })).toEqual(
       CAPABILITY_SETS.machineCredentialsOnly,
     );
   });
 
-  it.each([null, "nope", 3, [], {}, { capabilities: "machine_credentials" }])("fails closed on %j", (body) => {
+  it.each([null, "nope", 3, [], {}, { capabilities: MACHINE_CREDENTIALS }])("fails closed on %j", (body) => {
     expect(parseCapabilities(body)).toEqual(NO_CAPABILITIES);
   });
 });
 
+const REQUIREMENTS: Requirement[] = [MACHINE_CREDENTIALS, CUSTOM_ATTRIBUTES, RELATIONSHIP_STORE];
+
 describe("servedBy", () => {
   it.each([
-    ["descope", { machine_credentials: true, custom_attributes: true, relationship_store: true }],
-    ["none", { machine_credentials: false, custom_attributes: false, relationship_store: false }],
-    ["machineCredentialsOnly", { machine_credentials: true, custom_attributes: false, relationship_store: false }],
-    ["customAttributesOnly", { machine_credentials: false, custom_attributes: true, relationship_store: false }],
-    ["relationshipStoreOnly", { machine_credentials: false, custom_attributes: false, relationship_store: true }],
-  ] as const)("%s", (name, expected) => {
-    const set = CAPABILITY_SETS[name];
-    expect({
-      machine_credentials: servedBy(set, "machine_credentials"),
-      custom_attributes: servedBy(set, "custom_attributes"),
-      relationship_store: servedBy(set, "relationship_store"),
-    }).toEqual(expected);
+    ["descope", [MACHINE_CREDENTIALS, CUSTOM_ATTRIBUTES, RELATIONSHIP_STORE]],
+    ["none", []],
+    ["machineCredentialsOnly", [MACHINE_CREDENTIALS]],
+    ["customAttributesOnly", [CUSTOM_ATTRIBUTES]],
+    ["relationshipStoreOnly", [RELATIONSHIP_STORE]],
+  ] as [CapabilitySetName, Requirement[]][])("%s", (name, served) => {
+    expect(REQUIREMENTS.filter((r) => servedBy(CAPABILITY_SETS[name], r))).toEqual(served);
   });
 });
