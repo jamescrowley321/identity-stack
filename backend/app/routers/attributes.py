@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from app.dependencies.auth import get_claims
+from app.dependencies.capabilities import require_custom_attributes
 from app.dependencies.descope import get_descope_management, is_descope_principal, require_descope_principal
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
@@ -54,7 +55,7 @@ async def get_profile(
     return result_to_response(result, request)
 
 
-@router.patch("/profile", dependencies=[Depends(require_descope_principal)])
+@router.patch("/profile", dependencies=[Depends(require_custom_attributes), Depends(require_descope_principal)])
 async def update_profile_attribute(
     request: Request,
     body: UpdateAttributeRequest,
@@ -74,7 +75,9 @@ async def update_profile_attribute(
     return result_to_response(Ok({"status": "updated", "key": body.key, "value": body.value}), request)
 
 
-@router.get("/tenants/current/settings", dependencies=[Depends(require_descope_principal)])
+@router.get(
+    "/tenants/current/settings", dependencies=[Depends(require_custom_attributes), Depends(require_descope_principal)]
+)
 async def get_tenant_settings(
     request: Request,
     tenant_id: str = Depends(get_tenant_id),
@@ -89,7 +92,9 @@ async def get_tenant_settings(
     return result_to_response(result, request)
 
 
-@router.patch("/tenants/current/settings", dependencies=[Depends(require_descope_principal)])
+@router.patch(
+    "/tenants/current/settings", dependencies=[Depends(require_custom_attributes), Depends(require_descope_principal)]
+)
 async def update_tenant_settings(
     request: Request,
     body: UpdateTenantSettingsRequest,

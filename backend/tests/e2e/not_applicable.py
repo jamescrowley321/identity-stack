@@ -78,6 +78,14 @@ TENANT_SETTINGS = (
     "attributes, which serves Descope principals only (#590)"
 )
 ORY_PROVIDER = "proves the Ory provider, which only the Descope run's backend configures"
+NO_CUSTOM_ATTRIBUTES = (
+    "Descope's custom attributes serve Descope principals only, so this run's principals have no "
+    "custom_attributes capability and the SPA no Tenant Settings page (#678)"
+)
+NO_MACHINE_CREDENTIALS = (
+    "this run's backend syncs with Descope, whose access keys serve Descope principals only, so its "
+    "principals have no machine_credentials capability and the SPA no Access Keys page (#678, #680)"
+)
 
 
 def _both(reason: str) -> dict[str, str]:
@@ -100,7 +108,6 @@ NOT_APPLICABLE: dict[str, dict[str, str]] = {
         [
             "test_roles_list_responds",
             "test_permissions_list_responds",
-            "test_keys_list_responds",
         ],
         _both(DESCOPE_ONLY_ROUTE),
     ),
@@ -127,6 +134,12 @@ NOT_APPLICABLE: dict[str, dict[str, str]] = {
         _both(DESCOPE_MANAGEMENT_API),
     ),
     "test_identity_repository_ui.py::test_navigate_to_settings_page": _both(TENANT_SETTINGS),
+    # Pages a capability gives (test_capability_pages.py checks each run sees exactly its own)
+    "test_authenticated_ui.py::test_navigate_to_settings": _both(NO_CUSTOM_ATTRIBUTES),
+    "test_page_content.py::test_tenant_settings_handles_no_tenant": _both(NO_CUSTOM_ATTRIBUTES),
+    # Keycloak's machine credentials are canonical clients of the realm (#680): both run there.
+    "test_page_content.py::test_access_keys_page_loads": {ZITADEL: NO_MACHINE_CREDENTIALS},
+    "test_api_endpoints.py::TestAdminEndpoints::test_keys_list_responds": {ZITADEL: NO_MACHINE_CREDENTIALS},
     "test_identity_repository_ui.py::test_role_created_via_api_is_invisible_to_an_access_key_session": _both(
         DESCOPE_ACCESS_KEY
     ),

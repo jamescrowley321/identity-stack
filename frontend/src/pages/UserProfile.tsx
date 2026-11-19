@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
 import { useApiClient } from "@/hooks/useApiClient";
+import { useCapabilities } from "@/contexts/CapabilitiesContext";
+import { Capability } from "@/lib/capabilities";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -19,6 +21,7 @@ interface ProfileData {
 
 export default function UserProfile() {
   const { apiFetch } = useApiClient();
+  const { serves } = useCapabilities();
   const [profile, setProfile] = useState<ProfileData | null>(null);
   const [editKey, setEditKey] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -85,6 +88,7 @@ export default function UserProfile() {
           </CardContent>
         </Card>
 
+        {serves(Capability.CUSTOM_ATTRIBUTES) && (
         <Card>
           <CardHeader>
             <CardTitle>Custom Attributes</CardTitle>
@@ -137,6 +141,7 @@ export default function UserProfile() {
             </Table>
           </CardContent>
         </Card>
+        )}
       </div>
     </>
   );

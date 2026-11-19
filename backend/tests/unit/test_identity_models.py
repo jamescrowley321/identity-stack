@@ -355,6 +355,8 @@ class TestPackageExports:
         expected = {
             "IdPLink",
             "KeycloakPullState",
+            "MachineCredentialRole",
+            "MachineCredentialRow",
             "PendingPush",
             "Permission",
             "Provider",

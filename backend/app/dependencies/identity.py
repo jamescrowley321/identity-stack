@@ -23,9 +23,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import State
 
-from app.dependencies.descope import require_descope_management
+from app.dependencies.descope import get_descope_management, require_descope_management, require_descope_principal
 from app.dependencies.keycloak_reconciliation import build_keycloak_reconciliation
 from app.dependencies.keycloak_sync import build_keycloak_sync_adapter
+from app.dependencies.rbac import get_rbac_session
 from app.dependencies.zitadel_sync import build_zitadel_sync_adapter
 from app.errors.identity import Conflict, IdentityErrorRaised
 from app.knobs import knob
@@ -34,6 +35,7 @@ from app.middleware.providers import KEYCLOAK_PROVIDER_NAME, ZITADEL_PROVIDER_NA
 from app.models.database import get_async_session, get_engine
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
+from app.repositories.machine_credential import MachineCredentialRepository
 from app.repositories.permission import PermissionRepository
 from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
@@ -41,16 +43,25 @@ from app.repositories.sync_event import SyncEventRepository
 from app.repositories.sync_ledger import PendingPushRepository, ReconciliationRunRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
-from app.services.adapters.base import IdentityProviderAdapter
+from app.services.adapters.base import Capability, IdentityProviderAdapter
 from app.services.adapters.descope import DescopeSyncAdapter
+from app.services.adapters.keycloak import KeycloakSyncAdapter
+from app.services.adapters.zitadel import ZitadelSyncAdapter
 from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
 from app.services.idp_link import IdPLinkService
 from app.services.inbound_sync import InboundSyncService
+from app.services.machine_credentials import (
+    CanonicalMachineCredentials,
+    DescopeAccessKeys,
+    MachineCredentials,
+    MachineCredentialService,
+)
 from app.services.members import MemberDirectory, MemberService
 from app.services.permission import PermissionService
 from app.services.provider import ProviderService
 from app.services.reconciliation import ProviderReconciliation, ReconciliationService
+from app.services.relationship_store import RelationshipStoreKind
 from app.services.role import RoleService
 from app.services.sync_status import SyncStatusService
 from app.services.tenant import TenantService
@@ -101,12 +112,53 @@ logger = logbook(__name__)
 SYNC_PROVIDER = knob("SYNC_PROVIDER", "descope").strip().lower()
 
 
-# One entry per provider: how its adapter is built from the application state and
-# the request's database session.
-SYNC_ADAPTERS: dict[str, Callable[[State, AsyncSession], IdentityProviderAdapter]] = {
-    "descope": lambda state, _session: DescopeSyncAdapter(client=state.descope_client),
-    "keycloak": lambda state, session: build_keycloak_sync_adapter(state.keycloak_admin, session),
-    "zitadel": lambda state, session: build_zitadel_sync_adapter(state.zitadel_admin, session),
+def _descope_access_keys(request: Request, _session: AsyncSession | None) -> MachineCredentials:
+    """Descope's access keys, for a Descope principal only: they hand Descope the tenant id (conventions §18)."""
+    require_descope_principal(request)
+    return DescopeAccessKeys(get_descope_management(request))
+
+
+def _keycloak_machine_credentials(request: Request, session: AsyncSession | None) -> MachineCredentials:
+    """Canonical machine credentials, each a Keycloak client the sync adapter keeps."""
+    if session is None:
+        raise RuntimeError("machine credentials of a canonical provider need DATABASE_URL")
+    return CanonicalMachineCredentials(
+        provider="keycloak",
+        repository=MachineCredentialRepository(session),
+        push=build_keycloak_sync_adapter(request.app.state.keycloak_admin, session),
+    )
+
+
+@dataclass(frozen=True)
+class SyncAdapterRegistration:
+    """A provider's sync adapter: its class, which declares its capabilities, and how it is built.
+
+    ``machine_credentials`` builds the provider's ``MachineCredentials`` when its
+    adapter declares ``Capability.MACHINE_CREDENTIALS``, and is ``None`` otherwise
+    (``test_capabilities.py`` holds the two together).
+    """
+
+    adapter: type[IdentityProviderAdapter]
+    build: Callable[[State, AsyncSession], IdentityProviderAdapter]
+    machine_credentials: Callable[[Request, AsyncSession | None], MachineCredentials] | None = None
+
+
+# One entry per provider: its adapter's class and how the adapter is built from the
+# application state and the request's database session.
+SYNC_ADAPTERS: dict[str, SyncAdapterRegistration] = {
+    "descope": SyncAdapterRegistration(
+        DescopeSyncAdapter,
+        lambda state, _session: DescopeSyncAdapter(client=state.descope_client),
+        machine_credentials=_descope_access_keys,
+    ),
+    "keycloak": SyncAdapterRegistration(
+        KeycloakSyncAdapter,
+        lambda state, session: build_keycloak_sync_adapter(state.keycloak_admin, session),
+        machine_credentials=_keycloak_machine_credentials,
+    ),
+    "zitadel": SyncAdapterRegistration(
+        ZitadelSyncAdapter, lambda state, session: build_zitadel_sync_adapter(state.zitadel_admin, session)
+    ),
 }
 
 
@@ -145,7 +197,40 @@ RECONCILIATION_HAS_NO_READER = "Reconciliation has no reader for SYNC_PROVIDER; 
 
 def get_sync_adapter(request: Request, session: AsyncSession) -> IdentityProviderAdapter:
     """The sync adapter of the configured provider (``SYNC_PROVIDER``)."""
-    return SYNC_ADAPTERS[SYNC_PROVIDER](request.app.state, session)
+    return SYNC_ADAPTERS[SYNC_PROVIDER].build(request.app.state, session)
+
+
+def sync_capabilities() -> frozenset[Capability]:
+    """The optional capabilities the configured provider's sync adapter declares."""
+    return SYNC_ADAPTERS[SYNC_PROVIDER].adapter.capabilities
+
+
+# The relationship store of a deployment, by its sync provider: Descope's FGA store
+# for Descope, none for any other. Descope's store is keyed on Descope ids, which a
+# canonical principal does not have.
+RELATIONSHIP_STORES: dict[str, RelationshipStoreKind] = {"descope": RelationshipStoreKind.DESCOPE}
+
+
+def relationship_store_kind() -> RelationshipStoreKind:
+    """The kind of the deployment's relationship store (``RELATIONSHIP_STORES``)."""
+    return RELATIONSHIP_STORES.get(SYNC_PROVIDER, RelationshipStoreKind.NONE)
+
+
+async def get_machine_credential_service(
+    request: Request,
+    session: AsyncSession | None = Depends(get_rbac_session),
+) -> MachineCredentialService:
+    """The configured provider's machine credentials (``/api/keys``).
+
+    The route's capability gate runs first, so a provider without the capability
+    never gets here; one that does with no builder is a configuration defect.
+    The session is ``get_rbac_session``'s, ``None`` without a database: Descope's
+    access keys need none, as before.
+    """
+    build = SYNC_ADAPTERS[SYNC_PROVIDER].machine_credentials
+    if build is None:
+        raise RuntimeError(f"SYNC_PROVIDER={SYNC_PROVIDER} declares no machine credentials")
+    return MachineCredentialService(build(request, session))
 
 
 async def get_user_service(

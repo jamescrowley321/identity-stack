@@ -65,13 +65,14 @@ no row.
 | Access | Roles, permissions, assignments | `app/domain/access/` | Migrated (#513) |
 | Directory | Users, tenants, memberships | `app/domain/directory/` | #515 |
 | Federation | Providers, IdP links, identity resolution, just-in-time provisioning, logout | `app/domain/federation/` | #516 |
+| Credentials | Machine credentials, each owned by one tenant | `app/domain/credentials/` | #680 |
 | Documents and fine-grained authorization | Documents and their FGA relations | `app/domain/documents/` | #517 |
 | Synchronisation | Domain events, the Descope and Ory adapters, inbound sync, reconciliation, sync status, cache invalidation | `app/domain/synchronisation/` | #518 |
 | Descope management boundary | The pass-through routers, moved behind one adapter | none: a boundary, not a domain | #519 |
 
 Relationships:
 
-- **Directory is upstream of Access, Federation and Documents.** They hold a user or a
+- **Directory is upstream of Access, Credentials, Federation and Documents.** They hold a user or a
   tenant by id and never import Directory's types.
 - **Synchronisation is downstream of every domain context.** It consumes their events and
   owns the anti-corruption layer to the providers.
@@ -108,6 +109,14 @@ its own.
 | Identity resolution | Finding the canonical user, tenant, roles and permissions for a provider's subject. |
 | Just-in-time provisioning | Creating the canonical user and its links on first sight of a valid token. |
 | Logout strategy | How a session is ended at a given provider. |
+
+### Glossary: Credentials
+
+| Term | Meaning |
+|---|---|
+| Machine credential | What a machine signs in with, owned by one tenant: a client of the provider that gets client-credentials tokens. It holds roles in its tenant and nothing elsewhere. |
+| Expiry | When a credential's tokens stop being accepted. Required, and at most 365 days ahead. |
+| In force | Active and not expired: only then are its tokens accepted. |
 
 ### Glossary: Documents and fine-grained authorization
 

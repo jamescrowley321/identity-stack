@@ -34,6 +34,7 @@ import enum
 import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.params import Depends as DependsMarker
@@ -46,6 +47,8 @@ from app.dependencies.tenant_access import (
     TenantAccess,
     resolve_tenant_access,
 )
+from app.domain import credentials
+from app.errors.identity import IdentityErrorRaised, MachinePrincipalRefused
 from app.knobs import knob_set
 from app.logbook import logbook
 from app.middleware.providers import ProviderTokenConfig
@@ -53,6 +56,7 @@ from app.models.database import get_session_factory
 from app.models.identity.user import UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
+from app.repositories.machine_credential import MachineCredentialRepository
 from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
@@ -106,6 +110,66 @@ def _principal_provider(request: Request) -> str:
     return authentication_type.lower() if isinstance(authentication_type, str) else ""
 
 
+def _machine_client(request: Request, claims: dict) -> str | None:
+    """The machine credential client the token was issued to, by its provider's reader; ``None`` for a person."""
+    provider = getattr(request.state, "provider", None)
+    if not isinstance(provider, ProviderTokenConfig) or provider.machine_client is None:
+        return None
+    return provider.machine_client(claims)
+
+
+MACHINE_PRINCIPAL_REFUSED = "A machine credential cannot manage machine credentials"
+MACHINE_ROLES_REFUSED = "This machine credential holds no role it may use"
+
+
+def refuse_machine_principal(request: Request) -> None:
+    """Refuse a token issued to a machine credential's client (403, ``MachinePrincipalRefused``).
+
+    On ``/api/keys``: a credential holding ``owner`` or ``admin`` would otherwise
+    mint its own successor before it expires, and so outlive its 365-day cap and
+    the membership of the person who created it, and manage its siblings. Which
+    tokens are a machine's is the provider's ``machine_client`` reader.
+    """
+    claims = getattr(request.state, "claims", None)
+    if not isinstance(claims, dict):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if _machine_client(request, claims) is not None:
+        raise IdentityErrorRaised(MachinePrincipalRefused(message=MACHINE_PRINCIPAL_REFUSED))
+
+
+async def _load_machine_memberships(
+    request: Request, sub: str, client_id: str, session: AsyncSession
+) -> CanonicalMemberships:
+    """A machine credential's grants: its roles in its one tenant, and nothing else.
+
+    Refused (403) unless the provider's credential whose tokens carry ``sub`` is
+    the one issued to ``client_id``, active and not expired. A deactivated or
+    deleted credential's tokens are refused here, before they expire.
+    """
+    repository = MachineCredentialRepository(session)
+    credential = await repository.by_subject(_principal_provider(request), sub)
+    if credential is None or credential.client_id != client_id:
+        logger.warning("canonical role resolution found no machine credential for sub=%r", sub)
+        raise HTTPException(status_code=403, detail=NO_TENANT_CONTEXT)
+    if not credentials.in_force(credential, now=datetime.now(timezone.utc)):
+        logger.warning("canonical role resolution refused a machine credential not in force (sub=%r)", sub)
+        raise HTTPException(status_code=403, detail=NO_TENANT_CONTEXT)
+    tenant_id = str(credential.tenant_id)
+    grants = await repository.permissions(credential.id)
+    if credentials.holdable_roles(tuple(grants)).is_error():
+        # A role deleted or renamed since the credential was made: it holds none, or one no
+        # machine may hold (``operator``). Either would serve it more than it was given.
+        logger.warning("canonical role resolution refused a machine credential's current roles (sub=%r)", sub)
+        raise IdentityErrorRaised(MachinePrincipalRefused(message=MACHINE_ROLES_REFUSED))
+    return CanonicalMemberships(
+        grants=tuple(
+            CanonicalGrant(tenant_id=tenant_id, role_name=role_name, permissions=permissions)
+            for role_name, permissions in grants.items()
+        ),
+        tenants=frozenset({tenant_id}),
+    )
+
+
 async def _load_canonical_memberships(
     request: Request,
     claims: dict,
@@ -115,13 +179,19 @@ async def _load_canonical_memberships(
 
     Raises 401 when the token names no subject, and 403 when there is no database,
     no canonical identity for the subject, or the canonical user is not active.
-    Which tenant the request is for is the resolver's decision, not this function's.
+    A token issued to a machine credential's client is decided from that
+    credential alone (``_load_machine_memberships``), never from a user's
+    memberships. Which tenant the request is for is the resolver's decision, not
+    this function's.
     """
     sub = claims.get("sub")
     if not sub:
         raise HTTPException(status_code=401, detail="Token missing subject")
     if session is None:
         raise HTTPException(status_code=403, detail=NO_TENANT_CONTEXT)
+    machine_client = _machine_client(request, claims)
+    if machine_client is not None:
+        return await _load_machine_memberships(request, sub, machine_client, session)
 
     resolver = IdentityResolutionService(
         user_repository=UserRepository(session),

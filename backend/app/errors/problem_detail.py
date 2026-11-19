@@ -16,11 +16,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.errors.identity import (
+    CapabilityMissing,
     Conflict,
     EmailLinkRefused,
     Forbidden,
+    GrantRefused,
     IdentityError,
     IdentityErrorRaised,
+    MachinePrincipalRefused,
     NotFound,
     ProviderError,
     SyncFailed,
@@ -54,12 +57,15 @@ class _ErrorMapping:
 # Error type -> structured mapping (URI path, HTTP status, title)
 _ERROR_TYPE_MAP: dict[type[IdentityError], _ErrorMapping] = {
     NotFound: _ErrorMapping(uri="/errors/not-found", status=404, title="Resource Not Found"),
+    CapabilityMissing: _ErrorMapping(uri="/errors/capability-missing", status=404, title="Capability Not Available"),
     Conflict: _ErrorMapping(uri="/errors/conflict", status=409, title="Conflict"),
     EmailLinkRefused: _ErrorMapping(uri="/errors/conflict", status=409, title="Conflict"),
     ValidationError: _ErrorMapping(uri="/errors/validation", status=422, title="Validation Error"),
     SyncFailed: _ErrorMapping(uri="/errors/sync-failed", status=207, title="Sync Partial Success"),
     ProviderError: _ErrorMapping(uri="/errors/provider-error", status=502, title="Provider Error"),
     Forbidden: _ErrorMapping(uri="/errors/forbidden", status=403, title="Forbidden"),
+    GrantRefused: _ErrorMapping(uri="/errors/forbidden", status=403, title="Forbidden"),
+    MachinePrincipalRefused: _ErrorMapping(uri="/errors/forbidden", status=403, title="Forbidden"),
 }
 
 # Sanitized messages for error types where upstream details may leak.

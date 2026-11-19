@@ -44,6 +44,10 @@ ORGANIZATION_FIRST_LOGIN_PROVIDERS = frozenset({ZITADEL_PROVIDER_NAME.lower(), K
 KEYCLOAK_AUTHORIZED_PARTY_CLAIM = "azp"
 KEYCLOAK_KIND_CLAIM = "typ"
 KEYCLOAK_ACCESS_KIND = "Bearer"
+# Every client the backend creates for a machine credential has a client id with
+# this prefix (``app.services.adapters.keycloak``), and only those: a token issued
+# to one names it in ``azp``.
+KEYCLOAK_MACHINE_CLIENT_PREFIX = "identity-stack-machine-"
 # The claim that lists the organization aliases a Keycloak token was issued for.
 KEYCLOAK_ORGANIZATION_CLAIM = "organization"
 
@@ -75,6 +79,9 @@ TokenBinding = Callable[[dict], str | None]
 # canonical tenant (``tenants.external_org_id``) a user provisioned at first
 # login joins, read from the verified claims, or ``None`` when they name none.
 FirstLoginOrganization = Callable[[dict], str | None]
+# The client of a machine credential a token was issued to, or ``None`` for a
+# person's token (``ProviderTokenConfig.machine_client``).
+MachineClientReader = Callable[[dict], str | None]
 
 
 @dataclass(frozen=True)
@@ -143,6 +150,11 @@ class ProviderTokenConfig:
     # ``POST /api/validate-id-token`` then trusts every audience the token lists;
     # its ``azp`` must still be the SPA. False: the client id is the only one.
     id_token_trusts_listed_audiences: bool = False
+    # The machine credential client a token was issued to, or ``None`` for a
+    # person's token. A machine's token is authorized from its canonical machine
+    # credential alone (``app.dependencies.rbac``), never from a user's
+    # memberships. ``None`` here: the provider serves no machine credentials.
+    machine_client: MachineClientReader | None = None
 
 
 def _string_list(value: object) -> list[str]:
@@ -292,17 +304,31 @@ def local_issuer(issuer_url: str) -> bool:
         return False
 
 
-def keycloak_binding_failure(client_id: str, claims: dict) -> str | None:
-    """Why ``claims`` are not those of an access token issued to the SPA ``client_id``, or ``None``.
+def keycloak_machine_client(claims: dict) -> str | None:
+    """The machine credential client a Keycloak token was issued to (``azp``), or ``None``.
 
-    ``azp`` must be the SPA's client id and ``typ`` must be ``Bearer``: the
-    realm's ID tokens (``ID``) and refresh tokens (``Refresh``) are signed by
-    the same keys, and an ID token issued to the SPA names the SPA in ``azp``
-    too. The reason is for the server's log and quotes no claim value.
+    Only a client id with ``KEYCLOAK_MACHINE_CLIENT_PREFIX`` names one. Whether
+    the token is that client's service account's is decided from the canonical
+    machine credential (``app.dependencies.rbac``), not here.
     """
     azp = claims.get(KEYCLOAK_AUTHORIZED_PARTY_CLAIM)
-    if not isinstance(azp, str) or azp != client_id:
-        return "azp is not the SPA client"
+    if isinstance(azp, str) and len(azp) > len(KEYCLOAK_MACHINE_CLIENT_PREFIX):
+        return azp if azp.startswith(KEYCLOAK_MACHINE_CLIENT_PREFIX) else None
+    return None
+
+
+def keycloak_binding_failure(client_id: str, claims: dict) -> str | None:
+    """Why ``claims`` are not those of an access token issued to the SPA ``client_id`` or a machine client, or ``None``.
+
+    ``azp`` must be the SPA's client id or a machine credential's client
+    (``keycloak_machine_client``) and ``typ`` must be ``Bearer``: the realm's ID
+    tokens (``ID``) and refresh tokens (``Refresh``) are signed by the same
+    keys, and an ID token issued to the SPA names the SPA in ``azp`` too. The
+    reason is for the server's log and quotes no claim value.
+    """
+    azp = claims.get(KEYCLOAK_AUTHORIZED_PARTY_CLAIM)
+    if not isinstance(azp, str) or (azp != client_id and keycloak_machine_client(claims) is None):
+        return "azp is neither the SPA client nor a machine credential client"
     if claims.get(KEYCLOAK_KIND_CLAIM) != KEYCLOAK_ACCESS_KIND:
         return "typ is not Bearer"
     return None
@@ -388,6 +414,7 @@ def keycloak_config(
         post_logout_redirect_uri=post_logout_redirect_uri,
         token_binding=KeycloakTokenBinding(client_id),
         first_login_organization=keycloak_organization_alias,
+        machine_client=keycloak_machine_client,
     )
 
 

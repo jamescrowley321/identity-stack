@@ -55,7 +55,7 @@ import json
 import uuid
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
-from typing import Protocol
+from typing import ClassVar, Protocol
 
 from expression import Error, Ok, Result
 from opentelemetry import trace
@@ -67,6 +67,7 @@ from app.services.adapters.base import (
     CREATED_IN_TENANT,
     STATUS_CHANGED,
     UNANSWERED,
+    Capability,
     IdentityProviderAdapter,
     SyncError,
 )
@@ -276,6 +277,8 @@ async def _bring_to(api: ZitadelAdminApi, sub: str, state: str, wanted: str) -> 
 
 class ZitadelSyncAdapter(IdentityProviderAdapter):
     """Syncs canonical tenants and users to Zitadel. Roles and permissions stay canonical."""
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset()
 
     def __init__(self, open_api: ApiOpener, links: ZitadelLinks, *, project_id: str) -> None:
         self._open_api = open_api

@@ -90,8 +90,10 @@ locals {
   # The backend's service account for the Keycloak admin adapter, which pushes
   # canonical changes to the realm and pulls the realm's changes back. Each
   # role is probed in keycloak/fixtures/README.md.
+  # create-client registers machine credentials' clients through client
+  # registration, the one way the admin client creates a client.
   admin_client_id    = "identity-stack-admin"
-  admin_client_roles = ["manage-users", "manage-organizations", "query-clients", "view-events"]
+  admin_client_roles = ["manage-users", "manage-organizations", "query-clients", "view-events", "create-client"]
   # Its fine-grained admin permission (v2) on the API client alone: read it,
   # manage its roles, and set their composites.
   admin_api_client_scopes = ["manage", "map-roles-composite", "view"]
@@ -140,6 +142,10 @@ resource "keycloak_realm" "this" {
   # resource below has no argument for it.
   attributes = {
     adminEventsExpiration = tostring(local.events_expiration_seconds)
+    # Keycloak 26.8 allows a mapper type in client registration only when this
+    # realm attribute names it too (the policy below names it as well): the
+    # machine credentials' clients carry an audience mapper.
+    allowedProtocolMapperTypesForClientAdministrators = "oidc-audience-mapper"
   }
 
   # Brute-force detection on, with temporary lockouts (Keycloak's own numbers),
@@ -384,6 +390,40 @@ resource "terraform_data" "role_assignment" {
   }
 
   depends_on = [keycloak_organization_memberships.this]
+}
+
+# --- Client registration: machine credentials' clients --------------------------------
+
+# The backend registers each machine credential's client with an audience mapper
+# naming the API client (identity-stack-api), so its client-credentials tokens
+# carry the API audience. Keycloak's authenticated "Allowed Protocol Mapper
+# Types" client registration policy refuses that mapper type by default; this
+# adds it to that one policy, as the import does. The provider has no resource
+# for client registration policies, so the Admin API sets it.
+resource "terraform_data" "registration_audience_mapper" {
+  input = {
+    keycloak_url      = local.keycloak_url
+    realm             = keycloak_realm.this.realm
+    realm_internal_id = keycloak_realm.this.internal_id
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      a() { jq -r --arg k "$1" '.[$k]' <<<"$POLICY"; }
+      ${local.admin_token_command}
+      base="$(a keycloak_url)/admin/realms/$(a realm)"
+      policy="$(printf 'Authorization: Bearer %s\n' "$token" | curl -fsS --max-time 20 -H @- \
+        "$base/components?type=org.keycloak.services.clientregistration.policy.ClientRegistrationPolicy" |
+        jq -ce '[.[] | select(.subType == "authenticated" and .providerId == "allowed-protocol-mappers")] | if length == 1 then .[0] else error("expected one authenticated mapper policy") end')"
+      updated="$(jq -c '.config["allowed-protocol-mapper-types"] |= ((. // []) + ["oidc-audience-mapper"] | unique)' <<<"$policy")"
+      printf 'Authorization: Bearer %s\n' "$token" | curl -fsS --max-time 20 -o /dev/null -X PUT -H @- \
+        -H 'Content-Type: application/json' --data-binary @<(printf '%s' "$updated") \
+        "$base/components/$(jq -r .id <<<"$policy")"
+    EOT
+    environment = { POLICY = jsonencode(self.input) }
+  }
 }
 
 # --- Scoped admin permission on the API client ---------------------------------------

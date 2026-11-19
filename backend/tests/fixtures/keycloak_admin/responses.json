@@ -831,6 +831,14 @@
               "description": "${role_manage-users}",
               "id": "4589defc-6f68-429d-9aaa-3df5c0c95309",
               "name": "manage-users"
+            },
+            {
+              "clientRole": true,
+              "composite": false,
+              "containerId": "3472d841-3e86-4fb5-96d3-239b92079f07",
+              "description": "${role_create-client}",
+              "id": "0cb5a154-49b7-4934-b0fd-855b3e338fa9",
+              "name": "create-client"
             }
           ]
         }
@@ -873,6 +881,14 @@
         "description": "${role_manage-users}",
         "id": "4589defc-6f68-429d-9aaa-3df5c0c95309",
         "name": "manage-users"
+      },
+      {
+        "clientRole": true,
+        "composite": false,
+        "containerId": "3472d841-3e86-4fb5-96d3-239b92079f07",
+        "description": "${role_create-client}",
+        "id": "0cb5a154-49b7-4934-b0fd-855b3e338fa9",
+        "name": "create-client"
       }
     ],
     "method": "GET",

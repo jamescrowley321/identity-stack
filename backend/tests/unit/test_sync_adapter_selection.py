@@ -250,8 +250,8 @@ class TestStartup:
 
         assert str(refused.value) == (
             "The Keycloak admin client's service account lacks realm-management roles "
-            "['manage-organizations', 'query-clients', 'view-events']: grant it "
-            "['manage-organizations', 'manage-users', 'query-clients', 'view-events'] "
+            "['create-client', 'manage-organizations', 'query-clients', 'view-events']: grant it "
+            "['create-client', 'manage-organizations', 'manage-users', 'query-clients', 'view-events'] "
             "directly (roles reached through a group or a composite realm role are not read) "
             "or name another client in KEYCLOAK_ADMIN_CLIENT_ID"
         )

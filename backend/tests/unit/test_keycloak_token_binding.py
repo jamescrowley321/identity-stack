@@ -12,6 +12,7 @@ runs the same refusals with tokens the compose realm signs.
 
 import base64
 import json
+import uuid
 from dataclasses import replace
 from pathlib import Path
 
@@ -22,11 +23,13 @@ from fastapi.testclient import TestClient
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.providers import (
+    KEYCLOAK_MACHINE_CLIENT_PREFIX,
     KeycloakTokenBinding,
     ProviderTokenConfig,
     descope_config,
     keycloak_binding_failure,
     keycloak_config,
+    keycloak_machine_client,
 )
 from tests.helpers.keycloak_model import API_AUDIENCE, OTHER_CLIENT_ID, SPA_CLIENT_ID
 from tests.helpers.local_op import ES256, RS256, LocalProvider, local_provider
@@ -213,7 +216,31 @@ class TestTheBindingAlone:
         assert keycloak_binding_failure(SPA_CLIENT_ID, _claims(ID)) == "typ is not Bearer"
 
     def test_the_other_client_is_named_by_its_azp(self):
-        assert keycloak_binding_failure(SPA_CLIENT_ID, _claims(OTHER)) == "azp is not the SPA client"
+        assert (
+            keycloak_binding_failure(SPA_CLIENT_ID, _claims(OTHER))
+            == "azp is neither the SPA client nor a machine credential client"
+        )
+
+    def test_a_machine_credential_clients_access_token_passes(self):
+        claims = {**_claims(ACCESS), "azp": f"{KEYCLOAK_MACHINE_CLIENT_PREFIX}{uuid.uuid4()}"}
+
+        assert keycloak_binding_failure(SPA_CLIENT_ID, claims) is None
+
+    @pytest.mark.parametrize(
+        "azp",
+        [KEYCLOAK_MACHINE_CLIENT_PREFIX, f"x{KEYCLOAK_MACHINE_CLIENT_PREFIX}1", "identity-stack-admin"],
+        ids=["the bare prefix", "the prefix not at the start", "the admin client"],
+    )
+    def test_no_other_client_is_a_machine_client(self, azp):
+        claims = {**_claims(ACCESS), "azp": azp}
+
+        assert keycloak_machine_client(claims) is None
+        assert keycloak_binding_failure(SPA_CLIENT_ID, claims) is not None
+
+    def test_a_machine_clients_id_token_is_still_refused(self):
+        claims = {**_claims(ID), "azp": f"{KEYCLOAK_MACHINE_CLIENT_PREFIX}{uuid.uuid4()}"}
+
+        assert keycloak_binding_failure(SPA_CLIENT_ID, claims) == "typ is not Bearer"
 
     def test_the_reason_quotes_no_claim_value(self):
         claims = {**_claims(ACCESS), "azp": "secret-looking-value", "typ": "secret-looking-type"}

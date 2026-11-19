@@ -98,7 +98,7 @@ REALM_SETTINGS = (
     "maxTemporaryLockouts",
     "bruteForceStrategy",
 )
-REALM_ATTRIBUTES = ("adminEventsExpiration",)
+REALM_ATTRIBUTES = ("adminEventsExpiration", "allowedProtocolMapperTypesForClientAdministrators")
 EVENT_SETTINGS = (
     "eventsEnabled",
     "eventsExpiration",
@@ -262,6 +262,12 @@ def describe(realm: Realm) -> dict:
             }
 
         realm_groups = {group["path"]: group.get("subGroupCount", 0) for group in _get(http, "/groups")}
+        registration_policies = {
+            f"{policy['subType']} {policy['name']}": {
+                key: sorted(value) for key, value in (policy.get("config") or {}).items()
+            }
+            for policy in _get(http, "/components", type=REGISTRATION_POLICY_TYPE)
+        }
 
     return {
         "realm": {key: settings.get(key, ABSENT) for key in REALM_SETTINGS},
@@ -271,6 +277,7 @@ def describe(realm: Realm) -> dict:
         "users": users,
         "realm groups": realm_groups,
         "organizations": organizations,
+        "client registration policies": registration_policies,
     }
 
 
@@ -494,7 +501,9 @@ def frontend_login(realm: Realm, frontend_environment: dict) -> list[str]:
 
 
 # The admin service account's realm-management roles, which it reads back at startup.
-ADMIN_CLIENT_ROLES = sorted(["manage-organizations", "manage-users", "query-clients", "view-events"])
+# Client registration policies: the machine credentials' clients are registered with an audience mapper.
+REGISTRATION_POLICY_TYPE = "org.keycloak.services.clientregistration.policy.ClientRegistrationPolicy"
+ADMIN_CLIENT_ROLES = sorted(["create-client", "manage-organizations", "manage-users", "query-clients", "view-events"])
 # What the admin service account must be able to read (200), and the SPA client it must not (403).
 ADMIN_CLIENT_READS = (
     ("/organizations", httpx.codes.OK),

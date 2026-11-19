@@ -11,6 +11,7 @@ Requires DESCOPE_MANAGEMENT_KEY for admin_api_context.
 import pytest
 from playwright.sync_api import APIRequestContext
 
+from app.services.adapters.base import Capability
 from tests.e2e.not_applicable import descope_credentials_missing
 
 # --- Unauthenticated endpoint tests (no credentials needed) ---
@@ -237,16 +238,22 @@ class TestAdminEndpoints:
         assert resp.status in (403, 422), f"/api/users?status=bogus returned {resp.status}"
 
     def test_admin_endpoints_reject_non_admin_token(self, auth_api_context: APIRequestContext, backend_url: str):
-        """Admin endpoints return 403 with a valid but non-admin token."""
+        """Admin endpoints return 403 with a valid but non-admin token.
+
+        ``/api/keys`` is there only where machine credentials serve the caller; elsewhere
+        it answers 404 to everyone (test_capability_pages.py), so it is not held here.
+        """
         admin_only = [
             "/api/roles",
             "/api/permissions",
             "/api/members",
-            "/api/keys",
             "/api/sync/status",
             "/api/events/recent",
             "/api/users",
         ]
+        capabilities = auth_api_context.get(f"{backend_url}/api/capabilities").json()["capabilities"]
+        if Capability.MACHINE_CREDENTIALS in capabilities:
+            admin_only.append("/api/keys")
         for path in admin_only:
             resp = auth_api_context.get(f"{backend_url}{path}")
             # Exactly 403. Accepting 200 made this a security test that could not

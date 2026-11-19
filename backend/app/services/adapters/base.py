@@ -5,6 +5,7 @@ All methods return Result[None, SyncError] — never raise for domain errors.
 
 from __future__ import annotations
 
+import enum
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -45,6 +46,23 @@ CREATED_IN_TENANT = "created_in_tenant"
 CHANGED_IN_TENANT = "changed_in_tenant"
 
 
+class Capability(enum.StrEnum):
+    """An optional feature a sync adapter implements beyond the canonical sync.
+
+    ``GET /api/capabilities`` reports the configured adapter's set, the SPA shows a
+    page only when its capability is there, and a route for a capability the
+    adapter lacks answers 404 (``app.dependencies.capabilities``).
+    """
+
+    # Credentials a machine signs in with, owned by a tenant: Descope access keys,
+    # and for a canonical provider a client the adapter creates through
+    # ``MachineCredentialPush`` (Keycloak: a confidential client with a service account).
+    MACHINE_CREDENTIALS = "machine_credentials"
+    # Free-form attributes on a user and on a tenant: the profile's custom
+    # attributes and the tenant settings (Descope custom attributes).
+    CUSTOM_ATTRIBUTES = "custom_attributes"
+
+
 @dataclass(frozen=True)
 class SyncError:
     """Error returned when an adapter sync operation fails."""
@@ -52,6 +70,56 @@ class SyncError:
     message: str
     operation: str = ""
     context: dict | None = field(default=None)
+
+
+@dataclass(frozen=True)
+class MachineClient:
+    """A client the provider created for a machine credential (``MachineCredentialPush.create_machine_client``).
+
+    ``client_id`` is what the machine authenticates as and ``secret`` its secret,
+    returned once and never stored. ``subject`` is the ``sub`` of the tokens the
+    client is issued and ``external_id`` the provider's id for the client.
+    ``registration_token`` is the provider's token for managing that one client
+    later: it is stored, but never returned by the API.
+    """
+
+    client_id: str
+    external_id: str
+    subject: str
+    secret: str = field(repr=False)
+    registration_token: str = field(repr=False, default="")
+
+
+@dataclass(frozen=True)
+class MachineClientRef:
+    """What the adapter needs to change or delete a machine credential's client."""
+
+    client_id: str
+    external_id: str
+    subject: str
+    registration_token: str = field(repr=False, default="")
+
+
+class MachineCredentialPush(ABC):
+    """The provider half of the ``machine_credentials`` capability of a canonical adapter.
+
+    The canonical service (``app.services.machine_credentials``) keeps each
+    credential in Postgres and pushes it here. Every failure is ``Error(SyncError)``.
+    """
+
+    @abstractmethod
+    async def create_machine_client(
+        self, *, credential_id: uuid.UUID, tenant_id: uuid.UUID, name: str
+    ) -> Result[MachineClient, SyncError]:
+        """Create a client that signs in with the client-credentials grant only, owned by the tenant."""
+
+    @abstractmethod
+    async def set_machine_client_enabled(self, *, client: MachineClientRef, enabled: bool) -> Result[None, SyncError]:
+        """Let the client be issued tokens, or stop it."""
+
+    @abstractmethod
+    async def delete_machine_client(self, *, client: MachineClientRef) -> Result[None, SyncError]:
+        """Delete the client. One that is already gone is deleted."""
 
 
 class IdentityProviderAdapter(ABC):
@@ -66,6 +134,16 @@ class IdentityProviderAdapter(ABC):
     # users the deleted role was the last role of; other adapters get the role
     # delete alone.
     ends_memberships: ClassVar[bool] = False
+
+    # The optional capabilities the adapter implements. Every concrete adapter
+    # declares its own set, empty when it implements none.
+    capabilities: ClassVar[frozenset[Capability]]
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        """Refuse an adapter class that does not declare its ``capabilities``."""
+        super().__init_subclass__(**kwargs)
+        if not isinstance(getattr(cls, "capabilities", None), frozenset):
+            raise TypeError(f"{cls.__name__} must declare capabilities: ClassVar[frozenset[Capability]]")
 
     @abstractmethod
     async def sync_user(self, *, user_id: uuid.UUID, data: dict) -> Result[None, SyncError]: ...

@@ -1,5 +1,7 @@
 """KeycloakAdminApi settings and the startup credential check, against recorded answers."""
 
+from urllib.parse import urlsplit
+
 import httpx
 import pytest
 
@@ -146,7 +148,9 @@ class TestCredentialCheck:
         with pytest.raises(KeycloakAdminRolesMissing) as refused:
             await api.api().check_credentials()
 
-        assert refused.value.missing == frozenset({"manage-organizations", "query-clients", "view-events"})
+        assert refused.value.missing == frozenset(
+            {"create-client", "manage-organizations", "query-clients", "view-events"}
+        )
 
     async def test_a_service_account_that_cannot_be_found_lacks_the_roles(self):
         api = RecordedAdminApi(["token", "credential_check", httpx.Response(200, json=[])])
@@ -408,3 +412,66 @@ class TestIdempotentWrites:
             await api.api().list_organizations()
 
         assert refused.value.status == 200
+
+
+REGISTERED = {
+    "id": "kc-client",
+    "clientId": "identity-stack-machine-1",
+    "secret": "s",
+    "registrationAccessToken": "rat",
+}
+REGISTRATION_PATH = urlsplit(ISSUER).path
+
+
+class TestClientRegistration:
+    """The calls behind machine credentials: registered under the issuer, deleted with the registration token."""
+
+    async def test_registers_as_the_service_account_under_the_issuer(self):
+        api = RecordedAdminApi(["token", httpx.Response(201, json=REGISTERED)])
+
+        created = await api.api().register_client({"clientId": "identity-stack-machine-1"})
+
+        assert created == REGISTERED
+        sent = api.sent[-1]
+        assert (sent.method, sent.path, sent.body, sent.authorization) == (
+            "POST",
+            f"{REGISTRATION_PATH}/clients-registrations/default",
+            {"clientId": "identity-stack-machine-1"},
+            "Bearer recorded-access-token",
+        )
+
+    @pytest.mark.parametrize("missing", sorted(REGISTERED))
+    async def test_an_answer_without_the_created_client_is_an_error(self, missing):
+        answer = {key: value for key, value in REGISTERED.items() if key != missing}
+        api = RecordedAdminApi(["token", httpx.Response(201, json=answer)])
+
+        with pytest.raises(KeycloakAdminError):
+            await api.api().register_client({})
+
+    async def test_a_refused_registration_is_an_error_with_its_status(self):
+        api = RecordedAdminApi(["token", httpx.Response(403, json={"error": "insufficient_scope"})])
+
+        with pytest.raises(KeycloakAdminError) as refused:
+            await api.api().register_client({})
+
+        assert refused.value.status == 403
+
+    @pytest.mark.parametrize(("status", "deleted"), [(204, True), (401, False)])
+    async def test_unregisters_with_the_registration_token(self, status, deleted):
+        api = RecordedAdminApi([httpx.Response(status)])
+
+        assert await api.api().unregister_client("identity-stack-machine-1", "rat") is deleted
+        sent = api.sent[-1]
+        assert (sent.method, sent.path, sent.authorization) == (
+            "DELETE",
+            f"{REGISTRATION_PATH}/clients-registrations/default/identity-stack-machine-1",
+            "Bearer rat",
+        )
+
+    async def test_any_other_answer_to_the_delete_is_an_error(self):
+        api = RecordedAdminApi([httpx.Response(500)])
+
+        with pytest.raises(KeycloakAdminError) as refused:
+            await api.api().unregister_client("identity-stack-machine-1", "rat")
+
+        assert refused.value.status == 500

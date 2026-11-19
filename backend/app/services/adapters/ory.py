@@ -20,12 +20,12 @@ is tested.
 from __future__ import annotations
 
 import uuid
-from typing import Protocol
+from typing import ClassVar, Protocol
 
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
-from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.adapters.base import Capability, IdentityProviderAdapter, SyncError
 
 tracer = trace.get_tracer(__name__)
 
@@ -40,6 +40,8 @@ class OryIdentityClient(Protocol):
 
 class OrySyncAdapter(IdentityProviderAdapter):
     """Syncs canonical identity state to Ory. Roles/permissions stay canonical."""
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset()
 
     def __init__(self, client: OryIdentityClient, *, enable_organizations: bool = False) -> None:
         self._client = client

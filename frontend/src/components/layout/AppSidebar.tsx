@@ -13,6 +13,8 @@ import {
 } from "lucide-react"
 import { useLocation, Link } from "react-router-dom"
 import { useRBAC } from "@/hooks/useRBAC"
+import { useCapabilities } from "@/contexts/CapabilitiesContext"
+import { PAGE_REQUIREMENTS } from "@/lib/capabilities"
 import {
   Sidebar,
   SidebarContent,
@@ -78,6 +80,7 @@ const navSections: NavSection[] = [
 export function AppSidebar() {
   const location = useLocation()
   const { isAdmin } = useRBAC()
+  const { serves } = useCapabilities()
 
   return (
     <Sidebar>
@@ -87,7 +90,9 @@ export function AppSidebar() {
       <SidebarContent>
         {navSections.map((section) => {
           const visibleItems = section.items.filter(
-            (item) => !item.adminOnly || isAdmin
+            (item) =>
+              (!item.adminOnly || isAdmin) &&
+              (PAGE_REQUIREMENTS[item.to] === undefined || serves(PAGE_REQUIREMENTS[item.to]))
           )
           if (visibleItems.length === 0) return null
           return (

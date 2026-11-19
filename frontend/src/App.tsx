@@ -11,6 +11,8 @@ import MemberManagement from "./pages/MemberManagement";
 import FGAManagement from "./pages/FGAManagement";
 import { Button } from "./components/ui/button";
 import { Alert, AlertTitle, AlertDescription } from "./components/ui/alert";
+import { useCapabilities } from "./contexts/CapabilitiesContext";
+import { PAGE_REQUIREMENTS } from "./lib/capabilities";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const auth = useAuth();
@@ -61,6 +63,16 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/** A page whose capability the deployment lacks is not there: its link goes to the dashboard. */
+export function CapabilityRoute({ path, children }: { path: string; children: React.ReactNode }) {
+  const { serves } = useCapabilities();
+  const requirement = PAGE_REQUIREMENTS[path];
+  if (requirement !== undefined && !serves(requirement)) {
+    return <Navigate to="/" replace />;
+  }
+  return <>{children}</>;
+}
+
 function Login() {
   const auth = useAuth();
   const location = useLocation();
@@ -104,10 +116,10 @@ export default function App() {
         <Route index element={<Dashboard />} />
         <Route path="roles" element={<RoleManagement />} />
         <Route path="profile" element={<UserProfile />} />
-        <Route path="settings" element={<TenantSettings />} />
-        <Route path="keys" element={<AccessKeys />} />
+        <Route path="settings" element={<CapabilityRoute path="/settings"><TenantSettings /></CapabilityRoute>} />
+        <Route path="keys" element={<CapabilityRoute path="/keys"><AccessKeys /></CapabilityRoute>} />
         <Route path="members" element={<MemberManagement />} />
-        <Route path="fga" element={<FGAManagement />} />
+        <Route path="fga" element={<CapabilityRoute path="/fga"><FGAManagement /></CapabilityRoute>} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

@@ -114,7 +114,7 @@ async def test_create_key(mock_validate, client):
     response = await client.post(
         "/api/keys",
         headers={"Authorization": "Bearer valid.token"},
-        json={"name": "My API Key", "expire_time": future_expiry()},
+        json={"name": "My API Key", "expire_time": future_expiry(), "role_names": ["admin"]},
     )
     assert response.status_code == 200
     data = response.json()
@@ -425,7 +425,7 @@ async def test_expiry_at_the_cap_is_accepted(mock_validate, client):
     response = await client.post(
         "/api/keys",
         headers={"Authorization": "Bearer valid.token"},
-        json={"name": "max", "expire_time": future_expiry(days=364)},
+        json={"name": "max", "expire_time": future_expiry(days=364), "role_names": ["admin"]},
     )
 
     assert response.status_code == 200
@@ -444,7 +444,7 @@ async def test_validated_expiry_is_what_reaches_descope(mock_validate, client):
     await client.post(
         "/api/keys",
         headers={"Authorization": "Bearer valid.token"},
-        json={"name": "forwarded", "expire_time": expiry},
+        json={"name": "forwarded", "expire_time": expiry, "role_names": ["admin"]},
     )
 
     assert mock_client.create_access_key.await_args.kwargs["expire_time"] == expiry
@@ -475,3 +475,45 @@ async def test_key_command_error_is_not_reported_as_success(mock_validate, clien
     assert response.headers["content-type"] == "application/problem+json"
     assert response.json()["type"] == "/errors/provider-error"
     failure.assert_awaited_once_with("key123")
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_a_key_with_no_role_is_refused(mock_validate, client):
+    """A key with no role would still count as a member of the tenant."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_client = AsyncMock()
+    app.state.descope_client = mock_client
+
+    response = await client.post(
+        "/api/keys",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"name": "roleless", "expire_time": future_expiry()},
+    )
+
+    assert (response.status_code, response.json()["detail"]) == (
+        422,
+        "role_names must name at least one role the credential holds",
+    )
+    mock_client.create_access_key.assert_not_awaited()
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_operator_is_refused_on_a_key_even_to_an_operator(mock_validate, client):
+    """A key has one membership, so operator there would open every tenant's state to it."""
+    mock_validate.return_value = {
+        **ADMIN_CLAIMS,
+        "tenants": {"tenant-abc": {"roles": ["admin", "operator"], "permissions": []}},
+    }
+    mock_client = AsyncMock()
+    app.state.descope_client = mock_client
+
+    response = await client.post(
+        "/api/keys",
+        headers={"Authorization": "Bearer valid.token"},
+        json={"name": "global", "role_names": ["operator"], "expire_time": future_expiry()},
+    )
+
+    assert (response.status_code, response.json()["detail"]) == (403, "A machine credential cannot hold: operator")
+    mock_client.create_access_key.assert_not_awaited()

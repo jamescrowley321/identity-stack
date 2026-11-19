@@ -21,10 +21,13 @@ from expression import Error, Ok, Result
 from pydantic import BaseModel
 
 from app.errors.identity import (
+    CapabilityMissing,
     Conflict,
     EmailLinkRefused,
     Forbidden,
+    GrantRefused,
     IdentityError,
+    MachinePrincipalRefused,
     NotFound,
     ProviderError,
     SyncFailed,
@@ -77,8 +80,30 @@ class TestProblemDetailResponse:
 class TestErrorTypeMap:
     def test_all_subclasses_registered(self):
         """Every IdentityError subclass must be in the map."""
-        expected = {NotFound, Conflict, EmailLinkRefused, ValidationError, SyncFailed, ProviderError, Forbidden}
+        expected = {
+            NotFound,
+            CapabilityMissing,
+            Conflict,
+            EmailLinkRefused,
+            ValidationError,
+            SyncFailed,
+            ProviderError,
+            Forbidden,
+            GrantRefused,
+            MachinePrincipalRefused,
+        }
         assert set(_ERROR_TYPE_MAP.keys()) == expected
+
+    def test_a_refused_grant_is_a_403_that_names_the_roles(self):
+        """Unlike ``Forbidden``, its message is the detail: it names only what the caller asked to grant."""
+        result: Result[dict, IdentityError] = Error(GrantRefused(message="Cannot grant roles you do not hold: owner"))
+
+        response = result_to_response(result, _make_request())
+
+        assert (response.status_code, json.loads(response.body)["detail"]) == (
+            403,
+            "Cannot grant roles you do not hold: owner",
+        )
 
     def test_status_codes(self):
         """AC-1.3.3: exact status code mapping."""
@@ -88,6 +113,7 @@ class TestErrorTypeMap:
         assert _ERROR_TYPE_MAP[SyncFailed].status == 207
         assert _ERROR_TYPE_MAP[ProviderError].status == 502
         assert _ERROR_TYPE_MAP[Forbidden].status == 403
+        assert _ERROR_TYPE_MAP[CapabilityMissing].status == 404
 
     def test_uri_paths(self):
         assert _ERROR_TYPE_MAP[NotFound].uri == "/errors/not-found"
@@ -96,6 +122,7 @@ class TestErrorTypeMap:
         assert _ERROR_TYPE_MAP[SyncFailed].uri == "/errors/sync-failed"
         assert _ERROR_TYPE_MAP[ProviderError].uri == "/errors/provider-error"
         assert _ERROR_TYPE_MAP[Forbidden].uri == "/errors/forbidden"
+        assert _ERROR_TYPE_MAP[CapabilityMissing].uri == "/errors/capability-missing"
 
 
 # ---------------------------------------------------------------------------
