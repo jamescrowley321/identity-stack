@@ -269,9 +269,12 @@ def two_tenant(request, monkeypatch):
 class TestSeedMissing:
     """A run whose linked user is not in both tenants fails naming the user, its scope, the seed and the answer."""
 
-    def _memberships(self, provider, monkeypatch, names):
+    def _memberships(self, provider, monkeypatch, keys):
+        """``GET /api/identity`` listing the fixture tenants ``keys`` under the names the provider gives them."""
         answer = {
-            "tenant_memberships": [{"tenant_name": name, "tenant_id": f"id-{name}"} for name in names],
+            "tenant_memberships": [
+                {"tenant_name": provider._tenant_name(key), "tenant_id": f"id-{key}"} for key in keys
+            ],
         }
         monkeypatch.setattr(provider, "_identity", lambda token, headers=None: answer)
         return answer
@@ -322,6 +325,18 @@ class TestSeedMissing:
 
         with pytest.raises(pytest.fail.Exception, match=rf"not a member of {member_tenant}: run `"):
             two_tenant.tenant_id(None)
+
+
+def test_keycloak_tenants_carry_their_organizations_name_and_zitadels_the_fixture_key():
+    """Reconciliation gives a Keycloak tenant its organization's name; the Zitadel seed names a tenant after its key."""
+    from tests.helpers.identity_fixture import IDENTITIES
+
+    keycloak = providers.KeycloakProvider("http://backend", "http://frontend")
+    zitadel = providers.ZitadelProvider("http://backend", "http://frontend")
+
+    assert {key: (keycloak._tenant_name(key), zitadel._tenant_name(key)) for key in IDENTITIES.tenants} == {
+        key: (tenant.name, key) for key, tenant in IDENTITIES.tenants.items()
+    }
 
 
 def test_each_provider_names_its_own_seed():
