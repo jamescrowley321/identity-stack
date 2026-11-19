@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.domain import access
-from app.errors.identity import Conflict, IdentityError, NotFound, ValidationError
+from app.errors.identity import Conflict, Forbidden, IdentityError, NotFound, ValidationError
 
 _NAME_SUBJECTS = {
     access.NameSubject.ROLE: "Role",
@@ -13,6 +13,8 @@ _NAME_FAULTS = {
     access.NameFault.EMPTY: "must not be empty",
     access.NameFault.TOO_LONG: f"must be at most {access.MAX_NAME_LENGTH} characters",
 }
+
+NOT_A_MEMBER_OF_THE_TENANT = "The user is not a member of the tenant: a role is assigned only to a member"
 
 
 def identity_error(error: access.AccessError) -> IdentityError:
@@ -36,6 +38,9 @@ def identity_error(error: access.AccessError) -> IdentityError:
             return Conflict(message=f"User '{user_id}' already has role '{role_id}' in tenant '{tenant_id}'")
         case access.AssignmentNotFound(user_id=user_id, tenant_id=tenant_id):
             return NotFound(message=f"Role assignment not found for user '{user_id}' in tenant '{tenant_id}'")
+        case access.NotATenantMember():
+            # The same answer for an unknown user and a user of another tenant: no enumeration.
+            return Forbidden(message=NOT_A_MEMBER_OF_THE_TENANT)
         case access.InvalidName(subject=subject, fault=fault):
             return ValidationError(message=f"{_NAME_SUBJECTS[subject]} name {_NAME_FAULTS[fault]}")
     raise TypeError(f"no IdentityError for {type(error).__name__}")

@@ -16,7 +16,7 @@ from opentelemetry import trace
 
 from app.domain import access
 from app.errors.access import identity_error
-from app.errors.identity import Conflict, Forbidden, IdentityError, ValidationError
+from app.errors.identity import Conflict, IdentityError, ValidationError
 from app.logbook import logbook
 from app.repositories.assignment import UserTenantRoleRepository, assignment_from_row, assignment_to_row
 from app.repositories.base import RepositoryConflictError
@@ -47,11 +47,6 @@ _INVALIDATIONS: dict[type[access.AccessEvent], str] = {
 }
 
 
-# An adapter that keeps memberships (Keycloak organizations) makes a role
-# assignment a provider membership: it is given only to a user who already holds
-# a role in the tenant. The first membership comes from sign-in provisioning, as
-# #592 has it for every provider.
-NOT_A_MEMBER_OF_THE_TENANT = "The user is not a member of the tenant: a role is assigned only to a member"
 NO_ROLES_TO_ENROL = "A member is given at least one role"
 
 
@@ -262,10 +257,12 @@ class RoleService:
             span.set_attribute("tenant.id", str(tenant_id))
             span.set_attribute("role.id", str(role_id))
 
-            if self._adapter.ends_memberships is True and not await self._assignment_repository.list_by_user_tenant(
-                user_id, tenant_id
-            ):
-                return Error(Forbidden(message=NOT_A_MEMBER_OF_THE_TENANT))
+            # A role is given only to a user who already holds one in the tenant, whatever
+            # the adapter: otherwise a tenant admin could pull a user of another tenant
+            # (an operator among them) into theirs (#693). The first membership comes
+            # from sign-in provisioning, as #592 has it for every provider.
+            if not await self._assignment_repository.list_by_user_tenant(user_id, tenant_id):
+                return Error(identity_error(access.NotATenantMember(user_id=user_id, tenant_id=tenant_id)))
 
             row = await self._repository.get(role_id)
             held_row = None if row is None else await self._assignment_repository.get(user_id, tenant_id, role_id)
