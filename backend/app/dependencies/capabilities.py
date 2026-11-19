@@ -29,13 +29,18 @@ logger = logbook(__name__)
 class Served:
     capabilities: frozenset[Capability]
     relationship_store: RelationshipStoreKind
+    # Whether the caller is a principal of the sync provider, so the routes whose writes
+    # go to it (the members, roles and permissions) serve them: the decision
+    # ``require_sync_provider_principal`` makes (``identity.is_sync_provider_principal``).
+    sync_provider_principal: bool = False
 
 
 NOTHING = Served(frozenset(), RelationshipStoreKind.NONE)
 
 
 def served(request: Request) -> Served:
-    """The sync adapter's capabilities and the relationship store, as far as they serve the caller.
+    """The sync adapter's capabilities and the relationship store, as far as they serve the caller,
+    and whether the sync provider's routes do.
 
     An adapter's capabilities take the caller's ``sub`` and tenant as its own
     provider's ids, so they serve only that provider's principals
@@ -49,13 +54,14 @@ def served(request: Request) -> Served:
     if getattr(request.state, "claims", None) is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     capabilities = identity.sync_capabilities()
-    if not identity.is_sync_provider_principal(request):
+    sync_provider_principal = identity.is_sync_provider_principal(request)
+    if not sync_provider_principal:
         capabilities = capabilities & identity.SYNC_ADAPTERS[identity.SYNC_PROVIDER].adapter.canonical_capabilities
     store = identity.relationship_store_kind()
     registration = identity.RELATIONSHIP_STORES.get(store)
     if registration is None or not registration.serves(request):
         store = RelationshipStoreKind.NONE
-    return Served(capabilities, store)
+    return Served(capabilities, store, sync_provider_principal)
 
 
 def _require(capability: Capability) -> Callable[[Request], None]:

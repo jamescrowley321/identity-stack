@@ -77,13 +77,13 @@ DECLARED = {
     NoOpSyncAdapter: frozenset(),
 }
 
-DESCOPE_SERVED = Served(DESCOPE_CAPABILITIES, RelationshipStoreKind.DESCOPE)
+DESCOPE_SERVED = Served(DESCOPE_CAPABILITIES, RelationshipStoreKind.DESCOPE, sync_provider_principal=True)
 # Keycloak's own principal is served every capability its adapter declares; OpenFGA
 # serves it only where CANONICAL_RBAC_PROVIDERS names Keycloak, which here it does not
 # (the default, ``ory``). Keycloak's machine credentials are canonical: they serve
 # every principal (#680); its custom attributes take the caller's sub and tenant as
 # Keycloak's ids, so they serve a Keycloak principal only (#679).
-KEYCLOAK_SERVED = Served(KEYCLOAK_CAPABILITIES, RelationshipStoreKind.NONE)
+KEYCLOAK_SERVED = Served(KEYCLOAK_CAPABILITIES, RelationshipStoreKind.NONE, sync_provider_principal=True)
 KEYCLOAK_MACHINE_CREDENTIALS = frozenset({Capability.MACHINE_CREDENTIALS})
 
 # (method, path) of every route each capability serves.
@@ -147,6 +147,7 @@ def _response(served: Served) -> dict:
     return {
         "capabilities": sorted(capability.value for capability in served.capabilities),
         "relationship_store": served.relationship_store.value,
+        "sync_provider_principal": served.sync_provider_principal,
     }
 
 
@@ -281,7 +282,7 @@ SERVED_TO = [
     ("zitadel", "", "descope", NOTHING),
     ("zitadel", "", "ory", OPENFGA_SERVED),
     ("zitadel", "", "keycloak", NOTHING),
-    ("descope", "openfga", "descope", Served(DESCOPE_CAPABILITIES, RelationshipStoreKind.NONE)),
+    ("descope", "openfga", "descope", Served(DESCOPE_CAPABILITIES, RelationshipStoreKind.NONE, True)),
     ("descope", "openfga", "ory", OPENFGA_SERVED),
     ("keycloak", "none", "ory", Served(KEYCLOAK_MACHINE_CREDENTIALS, RelationshipStoreKind.NONE)),
     ("keycloak", "descope", "ory", Served(KEYCLOAK_MACHINE_CREDENTIALS, RelationshipStoreKind.NONE)),
@@ -298,6 +299,21 @@ class TestTheCapabilitiesRoute:
         response = client.get("/api/capabilities", headers=_bearer(PRINCIPALS[principal]))
 
         assert (response.status_code, response.json()) == (200, _response(expected))
+
+    @pytest.mark.parametrize(("provider", "store", "principal", "expected"), SERVED_TO)
+    def test_its_sync_provider_flag_is_the_sync_provider_guards_decision(
+        self, client, monkeypatch, provider, store, principal, expected
+    ):
+        """The SPA shows Members and Roles by the flag: it must be exactly whom the guard lets through."""
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", provider)
+        monkeypatch.setattr(identity, "RELATIONSHIP_STORE", store)
+        headers = _bearer(PRINCIPALS[principal])
+
+        flag = client.get("/api/capabilities", headers=headers).json()["sync_provider_principal"]
+        members = client.get("/api/members", headers=headers)
+        fenced = members.status_code == 403 and members.json().get("detail", "").startswith("This route serves ")
+
+        assert (flag, not fenced) == (expected.sync_provider_principal, expected.sync_provider_principal)
 
     def test_a_request_with_no_token_gets_401(self, client):
         assert client.get("/api/capabilities").status_code == 401

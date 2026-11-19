@@ -193,30 +193,13 @@ SYNC_ADAPTERS: dict[str, SyncAdapterRegistration] = {
 }
 
 
-@dataclass(frozen=True)
-class SyncProviderPrincipal:
-    """Whose principals a sync provider's adapter takes the tenant and the user ids of.
-
-    ``name`` is the provider's registration name (``ProviderTokenConfig.name``),
-    which the refusal of ``require_sync_provider_principal`` names.
-    """
-
-    name: str
-    is_principal: Callable[[ProviderTokenConfig], bool]
-
-
-# One entry per key of SYNC_ADAPTERS: which principals the canonical services may
-# push writes for (``app.dependencies.sync_provider``). Descope's are the
-# ``descope_managed`` ones, as ``require_descope_principal`` reads them; the others
-# are their registration's.
-SYNC_PROVIDER_PRINCIPALS: dict[str, SyncProviderPrincipal] = {
-    "descope": SyncProviderPrincipal(name="Descope", is_principal=lambda provider: provider.descope_managed),
-    "keycloak": SyncProviderPrincipal(
-        name=KEYCLOAK_PROVIDER_NAME, is_principal=lambda provider: provider.name == KEYCLOAK_PROVIDER_NAME
-    ),
-    "zitadel": SyncProviderPrincipal(
-        name=ZITADEL_PROVIDER_NAME, is_principal=lambda provider: provider.name == ZITADEL_PROVIDER_NAME
-    ),
+# One entry per key of SYNC_ADAPTERS: the name of the provider whose principals the
+# canonical services push writes for, as ``require_sync_provider_principal`` names it
+# in its refusal. Who those principals are is ``is_sync_provider_principal``.
+SYNC_PROVIDER_NAMES: dict[str, str] = {
+    "descope": "Descope",
+    "keycloak": KEYCLOAK_PROVIDER_NAME,
+    "zitadel": ZITADEL_PROVIDER_NAME,
 }
 
 

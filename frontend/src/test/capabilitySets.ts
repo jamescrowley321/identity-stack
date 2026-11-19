@@ -6,8 +6,12 @@ import {
   type Requirement,
 } from "@/lib/capabilities";
 
-function set(capabilities: Capability[], relationshipStore: RelationshipStoreKind): Capabilities {
-  return { capabilities: new Set(capabilities), relationshipStore };
+function set(
+  capabilities: Capability[],
+  relationshipStore: RelationshipStoreKind,
+  syncProviderPrincipal = true,
+): Capabilities {
+  return { capabilities: new Set(capabilities), relationshipStore, syncProviderPrincipal };
 }
 
 const { MACHINE_CREDENTIALS, CUSTOM_ATTRIBUTES } = Capability;
@@ -21,13 +25,19 @@ export const CAPABILITY_SETS = {
   relationshipStoreOnly: set([], RelationshipStoreKind.DESCOPE),
   /** A Keycloak, Zitadel or Ory deployment: OpenFGA and no adapter capability. */
   openfga: set([], RelationshipStoreKind.OPENFGA),
+  /** A principal of another provider than the one the backend syncs to: no member or role routes. */
+  notTheSyncProvider: set([], RelationshipStoreKind.OPENFGA, false),
 } as const;
 
 export type CapabilitySetName = keyof typeof CAPABILITY_SETS;
 
 /** The backend's answer for a set. */
 export function capabilitiesBody(capabilities: Capabilities) {
-  return { capabilities: [...capabilities.capabilities].sort(), relationship_store: capabilities.relationshipStore };
+  return {
+    capabilities: [...capabilities.capabilities].sort(),
+    relationship_store: capabilities.relationshipStore,
+    sync_provider_principal: capabilities.syncProviderPrincipal,
+  };
 }
 
 /** What `useCapabilities` returns for a loaded set. */

@@ -17,16 +17,17 @@ vi.mock("@/hooks/useApiClient", () => ({
 
 vi.mock("react-oidc-context", () => ({ useAuth: () => ({ isAuthenticated: true }) }));
 
-const GATED_PAGES = ["/keys", "/fga", "/settings"] as const;
+const GATED_PAGES = ["/keys", "/fga", "/settings", "/members", "/roles"] as const;
 
 /** Each capability set and which of the gated pages it gives. */
 const GIVES: Record<CapabilitySetName, Record<(typeof GATED_PAGES)[number], boolean>> = {
-  descope: { "/keys": true, "/fga": true, "/settings": true },
-  none: { "/keys": false, "/fga": false, "/settings": false },
-  machineCredentialsOnly: { "/keys": true, "/fga": false, "/settings": false },
-  customAttributesOnly: { "/keys": false, "/fga": false, "/settings": true },
-  relationshipStoreOnly: { "/keys": false, "/fga": true, "/settings": false },
-  openfga: { "/keys": false, "/fga": true, "/settings": false },
+  descope: { "/keys": true, "/fga": true, "/settings": true, "/members": true, "/roles": true },
+  none: { "/keys": false, "/fga": false, "/settings": false, "/members": true, "/roles": true },
+  machineCredentialsOnly: { "/keys": true, "/fga": false, "/settings": false, "/members": true, "/roles": true },
+  customAttributesOnly: { "/keys": false, "/fga": false, "/settings": true, "/members": true, "/roles": true },
+  relationshipStoreOnly: { "/keys": false, "/fga": true, "/settings": false, "/members": true, "/roles": true },
+  openfga: { "/keys": false, "/fga": true, "/settings": false, "/members": true, "/roles": true },
+  notTheSyncProvider: { "/keys": false, "/fga": true, "/settings": false, "/members": false, "/roles": false },
 };
 
 function landing(path: string): string {

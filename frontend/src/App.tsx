@@ -63,7 +63,7 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-/** A page whose capability the deployment lacks is not there: its link goes to the dashboard. */
+/** A page whose capability (or sync provider) does not serve the caller is not there: its link goes to the dashboard. */
 export function CapabilityRoute({ path, children }: { path: string; children: React.ReactNode }) {
   const { serves } = useCapabilities();
   const requirement = PAGE_REQUIREMENTS[path];
@@ -114,11 +114,11 @@ export default function App() {
         }
       >
         <Route index element={<Dashboard />} />
-        <Route path="roles" element={<RoleManagement />} />
+        <Route path="roles" element={<CapabilityRoute path="/roles"><RoleManagement /></CapabilityRoute>} />
         <Route path="profile" element={<UserProfile />} />
         <Route path="settings" element={<CapabilityRoute path="/settings"><TenantSettings /></CapabilityRoute>} />
         <Route path="keys" element={<CapabilityRoute path="/keys"><AccessKeys /></CapabilityRoute>} />
-        <Route path="members" element={<MemberManagement />} />
+        <Route path="members" element={<CapabilityRoute path="/members"><MemberManagement /></CapabilityRoute>} />
         <Route path="fga" element={<CapabilityRoute path="/fga"><FGAManagement /></CapabilityRoute>} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

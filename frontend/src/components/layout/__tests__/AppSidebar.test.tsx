@@ -34,14 +34,14 @@ function shownLinks(): Set<string> {
 
 const ALWAYS_FOR_ADMIN = [
   "Dashboard",
-  "Members",
-  "Roles",
   "Providers",
   "Sync Dashboard",
   "Events",
   "Provisional Users",
   "Profile",
 ];
+/** The pages of the sync provider's routes, shown to an admin who is its principal. */
+const SYNC_PROVIDER_PAGES = ["Members", "Roles"];
 
 describe("AppSidebar", () => {
   beforeEach(() => {
@@ -111,17 +111,28 @@ describe("AppSidebar shows the pages the deployment's capabilities give", () => 
   const cases: { set: CapabilitySetName; admin: string[]; member: string[] }[] = [
     {
       set: "descope",
-      admin: [...ALWAYS_FOR_ADMIN, "Access Keys", "FGA", "Tenant Settings"],
+      admin: [...ALWAYS_FOR_ADMIN, ...SYNC_PROVIDER_PAGES, "Access Keys", "FGA", "Tenant Settings"],
       member: ["Dashboard", "Profile", "Tenant Settings"],
     },
-    { set: "none", admin: ALWAYS_FOR_ADMIN, member: ["Dashboard", "Profile"] },
-    { set: "machineCredentialsOnly", admin: [...ALWAYS_FOR_ADMIN, "Access Keys"], member: ["Dashboard", "Profile"] },
+    { set: "none", admin: [...ALWAYS_FOR_ADMIN, ...SYNC_PROVIDER_PAGES], member: ["Dashboard", "Profile"] },
+    {
+      set: "machineCredentialsOnly",
+      admin: [...ALWAYS_FOR_ADMIN, ...SYNC_PROVIDER_PAGES, "Access Keys"],
+      member: ["Dashboard", "Profile"],
+    },
     {
       set: "customAttributesOnly",
-      admin: [...ALWAYS_FOR_ADMIN, "Tenant Settings"],
+      admin: [...ALWAYS_FOR_ADMIN, ...SYNC_PROVIDER_PAGES, "Tenant Settings"],
       member: ["Dashboard", "Profile", "Tenant Settings"],
     },
-    { set: "relationshipStoreOnly", admin: [...ALWAYS_FOR_ADMIN, "FGA"], member: ["Dashboard", "Profile"] },
+    {
+      set: "relationshipStoreOnly",
+      admin: [...ALWAYS_FOR_ADMIN, ...SYNC_PROVIDER_PAGES, "FGA"],
+      member: ["Dashboard", "Profile"],
+    },
+    { set: "openfga", admin: [...ALWAYS_FOR_ADMIN, ...SYNC_PROVIDER_PAGES, "FGA"], member: ["Dashboard", "Profile"] },
+    // An admin of another provider than the backend syncs to: no Members or Roles.
+    { set: "notTheSyncProvider", admin: [...ALWAYS_FOR_ADMIN, "FGA"], member: ["Dashboard", "Profile"] },
   ];
 
   it.each(cases)("$set, to an admin", ({ set, admin }) => {

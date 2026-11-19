@@ -1,12 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import { CapabilitiesProvider, useCapabilities } from "../CapabilitiesContext";
+import { NO_CAPABILITIES, type Capabilities } from "../../lib/capabilities";
 import { CAPABILITY_SETS, capabilitiesBody } from "@/test/capabilitySets";
 
-/** What the consumer shows for a loaded set. */
-function shown(name: keyof typeof CAPABILITY_SETS, loading = false) {
-  const { capabilities, relationship_store } = capabilitiesBody(CAPABILITY_SETS[name]);
-  return { loading, capabilities, relationshipStore: relationship_store };
+/** What the consumer shows for a set. */
+function shown(set: Capabilities, loading = false) {
+  const { capabilities, relationship_store, sync_provider_principal } = capabilitiesBody(set);
+  return { loading, capabilities, relationshipStore: relationship_store, syncProviderPrincipal: sync_provider_principal };
 }
 
 const mockUseAuth = vi.fn();
@@ -20,10 +21,10 @@ vi.mock("../../hooks/useApiClient", () => ({
 }));
 
 function Consumer() {
-  const { loading, capabilities, relationshipStore } = useCapabilities();
+  const { loading, capabilities, relationshipStore, syncProviderPrincipal } = useCapabilities();
   return (
     <span data-testid="state">
-      {JSON.stringify({ loading, capabilities: [...capabilities].sort(), relationshipStore })}
+      {JSON.stringify({ loading, capabilities: [...capabilities].sort(), relationshipStore, syncProviderPrincipal })}
     </span>
   );
 }
@@ -50,21 +51,19 @@ describe("CapabilitiesProvider", () => {
       </CapabilitiesProvider>,
     );
 
-    expect(state()).toEqual(shown("none", true));
+    expect(state()).toEqual(shown(NO_CAPABILITIES, true));
     expect(mockApiFetch.mock.calls).toEqual([["/api/capabilities"]]);
   });
 
-  it("serves what the backend reports", async () => {
-    mockApiFetch.mockReturnValue(
-      answer(200, capabilitiesBody(CAPABILITY_SETS.descope)),
-    );
+  it.each(["descope", "notTheSyncProvider"] as const)("serves what the backend reports for %s", async (name) => {
+    mockApiFetch.mockReturnValue(answer(200, capabilitiesBody(CAPABILITY_SETS[name])));
     render(
       <CapabilitiesProvider>
         <Consumer />
       </CapabilitiesProvider>,
     );
 
-    await waitFor(() => expect(state()).toEqual(shown("descope")));
+    await waitFor(() => expect(state()).toEqual(shown(CAPABILITY_SETS[name])));
   });
 
   it.each([
@@ -78,7 +77,7 @@ describe("CapabilitiesProvider", () => {
       </CapabilitiesProvider>,
     );
 
-    await waitFor(() => expect(state()).toEqual(shown("none")));
+    await waitFor(() => expect(state()).toEqual(shown(NO_CAPABILITIES)));
   });
 
   it("throws outside a provider", () => {
