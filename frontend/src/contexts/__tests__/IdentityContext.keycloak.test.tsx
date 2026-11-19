@@ -6,6 +6,7 @@ import { AuthProvider } from "react-oidc-context";
 import App from "../../App";
 import { IdentityProvider, type CanonicalIdentity } from "../IdentityContext";
 import { buildOidcConfig, type OidcEnv } from "../../config/oidc";
+import { TENANT_SELECTION_KEY } from "../tenantSelection";
 
 // The whole SPA session against a Keycloak realm: the real AuthProvider
 // (oidc-client-ts), IdentityProvider, useApiClient, App, TenantSwitcher and
@@ -312,7 +313,7 @@ describe("a Keycloak session", () => {
   });
 
   it("opens the tenant of the organization the sign-in named, not one chosen before", async () => {
-    window.localStorage.setItem("identity.currentTenantId", "tenant-acme");
+    window.localStorage.setItem(TENANT_SELECTION_KEY, "tenant-acme");
     organization = "globex";
     await signIn();
 
@@ -367,7 +368,7 @@ describe("a Keycloak session", () => {
     expect(tokenRequests.map((r) => r.grant_type)).toEqual(["authorization_code"]);
     expect(callsTo("/api/identity")).toHaveLength(1);
     expect(apiCalls.slice(beforeSwitch).filter((c) => c.tenant === "tenant-acme")).toEqual([]);
-    expect(window.localStorage.getItem("identity.currentTenantId")).toBe("tenant-globex");
+    expect(window.localStorage.getItem(TENANT_SELECTION_KEY)).toBe("tenant-globex");
   });
 
   it("logs out through the backend and Keycloak's end-session endpoint", async () => {

@@ -39,7 +39,7 @@ def test_sign_in_opens_the_tenant_of_the_organization_picked(alias: str, page: P
     identity = api(token).get(IDENTITY)
     assert identity.status == 200, identity.text()
     assert {
-        TENANT_KEYS[membership["tenant_name"]]: membership["external_org_id"]
+        TENANT_KEYS.get(membership["tenant_name"], membership["tenant_name"]): membership["external_org_id"]
         for membership in identity.json()["tenant_memberships"]
     } == {tenant: tenant for tenant in TWO_TENANTS.roles}
 

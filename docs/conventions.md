@@ -318,7 +318,10 @@ tenant, role or permission claim itself. The resolver takes its sources in this 
    itself: it only chooses among the tenants the caller's canonical memberships name. A
    selector naming any other tenant **MUST** be refused, and no grant is read from that
    tenant. An empty or repeated header is refused too. A value that parses as a UUID is
-   compared in its canonical lower-case form, and any other value as it is.
+   compared in its canonical lower-case form, and any other value as it is. The SPA
+   remembers the tenant chosen last, and each new sign-in drops it, for every provider: the
+   selector then starts on the membership whose `external_org_id` (`GET /api/identity`) is
+   the organization the sign-in named, else the first membership.
 3. **The caller's sole canonical membership**, when the request selects nothing.
 
 Anything else is 403, including an extractor that raises, and one whose answer is not a
