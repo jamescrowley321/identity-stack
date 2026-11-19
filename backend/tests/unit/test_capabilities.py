@@ -1,16 +1,18 @@
 """Adapter capabilities, ``GET /api/capabilities``, and the 404 of a route whose capability is missing."""
 
+import uuid
 from collections.abc import Callable, Iterator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from expression import Ok
 from fastapi import FastAPI
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from slowapi.errors import RateLimitExceeded
 
-from app.dependencies import identity
+from app.dependencies import identity, rbac
 from app.dependencies.capabilities import (
     NOTHING,
     Served,
@@ -18,19 +20,29 @@ from app.dependencies.capabilities import (
     require_machine_credentials,
     require_relationship_store,
 )
-from app.dependencies.identity import SYNC_ADAPTERS, relationship_store_kind, sync_capabilities
+from app.dependencies.identity import (
+    SYNC_ADAPTERS,
+    SyncAdapterRegistration,
+    get_identity_resolution_service,
+    get_user_service,
+    relationship_store_kind,
+    sync_capabilities,
+)
+from app.dependencies.rbac import get_rbac_session
+from app.dependencies.tenant import get_tenant_id
 from app.main import app as shipped_app
 from app.middleware.claims import GatewayClaimsMiddleware
-from app.middleware.providers import descope_config, ory_config
+from app.middleware.providers import descope_config, keycloak_config, ory_config
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.models.database import get_async_session
-from app.services.adapters.base import Capability, IdentityProviderAdapter
+from app.services.adapters.base import Capability, IdentityProviderAdapter, TenantAttributes
 from app.services.adapters.descope import DescopeSyncAdapter
 from app.services.adapters.keycloak import KeycloakSyncAdapter
 from app.services.adapters.noop import NoOpSyncAdapter
 from app.services.adapters.ory import OrySyncAdapter
 from app.services.adapters.zitadel import ZitadelSyncAdapter
 from app.services.relationship_store import RelationshipStoreKind
+from app.services.user import UserService
 from tests.unit.test_descope_backed_routes import (
     DESCOPE_MEMBER,
     DESCOPE_PROJECT,
@@ -42,21 +54,37 @@ from tests.unit.test_descope_backed_routes import (
 )
 
 DESCOPE_CAPABILITIES = frozenset({Capability.MACHINE_CREDENTIALS, Capability.CUSTOM_ATTRIBUTES})
+KEYCLOAK_CAPABILITIES = frozenset({Capability.MACHINE_CREDENTIALS, Capability.CUSTOM_ATTRIBUTES})
+
+KEYCLOAK_ISSUER = "https://keycloak.example.test/realms/r"
+KEYCLOAK_AUDIENCE = "identity-stack-api"
+KEYCLOAK_SPA = "identity-stack-spa"
+KEYCLOAK_MEMBER = {
+    "iss": KEYCLOAK_ISSUER,
+    "sub": "keycloak-subject-1",
+    "aud": KEYCLOAK_AUDIENCE,
+    "azp": KEYCLOAK_SPA,
+    "typ": "Bearer",
+}
 
 # Each adapter's own declaration: what it implements today. Every adapter class
 # in the application must be listed here (``test_every_adapter_is_listed``).
 DECLARED = {
     DescopeSyncAdapter: DESCOPE_CAPABILITIES,
-    KeycloakSyncAdapter: frozenset({Capability.MACHINE_CREDENTIALS}),
+    KeycloakSyncAdapter: KEYCLOAK_CAPABILITIES,
     ZitadelSyncAdapter: frozenset(),
     OrySyncAdapter: frozenset(),
     NoOpSyncAdapter: frozenset(),
 }
 
 DESCOPE_SERVED = Served(DESCOPE_CAPABILITIES, RelationshipStoreKind.DESCOPE)
-# Keycloak's machine credentials are canonical: they serve every principal. Its store,
-# OpenFGA, serves a canonical principal only.
-KEYCLOAK_SERVED = Served(frozenset({Capability.MACHINE_CREDENTIALS}), RelationshipStoreKind.NONE)
+# Keycloak's own principal is served every capability its adapter declares; OpenFGA
+# serves it only where CANONICAL_RBAC_PROVIDERS names Keycloak, which here it does not
+# (the default, ``ory``). Keycloak's machine credentials are canonical: they serve
+# every principal (#680); its custom attributes take the caller's sub and tenant as
+# Keycloak's ids, so they serve a Keycloak principal only (#679).
+KEYCLOAK_SERVED = Served(KEYCLOAK_CAPABILITIES, RelationshipStoreKind.NONE)
+KEYCLOAK_MACHINE_CREDENTIALS = frozenset({Capability.MACHINE_CREDENTIALS})
 
 # (method, path) of every route each capability serves.
 MACHINE_CREDENTIAL_ROUTES = frozenset(
@@ -71,7 +99,7 @@ MACHINE_CREDENTIAL_ROUTES = frozenset(
 )
 CUSTOM_ATTRIBUTE_ROUTES = frozenset(
     {
-        ("PATCH", "/api/profile"),
+        ("PATCH", "/api/profile/attributes"),
         ("GET", "/api/tenants/current/settings"),
         ("PATCH", "/api/tenants/current/settings"),
     }
@@ -155,7 +183,12 @@ def client(descope_client) -> TestClient:
 
     app.dependency_overrides[get_async_session] = _session
     app.add_middleware(
-        GatewayClaimsMiddleware, providers=[descope_config(DESCOPE_PROJECT), ory_config(ORY_ISSUER, ORY_AUDIENCE)]
+        GatewayClaimsMiddleware,
+        providers=[
+            descope_config(DESCOPE_PROJECT),
+            ory_config(ORY_ISSUER, ORY_AUDIENCE),
+            keycloak_config(KEYCLOAK_ISSUER, KEYCLOAK_AUDIENCE, KEYCLOAK_SPA),
+        ],
     )
     return TestClient(app)
 
@@ -179,6 +212,14 @@ class TestDeclarations:
         with pytest.raises(TypeError, match="Undeclared must declare capabilities"):
             type("Undeclared", (IdentityProviderAdapter,), {})
 
+    def test_an_adapter_that_declares_custom_attributes_without_them_is_refused(self):
+        with pytest.raises(TypeError, match="Unimplemented declares custom_attributes but is no CustomAttributes"):
+            type(
+                "Unimplemented",
+                (IdentityProviderAdapter,),
+                {"capabilities": frozenset({Capability.CUSTOM_ATTRIBUTES})},
+            )
+
     def test_every_registration_names_its_adapter(self):
         assert {name: registration.adapter for name, registration in SYNC_ADAPTERS.items()} == {
             "descope": DescopeSyncAdapter,
@@ -190,7 +231,7 @@ class TestDeclarations:
         ("provider", "capabilities", "store"),
         [
             ("descope", DESCOPE_CAPABILITIES, RelationshipStoreKind.DESCOPE),
-            ("keycloak", frozenset({Capability.MACHINE_CREDENTIALS}), RelationshipStoreKind.OPENFGA),
+            ("keycloak", KEYCLOAK_CAPABILITIES, RelationshipStoreKind.OPENFGA),
             ("zitadel", frozenset(), RelationshipStoreKind.OPENFGA),
         ],
     )
@@ -211,22 +252,27 @@ class TestDeclarations:
 OPENFGA_SERVED = Served(frozenset(), RelationshipStoreKind.OPENFGA)
 
 # (sync provider, RELATIONSHIP_STORE, principal) -> what the caller is served.
-# Descope's capabilities and store are keyed on Descope ids: they serve a Descope
-# principal only. OpenFGA is keyed on canonical ids: it serves a principal of a
-# provider in CANONICAL_RBAC_PROVIDERS (Ory here) only.
+# An adapter's capabilities take the caller's sub and tenant as its provider's ids,
+# so they serve that provider's own principals only, except Keycloak's canonical
+# machine credentials, which serve every principal. Descope's store is keyed on
+# Descope ids: it serves a Descope principal only. OpenFGA is keyed on canonical
+# ids: it serves a principal of a provider in CANONICAL_RBAC_PROVIDERS only.
 SERVED_TO = [
     ("descope", "", "descope", DESCOPE_SERVED),
     ("descope", "", "ory", NOTHING),
-    ("keycloak", "", "descope", KEYCLOAK_SERVED),
-    ("keycloak", "", "ory", Served(frozenset({Capability.MACHINE_CREDENTIALS}), RelationshipStoreKind.OPENFGA)),
+    ("descope", "", "keycloak", NOTHING),
+    ("keycloak", "", "keycloak", KEYCLOAK_SERVED),
+    ("keycloak", "", "descope", Served(KEYCLOAK_MACHINE_CREDENTIALS, RelationshipStoreKind.NONE)),
+    ("keycloak", "", "ory", Served(KEYCLOAK_MACHINE_CREDENTIALS, RelationshipStoreKind.OPENFGA)),
     ("zitadel", "", "descope", NOTHING),
     ("zitadel", "", "ory", OPENFGA_SERVED),
+    ("zitadel", "", "keycloak", NOTHING),
     ("descope", "openfga", "descope", Served(DESCOPE_CAPABILITIES, RelationshipStoreKind.NONE)),
     ("descope", "openfga", "ory", OPENFGA_SERVED),
-    ("keycloak", "none", "ory", KEYCLOAK_SERVED),
-    ("keycloak", "descope", "ory", KEYCLOAK_SERVED),
+    ("keycloak", "none", "ory", Served(KEYCLOAK_MACHINE_CREDENTIALS, RelationshipStoreKind.NONE)),
+    ("keycloak", "descope", "ory", Served(KEYCLOAK_MACHINE_CREDENTIALS, RelationshipStoreKind.NONE)),
 ]
-PRINCIPALS = {"descope": DESCOPE_MEMBER, "ory": ORY_OWNER}
+PRINCIPALS = {"descope": DESCOPE_MEMBER, "ory": ORY_OWNER, "keycloak": KEYCLOAK_MEMBER}
 
 
 class TestTheCapabilitiesRoute:
@@ -317,12 +363,195 @@ class TestAMissingCapabilityIs404:
         assert client.request(method, _url(path)).status_code == 401
 
     def test_the_profile_still_loads(self, client, monkeypatch):
-        """Every session loads it: name and email are not a capability."""
+        """Every session loads it: name and email are the canonical user's, not a capability."""
         monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        resolver = AsyncMock()
+        resolver.resolve.return_value = Ok({"user": CANONICAL_USER})
+        client.app.dependency_overrides[get_identity_resolution_service] = lambda: resolver
 
         response = client.get("/api/profile", headers=_bearer(ORY_OWNER))
 
+        assert (response.status_code, response.json()) == (200, CANONICAL_PROFILE)
+        resolver.resolve.assert_awaited_once_with(provider="ory", sub=ORY_OWNER["sub"])
+
+
+CANONICAL_USER = {
+    "id": "0b1d0b1d-0000-4000-8000-000000000001",
+    "email": "member@example.test",
+    "user_name": "member",
+    "given_name": "A",
+    "family_name": "Member",
+    "status": "active",
+}
+CANONICAL_PROFILE = {
+    "user_id": ORY_OWNER["sub"],
+    "name": "A Member",
+    "given_name": "A",
+    "family_name": "Member",
+    "email": "member@example.test",
+    "custom_attributes": {},
+}
+TENANT = "11111111-1111-1111-1111-111111111111"
+
+
+class TestAProvidersOwnPrincipalReachesItsAdapter:
+    """A Keycloak principal of a Keycloak deployment: the custom attribute routes go to the sync adapter."""
+
+    @pytest.fixture
+    def adapter(self, monkeypatch) -> AsyncMock:
+        adapter = AsyncMock(spec=KeycloakSyncAdapter)
+        registration = SYNC_ADAPTERS["keycloak"]
+        monkeypatch.setitem(
+            SYNC_ADAPTERS,
+            "keycloak",
+            SyncAdapterRegistration(registration.adapter, lambda _state, _session: adapter, registration.own_principal),
+        )
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        return adapter
+
+    def test_the_profile_reads_its_attributes_by_the_callers_subject(self, client, adapter):
+        resolver = AsyncMock()
+        resolver.resolve.return_value = Ok({"user": CANONICAL_USER})
+        client.app.dependency_overrides[get_identity_resolution_service] = lambda: resolver
+        adapter.user_attributes.return_value = Ok({"department": "Engineering", "unlisted": "kept out"})
+
+        response = client.get("/api/profile", headers=_bearer(KEYCLOAK_MEMBER))
+
         assert (response.status_code, response.json()) == (
             200,
-            {"user_id": ORY_OWNER["sub"], "name": "", "email": "", "custom_attributes": {}},
+            {
+                **CANONICAL_PROFILE,
+                "user_id": KEYCLOAK_MEMBER["sub"],
+                "custom_attributes": {"department": "Engineering"},
+            },
         )
+        adapter.user_attributes.assert_awaited_once_with(subject=KEYCLOAK_MEMBER["sub"])
+        resolver.resolve.assert_awaited_once_with(provider="keycloak", sub=KEYCLOAK_MEMBER["sub"])
+
+    def test_the_profile_writes_an_attribute_by_the_callers_subject(self, client, adapter):
+        adapter.set_user_attribute.return_value = Ok(None)
+
+        response = client.patch(
+            "/api/profile/attributes",
+            json={"key": "department", "value": "Engineering"},
+            headers=_bearer(KEYCLOAK_MEMBER),
+        )
+
+        assert (response.status_code, response.json()) == (
+            200,
+            {"status": "updated", "key": "department", "value": "Engineering"},
+        )
+        adapter.set_user_attribute.assert_awaited_once_with(
+            subject=KEYCLOAK_MEMBER["sub"], key="department", value="Engineering"
+        )
+
+    def test_the_tenant_settings_read_the_resolved_tenant(self, client, adapter):
+        tenant = TENANT
+        client.app.dependency_overrides[get_tenant_id] = lambda: tenant
+        adapter.tenant_attributes.return_value = Ok(TenantAttributes("Acme", {"plan_tier": "pro", "other": 1}))
+
+        response = client.get("/api/tenants/current/settings", headers=_bearer(KEYCLOAK_MEMBER))
+
+        assert (response.status_code, response.json()) == (
+            200,
+            {"tenant_id": tenant, "name": "Acme", "custom_attributes": {"plan_tier": "pro"}},
+        )
+        adapter.tenant_attributes.assert_awaited_once_with(tenant=tenant)
+
+    def test_a_tenant_the_provider_lacks_has_empty_settings(self, client, adapter):
+        tenant = TENANT
+        client.app.dependency_overrides[get_tenant_id] = lambda: tenant
+        adapter.tenant_attributes.return_value = Ok(None)
+
+        response = client.get("/api/tenants/current/settings", headers=_bearer(KEYCLOAK_MEMBER))
+
+        assert (response.status_code, response.json()) == (
+            200,
+            {"tenant_id": tenant, "name": "", "custom_attributes": {}},
+        )
+
+    @pytest.fixture
+    def users(self, client) -> AsyncMock:
+        users = AsyncMock(spec=UserService)
+        users.update_own_names.return_value = Ok({**CANONICAL_USER, "given_name": "B", "family_name": "Other"})
+        resolver = AsyncMock()
+        resolver.resolve.return_value = Ok({"user": CANONICAL_USER})
+        client.app.dependency_overrides[get_identity_resolution_service] = lambda: resolver
+        client.app.dependency_overrides[get_user_service] = lambda: users
+        return users
+
+    @pytest.mark.parametrize(
+        ("principal", "subject"),
+        [("keycloak", KEYCLOAK_MEMBER["sub"]), ("ory", None), ("descope", None)],
+    )
+    def test_names_are_saved_for_every_provider_and_pushed_to_the_sync_providers_own_principal_only(
+        self, client, adapter, users, principal, subject
+    ):
+        response = client.patch(
+            "/api/profile", json={"given_name": "B", "family_name": "Other"}, headers=_bearer(PRINCIPALS[principal])
+        )
+
+        assert (response.status_code, response.json()) == (
+            200,
+            {"status": "updated", "name": "B Other", "given_name": "B", "family_name": "Other"},
+        )
+        users.update_own_names.assert_awaited_once_with(
+            user_id=uuid.UUID(CANONICAL_USER["id"]), given_name="B", family_name="Other", subject=subject
+        )
+
+
+class TestKeycloakTenantSettingsNeedAnAdminRole:
+    """``PATCH /api/tenants/current/settings`` for a Keycloak principal, authorized from the canonical model."""
+
+    @pytest.fixture
+    def adapter(self, monkeypatch, client) -> AsyncMock:
+        adapter = AsyncMock(spec=KeycloakSyncAdapter)
+        adapter.set_tenant_attributes.return_value = Ok(None)
+        registration = SYNC_ADAPTERS["keycloak"]
+        monkeypatch.setitem(
+            SYNC_ADAPTERS,
+            "keycloak",
+            SyncAdapterRegistration(registration.adapter, lambda _state, _session: adapter, registration.own_principal),
+        )
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        monkeypatch.setattr(rbac, "CANONICAL_RBAC_PROVIDERS", frozenset({"keycloak"}))
+
+        async def _session():
+            yield MagicMock()
+
+        client.app.dependency_overrides[get_rbac_session] = _session
+        return adapter
+
+    def _held(self, monkeypatch, role: str) -> None:
+        resolver = AsyncMock()
+        resolver.resolve.return_value = Ok(
+            {"user": CANONICAL_USER, "roles": [{"tenant_id": TENANT, "role_name": role, "permissions": []}]}
+        )
+        monkeypatch.setattr(rbac, "IdentityResolutionService", lambda **_: resolver)
+
+    def test_an_admin_saves(self, client, adapter, monkeypatch):
+        self._held(monkeypatch, "admin")
+
+        response = client.patch(
+            "/api/tenants/current/settings",
+            json={"custom_attributes": {"plan_tier": "pro"}},
+            headers=_bearer(KEYCLOAK_MEMBER),
+        )
+
+        assert (response.status_code, response.json()) == (
+            200,
+            {"status": "updated", "tenant_id": TENANT, "custom_attributes": {"plan_tier": "pro"}},
+        )
+        adapter.set_tenant_attributes.assert_awaited_once_with(tenant=TENANT, attributes={"plan_tier": "pro"})
+
+    def test_a_member_is_refused(self, client, adapter, monkeypatch):
+        self._held(monkeypatch, "member")
+
+        response = client.patch(
+            "/api/tenants/current/settings",
+            json={"custom_attributes": {"plan_tier": "pro"}},
+            headers=_bearer(KEYCLOAK_MEMBER),
+        )
+
+        assert (response.status_code, response.json()) == (403, {"detail": "Insufficient permissions"})
+        adapter.set_tenant_attributes.assert_not_awaited()

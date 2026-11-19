@@ -6,12 +6,14 @@ and HTTP responses. Routers call this instead of constructing responses manually
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
 from expression import Error, Result
 from fastapi import Request
 from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -198,3 +200,24 @@ async def identity_error_raised_handler(request: Request, exc: Exception) -> JSO
     if not isinstance(exc, IdentityErrorRaised):  # pragma: no cover - registered by type
         raise exc
     return result_to_response(Error(exc.error), request)
+
+
+def _json_safe(value: Any) -> Any:
+    """``value`` with each NaN or infinity written as text: JSON has no such number."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+async def request_validation_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """FastAPI's own 422, but answerable for a body that sent NaN or infinity.
+
+    The errors echo the input, and FastAPI's handler cannot write a non-finite
+    number as JSON, so such a body was answered 500 instead of 422.
+    """
+    errors = exc.errors() if isinstance(exc, RequestValidationError) else []
+    return JSONResponse(status_code=422, content={"detail": _json_safe(jsonable_encoder(errors))})

@@ -146,7 +146,8 @@ def _keycloak_machine_credentials(request: Request, session: AsyncSession | None
 @dataclass(frozen=True)
 class SyncAdapterRegistration:
     """A provider's sync adapter: its class, which declares its capabilities and its default
-    relationship store, and how it is built.
+    relationship store, how it is built, and which principals are the provider's own
+    (their subject and tenant are its ids).
 
     ``machine_credentials`` builds the provider's ``MachineCredentials`` when its
     adapter declares ``Capability.MACHINE_CREDENTIALS``, and is ``None`` otherwise
@@ -155,24 +156,39 @@ class SyncAdapterRegistration:
 
     adapter: type[IdentityProviderAdapter]
     build: Callable[[State, AsyncSession], IdentityProviderAdapter]
+    own_principal: Callable[[Request], bool]
     machine_credentials: Callable[[Request, AsyncSession | None], MachineCredentials] | None = None
 
 
-# One entry per provider: its adapter's class and how the adapter is built from the
-# application state and the request's database session.
+def _recorded_as(name: str) -> Callable[[Request], bool]:
+    """Whether a middleware attributed the request's claims to the provider named ``name``."""
+
+    def recorded(request: Request) -> bool:
+        provider = getattr(request.state, "provider", None)
+        return isinstance(provider, ProviderTokenConfig) and provider.name == name
+
+    return recorded
+
+
+# One entry per provider: its adapter's class, how the adapter is built from the
+# application state and the request's database session, and its own principals.
 SYNC_ADAPTERS: dict[str, SyncAdapterRegistration] = {
     "descope": SyncAdapterRegistration(
         DescopeSyncAdapter,
         lambda state, _session: DescopeSyncAdapter(client=state.descope_client),
+        is_descope_principal,
         machine_credentials=_descope_access_keys,
     ),
     "keycloak": SyncAdapterRegistration(
         KeycloakSyncAdapter,
         lambda state, session: build_keycloak_sync_adapter(state.keycloak_admin, session),
+        _recorded_as(KEYCLOAK_PROVIDER_NAME),
         machine_credentials=_keycloak_machine_credentials,
     ),
     "zitadel": SyncAdapterRegistration(
-        ZitadelSyncAdapter, lambda state, session: build_zitadel_sync_adapter(state.zitadel_admin, session)
+        ZitadelSyncAdapter,
+        lambda state, session: build_zitadel_sync_adapter(state.zitadel_admin, session),
+        _recorded_as(ZITADEL_PROVIDER_NAME),
     ),
 }
 
@@ -288,6 +304,11 @@ RELATIONSHIP_STORES: dict[RelationshipStoreKind, RelationshipStoreRegistration] 
         start=_start_openfga,
     ),
 }
+
+
+def is_sync_provider_principal(request: Request) -> bool:
+    """Whether the caller is a principal of the configured provider: its ``sub`` and tenant are that provider's."""
+    return SYNC_ADAPTERS[SYNC_PROVIDER].own_principal(request)
 
 
 def relationship_store_kind() -> RelationshipStoreKind:

@@ -13,7 +13,8 @@ It checks, against the admin API and against real tokens from both realms:
    client and realm roles and its fine-grained admin permissions, every user
    and their client, realm and group memberships, organizations, domains,
    members, attributes and organization groups (their members and role
-   mappings) match the import, in both directions (user ids differ: Keycloak
+   mappings) and the user profile (its unmanaged attribute policy included) match
+   the import, in both directions (user ids differ: Keycloak
    picks them in the Terraform realm, so everything is compared by username);
 2. a token from each realm has the same ``iss`` (up to the realm name),
    ``typ``, ``aud``, ``azp``, ``organization``, ``resource_access``,
@@ -268,6 +269,7 @@ def describe(realm: Realm) -> dict:
             }
             for policy in _get(http, "/components", type=REGISTRATION_POLICY_TYPE)
         }
+        user_profile = _get(http, "/users/profile")
 
     return {
         "realm": {key: settings.get(key, ABSENT) for key in REALM_SETTINGS},
@@ -278,6 +280,7 @@ def describe(realm: Realm) -> dict:
         "realm groups": realm_groups,
         "organizations": organizations,
         "client registration policies": registration_policies,
+        "user profile": user_profile,
     }
 
 

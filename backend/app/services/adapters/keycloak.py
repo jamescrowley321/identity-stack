@@ -56,7 +56,9 @@ the backend made it (``KeycloakLinks.linked_subject``; the backend's links are
 the accounts the adapter created and those an operator's seed names) unless it
 is a client's service account, and otherwise the account under the canonical
 id. No email or name is pushed to an account whose username is not the
-canonical id: its email and names are the account's own.
+canonical id: its email and names are the account's own, except the names its
+owner changed on their own profile (``OWN_PROFILE_OF``), which go to that account
+only.
 
 Every failure is ``Error(SyncError)`` with ``context["status"]``, the HTTP status
 or ``None``, ``context[UNANSWERED]`` when Keycloak gave no readable answer, and
@@ -68,6 +70,7 @@ A failure of the service's own database (``LocalDatabaseError``) has status
 from __future__ import annotations
 
 import enum
+import json
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import ClassVar, Protocol
@@ -79,14 +82,18 @@ from app.middleware.providers import KEYCLOAK_MACHINE_CLIENT_PREFIX
 from app.services.adapters.base import (
     CREATED_IN_TENANT,
     LAST_ROLE_IN_TENANT,
+    OWN_PROFILE_OF,
     STATUS_CHANGED,
     UNANSWERED,
+    AttributeValue,
     Capability,
+    CustomAttributes,
     IdentityProviderAdapter,
     MachineClient,
     MachineClientRef,
     MachineCredentialPush,
     SyncError,
+    TenantAttributes,
 )
 from app.services.keycloak_admin import KeycloakAdminApi, KeycloakAdminError
 
@@ -338,7 +345,39 @@ def _machine_client_representation(
     }
 
 
-class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush):
+# A user's fields Keycloak keeps when a PUT leaves them out, which an attribute write never sends.
+_KEPT_ON_A_USER_PUT = frozenset({"enabled", "emailVerified", "requiredActions"})
+
+
+def _attribute_values(attributes: dict[str, AttributeValue], held: dict) -> dict:
+    """``held`` with each of ``attributes`` set, as a JSON value; ``None`` removes it."""
+    merged = dict(held)
+    for key, value in attributes.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = [json.dumps(value)]
+    return merged
+
+
+def _attribute_value(values: object) -> AttributeValue:
+    """A single-valued attribute as the API's value: its JSON, or the text a realm admin typed."""
+    if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], str):
+        return None
+    try:
+        value = json.loads(values[0])
+    except ValueError:
+        return values[0]
+    return value if isinstance(value, str | int | float | bool) else values[0]
+
+
+def _custom_attributes(entry: dict) -> dict[str, AttributeValue]:
+    """The entry's single-valued attributes: a multi-valued one is no custom attribute."""
+    decoded = {key: _attribute_value(values) for key, values in _attributes(entry).items()}
+    return {key: value for key, value in decoded.items() if value is not None}
+
+
+class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush, CustomAttributes):
     """Pushes canonical tenants, users, memberships, permissions, roles and role assignments to Keycloak.
 
     It also keeps each machine credential's client (``MachineCredentialPush``):
@@ -346,10 +385,20 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush):
     disabled through its service account (``manage-users``), and deleted with its
     registration access token. The admin client reads or changes no client
     through the Admin API (``keycloak/fixtures/README.md``).
+
+    Custom attributes (``CustomAttributes``) are the account's user attributes and the
+    tenant's organization attributes, each value one JSON string. The realm's user
+    profile lets admins edit attributes it does not declare (``unmanagedAttributePolicy``
+    ``ADMIN_EDIT``): the user cannot set them in the account console. Keycloak replaces
+    a user's or an organization's attributes with the ones a PUT sends, and a user's
+    profile fields with the ones it sends, so each write sends back what it read (but a
+    user's status fields, which Keycloak keeps when a PUT leaves them out).
     """
 
     ends_memberships: ClassVar[bool] = True
-    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.MACHINE_CREDENTIALS})
+    capabilities: ClassVar[frozenset[Capability]] = frozenset(
+        {Capability.MACHINE_CREDENTIALS, Capability.CUSTOM_ATTRIBUTES}
+    )
 
     def __init__(self, api: KeycloakAdminApi, links: KeycloakLinks) -> None:
         self._api = api
@@ -475,13 +524,77 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush):
             span.set_attribute("tenant.id", str(tenant_id))
             return await _run("delete_tenant", {"tenant_id": str(tenant_id)}, push)
 
+    # --- custom attributes (CustomAttributes) ---------------------------------------
+
+    async def _full_organization(self, tenant: str) -> dict | None:
+        """The tenant's organization with its attributes, which a search by alias leaves out."""
+        organization = await self._organization(uuid.UUID(_tenant_uuid(tenant)))
+        return None if organization is None else await self._api.get_organization(organization["id"])
+
+    async def user_attributes(self, *, subject: str) -> Result[dict[str, AttributeValue], SyncError]:
+        found: dict[str, AttributeValue] = {}
+
+        async def read() -> None:
+            account = await self._api.get_user(subject)
+            if account is not None:
+                found.update(_custom_attributes(account))
+
+        with tracer.start_as_current_span("keycloak.user_attributes"):
+            return (await _run("user_attributes", {"subject": subject}, read)).map(lambda _: found)
+
+    async def set_user_attribute(self, *, subject: str, key: str, value: AttributeValue) -> Result[None, SyncError]:
+        async def push() -> None:
+            account = await self._api.get_user(subject)
+            if account is None:
+                raise _Refused(Refusal.USER_NOT_IN_KEYCLOAK)
+            attributes = _attribute_values({key: value}, _attributes(account))
+            # The status fields are left out: Keycloak keeps what a PUT leaves out of them,
+            # and sending them back as read would undo a disable made between the read
+            # and the write.
+            sent = {field: held for field, held in account.items() if field not in _KEPT_ON_A_USER_PUT}
+            await self._api.update_user(account["id"], {**sent, "attributes": attributes})
+
+        with tracer.start_as_current_span("keycloak.set_user_attribute"):
+            return await _run("set_user_attribute", {"subject": subject}, push)
+
+    async def tenant_attributes(self, *, tenant: str) -> Result[TenantAttributes | None, SyncError]:
+        found: list[TenantAttributes] = []
+
+        async def read() -> None:
+            organization = await self._full_organization(tenant)
+            if organization is not None:
+                found.append(TenantAttributes(organization.get("name") or "", _custom_attributes(organization)))
+
+        with tracer.start_as_current_span("keycloak.tenant_attributes"):
+            return (await _run("tenant_attributes", {"tenant_id": tenant}, read)).map(
+                lambda _: found[0] if found else None
+            )
+
+    async def set_tenant_attributes(
+        self, *, tenant: str, attributes: dict[str, AttributeValue]
+    ) -> Result[None, SyncError]:
+        async def push() -> None:
+            organization = await self._full_organization(tenant)
+            if organization is None:
+                raise _Refused(Refusal.NO_ORGANIZATION)
+            held = _attributes(organization)
+            await self._api.update_organization(
+                organization["id"], {**organization, "attributes": _attribute_values(attributes, held)}
+            )
+
+        with tracer.start_as_current_span("keycloak.set_tenant_attributes"):
+            return await _run("set_tenant_attributes", {"tenant_id": tenant}, push)
+
     # --- users --------------------------------------------------------------------
 
     async def sync_user(self, *, user_id: uuid.UUID, data: dict) -> Result[None, SyncError]:
         """Create or update the user whose username is ``user_id``.
 
         Expected data keys: email, status (required); given_name, family_name,
-        ``CREATED_IN_TENANT``, ``STATUS_CHANGED``, left_tenant_id (optional).
+        ``CREATED_IN_TENANT``, ``STATUS_CHANGED``, left_tenant_id (optional). With
+        ``OWN_PROFILE_OF`` (the owner's own account id) only the names are pushed, to
+        that account, whether or not its username is the canonical id: the owner
+        changed them.
         """
         context = {"user_id": str(user_id)}
         email = data.get("email")
@@ -503,6 +616,23 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush):
             for key, field in (("firstName", "given_name"), ("lastName", "family_name"))
             if isinstance(data.get(field), str) and data[field]
         }
+        own = data.get(OWN_PROFILE_OF)
+
+        async def push_own_names(subject: str) -> None:
+            """The owner's own names, to their own account: sent back whole, but its status fields."""
+            account = await self._api.get_user(subject)
+            if account is None or _is_service_account(account):
+                raise _Refused(Refusal.USER_NOT_IN_KEYCLOAK)
+            wanted = {"firstName": data.get("given_name") or "", "lastName": data.get("family_name") or ""}
+            if all(account.get(key, "") == value for key, value in wanted.items()):
+                return
+            sent = {field: held for field, held in account.items() if field not in _KEPT_ON_A_USER_PUT}
+            await self._api.update_user(account["id"], {**sent, **wanted})
+
+        if isinstance(own, str) and own:
+            with tracer.start_as_current_span("keycloak.sync_user") as span:
+                span.set_attribute("user.id", username)
+                return await _run("sync_user", context, lambda: push_own_names(own))
 
         async def push() -> None:
             user = await self._account(user_id)

@@ -12,13 +12,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import identity
-from app.dependencies.descope import is_descope_principal
 from app.errors.identity import CapabilityMissing, IdentityErrorRaised
-from app.services.adapters.base import Capability
-from app.services.adapters.descope import DescopeSyncAdapter
+from app.models.database import get_async_session
+from app.services.adapters.base import Capability, CustomAttributes
 from app.services.relationship_store import RelationshipStoreKind
 
 
@@ -34,18 +34,17 @@ NOTHING = Served(frozenset(), RelationshipStoreKind.NONE)
 def served(request: Request) -> Served:
     """The sync adapter's capabilities and the relationship store, as far as they serve the caller.
 
-    Descope's capabilities and its FGA store are keyed on Descope's own tenant and
-    user ids, so they serve only a principal of a ``descope_managed`` provider
-    (conventions §18). OpenFGA is keyed on canonical ids, so it serves only a
-    principal authorized from the canonical model. Each store says whom it serves
-    (``identity.RELATIONSHIP_STORES``).
+    An adapter's capabilities take the caller's ``sub`` and tenant as its own
+    provider's ids, so they serve only that provider's principals
+    (``identity.is_sync_provider_principal``; for Descope, a ``descope_managed``
+    provider's, conventions §18): any other principal is served none. Each store says
+    whom it serves (``identity.RELATIONSHIP_STORES``): Descope's FGA store is keyed on
+    Descope's ids, so it serves only a Descope principal; OpenFGA is keyed on canonical
+    ids, so it serves only a principal authorized from the canonical model.
     """
     if getattr(request.state, "claims", None) is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    descope_principal = is_descope_principal(request)
-    capabilities = identity.sync_capabilities()
-    if identity.SYNC_ADAPTERS[identity.SYNC_PROVIDER].adapter is DescopeSyncAdapter and not descope_principal:
-        capabilities = frozenset()
+    capabilities = identity.sync_capabilities() if identity.is_sync_provider_principal(request) else frozenset()
     store = identity.relationship_store_kind()
     registration = identity.RELATIONSHIP_STORES.get(store)
     if registration is None or not registration.serves(request):
@@ -56,7 +55,7 @@ def served(request: Request) -> Served:
 def _require(capability: Capability) -> Callable[[Request], None]:
     def require(request: Request) -> None:
         if capability not in served(request).capabilities:
-            raise IdentityErrorRaised(CapabilityMissing(message=f"This deployment has no {capability} capability"))
+            raise _missing(capability)
 
     require.__name__ = f"require_{capability}"
     return require
@@ -69,3 +68,41 @@ require_custom_attributes = _require(Capability.CUSTOM_ATTRIBUTES)
 def require_relationship_store(request: Request) -> None:
     if served(request).relationship_store is RelationshipStoreKind.NONE:
         raise IdentityErrorRaised(CapabilityMissing(message="This deployment has no relationship store"))
+
+
+def _missing(capability: Capability) -> IdentityErrorRaised:
+    return IdentityErrorRaised(CapabilityMissing(message=f"This deployment has no {capability} capability"))
+
+
+async def custom_attributes_if_served(
+    request: Request, session: AsyncSession = Depends(get_async_session)
+) -> CustomAttributes | None:
+    """The sync adapter, as its ``custom_attributes`` capability, when it serves the caller (``served``)."""
+    if Capability.CUSTOM_ATTRIBUTES not in served(request).capabilities:
+        return None
+    adapter = identity.get_sync_adapter(request, session)
+    return adapter if isinstance(adapter, CustomAttributes) else None
+
+
+async def get_custom_attributes(
+    adapter: CustomAttributes | None = Depends(custom_attributes_if_served),
+) -> CustomAttributes:
+    """As ``custom_attributes_if_served``, for a route gated by ``require_custom_attributes``: 404 otherwise."""
+    if adapter is None:
+        raise _missing(Capability.CUSTOM_ATTRIBUTES)
+    return adapter
+
+
+def sync_provider_subject(request: Request) -> str | None:
+    """The caller's ``sub`` when they are a principal of the sync provider, else ``None``.
+
+    Only then is the ``sub`` an account of the sync provider, so only then may a change
+    of the caller's own profile be pushed to it (``OWN_PROFILE_OF``). 401 without claims.
+    """
+    claims = getattr(request.state, "claims", None)
+    if claims is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    sub = claims.get("sub") if isinstance(claims, dict) else None
+    if not isinstance(sub, str) or not sub or not identity.is_sync_provider_principal(request):
+        return None
+    return sub

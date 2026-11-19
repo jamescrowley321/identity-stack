@@ -19,13 +19,12 @@ from opentelemetry import trace
 from app.errors.identity import Conflict, Forbidden, IdentityError, NotFound, ProviderError, ValidationError
 from app.logbook import logbook
 from app.outbound import UpstreamStatusError, UpstreamTransportError
+from app.services.adapters.base import AttributeValue
 from app.services.canonical import canonical_user
 from app.services.descope import DescopeManagementClient
 
 logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
-
-AttributeValue = str | int | bool | float | None
 
 
 def _provider_error(operation: str, exc: UpstreamStatusError) -> ProviderError:

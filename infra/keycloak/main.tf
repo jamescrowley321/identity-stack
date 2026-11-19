@@ -174,6 +174,81 @@ resource "keycloak_realm_events" "this" {
   events_listeners             = ["jboss-logging"]
 }
 
+# Keycloak's default user profile, with the attributes it does not declare editable
+# by admins only (ADMIN_EDIT): the backend's admin client keeps the profile's custom
+# attributes there (KeycloakSyncAdapter, the custom_attributes capability), and a user
+# can neither see nor set them in the account console.
+resource "keycloak_realm_user_profile" "this" {
+  realm_id                   = keycloak_realm.this.id
+  unmanaged_attribute_policy = "ADMIN_EDIT"
+
+  attribute {
+    name         = "username"
+    display_name = "$${username}"
+    validator {
+      name   = "length"
+      config = { min = "3", max = "255" }
+    }
+    validator { name = "username-prohibited-characters" }
+    validator { name = "up-username-not-idn-homograph" }
+    permissions {
+      view = ["admin", "user"]
+      edit = ["admin", "user"]
+    }
+  }
+
+  attribute {
+    name               = "email"
+    display_name       = "$${email}"
+    required_for_roles = ["user"]
+    validator { name = "email" }
+    validator {
+      name   = "length"
+      config = { max = "255" }
+    }
+    permissions {
+      view = ["admin", "user"]
+      edit = ["admin", "user"]
+    }
+  }
+
+  attribute {
+    name               = "firstName"
+    display_name       = "$${firstName}"
+    required_for_roles = ["user"]
+    validator {
+      name   = "length"
+      config = { max = "255" }
+    }
+    validator { name = "person-name-prohibited-characters" }
+    permissions {
+      view = ["admin", "user"]
+      edit = ["admin", "user"]
+    }
+  }
+
+  attribute {
+    name               = "lastName"
+    display_name       = "$${lastName}"
+    required_for_roles = ["user"]
+    validator {
+      name   = "length"
+      config = { max = "255" }
+    }
+    validator { name = "person-name-prohibited-characters" }
+    permissions {
+      view = ["admin", "user"]
+      edit = ["admin", "user"]
+    }
+  }
+
+  group {
+    name                = "user-metadata"
+    display_header      = "User metadata"
+    display_description = "Attributes, which refer to user metadata"
+  }
+}
+
 # --- The API client: audience, permissions and roles ---------------------------
 
 resource "keycloak_openid_client" "api" {

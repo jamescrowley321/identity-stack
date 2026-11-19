@@ -48,6 +48,14 @@ CREATED_IN_TENANT = "created_in_tenant"
 CHANGED_IN_TENANT = "changed_in_tenant"
 
 
+# ``sync_user`` data key: the caller's own subject at the adapter's provider, sent with
+# ``given_name`` and ``family_name`` when the account's owner changed their own names
+# (UserService.update_own_names). The adapter pushes the names to that account, and
+# to no other: no other field and no status. Sent only for a principal of the sync
+# provider, so the subject is one of its accounts.
+OWN_PROFILE_OF = "own_profile_of"
+
+
 class Capability(enum.StrEnum):
     """An optional feature a sync adapter implements beyond the canonical sync.
 
@@ -61,8 +69,12 @@ class Capability(enum.StrEnum):
     # ``MachineCredentialPush`` (Keycloak: a confidential client with a service account).
     MACHINE_CREDENTIALS = "machine_credentials"
     # Free-form attributes on a user and on a tenant: the profile's custom
-    # attributes and the tenant settings (Descope custom attributes).
+    # attributes and the tenant settings (``CustomAttributes``).
     CUSTOM_ATTRIBUTES = "custom_attributes"
+
+
+# One custom attribute's value, as the API takes and answers it.
+AttributeValue = str | int | bool | float | None
 
 
 @dataclass(frozen=True)
@@ -124,6 +136,43 @@ class MachineCredentialPush(ABC):
         """Delete the client. One that is already gone is deleted."""
 
 
+@dataclass(frozen=True)
+class TenantAttributes:
+    """A tenant's name and custom attributes, as its provider holds them."""
+
+    name: str
+    attributes: dict[str, AttributeValue]
+
+
+class CustomAttributes(ABC):
+    """The ``custom_attributes`` capability: free-form attributes on the caller and on the request's tenant.
+
+    An adapter that declares ``Capability.CUSTOM_ATTRIBUTES`` implements this
+    (``IdentityProviderAdapter.__init_subclass__``). The capability serves only the
+    sync provider's own principals (``app.dependencies.capabilities.served``), so
+    ``subject`` is the caller's own ``sub`` at this provider, and ``tenant`` the
+    request's tenant as the tenant resolver gives it to them (conventions §18):
+    Descope's own tenant id for Descope, the canonical tenant id for a provider
+    authorized from the canonical model, which the adapter maps to its organization.
+    A value of ``None`` removes the attribute.
+    """
+
+    @abstractmethod
+    async def user_attributes(self, *, subject: str) -> Result[dict[str, AttributeValue], SyncError]: ...
+
+    @abstractmethod
+    async def set_user_attribute(self, *, subject: str, key: str, value: AttributeValue) -> Result[None, SyncError]: ...
+
+    @abstractmethod
+    async def tenant_attributes(self, *, tenant: str) -> Result[TenantAttributes | None, SyncError]:
+        """``Ok(None)`` when the provider has no such tenant."""
+
+    @abstractmethod
+    async def set_tenant_attributes(
+        self, *, tenant: str, attributes: dict[str, AttributeValue]
+    ) -> Result[None, SyncError]: ...
+
+
 class IdentityProviderAdapter(ABC):
     """Abstract base class for outbound identity provider sync operations.
 
@@ -148,10 +197,13 @@ class IdentityProviderAdapter(ABC):
     relationship_store: ClassVar[RelationshipStoreKind] = RelationshipStoreKind.OPENFGA
 
     def __init_subclass__(cls, **kwargs: object) -> None:
-        """Refuse an adapter class that does not declare its ``capabilities``."""
+        """Refuse an adapter class that does not declare its ``capabilities``, or lacks one's interface."""
         super().__init_subclass__(**kwargs)
-        if not isinstance(getattr(cls, "capabilities", None), frozenset):
+        capabilities = getattr(cls, "capabilities", None)
+        if not isinstance(capabilities, frozenset):
             raise TypeError(f"{cls.__name__} must declare capabilities: ClassVar[frozenset[Capability]]")
+        if Capability.CUSTOM_ATTRIBUTES in capabilities and not issubclass(cls, CustomAttributes):
+            raise TypeError(f"{cls.__name__} declares {Capability.CUSTOM_ATTRIBUTES} but is no CustomAttributes")
 
     @abstractmethod
     async def sync_user(self, *, user_id: uuid.UUID, data: dict) -> Result[None, SyncError]: ...
