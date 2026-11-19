@@ -113,20 +113,50 @@ END
 $$;
 """
 
-# table -> the columns a push carries: an update that changes none of them (a link
-# written by the adapter, ``updated_at``) is not a change to push.
-_PUSHED_COLUMNS: dict[str, tuple[str, ...]] = {
-    "tenants": ("name", "domains", "status"),
-    "users": ("email", "given_name", "family_name", "status"),
-    "permissions": ("name", "description"),
-    "roles": ("name", "description", "tenant_id"),
-}
-_ROW_TABLES = ("role_permissions", "user_tenant_roles")
+# One trigger per row change; an UPDATE marks only when it changes a column a push
+# carries (``json`` has no equality operator: its text is compared). An update that
+# changes none of them (a link written by the adapter, ``updated_at``) is no change
+# to push.
+_CREATE_TRIGGERS = (
+    "CREATE TRIGGER pending_push_write AFTER INSERT OR DELETE ON tenants "
+    "FOR EACH ROW EXECUTE FUNCTION pending_push_trigger()",
+    "CREATE TRIGGER pending_push_update AFTER UPDATE ON tenants FOR EACH ROW WHEN ("
+    "OLD.name::text IS DISTINCT FROM NEW.name::text OR OLD.domains::text IS DISTINCT FROM NEW.domains::text "
+    "OR OLD.status::text IS DISTINCT FROM NEW.status::text) EXECUTE FUNCTION pending_push_trigger()",
+    "CREATE TRIGGER pending_push_write AFTER INSERT OR DELETE ON users "
+    "FOR EACH ROW EXECUTE FUNCTION pending_push_trigger()",
+    "CREATE TRIGGER pending_push_update AFTER UPDATE ON users FOR EACH ROW WHEN ("
+    "OLD.email::text IS DISTINCT FROM NEW.email::text OR OLD.given_name::text IS DISTINCT FROM NEW.given_name::text "
+    "OR OLD.family_name::text IS DISTINCT FROM NEW.family_name::text "
+    "OR OLD.status::text IS DISTINCT FROM NEW.status::text) EXECUTE FUNCTION pending_push_trigger()",
+    "CREATE TRIGGER pending_push_write AFTER INSERT OR DELETE ON permissions "
+    "FOR EACH ROW EXECUTE FUNCTION pending_push_trigger()",
+    "CREATE TRIGGER pending_push_update AFTER UPDATE ON permissions FOR EACH ROW WHEN ("
+    "OLD.name::text IS DISTINCT FROM NEW.name::text "
+    "OR OLD.description::text IS DISTINCT FROM NEW.description::text) EXECUTE FUNCTION pending_push_trigger()",
+    "CREATE TRIGGER pending_push_write AFTER INSERT OR DELETE ON roles "
+    "FOR EACH ROW EXECUTE FUNCTION pending_push_trigger()",
+    "CREATE TRIGGER pending_push_update AFTER UPDATE ON roles FOR EACH ROW WHEN ("
+    "OLD.name::text IS DISTINCT FROM NEW.name::text OR OLD.description::text IS DISTINCT FROM NEW.description::text "
+    "OR OLD.tenant_id::text IS DISTINCT FROM NEW.tenant_id::text) EXECUTE FUNCTION pending_push_trigger()",
+    "CREATE TRIGGER pending_push_write AFTER INSERT OR UPDATE OR DELETE ON role_permissions "
+    "FOR EACH ROW EXECUTE FUNCTION pending_push_trigger()",
+    "CREATE TRIGGER pending_push_write AFTER INSERT OR UPDATE OR DELETE ON user_tenant_roles "
+    "FOR EACH ROW EXECUTE FUNCTION pending_push_trigger()",
+)
 
-
-def _distinct(column: str) -> str:
-    # ``json`` has no equality operator: compare its text.
-    return f"OLD.{column}::text IS DISTINCT FROM NEW.{column}::text"
+_DROP_TRIGGERS = (
+    "DROP TRIGGER IF EXISTS pending_push_write ON tenants",
+    "DROP TRIGGER IF EXISTS pending_push_update ON tenants",
+    "DROP TRIGGER IF EXISTS pending_push_write ON users",
+    "DROP TRIGGER IF EXISTS pending_push_update ON users",
+    "DROP TRIGGER IF EXISTS pending_push_write ON permissions",
+    "DROP TRIGGER IF EXISTS pending_push_update ON permissions",
+    "DROP TRIGGER IF EXISTS pending_push_write ON roles",
+    "DROP TRIGGER IF EXISTS pending_push_update ON roles",
+    "DROP TRIGGER IF EXISTS pending_push_write ON role_permissions",
+    "DROP TRIGGER IF EXISTS pending_push_write ON user_tenant_roles",
+)
 
 
 def upgrade() -> None:
@@ -149,21 +179,8 @@ def upgrade() -> None:
     )
     op.execute(_MARK_FUNCTION)
     op.execute(_TRIGGER_FUNCTION)
-    for table, columns in _PUSHED_COLUMNS.items():
-        changed = " OR ".join(_distinct(column) for column in columns)
-        op.execute(
-            f"CREATE TRIGGER pending_push_write AFTER INSERT OR DELETE ON {table} "
-            "FOR EACH ROW EXECUTE FUNCTION pending_push_trigger()"
-        )
-        op.execute(
-            f"CREATE TRIGGER pending_push_update AFTER UPDATE ON {table} "
-            f"FOR EACH ROW WHEN ({changed}) EXECUTE FUNCTION pending_push_trigger()"
-        )
-    for table in _ROW_TABLES:
-        op.execute(
-            f"CREATE TRIGGER pending_push_write AFTER INSERT OR UPDATE OR DELETE ON {table} "
-            "FOR EACH ROW EXECUTE FUNCTION pending_push_trigger()"
-        )
+    for statement in _CREATE_TRIGGERS:
+        op.execute(statement)
     op.execute(
         """
         INSERT INTO pending_pushes (kind, key, seq)
@@ -179,9 +196,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    for table in (*_PUSHED_COLUMNS, *_ROW_TABLES):
-        op.execute(f"DROP TRIGGER IF EXISTS pending_push_write ON {table}")
-        op.execute(f"DROP TRIGGER IF EXISTS pending_push_update ON {table}")
+    for statement in _DROP_TRIGGERS:
+        op.execute(statement)
     op.execute("DROP FUNCTION pending_push_trigger()")
     op.execute("DROP FUNCTION pending_push_mark(text, text, jsonb)")
     op.drop_table("reconciliation_runs")
