@@ -66,24 +66,36 @@ GATED_PAGES = {
 # that run checks the pages a member sees.
 SPA_ADMIN = {DESCOPE: False, KEYCLOAK: True, ZITADEL: True}
 
-# The pages this test does not visit and the API calls whose 403 it does not count.
-# The member, role and permission routes serve the sync provider's principals
-# (require_sync_provider_principal, #676, #677): the Keycloak run syncs to Keycloak, so
-# the member routes serve its admin; the Zitadel run's backend syncs to Descope, so they
-# refuse its Zitadel admin 403. The role and permission definitions also need
-# ``operator`` from a canonical principal (require_definitions_role, #676), which a
-# tenant admin is not. The tenant list and resources are canonical since #673. The
-# Descope run has none: any 403 fails it.
-ROLES_NEED_OPERATOR = "/api/roles and /api/permissions need operator from a canonical principal (#676)"
-EXCLUDED_PAGES = {
+# The API calls a page the SPA shows makes on opening that answer 403 for a reason the
+# run cannot change, per provider: (method, path) -> why. Every page is visited, and
+# every other 403 fails the run. Each listed call must be refused, so an entry that
+# stops being true fails the run too and is removed. The Descope run has none.
+#
+# The role and permission definitions need ``operator`` from a canonical principal's
+# sole membership (require_definitions_role, #676), and the canonical runs' admin is the
+# fixture's two-tenant user, a tenant admin: the Roles page reads them anyway (#707).
+# The Zitadel run's backend syncs to Descope (SYNC_PROVIDER unset: it holds no Zitadel
+# write credential), so require_sync_provider_principal refuses its Zitadel principals
+# the member and role routes before anything else (#703).
+DEFINITIONS_NEED_OPERATOR = (
+    "the definitions need operator from a canonical principal (require_definitions_role, #676); "
+    "the Roles page reads them for a tenant admin (#707)"
+)
+SYNCS_TO_DESCOPE = (
+    "the Zitadel run's backend syncs to Descope, so the sync provider's routes refuse its principals (#703)"
+)
+EXPECTED_REFUSALS: dict[str, dict[tuple[str, str], str]] = {
     DESCOPE: {},
-    KEYCLOAK: {"Roles": ROLES_NEED_OPERATOR},
+    KEYCLOAK: {
+        ("GET", "/api/roles"): DEFINITIONS_NEED_OPERATOR,
+        ("GET", "/api/permissions"): DEFINITIONS_NEED_OPERATOR,
+    },
     ZITADEL: {
-        "Members": "the Zitadel run syncs to Descope: GET /api/members serves Descope principals only (#677)",
-        "Roles": ROLES_NEED_OPERATOR,
+        ("GET", "/api/members"): SYNCS_TO_DESCOPE,
+        ("GET", "/api/roles"): SYNCS_TO_DESCOPE,
+        ("GET", "/api/permissions"): SYNCS_TO_DESCOPE,
     },
 }
-EXCLUDED_CALLS: dict[str, dict[re.Pattern[str], str]] = {DESCOPE: {}, KEYCLOAK: {}, ZITADEL: {}}
 
 
 def _served(admin_api_context) -> dict:
@@ -143,23 +155,25 @@ def test_a_missing_capabilitys_routes_answer_404(admin_api_context):
 
 
 def test_no_page_the_sidebar_shows_answers_403(admin_page: Page, frontend_url: str):
-    """Visit every page the sidebar shows the admin and fail on any 403 from the API."""
-    provider = selected_provider(os.environ)
-    links = _shown_links(admin_page) - set(EXCLUDED_PAGES[provider])
+    """Visit every page the sidebar shows the admin and fail on any 403 from the API but the expected ones."""
+    expected = EXPECTED_REFUSALS[selected_provider(os.environ)]
+    links = _shown_links(admin_page)
     addresses = {
         label: _sidebar(admin_page).get_by_role("link", name=label, exact=True).get_attribute("href") for label in links
     }
     refused: list[str] = []
+    seen: set[tuple[str, str]] = set()
     visiting = [""]
 
     def record(response: Response) -> None:
         path = urlsplit(response.url).path
-        if (
-            response.status == 403
-            and path.startswith("/api/")
-            and not any(call.match(path) for call in EXCLUDED_CALLS[provider])
-        ):
-            refused.append(f"{visiting[0]}: {response.request.method} {path}")
+        if response.status != 403 or not path.startswith("/api/"):
+            return
+        call = (response.request.method, path)
+        if call in expected:
+            seen.add(call)
+        else:
+            refused.append(f"{visiting[0]}: {call[0]} {call[1]}")
 
     admin_page.on("response", record)
     for label, address in sorted(addresses.items()):
@@ -168,4 +182,4 @@ def test_no_page_the_sidebar_shows_answers_403(admin_page: Page, frontend_url: s
         admin_page.wait_for_load_state("networkidle")
     admin_page.remove_listener("response", record)
 
-    assert refused == []
+    assert (refused, sorted(set(expected) - seen)) == ([], [])

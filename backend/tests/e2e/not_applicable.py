@@ -61,15 +61,19 @@ def missing_internal_endpoint_secrets(provider: str, environment: Mapping[str, s
 #
 # One sentence each, saying what about the provider makes the test inapplicable.
 
-DESCOPE_ONLY_ROUTE = (
-    "the route serves Descope principals only (require_descope_principal, #566): it reads or writes "
-    "Descope's roles, permissions, members or access keys; canonical routes for "
-    "other providers are #590"
+DEFINITIONS_NEED_OPERATOR = (
+    "the role and permission definitions need operator from a canonical principal's sole membership "
+    "(require_definitions_role, #676), and the run's admin is the two-tenant fixture user, a tenant admin: "
+    "no fixture user of this provider is an operator (#707)"
+)
+DEFINITIONS_NOT_SYNCED = (
+    "the role and permission definitions serve the sync provider's principals (require_sync_provider_principal, "
+    "#676) and this run's backend syncs to Descope (#703); they also need operator, which no fixture user holds (#707)"
 )
 MEMBERS_NOT_SYNCED = (
     "the member routes serve the sync provider's principals (require_sync_provider_principal, #677) and this "
     "run's backend syncs to Descope (SYNC_PROVIDER unset: it holds no Zitadel write credential), so they answer "
-    "its principals 403"
+    "its principals 403 (#703)"
 )
 DESCOPE_MANAGEMENT_API = "calls the Descope Management API itself; the run has no Descope project"
 DESCOPE_ACCESS_KEY = "is about a Descope access-key session, which no other provider has"
@@ -86,6 +90,9 @@ NO_MACHINE_CREDENTIALS = (
 
 def _both(reason: str) -> dict[str, str]:
     return {KEYCLOAK: reason, ZITADEL: reason}
+
+
+DEFINITIONS = {KEYCLOAK: DEFINITIONS_NEED_OPERATOR, ZITADEL: DEFINITIONS_NOT_SYNCED}
 
 
 def _each(module: str, tests: list[str], reasons: dict[str, str]) -> dict[str, dict[str, str]]:
@@ -105,15 +112,15 @@ NOT_APPLICABLE: dict[str, dict[str, str]] = {
             "test_roles_list_responds",
             "test_permissions_list_responds",
         ],
-        _both(DESCOPE_ONLY_ROUTE),
+        DEFINITIONS,
     ),
-    "test_identity_crud_e2e.py::TestPermissionCrudCanonical": _both(DESCOPE_ONLY_ROUTE),
-    "test_identity_crud_e2e.py::TestRoleCrudCanonical": _both(DESCOPE_ONLY_ROUTE),
+    "test_identity_crud_e2e.py::TestPermissionCrudCanonical": DEFINITIONS,
+    "test_identity_crud_e2e.py::TestRoleCrudCanonical": DEFINITIONS,
     # The member routes serve the sync provider's principals (#677): Keycloak's run
     # syncs to Keycloak and runs them; Zitadel's backend syncs to Descope.
     "test_api_endpoints.py::TestAdminEndpoints::test_members_list_responds": {ZITADEL: MEMBERS_NOT_SYNCED},
     "test_identity_crud_e2e.py::TestMemberCrud": {ZITADEL: MEMBERS_NOT_SYNCED},
-    "test_identity_repository_api.py": _both(DESCOPE_ONLY_ROUTE),
+    "test_identity_repository_api.py": DEFINITIONS,
     **_each(
         "test_rbac_api.py",
         [
@@ -122,7 +129,7 @@ NOT_APPLICABLE: dict[str, dict[str, str]] = {
             "test_permission_crud_lifecycle",
             "test_role_crud_lifecycle",
         ],
-        _both(DESCOPE_ONLY_ROUTE),
+        DEFINITIONS,
     ),
     **_each(
         "test_rbac_api.py",
