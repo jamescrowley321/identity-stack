@@ -9,6 +9,8 @@
  * not a preferred IdP.
  */
 
+import { forgetTenantSelection } from "../contexts/tenantSelection";
+
 const DESCOPE_DEFAULT_BASE_URL = "https://api.descope.com";
 const DEFAULT_SCOPE = "openid profile email";
 
@@ -56,6 +58,8 @@ export function buildOidcConfig(
     response_type: "code",
     automaticSilentRenew: true,
     onSigninCallback: () => {
+      // A new sign-in opens the tenant it named, not one chosen in an earlier session.
+      forgetTenantSelection();
       // Remove code/state from URL after successful code exchange
       window.history.replaceState({}, document.title, window.location.pathname);
     },

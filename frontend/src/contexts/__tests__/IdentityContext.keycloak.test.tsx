@@ -6,6 +6,7 @@ import { AuthProvider } from "react-oidc-context";
 import App from "../../App";
 import { IdentityProvider, type CanonicalIdentity } from "../IdentityContext";
 import { buildOidcConfig, type OidcEnv } from "../../config/oidc";
+import { TENANT_SELECTION_KEY } from "../tenantSelection";
 
 // The whole SPA session against a Keycloak realm: the real AuthProvider
 // (oidc-client-ts), IdentityProvider, useApiClient, App, TenantSwitcher and
@@ -45,8 +46,8 @@ const bob: CanonicalIdentity = {
     { tenant_id: "tenant-globex", role_name: "member", permissions: [] },
   ],
   tenant_memberships: [
-    { tenant_id: "tenant-acme", tenant_name: "Acme" },
-    { tenant_id: "tenant-globex", tenant_name: "Globex" },
+    { tenant_id: "tenant-acme", tenant_name: "Acme", external_org_id: "acme" },
+    { tenant_id: "tenant-globex", tenant_name: "Globex", external_org_id: "globex" },
   ],
   linked_idps: [{ provider_name: "keycloak", external_sub: SUBJECT }],
 };
@@ -70,6 +71,8 @@ let navigations: URL[];
 let accessTokenLifetime: number;
 let issued: number;
 let nonce: string | undefined;
+/** The organization bob signed in through (the ID token's `organization`). */
+let organization: string;
 
 function base64url(value: unknown): string {
   return btoa(JSON.stringify(value)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -88,7 +91,7 @@ function idToken(): string {
     exp: Math.floor(Date.now() / 1000) + 300,
     email: "bob@acme.test",
     name: "Bob Builder",
-    organization: ["acme"],
+    organization: [organization],
     ...(nonce === undefined ? {} : { nonce }),
   };
   return `${base64url({ alg: "RS256", typ: "JWT" })}.${base64url(claims)}.signature`;
@@ -259,6 +262,7 @@ describe("a Keycloak session", () => {
     accessTokenLifetime = 3600;
     issued = 0;
     nonce = undefined;
+    organization = "acme";
     window.sessionStorage.clear();
     window.localStorage.clear();
     stubNetwork();
@@ -308,10 +312,21 @@ describe("a Keycloak session", () => {
     );
   });
 
+  it("opens the tenant of the organization the sign-in named, not one chosen before", async () => {
+    window.localStorage.setItem(TENANT_SELECTION_KEY, "tenant-acme");
+    organization = "globex";
+    await signIn();
+
+    expect(screen.getByRole("combobox")).toHaveTextContent("Globex");
+    await waitFor(() =>
+      expect(resourceCalls(0)).toEqual(new Set(["kc-access-1 tenant-globex /api/tenants/tenant-globex/resources"])),
+    );
+  });
+
   it("refreshes with the refresh token, keeping the identity and the active tenant", async () => {
-    // Globex was the tenant chosen last; the first access token is renewed a
-    // second after sign-in (oidc-client-ts renews 60 s before expiry).
-    window.localStorage.setItem("identity.currentTenantId", "tenant-globex");
+    // Bob signed in through Globex; the first access token is renewed a second
+    // after sign-in (oidc-client-ts renews 60 s before expiry).
+    organization = "globex";
     accessTokenLifetime = 61;
     await signIn();
     expect(screen.getByRole("combobox")).toHaveTextContent("Globex");
@@ -353,7 +368,7 @@ describe("a Keycloak session", () => {
     expect(tokenRequests.map((r) => r.grant_type)).toEqual(["authorization_code"]);
     expect(callsTo("/api/identity")).toHaveLength(1);
     expect(apiCalls.slice(beforeSwitch).filter((c) => c.tenant === "tenant-acme")).toEqual([]);
-    expect(window.localStorage.getItem("identity.currentTenantId")).toBe("tenant-globex");
+    expect(window.localStorage.getItem(TENANT_SELECTION_KEY)).toBe("tenant-globex");
   });
 
   it("logs out through the backend and Keycloak's end-session endpoint", async () => {
