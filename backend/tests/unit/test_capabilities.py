@@ -44,11 +44,14 @@ from app.services.adapters.zitadel import ZitadelSyncAdapter
 from app.services.relationship_store import RelationshipStoreKind
 from app.services.user import UserService
 from tests.unit.test_descope_backed_routes import (
+    DESCOPE_ISSUER,
     DESCOPE_MEMBER,
     DESCOPE_PROJECT,
+    KEY_BODY,
     ORY_AUDIENCE,
     ORY_ISSUER,
     ORY_OWNER,
+    TENANT_A,
     _bearer,
     _url,
 )
@@ -80,9 +83,10 @@ DECLARED = {
 DESCOPE_SERVED = Served(DESCOPE_CAPABILITIES, RelationshipStoreKind.DESCOPE)
 # Keycloak's own principal is served every capability its adapter declares; OpenFGA
 # serves it only where CANONICAL_RBAC_PROVIDERS names Keycloak, which here it does not
-# (the default, ``ory``). Keycloak's machine credentials are canonical: they serve
-# every principal (#680); its custom attributes take the caller's sub and tenant as
-# Keycloak's ids, so they serve a Keycloak principal only (#679).
+# (the default, ``ory``). Keycloak's machine credentials are canonical: they serve a
+# principal authorized from the canonical model, never a Descope principal (#680); its
+# custom attributes take the caller's sub and tenant as Keycloak's ids, so they serve a
+# Keycloak principal only (#679).
 KEYCLOAK_SERVED = Served(KEYCLOAK_CAPABILITIES, RelationshipStoreKind.NONE)
 KEYCLOAK_MACHINE_CREDENTIALS = frozenset({Capability.MACHINE_CREDENTIALS})
 
@@ -208,7 +212,7 @@ class TestDeclarations:
     def test_each_adapter_declares_its_own_set(self):
         assert {adapter: vars(adapter)["capabilities"] for adapter in DECLARED} == DECLARED
 
-    def test_only_keycloaks_machine_credentials_serve_every_principal(self):
+    def test_only_keycloaks_machine_credentials_serve_every_canonical_principal(self):
         assert {adapter: adapter.canonical_capabilities for adapter in DECLARED} == {
             **{adapter: frozenset() for adapter in DECLARED},
             KeycloakSyncAdapter: KEYCLOAK_MACHINE_CREDENTIALS,
@@ -268,7 +272,7 @@ OPENFGA_SERVED = Served(frozenset(), RelationshipStoreKind.OPENFGA)
 # (sync provider, RELATIONSHIP_STORE, principal) -> what the caller is served.
 # An adapter's capabilities take the caller's sub and tenant as its provider's ids,
 # so they serve that provider's own principals only, except Keycloak's canonical
-# machine credentials, which serve every principal. Descope's store is keyed on
+# machine credentials, which serve every canonical principal. Descope's store is keyed on
 # Descope ids: it serves a Descope principal only. OpenFGA is keyed on canonical
 # ids: it serves a principal of a provider in CANONICAL_RBAC_PROVIDERS only.
 SERVED_TO = [
@@ -276,7 +280,7 @@ SERVED_TO = [
     ("descope", "", "ory", NOTHING),
     ("descope", "", "keycloak", NOTHING),
     ("keycloak", "", "keycloak", KEYCLOAK_SERVED),
-    ("keycloak", "", "descope", Served(KEYCLOAK_MACHINE_CREDENTIALS, RelationshipStoreKind.NONE)),
+    ("keycloak", "", "descope", NOTHING),
     ("keycloak", "", "ory", Served(KEYCLOAK_MACHINE_CREDENTIALS, RelationshipStoreKind.OPENFGA)),
     ("zitadel", "", "descope", NOTHING),
     ("zitadel", "", "ory", OPENFGA_SERVED),
@@ -358,6 +362,15 @@ MISSING_FOR = sorted(
 )
 
 
+# A Descope owner and admin whose current tenant is a canonical tenant's id.
+DESCOPE_CANONICAL_TENANT_ADMIN = {
+    "iss": DESCOPE_ISSUER,
+    "sub": "descope-admin",
+    "dct": TENANT_A,
+    "tenants": {TENANT_A: {"roles": ["owner", "admin"], "permissions": []}},
+}
+
+
 class TestAMissingCapabilityIs404:
     """Every gated route, for every caller the capability does not serve (``SERVED_TO``)."""
 
@@ -371,6 +384,24 @@ class TestAMissingCapabilityIs404:
 
         assert (response.status_code, response.json()) == (404, _missing(url, MISSING_DETAIL[(method, path)]))
         assert descope_client.mock_calls == []
+
+    @pytest.mark.parametrize(("method", "path"), sorted(MACHINE_CREDENTIAL_ROUTES))
+    def test_a_descope_admin_naming_a_canonical_tenant_gets_no_keycloak_machine_credentials(
+        self, client, monkeypatch, method, path
+    ):
+        """A Descope token's ``dct`` naming a canonical tenant's id reaches no canonical ``/api/keys``."""
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        monkeypatch.setattr(rbac, "CANONICAL_RBAC_PROVIDERS", frozenset({"ory", "keycloak"}))
+        built = []
+        client.app.dependency_overrides[identity.get_machine_credential_service] = lambda: built.append(path)
+        url = _url(path)
+
+        response = client.request(method, url, headers=_bearer(DESCOPE_CANONICAL_TENANT_ADMIN), json=KEY_BODY)
+        served = client.get("/api/capabilities", headers=_bearer(DESCOPE_CANONICAL_TENANT_ADMIN))
+
+        assert (response.status_code, response.json()) == (404, _missing(url, MISSING_DETAIL[(method, path)]))
+        assert (served.status_code, served.json()) == (200, _response(NOTHING))
+        assert built == []
 
     @pytest.mark.parametrize(("method", "path"), sorted(EVERY_GATED_ROUTE))
     def test_a_request_with_no_token_still_gets_401(self, client, method, path):

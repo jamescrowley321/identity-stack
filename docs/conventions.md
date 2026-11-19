@@ -442,7 +442,9 @@ provider (its registration's `own_principal` in `SYNC_ADAPTERS`; for Descope, a
 `descope_managed` provider), because a capability takes the caller's `sub` and the
 request's tenant as that provider's own ids. The exception is an adapter's
 `canonical_capabilities`, kept in the canonical model and taking none of the provider's ids,
-which serve every principal: Keycloak's machine credentials (#680). Each relationship store
+which serve every principal authorized from the canonical model (`rbac.is_canonical_principal`),
+never a Descope principal, whose `dct` may name a canonical tenant's id: Keycloak's machine
+credentials (#680). Each relationship store
 serves only the principals whose ids it keys on (below). A caller not served answers 404 (`CapabilityMissing`), not the guard's
 403: the route is not there for them. `GET /api/capabilities` reports `served`, and the SPA
 shows a page only when it is there. A route that reaches the provider only through a sync
