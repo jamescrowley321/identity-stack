@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import enum
 import json
+import math
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import ClassVar, Protocol
@@ -286,6 +287,10 @@ def _stamp(entry: dict, attribute: str, canonical_id: str) -> dict:
 # A user's fields Keycloak keeps when a PUT leaves them out, which an attribute write never sends.
 _KEPT_ON_A_USER_PUT = frozenset({"enabled", "emailVerified", "requiredActions"})
 
+# An organization's fields Keycloak 26.8.2 resets when a PUT leaves them out (``enabled``
+# to true): an attribute write sends them as read, and nothing else but the attributes.
+_ORGANIZATION_RESET_ON_A_PUT = ("id", "name", "alias", "enabled", "description", "redirectUrl")
+
 
 def _attribute_values(attributes: dict[str, AttributeValue], held: dict) -> dict:
     """``held`` with each of ``attributes`` set, as a JSON value; ``None`` removes it."""
@@ -299,12 +304,18 @@ def _attribute_values(attributes: dict[str, AttributeValue], held: dict) -> dict
 
 
 def _attribute_value(values: object) -> AttributeValue:
-    """A single-valued attribute as the API's value: its JSON, or the text a realm admin typed."""
+    """A single-valued attribute as the API's value: its JSON, or the text a realm admin typed.
+
+    Text that decodes to no JSON value the API can answer with (``NaN``, ``Infinity``,
+    an object, an array too deep to decode) is that text.
+    """
     if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], str):
         return None
     try:
         value = json.loads(values[0])
-    except ValueError:
+    except (ValueError, RecursionError):
+        return values[0]
+    if isinstance(value, float) and not math.isfinite(value):
         return values[0]
     return value if isinstance(value, str | int | float | bool) else values[0]
 
@@ -507,9 +518,12 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, CustomAttributes):
             organization = await self._full_organization(tenant)
             if organization is None:
                 raise _Refused(Refusal.NO_ORGANIZATION)
+            # Keycloak keeps the domains a PUT leaves out, but resets ``enabled`` and the
+            # other fields of _ORGANIZATION_RESET_ON_A_PUT: those go back as read.
+            sent = {field: organization[field] for field in _ORGANIZATION_RESET_ON_A_PUT if field in organization}
             held = _attributes(organization)
             await self._api.update_organization(
-                organization["id"], {**organization, "attributes": _attribute_values(attributes, held)}
+                organization["id"], {**sent, "attributes": _attribute_values(attributes, held)}
             )
 
         with tracer.start_as_current_span("keycloak.set_tenant_attributes"):
