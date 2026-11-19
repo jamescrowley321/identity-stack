@@ -19,7 +19,14 @@ from app.models.identity.user import User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.base import RepositoryConflictError
 from app.repositories.user import UserRepository
-from app.services.adapters.base import CREATED_IN_TENANT, IdentityProviderAdapter, SyncError
+from app.services.adapters.base import (
+    CREATED_IN_TENANT,
+    OWN_PROFILE_OF,
+    PROVIDER_SYNC,
+    PROVIDER_SYNC_FAILED,
+    IdentityProviderAdapter,
+    SyncError,
+)
 from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.user import UserService
 
@@ -359,6 +366,65 @@ class TestUpdateUser:
         assert result.is_ok()
         repo.commit.assert_awaited_once()
         mock_logger.warning.assert_called_once()
+
+
+@pytest.mark.anyio
+class TestUpdateOwnNames:
+    async def test_saves_the_names_and_pushes_them_to_the_owners_account(self):
+        service, repo, adapter, _ = _build_service()
+        user = _make_user()
+        repo.get.return_value = user
+        repo.update.side_effect = lambda updated: updated
+        adapter.sync_user.return_value = Ok(None)
+
+        result = await service.update_own_names(
+            user_id=user.id, given_name="Ann", family_name="Other", subject="kc-account-1"
+        )
+
+        assert result == Ok({**user.model_dump(), "given_name": "Ann", "family_name": "Other"})
+        repo.commit.assert_awaited_once()
+        adapter.sync_user.assert_awaited_once_with(
+            user_id=user.id,
+            data={
+                "email": user.email,
+                "status": "active",
+                "user_name": user.user_name,
+                "given_name": "Ann",
+                "family_name": "Other",
+                OWN_PROFILE_OF: "kc-account-1",
+            },
+        )
+
+    async def test_without_a_subject_nothing_is_pushed(self):
+        service, repo, adapter, _ = _build_service()
+        user = _make_user()
+        repo.get.return_value = user
+        repo.update.side_effect = lambda updated: updated
+
+        result = await service.update_own_names(user_id=user.id, given_name="Ann", family_name="", subject=None)
+
+        assert result == Ok({**user.model_dump(), "given_name": "Ann", "family_name": ""})
+        adapter.sync_user.assert_not_awaited()
+
+    async def test_a_failed_push_is_told(self):
+        service, repo, adapter, _ = _build_service()
+        user = _make_user()
+        repo.get.return_value = user
+        repo.update.side_effect = lambda updated: updated
+        adapter.sync_user.return_value = Error(SyncError(message="refused", operation="sync_user"))
+
+        result = await service.update_own_names(user_id=user.id, given_name="Ann", family_name="B", subject="s")
+
+        assert result.ok[PROVIDER_SYNC] == PROVIDER_SYNC_FAILED
+
+    async def test_an_unknown_user_is_not_found(self):
+        service, repo, adapter, _ = _build_service()
+        repo.get.return_value = None
+
+        result = await service.update_own_names(user_id=uuid.uuid4(), given_name="A", family_name="", subject="s")
+
+        assert isinstance(result.error, NotFound)
+        adapter.sync_user.assert_not_awaited()
 
 
 @pytest.mark.anyio

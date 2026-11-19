@@ -422,10 +422,15 @@ configuration at startup (`refuse_canonical_descope_managed`).
   (`routers/tenants.py`), which reads a top-level `roles` claim itself and takes no
   tenant. It takes the claims from `get_descope_claims`, so only a Descope principal is
   decided from that claim; every other provider's is refused (403) (#596).
-- Exception: `GET /api/profile` carries no capability gate, because every provider's
-  session loads it. Name and email are the canonical user's (`GET /api/identity`'s
-  resolution); the custom attributes are asked of the sync adapter only for a caller its
-  `custom_attributes` capability serves, and are empty for anyone else.
+- Exception: `GET` and `PATCH /api/profile` carry no capability gate, because every
+  provider's session loads and saves it. Names and email are the canonical user's
+  (`GET /api/identity`'s resolution); `PATCH` saves the caller's own given and family
+  names there (never the email: sign-in and sync link accounts by it) and pushes them,
+  with `OWN_PROFILE_OF`, only to the caller's own account at the sync provider, and only
+  when the caller is its principal (`capabilities.sync_provider_subject`). The custom
+  attributes are asked of the sync adapter only for a caller its `custom_attributes`
+  capability serves, and are empty for anyone else; they are written through
+  `PATCH /api/profile/attributes`, which is gated.
 - Exception: `GET /api/tenants` takes no tenant from `get_tenant_id` and carries no guard
   of its own; `get_tenant_claims` refuses a principal of another provider (403). A canonical
   principal's tenants are in `GET /api/identity` (#590).

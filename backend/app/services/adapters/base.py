@@ -46,6 +46,14 @@ CREATED_IN_TENANT = "created_in_tenant"
 CHANGED_IN_TENANT = "changed_in_tenant"
 
 
+# ``sync_user`` data key: the caller's own subject at the adapter's provider, sent with
+# ``given_name`` and ``family_name`` when the account's owner changed their own names
+# (UserService.update_own_names). The adapter pushes the names to that account, and
+# to no other: no other field and no status. Sent only for a principal of the sync
+# provider, so the subject is one of its accounts.
+OWN_PROFILE_OF = "own_profile_of"
+
+
 class Capability(enum.StrEnum):
     """An optional feature a sync adapter implements beyond the canonical sync.
 

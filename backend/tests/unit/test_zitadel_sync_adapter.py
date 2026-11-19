@@ -16,6 +16,7 @@ from app.services.adapters.base import (
     CHANGED_IN_TENANT,
     CREATED_IN_TENANT,
     LAST_ROLE_IN_TENANT,
+    OWN_PROFILE_OF,
     STATUS_CHANGED,
     UNANSWERED,
     IdentityProviderAdapter,
@@ -134,6 +135,9 @@ class FakeApi:
     async def delete_user(self, user_id: str) -> bool:
         self._record("delete_user", user_id=user_id)
         return self.users.pop(user_id, None) is not None
+
+    async def set_human_names(self, user_id: str, given_name: str, family_name: str) -> None:
+        self._record("set_human_names", user_id=user_id, given_name=given_name, family_name=family_name)
 
 
 def _user(state: str = ACTIVE, org_id: str = ORG_ID) -> ZitadelUser:
@@ -937,3 +941,39 @@ class TestUnanswered:
         result = await adapter.sync_tenant(tenant_id=TENANT_ID, data={"name": "Initech"})
 
         assert result.error.context == {"tenant_id": str(TENANT_ID)}
+
+
+class TestOwnNames:
+    """``OWN_PROFILE_OF``: the owner's names reach their own Zitadel user, and nothing else changes."""
+
+    async def test_the_names_go_to_the_owners_user_only(self):
+        api = FakeApi()
+        adapter, _, links = _adapter(api)
+        data = {"email": "a@b.test", "status": "inactive", "user_name": "a", "given_name": "Ann", "family_name": "B"}
+
+        result = await adapter.sync_user(user_id=USER_ID, data={**data, OWN_PROFILE_OF: SUB})
+
+        assert (result.is_ok(), api.calls) == (
+            True,
+            [("set_human_names", {"user_id": SUB, "given_name": "Ann", "family_name": "B"})],
+        )
+
+    async def test_an_empty_family_name_is_sent_as_the_user_name(self):
+        """Zitadel refuses an empty name, as on create."""
+        api = FakeApi()
+        adapter, _, _ = _adapter(api)
+        data = {"email": "a@b.test", "status": "active", "user_name": "ann", "given_name": "Ann", "family_name": ""}
+
+        await adapter.sync_user(user_id=USER_ID, data={**data, OWN_PROFILE_OF: SUB})
+
+        assert api.calls == [("set_human_names", {"user_id": SUB, "given_name": "Ann", "family_name": "ann"})]
+
+    async def test_a_refused_push_is_an_error(self):
+        api = FakeApi(failing={"set_human_names": _refusal(400)})
+        adapter, _, _ = _adapter(api)
+
+        result = await adapter.sync_user(
+            user_id=USER_ID, data={"email": "a@b.test", "status": "active", "given_name": "A", OWN_PROFILE_OF: SUB}
+        )
+
+        assert result.is_error()

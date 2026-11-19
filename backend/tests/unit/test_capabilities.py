@@ -1,5 +1,6 @@
 """Adapter capabilities, ``GET /api/capabilities``, and the 404 of a route whose capability is missing."""
 
+import uuid
 from collections.abc import Callable, Iterator
 from unittest.mock import AsyncMock, MagicMock
 
@@ -11,7 +12,7 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from slowapi.errors import RateLimitExceeded
 
-from app.dependencies import identity
+from app.dependencies import identity, rbac
 from app.dependencies.capabilities import (
     NOTHING,
     Served,
@@ -23,9 +24,11 @@ from app.dependencies.identity import (
     SYNC_ADAPTERS,
     SyncAdapterRegistration,
     get_identity_resolution_service,
+    get_user_service,
     relationship_store_kind,
     sync_capabilities,
 )
+from app.dependencies.rbac import get_rbac_session
 from app.dependencies.tenant import get_tenant_id
 from app.main import app as shipped_app
 from app.middleware.claims import GatewayClaimsMiddleware
@@ -39,6 +42,7 @@ from app.services.adapters.noop import NoOpSyncAdapter
 from app.services.adapters.ory import OrySyncAdapter
 from app.services.adapters.zitadel import ZitadelSyncAdapter
 from app.services.relationship_store import RelationshipStoreKind
+from app.services.user import UserService
 from tests.unit.test_descope_backed_routes import (
     DESCOPE_MEMBER,
     DESCOPE_PROJECT,
@@ -89,7 +93,7 @@ MACHINE_CREDENTIAL_ROUTES = frozenset(
 )
 CUSTOM_ATTRIBUTE_ROUTES = frozenset(
     {
-        ("PATCH", "/api/profile"),
+        ("PATCH", "/api/profile/attributes"),
         ("GET", "/api/tenants/current/settings"),
         ("PATCH", "/api/tenants/current/settings"),
     }
@@ -328,7 +332,7 @@ class TestAMissingCapabilityIs404:
 
 
 CANONICAL_USER = {
-    "id": "canonical-user-1",
+    "id": "0b1d0b1d-0000-4000-8000-000000000001",
     "email": "member@example.test",
     "user_name": "member",
     "given_name": "A",
@@ -338,9 +342,12 @@ CANONICAL_USER = {
 CANONICAL_PROFILE = {
     "user_id": ORY_OWNER["sub"],
     "name": "A Member",
+    "given_name": "A",
+    "family_name": "Member",
     "email": "member@example.test",
     "custom_attributes": {},
 }
+TENANT = "11111111-1111-1111-1111-111111111111"
 
 
 class TestAProvidersOwnPrincipalReachesItsAdapter:
@@ -381,7 +388,9 @@ class TestAProvidersOwnPrincipalReachesItsAdapter:
         adapter.set_user_attribute.return_value = Ok(None)
 
         response = client.patch(
-            "/api/profile", json={"key": "department", "value": "Engineering"}, headers=_bearer(KEYCLOAK_MEMBER)
+            "/api/profile/attributes",
+            json={"key": "department", "value": "Engineering"},
+            headers=_bearer(KEYCLOAK_MEMBER),
         )
 
         assert (response.status_code, response.json()) == (
@@ -393,7 +402,7 @@ class TestAProvidersOwnPrincipalReachesItsAdapter:
         )
 
     def test_the_tenant_settings_read_the_resolved_tenant(self, client, adapter):
-        tenant = "11111111-1111-1111-1111-111111111111"
+        tenant = TENANT
         client.app.dependency_overrides[get_tenant_id] = lambda: tenant
         adapter.tenant_attributes.return_value = Ok(TenantAttributes("Acme", {"plan_tier": "pro", "other": 1}))
 
@@ -406,7 +415,7 @@ class TestAProvidersOwnPrincipalReachesItsAdapter:
         adapter.tenant_attributes.assert_awaited_once_with(tenant=tenant)
 
     def test_a_tenant_the_provider_lacks_has_empty_settings(self, client, adapter):
-        tenant = "11111111-1111-1111-1111-111111111111"
+        tenant = TENANT
         client.app.dependency_overrides[get_tenant_id] = lambda: tenant
         adapter.tenant_attributes.return_value = Ok(None)
 
@@ -416,3 +425,89 @@ class TestAProvidersOwnPrincipalReachesItsAdapter:
             200,
             {"tenant_id": tenant, "name": "", "custom_attributes": {}},
         )
+
+    @pytest.fixture
+    def users(self, client) -> AsyncMock:
+        users = AsyncMock(spec=UserService)
+        users.update_own_names.return_value = Ok({**CANONICAL_USER, "given_name": "B", "family_name": "Other"})
+        resolver = AsyncMock()
+        resolver.resolve.return_value = Ok({"user": CANONICAL_USER})
+        client.app.dependency_overrides[get_identity_resolution_service] = lambda: resolver
+        client.app.dependency_overrides[get_user_service] = lambda: users
+        return users
+
+    @pytest.mark.parametrize(
+        ("principal", "subject"),
+        [("keycloak", KEYCLOAK_MEMBER["sub"]), ("ory", None), ("descope", None)],
+    )
+    def test_names_are_saved_for_every_provider_and_pushed_to_the_sync_providers_own_principal_only(
+        self, client, adapter, users, principal, subject
+    ):
+        response = client.patch(
+            "/api/profile", json={"given_name": "B", "family_name": "Other"}, headers=_bearer(PRINCIPALS[principal])
+        )
+
+        assert (response.status_code, response.json()) == (
+            200,
+            {"status": "updated", "name": "B Other", "given_name": "B", "family_name": "Other"},
+        )
+        users.update_own_names.assert_awaited_once_with(
+            user_id=uuid.UUID(CANONICAL_USER["id"]), given_name="B", family_name="Other", subject=subject
+        )
+
+
+class TestKeycloakTenantSettingsNeedAnAdminRole:
+    """``PATCH /api/tenants/current/settings`` for a Keycloak principal, authorized from the canonical model."""
+
+    @pytest.fixture
+    def adapter(self, monkeypatch, client) -> AsyncMock:
+        adapter = AsyncMock(spec=KeycloakSyncAdapter)
+        adapter.set_tenant_attributes.return_value = Ok(None)
+        registration = SYNC_ADAPTERS["keycloak"]
+        monkeypatch.setitem(
+            SYNC_ADAPTERS,
+            "keycloak",
+            SyncAdapterRegistration(registration.adapter, lambda _state, _session: adapter, registration.own_principal),
+        )
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        monkeypatch.setattr(rbac, "CANONICAL_RBAC_PROVIDERS", frozenset({"keycloak"}))
+
+        async def _session():
+            yield MagicMock()
+
+        client.app.dependency_overrides[get_rbac_session] = _session
+        return adapter
+
+    def _held(self, monkeypatch, role: str) -> None:
+        resolver = AsyncMock()
+        resolver.resolve.return_value = Ok(
+            {"user": CANONICAL_USER, "roles": [{"tenant_id": TENANT, "role_name": role, "permissions": []}]}
+        )
+        monkeypatch.setattr(rbac, "IdentityResolutionService", lambda **_: resolver)
+
+    def test_an_admin_saves(self, client, adapter, monkeypatch):
+        self._held(monkeypatch, "admin")
+
+        response = client.patch(
+            "/api/tenants/current/settings",
+            json={"custom_attributes": {"plan_tier": "pro"}},
+            headers=_bearer(KEYCLOAK_MEMBER),
+        )
+
+        assert (response.status_code, response.json()) == (
+            200,
+            {"status": "updated", "tenant_id": TENANT, "custom_attributes": {"plan_tier": "pro"}},
+        )
+        adapter.set_tenant_attributes.assert_awaited_once_with(tenant=TENANT, attributes={"plan_tier": "pro"})
+
+    def test_a_member_is_refused(self, client, adapter, monkeypatch):
+        self._held(monkeypatch, "member")
+
+        response = client.patch(
+            "/api/tenants/current/settings",
+            json={"custom_attributes": {"plan_tier": "pro"}},
+            headers=_bearer(KEYCLOAK_MEMBER),
+        )
+
+        assert (response.status_code, response.json()) == (403, {"detail": "Insufficient permissions"})
+        adapter.set_tenant_attributes.assert_not_awaited()

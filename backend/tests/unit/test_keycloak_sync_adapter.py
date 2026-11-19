@@ -15,6 +15,7 @@ from expression import Ok
 from app.services.adapters.base import (
     CREATED_IN_TENANT,
     LAST_ROLE_IN_TENANT,
+    OWN_PROFILE_OF,
     STATUS_CHANGED,
     UNANSWERED,
     SyncError,
@@ -690,6 +691,16 @@ class TestFailuresAreRecorded:
         assert error.message == f"{Refusal.LINK_REFUSED.value}: tenant gone"
 
 
+def sent_to(api: RecordedAdminApi, method: str, path: str) -> Sent:
+    """The one request the adapter sent with this method to this path."""
+    found = [sent for sent in api.sent if (sent.method, sent.path) == (method, path)]
+    assert len(found) == 1, f"{method} {path}: sent {len(found)} times"
+    return found[0]
+
+
+ACCOUNT_PATH = admin_path(f"/users/{KEYCLOAK_USER_ID}")
+
+
 class TestCustomAttributes:
     """User attributes on the caller's account, organization attributes on the tenant's: JSON values."""
 
@@ -701,6 +712,7 @@ class TestCustomAttributes:
         "lastName": "Two",
         "attributes": {"department": ['"Sales"'], "typed_by_admin": ["plain text"], "multi": ["a", "b"]},
     }
+    STATUS = {"enabled": True, "emailVerified": True, "requiredActions": []}
     ORGANIZATION = {
         "id": ORGANIZATION_ID,
         "alias": TENANT_ID,
@@ -716,29 +728,17 @@ class TestCustomAttributes:
         result = await adapter(api).user_attributes(subject=KEYCLOAK_USER_ID)
 
         assert result == Ok({"department": "Sales", "typed_by_admin": "plain text"})
-        assert api.calls()[1] == ("GET", admin_path(f"/users/{KEYCLOAK_USER_ID}"))
+        assert sent_to(api, "GET", ACCOUNT_PATH).body is None
 
-    async def test_an_attribute_write_sends_the_account_back_whole(self):
-        """Keycloak replaces the profile fields and attributes a PUT sends: nothing read may be dropped."""
-        api = RecordedAdminApi(["token", httpx.Response(200, json=self.ACCOUNT), NO_CONTENT])
+    async def test_an_attribute_write_sends_the_account_back_but_its_status(self):
+        """Keycloak replaces the profile fields a PUT sends and keeps the status fields it leaves out."""
+        account = {**self.ACCOUNT, **self.STATUS}
+        api = RecordedAdminApi(["token", httpx.Response(200, json=account), NO_CONTENT])
 
         result = await adapter(api).set_user_attribute(subject=KEYCLOAK_USER_ID, key="job_title", value="Lead")
 
         assert result == Ok(None)
-        assert (api.sent[2].method, api.sent[2].path, api.sent[2].body) == (
-            "PUT",
-            admin_path(f"/users/{KEYCLOAK_USER_ID}"),
-            {**self.ACCOUNT, "attributes": {**self.ACCOUNT["attributes"], "job_title": ['"Lead"']}},
-        )
-
-    async def test_an_attribute_write_leaves_the_accounts_status_to_keycloak(self):
-        """A disable between the read and the write is not undone: the status fields are never sent."""
-        status = {"enabled": True, "emailVerified": True, "requiredActions": []}
-        api = RecordedAdminApi(["token", httpx.Response(200, json={**self.ACCOUNT, **status}), NO_CONTENT])
-
-        await adapter(api).set_user_attribute(subject=KEYCLOAK_USER_ID, key="job_title", value="Lead")
-
-        assert api.sent[2].body == {
+        assert sent_to(api, "PUT", ACCOUNT_PATH).body == {
             **self.ACCOUNT,
             "attributes": {**self.ACCOUNT["attributes"], "job_title": ['"Lead"']},
         }
@@ -748,7 +748,10 @@ class TestCustomAttributes:
 
         await adapter(api).set_user_attribute(subject=KEYCLOAK_USER_ID, key="department", value=None)
 
-        assert api.sent[2].body["attributes"] == {"typed_by_admin": ["plain text"], "multi": ["a", "b"]}
+        assert sent_to(api, "PUT", ACCOUNT_PATH).body == {
+            **self.ACCOUNT,
+            "attributes": {"typed_by_admin": ["plain text"], "multi": ["a", "b"]},
+        }
 
     async def test_a_write_to_an_account_keycloak_lacks_is_refused(self):
         api = RecordedAdminApi(["token", httpx.Response(404, json={"error": "User not found"})])
@@ -763,7 +766,7 @@ class TestCustomAttributes:
 
         result = await adapter(api, Links(aliases={TENANT: TENANT_ID})).tenant_attributes(tenant=TENANT_ID)
 
-        assert result.ok == TenantAttributes("Recorded Co", {"plan_tier": "pro", "max_members": 25})
+        assert result == Ok(TenantAttributes("Recorded Co", {"plan_tier": "pro", "max_members": 25}))
 
     async def test_a_tenant_without_an_organization_has_none(self):
         api = RecordedAdminApi(["token", httpx.Response(200, json=[])])
@@ -778,11 +781,10 @@ class TestCustomAttributes:
         )
 
         assert result == Ok(None)
-        assert (api.sent[3].method, api.sent[3].path, api.sent[3].body) == (
-            "PUT",
-            ORGANIZATION,
-            {**self.ORGANIZATION, "attributes": {"plan_tier": ['"enterprise"']}},
-        )
+        assert sent_to(api, "PUT", ORGANIZATION).body == {
+            **self.ORGANIZATION,
+            "attributes": {"plan_tier": ['"enterprise"']},
+        }
 
     async def test_a_tenant_id_that_is_no_canonical_id_is_refused(self):
         api = RecordedAdminApi(["token"])
@@ -790,3 +792,42 @@ class TestCustomAttributes:
         result = await adapter(api).set_tenant_attributes(tenant="not-a-uuid", attributes={"plan_tier": "pro"})
 
         refused(result, "set_tenant_attributes", Refusal.BAD_TENANT_ID)
+
+
+class TestOwnNames:
+    """``OWN_PROFILE_OF``: the owner's names reach their own account, linked or not, and nothing else does."""
+
+    ACCOUNT = TestCustomAttributes.ACCOUNT
+    OWN = {
+        "email": "canonical@example.test",
+        "status": "inactive",
+        "given_name": "Robert",
+        "family_name": "Twice",
+        OWN_PROFILE_OF: KEYCLOAK_USER_ID,
+    }
+
+    async def test_the_names_go_to_the_owners_account_and_nothing_else_changes(self):
+        account = {**self.ACCOUNT, **TestCustomAttributes.STATUS}
+        api = RecordedAdminApi(["token", httpx.Response(200, json=account), NO_CONTENT])
+
+        result = await adapter(api).sync_user(user_id=USER, data=self.OWN)
+
+        assert result == Ok(None)
+        # The account's email and status stay as Keycloak holds them: only the names change.
+        assert sent_to(api, "PUT", ACCOUNT_PATH).body == {**self.ACCOUNT, "firstName": "Robert", "lastName": "Twice"}
+
+    async def test_names_the_account_already_has_write_nothing(self):
+        api = RecordedAdminApi(["token", httpx.Response(200, json=self.ACCOUNT)])
+
+        data = {**self.OWN, "given_name": "Bob", "family_name": "Two"}
+        assert await adapter(api).sync_user(user_id=USER, data=data) == Ok(None)
+        assert writes(api) == []
+
+    async def test_a_service_account_is_refused(self):
+        service = {**self.ACCOUNT, "username": "service-account-identity-stack-admin"}
+        api = RecordedAdminApi(["token", httpx.Response(200, json=service)])
+
+        result = await adapter(api).sync_user(user_id=USER, data=self.OWN)
+
+        refused(result, "sync_user", Refusal.USER_NOT_IN_KEYCLOAK)
+        assert writes(api) == []

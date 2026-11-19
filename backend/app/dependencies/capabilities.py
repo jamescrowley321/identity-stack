@@ -90,3 +90,18 @@ async def get_custom_attributes(
     if adapter is None:
         raise _missing(Capability.CUSTOM_ATTRIBUTES)
     return adapter
+
+
+def sync_provider_subject(request: Request) -> str | None:
+    """The caller's ``sub`` when they are a principal of the sync provider, else ``None``.
+
+    Only then is the ``sub`` an account of the sync provider, so only then may a change
+    of the caller's own profile be pushed to it (``OWN_PROFILE_OF``). 401 without claims.
+    """
+    claims = getattr(request.state, "claims", None)
+    if claims is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    sub = claims.get("sub") if isinstance(claims, dict) else None
+    if not isinstance(sub, str) or not sub or not identity.is_sync_provider_principal(request):
+        return None
+    return sub

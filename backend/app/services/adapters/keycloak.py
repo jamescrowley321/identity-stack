@@ -56,7 +56,9 @@ the backend made it (``KeycloakLinks.linked_subject``; the backend's links are
 the accounts the adapter created and those an operator's seed names) unless it
 is a client's service account, and otherwise the account under the canonical
 id. No email or name is pushed to an account whose username is not the
-canonical id: its email and names are the account's own.
+canonical id: its email and names are the account's own, except the names its
+owner changed on their own profile (``OWN_PROFILE_OF``), which go to that account
+only.
 
 Every failure is ``Error(SyncError)`` with ``context["status"]``, the HTTP status
 or ``None``, ``context[UNANSWERED]`` when Keycloak gave no readable answer, and
@@ -79,6 +81,7 @@ from opentelemetry import trace
 from app.services.adapters.base import (
     CREATED_IN_TENANT,
     LAST_ROLE_IN_TENANT,
+    OWN_PROFILE_OF,
     STATUS_CHANGED,
     UNANSWERED,
     AttributeValue,
@@ -518,7 +521,10 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, CustomAttributes):
         """Create or update the user whose username is ``user_id``.
 
         Expected data keys: email, status (required); given_name, family_name,
-        ``CREATED_IN_TENANT``, ``STATUS_CHANGED``, left_tenant_id (optional).
+        ``CREATED_IN_TENANT``, ``STATUS_CHANGED``, left_tenant_id (optional). With
+        ``OWN_PROFILE_OF`` (the owner's own account id) only the names are pushed, to
+        that account, whether or not its username is the canonical id: the owner
+        changed them.
         """
         context = {"user_id": str(user_id)}
         email = data.get("email")
@@ -540,6 +546,23 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, CustomAttributes):
             for key, field in (("firstName", "given_name"), ("lastName", "family_name"))
             if isinstance(data.get(field), str) and data[field]
         }
+        own = data.get(OWN_PROFILE_OF)
+
+        async def push_own_names(subject: str) -> None:
+            """The owner's own names, to their own account: sent back whole, but its status fields."""
+            account = await self._api.get_user(subject)
+            if account is None or _is_service_account(account):
+                raise _Refused(Refusal.USER_NOT_IN_KEYCLOAK)
+            wanted = {"firstName": data.get("given_name") or "", "lastName": data.get("family_name") or ""}
+            if all(account.get(key, "") == value for key, value in wanted.items()):
+                return
+            sent = {field: held for field, held in account.items() if field not in _KEPT_ON_A_USER_PUT}
+            await self._api.update_user(account["id"], {**sent, **wanted})
+
+        if isinstance(own, str) and own:
+            with tracer.start_as_current_span("keycloak.sync_user") as span:
+                span.set_attribute("user.id", username)
+                return await _run("sync_user", context, lambda: push_own_names(own))
 
         async def push() -> None:
             user = await self._account(user_id)

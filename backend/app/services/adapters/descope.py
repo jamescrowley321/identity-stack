@@ -14,6 +14,7 @@ from opentelemetry import trace
 from app.errors.identity import NotFound
 from app.logbook import logbook
 from app.services.adapters.base import (
+    OWN_PROFILE_OF,
     AttributeValue,
     Capability,
     CustomAttributes,
@@ -59,6 +60,8 @@ class DescopeSyncAdapter(IdentityProviderAdapter, CustomAttributes):
         Expected data keys:
             email: str — user's email (used as loginId in Descope)
             status: str — canonical status ("active", "inactive", "provisioned")
+            OWN_PROFILE_OF: str — the owner's Descope user id; then only given_name and
+                family_name are pushed, to that user
         """
         with tracer.start_as_current_span("descope.sync_user") as span:
             span.set_attribute("user.id", str(user_id))
@@ -82,6 +85,13 @@ class DescopeSyncAdapter(IdentityProviderAdapter, CustomAttributes):
                             context={"user_id": str(user_id)},
                         )
                     )
+                own = data.get(OWN_PROFILE_OF)
+                if isinstance(own, str) and own:
+                    # The owner's own names, to their own Descope user (its id); no status.
+                    await self._client.update_user_names(
+                        own, data.get("given_name") or "", data.get("family_name") or ""
+                    )
+                    return Ok(None)
                 await self._client.update_user_status(email, descope_status)
                 return Ok(None)
             except Exception as exc:

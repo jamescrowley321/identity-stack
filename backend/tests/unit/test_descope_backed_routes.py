@@ -153,7 +153,7 @@ _OWN_PRINCIPALS_ONLY = (
 # (method, path) -> why a route of a sync adapter capability hands no other provider's
 # subject or tenant to the provider. Each depends on the capability's gate first.
 ADAPTER_CAPABILITY_ROUTES: dict[tuple[str, str], str] = {
-    ("PATCH", "/api/profile"): _OWN_PRINCIPALS_ONLY,
+    ("PATCH", "/api/profile/attributes"): _OWN_PRINCIPALS_ONLY,
     ("GET", "/api/tenants/current/settings"): _OWN_PRINCIPALS_ONLY,
     ("PATCH", "/api/tenants/current/settings"): _OWN_PRINCIPALS_ONLY,
 }
@@ -506,6 +506,8 @@ class TestTheProfileTakesNoOtherProvidersSubjectToDescope:
     CANONICAL_PROFILE = {
         "user_id": ORY_SUB,
         "name": "A Member",
+        "given_name": "A",
+        "family_name": "Member",
         "email": "member@example.test",
         "custom_attributes": {},
     }
@@ -558,17 +560,19 @@ class TestTheProfileTakesNoOtherProvidersSubjectToDescope:
     def test_an_ory_principal_cannot_write_an_attribute(self, client, descope_client):
         """A well-formed body with an allowed key: Descope's custom attributes do not serve it."""
         response = client.patch(
-            "/api/profile", json={"key": "department", "value": "Engineering"}, headers=_bearer(ORY_OWNER)
+            "/api/profile/attributes", json={"key": "department", "value": "Engineering"}, headers=_bearer(ORY_OWNER)
         )
 
-        assert _refused(response, "PATCH", "/api/profile") == (404, CAPABILITY_MISSING_TYPE)
+        assert _refused(response, "PATCH", "/api/profile/attributes") == (404, CAPABILITY_MISSING_TYPE)
         assert descope_client.mock_calls == []
 
     def test_a_descope_principal_writes_its_attribute(self, client, descope_client):
         descope_client.resolve_login_id.return_value = "member@example.test"
 
         response = client.patch(
-            "/api/profile", json={"key": "department", "value": "Engineering"}, headers=_bearer(DESCOPE_MEMBER)
+            "/api/profile/attributes",
+            json={"key": "department", "value": "Engineering"},
+            headers=_bearer(DESCOPE_MEMBER),
         )
 
         assert response.status_code == 200
@@ -579,7 +583,8 @@ class TestTheProfileTakesNoOtherProvidersSubjectToDescope:
 
     def test_a_request_with_no_token_gets_401(self, client):
         assert client.get("/api/profile").status_code == 401
-        assert client.patch("/api/profile", json={"key": "department", "value": "x"}).status_code == 401
+        assert client.patch("/api/profile", json={"given_name": "x"}).status_code == 401
+        assert client.patch("/api/profile/attributes", json={"key": "department", "value": "x"}).status_code == 401
 
 
 class TestADescopePrincipalIsServed:

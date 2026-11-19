@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 import sqlalchemy
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from scalar_fastapi import get_scalar_api_reference
 from slowapi.errors import RateLimitExceeded
 
@@ -10,7 +11,7 @@ from app.dependencies import identity as identity_dependencies
 from app.dependencies.keycloak_pull import KeycloakPullNotConfigured, keycloak_pull_settings, run_keycloak_pull
 from app.dependencies.zitadel_sync import zitadel_admin_settings
 from app.errors.identity import IdentityErrorRaised
-from app.errors.problem_detail import identity_error_raised_handler
+from app.errors.problem_detail import identity_error_raised_handler, request_validation_error_handler
 from app.knobs import knob, required_knob
 from app.logbook import logbook
 from app.logging_config import setup_logging
@@ -291,6 +292,8 @@ app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 # Lets routing-layer guards raise a domain error instead of returning a response
 # the caller has to remember to propagate. See IdentityErrorRaised.
 app.add_exception_handler(IdentityErrorRaised, identity_error_raised_handler)
+# FastAPI's 422, but able to echo a NaN or infinity a body sent (attribute values).
+app.add_exception_handler(RequestValidationError, request_validation_error_handler)
 
 # Middleware stack — configured by deployment mode (standalone vs gateway)
 configure_middleware(app)

@@ -21,6 +21,7 @@ from app.repositories.user import UserRepository
 from app.services.adapters.base import (
     CHANGED_IN_TENANT,
     CREATED_IN_TENANT,
+    OWN_PROFILE_OF,
     PROVIDER_SYNC,
     PROVIDER_SYNC_FAILED,
     STATUS_CHANGED,
@@ -187,6 +188,57 @@ class UserService:
                 user.id,
                 "update",
             )
+
+            return Ok(result_dict)
+
+    async def update_own_names(
+        self,
+        *,
+        user_id: uuid.UUID,
+        given_name: str,
+        family_name: str,
+        subject: str | None,
+    ) -> Result[dict, IdentityError]:
+        """Set the caller's own names, then push them to their account at the sync provider.
+
+        Not tenant-scoped: a user's names are their own. ``subject`` is the caller's own
+        ``sub`` when they are a principal of the sync provider (``OWN_PROFILE_OF``), and
+        ``None`` otherwise: then nothing is pushed, since no account of the sync
+        provider is known to be theirs. A push that fails is told to the caller
+        (``PROVIDER_SYNC``): the provider keeps the old names, and a provider whose
+        changes are pulled back (Keycloak) restores them.
+        """
+        with tracer.start_as_current_span("UserService.update_own_names") as span:
+            span.set_attribute("user.id", str(user_id))
+
+            user = await self._repository.get(user_id)
+            if user is None:
+                return Error(NotFound(message=f"User '{user_id}' not found"))
+            user.given_name = given_name
+            user.family_name = family_name
+            try:
+                user = await self._repository.update(user)
+            except RepositoryConflictError:
+                return Error(Conflict(message="User update conflicts with existing data"))
+
+            result_dict = user.model_dump()
+            sync_data = {
+                "email": user.email,
+                "status": user.status.value,
+                "user_name": user.user_name,
+                "given_name": user.given_name,
+                "family_name": user.family_name,
+                OWN_PROFILE_OF: subject,
+            }
+            await self._repository.commit()
+
+            await self._publisher.publish(entity_type="user", entity_id=user.id, operation="update")
+
+            if subject is not None:
+                pushed = await self._adapter.sync_user(user_id=user.id, data=sync_data)
+                self._log_sync_failure(pushed, user.id, "update_own_names")
+                if pushed.is_error():
+                    result_dict[PROVIDER_SYNC] = PROVIDER_SYNC_FAILED
 
             return Ok(result_dict)
 

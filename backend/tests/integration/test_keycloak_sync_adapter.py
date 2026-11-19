@@ -31,7 +31,13 @@ from app.models.identity.user import LINK_ORIGIN, LINKED_BY_BACKEND, IdPLink, Us
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.permission import PermissionRepository
 from app.repositories.role import RoleRepository
-from app.services.adapters.base import CREATED_IN_TENANT, LAST_ROLE_IN_TENANT, STATUS_CHANGED, TenantAttributes
+from app.services.adapters.base import (
+    CREATED_IN_TENANT,
+    LAST_ROLE_IN_TENANT,
+    OWN_PROFILE_OF,
+    STATUS_CHANGED,
+    TenantAttributes,
+)
 from app.services.adapters.keycloak import (
     PERMISSION_ATTRIBUTE,
     PROVIDER_NAME,
@@ -407,6 +413,55 @@ class TestCustomAttributes:
 
     async def test_a_tenant_without_an_organization_has_no_attributes(self, sync, tenant_id):
         assert await sync.tenant_attributes(tenant=str(tenant_id)) == Ok(None)
+
+
+class TestOwnNames:
+    """``OWN_PROFILE_OF``: a profile's names reach the owner's own account, one they signed up with too."""
+
+    @pytest.fixture
+    def account(self, realm: httpx.Client) -> Iterator[dict]:
+        """An account whose username is not a canonical id: one its owner signed up with."""
+        username = f"own-{uuid.uuid4().hex[:8]}"
+        email = f"{username}@sync.test"
+        realm.post(
+            "/users",
+            json={
+                "username": username,
+                "email": email,
+                "emailVerified": True,
+                "enabled": True,
+                "firstName": "Before",
+                "lastName": "Rename",
+            },
+        ).raise_for_status()
+        found = realm.get("/users", params={"username": username, "exact": "true"})
+        found.raise_for_status()
+        account = found.json()[0]
+        yield account
+        realm.delete(f"/users/{account['id']}").raise_for_status()
+
+    async def test_the_names_reach_the_account_and_its_email_and_status_stay(self, sync, realm, user_id, account):
+        data = {
+            "email": "canonical-other@sync.test",
+            "status": "inactive",
+            "given_name": "After",
+            "family_name": "Renamed",
+            OWN_PROFILE_OF: account["id"],
+        }
+
+        assert await sync.sync_user(user_id=user_id, data=data) == Ok(None)
+
+        held = realm.get(f"/users/{account['id']}").json()
+        assert {key: held.get(key) for key in ("firstName", "lastName", "email", "emailVerified", "enabled")} == {
+            "firstName": "After",
+            "lastName": "Renamed",
+            "email": account["email"],
+            "emailVerified": True,
+            "enabled": True,
+        }
+        await repeat_writes_nothing(realm, lambda: sync.sync_user(user_id=user_id, data=data))
+        # No account was made under the canonical id.
+        assert find_user(realm, user_id) is None
 
 
 class TestPermissionsAndRoles:

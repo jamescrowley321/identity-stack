@@ -65,6 +65,7 @@ from app.outbound import UpstreamStatusError, UpstreamTransportError
 from app.services.adapters.base import (
     CHANGED_IN_TENANT,
     CREATED_IN_TENANT,
+    OWN_PROFILE_OF,
     STATUS_CHANGED,
     UNANSWERED,
     Capability,
@@ -334,7 +335,9 @@ class ZitadelSyncAdapter(IdentityProviderAdapter):
         Expected data keys: email, status; on creation also ``CREATED_IN_TENANT``,
         user_name, given_name and family_name; ``STATUS_CHANGED: True`` and
         ``CHANGED_IN_TENANT`` on activate and deactivate. An empty given or family name is
-        sent as the user name: Zitadel refuses an empty one. Any other change reaches nothing.
+        sent as the user name: Zitadel refuses an empty one. With ``OWN_PROFILE_OF`` (the
+        owner's own Zitadel user id) only the given and family names are pushed, to that
+        user. Any other change reaches nothing.
 
         A user with no followed link is looked up by its canonical id, the id this adapter
         gives the users it creates. On create, one an earlier try made but did not link (its
@@ -345,6 +348,14 @@ class ZitadelSyncAdapter(IdentityProviderAdapter):
             span.set_attribute("user.id", str(user_id))
             context: dict = {"user_id": str(user_id)}
             try:
+                own = data.get(OWN_PROFILE_OF)
+                if isinstance(own, str) and own:
+                    user_name = data.get("user_name") or ""
+                    async with self._open_api() as api:
+                        await api.set_human_names(
+                            own, data.get("given_name") or user_name, data.get("family_name") or user_name
+                        )
+                    return Ok(None)
                 status_changed = data.get(STATUS_CHANGED) is True
                 created_in = data.get(CREATED_IN_TENANT)
                 if not status_changed and created_in is None:
