@@ -26,7 +26,7 @@ from starlette.datastructures import State
 from app.dependencies.keycloak_reconciliation import build_keycloak_reconciliation
 from app.dependencies.keycloak_sync import build_keycloak_sync_adapter
 from app.dependencies.zitadel_sync import build_zitadel_sync_adapter
-from app.errors.identity import Conflict, IdentityErrorRaised
+from app.errors.identity import CapabilityMissing, Conflict, IdentityErrorRaised
 from app.knobs import knob
 from app.logbook import logbook
 from app.models.database import get_async_session, get_engine
@@ -50,7 +50,14 @@ from app.services.inbound_sync import InboundSyncService
 from app.services.permission import PermissionService
 from app.services.provider import ProviderService
 from app.services.reconciliation import ProviderReconciliation, ReconciliationService
-from app.services.relationship_store import RelationshipStoreKind
+from app.services.relationship_store import (
+    DescopeRelationshipStore,
+    RelationshipStore,
+    RelationshipStoreFault,
+    RelationshipStoreKind,
+    RelationshipStoreNotAvailable,
+    RelationshipStoreSetting,
+)
 from app.services.role import RoleService
 from app.services.sync_status import SyncStatusService
 from app.services.tenant import TenantService
@@ -140,15 +147,59 @@ def sync_capabilities() -> frozenset[Capability]:
     return SYNC_ADAPTERS[SYNC_PROVIDER].adapter.capabilities
 
 
-# The relationship store of a deployment, by its sync provider: Descope's FGA store
-# for Descope, none for any other. Descope's store is keyed on Descope ids, which a
-# canonical principal does not have.
+# The relationship store a deployment selects: ``descope`` or ``openfga``. Fixed for
+# the process; main.lifespan refuses a value no store is built for.
+RELATIONSHIP_STORE = knob("RELATIONSHIP_STORE", "").strip().lower()
+
+# The relationship store of a deployment that selects none, by its sync provider:
+# Descope's FGA store for Descope, none for any other. Descope's store is keyed on
+# Descope ids, which a canonical principal does not have.
 RELATIONSHIP_STORES: dict[str, RelationshipStoreKind] = {"descope": RelationshipStoreKind.DESCOPE}
 
 
+# The store each RELATIONSHIP_STORE setting selects. A setting with none here stops startup.
+_SELECTED_RELATIONSHIP_STORE: dict[RelationshipStoreSetting, RelationshipStoreKind] = {
+    RelationshipStoreSetting.DESCOPE: RelationshipStoreKind.DESCOPE,
+}
+
+
+def _selected_relationship_store(setting: str) -> RelationshipStoreKind:
+    try:
+        chosen = RelationshipStoreSetting(setting)
+    except ValueError as exc:
+        raise RelationshipStoreNotAvailable(RelationshipStoreFault.UNKNOWN, setting) from exc
+    kind = _SELECTED_RELATIONSHIP_STORE.get(chosen)
+    if kind is None:
+        raise RelationshipStoreNotAvailable(RelationshipStoreFault.NOT_BUILT, setting)
+    return kind
+
+
 def relationship_store_kind() -> RelationshipStoreKind:
-    """The kind of the deployment's relationship store (``RELATIONSHIP_STORES``)."""
+    """The kind of the deployment's relationship store: ``RELATIONSHIP_STORE``, else ``RELATIONSHIP_STORES``.
+
+    Raises ``RelationshipStoreNotAvailable`` for a ``RELATIONSHIP_STORE`` no store is built for.
+    """
+    if RELATIONSHIP_STORE:
+        return _selected_relationship_store(RELATIONSHIP_STORE)
     return RELATIONSHIP_STORES.get(SYNC_PROVIDER, RelationshipStoreKind.NONE)
+
+
+# How each store is built from the application state.
+_RELATIONSHIP_STORE_BUILDERS: dict[RelationshipStoreKind, Callable[[State], RelationshipStore]] = {
+    RelationshipStoreKind.DESCOPE: lambda state: DescopeRelationshipStore(state.descope_client),
+}
+
+
+def get_relationship_store(request: Request) -> RelationshipStore:
+    """The deployment's relationship store. The FGA and document routes reach relations only through it.
+
+    Their ``require_relationship_store`` gate refuses a deployment with none before this runs.
+    """
+    kind = relationship_store_kind()
+    build = _RELATIONSHIP_STORE_BUILDERS.get(kind)
+    if build is None:
+        raise IdentityErrorRaised(CapabilityMissing(message="This deployment has no relationship store"))
+    return build(request.app.state)
 
 
 async def get_user_service(

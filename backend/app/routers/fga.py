@@ -6,11 +6,13 @@ from pydantic import BaseModel, Field
 from app.dependencies.capabilities import require_relationship_store
 from app.dependencies.descope import require_descope_principal
 from app.dependencies.fga import resolve_fga_user_target
+from app.dependencies.identity import get_relationship_store
 from app.dependencies.rbac import require_role
 from app.dependencies.tenant import get_tenant_id
 from app.logbook import logbook
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.outbound import UpstreamStatusError, UpstreamTransportError
+from app.services.relationship_store import RelationshipStore
 
 logger = logbook(__name__)
 
@@ -38,24 +40,6 @@ class RelationRequest(BaseModel):
     target: str = Field(min_length=1, max_length=200)
 
 
-def _prefix_resource_id(tenant_id: str, resource_id: str) -> str:
-    """Prefix a resource ID with the tenant ID for FGA tenant isolation."""
-    return f"{tenant_id}:{resource_id}"
-
-
-def _strip_tenant_prefix(tenant_id: str, resource_id: object) -> object:
-    """Strip the tenant prefix from a resource ID before returning to client.
-
-    Non-string values are returned untouched: a null ``resource`` in an upstream
-    relation reached ``.startswith`` and raised AttributeError, which Starlette
-    turned into a 500 for a response the caller could otherwise have read.
-    """
-    if not isinstance(resource_id, str):
-        return resource_id
-    prefix = f"{tenant_id}:"
-    return resource_id[len(prefix) :] if resource_id.startswith(prefix) else resource_id
-
-
 def _sanitize_error_detail(response_text: str) -> str:
     """Extract a safe error message from Descope API error responses."""
     try:
@@ -76,19 +60,17 @@ def _sanitize_error_detail(response_text: str) -> str:
 async def get_fga_schema(
     request: Request,
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    store: RelationshipStore = Depends(get_relationship_store),
 ):
     """Get the current FGA schema. Requires owner or admin role.
 
     Note: FGA schema is project-global and affects all tenants.
     """
     try:
-        client = request.app.state.descope_client
-        # The AuthZ 1.0 DSL string — the same text infra/fga.tf declares and the
-        # same text PUT takes back, so the round trip this page performs is
-        # symmetric. The UI already expected a string (FGAManagement.tsx renders
-        # it into the editor); it was handed a namespaces object instead.
-        schema = await client.get_fga_schema() or ""
-        return {"schema": schema}
+        # The same text PUT takes back, so the round trip this page performs is
+        # symmetric. The UI expects a string (FGAManagement.tsx renders it into
+        # the editor).
+        return {"schema": await store.read_schema()}
     except UpstreamStatusError as exc:
         logger.warning("Descope API error loading FGA schema: %s %s", exc.response.status_code, exc.response.text[:500])
         if exc.response.status_code == 400:
@@ -105,14 +87,14 @@ async def update_fga_schema(
     request: Request,
     body: UpdateSchemaRequest,
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    store: RelationshipStore = Depends(get_relationship_store),
 ):
     """Update the FGA schema. Requires owner or admin role.
 
     Note: FGA schema is project-global and affects all tenants.
     """
     try:
-        client = request.app.state.descope_client
-        await client.update_fga_schema(body.schema_)
+        await store.write_schema(body.schema_)
     except ValueError as exc:
         # The client rejects an empty/blank schema with ValueError. min_length=1
         # stops "" but not "   ", so this fifth route was the one that still let a
@@ -129,11 +111,8 @@ async def update_fga_schema(
         raise HTTPException(status_code=502, detail="Failed to reach Descope API") from exc
 
     # Read-back is best-effort; if it fails, return the submitted schema.
-    # get_fga_schema returns the DSL string, not a wrapper dict — reading a key
-    # off it raised AttributeError and this route answered 500 on a save that
-    # had in fact succeeded.
     try:
-        return {"schema": await client.get_fga_schema() or body.schema_}
+        return {"schema": await store.read_schema() or body.schema_}
     except (UpstreamStatusError, UpstreamTransportError) as exc:
         logger.warning("FGA schema updated but read-back failed: %s", exc)
         return {"schema": body.schema_}
@@ -149,13 +128,12 @@ async def create_relation(
     body: RelationRequest,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    store: RelationshipStore = Depends(get_relationship_store),
 ):
     """Create an FGA relation tuple. Requires owner or admin role."""
-    prefixed_id = _prefix_resource_id(tenant_id, body.resource_id)
-    client = request.app.state.descope_client
-    target = await resolve_fga_user_target(client, body.target, tenant_id)
+    target = await resolve_fga_user_target(request.app.state.descope_client, body.target, tenant_id)
     try:
-        await client.create_relation(body.resource_type, prefixed_id, body.relation, target)
+        await store.write(tenant_id, body.resource_type, body.resource_id, body.relation, target)
         return {
             "resource_type": body.resource_type,
             "resource_id": body.resource_id,
@@ -189,13 +167,12 @@ async def delete_relation(
     body: RelationRequest,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    store: RelationshipStore = Depends(get_relationship_store),
 ):
     """Delete an FGA relation tuple. Requires owner or admin role."""
-    prefixed_id = _prefix_resource_id(tenant_id, body.resource_id)
-    client = request.app.state.descope_client
-    target = await resolve_fga_user_target(client, body.target, tenant_id)
+    target = await resolve_fga_user_target(request.app.state.descope_client, body.target, tenant_id)
     try:
-        await client.delete_relation(body.resource_type, prefixed_id, body.relation, target)
+        await store.delete(tenant_id, body.resource_type, body.resource_id, body.relation, target)
         return {"status": "deleted"}
     except json.JSONDecodeError as exc:
         # Must precede ValueError: JSONDecodeError subclasses it, and an upstream body
@@ -226,23 +203,15 @@ async def list_relations(
     relation: str | None = Query(default=None, min_length=1, max_length=200),
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    store: RelationshipStore = Depends(get_relationship_store),
 ):
     """List FGA relation tuples for a resource. Requires owner or admin role.
 
     With `relation`, answers "who holds this relation on this resource". Without it,
     returns every relation the schema defines for the resource type.
     """
-    prefixed_id = _prefix_resource_id(tenant_id, resource_id)
     try:
-        client = request.app.state.descope_client
-        relations = await client.list_relations(resource_type, prefixed_id, relation=relation) or []
-        # Strip tenant prefix from resource_id in response items
-        for rel in relations:
-            if isinstance(rel, dict) and "resource" in rel:
-                rel["resource"] = _strip_tenant_prefix(tenant_id, rel["resource"])
-            if isinstance(rel, dict) and "resource_id" in rel:
-                rel["resource_id"] = _strip_tenant_prefix(tenant_id, rel["resource_id"])
-        return {"relations": relations}
+        return {"relations": await store.relations(tenant_id, resource_type, resource_id, relation=relation)}
     except json.JSONDecodeError as exc:
         # Must precede ValueError: JSONDecodeError subclasses it, and an upstream body
         # we cannot parse is an upstream fault, not the caller's malformed request.
@@ -270,14 +239,12 @@ async def check_permission(
     body: RelationRequest,
     tenant_id: str = Depends(get_tenant_id),
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    store: RelationshipStore = Depends(get_relationship_store),
 ):
     """Check an FGA permission. Requires owner or admin role. Fail-closed: errors deny access."""
-    prefixed_id = _prefix_resource_id(tenant_id, body.resource_id)
-    client = request.app.state.descope_client
-    target = await resolve_fga_user_target(client, body.target, tenant_id)
+    target = await resolve_fga_user_target(request.app.state.descope_client, body.target, tenant_id)
     try:
-        allowed = bool(await client.check_permission(body.resource_type, prefixed_id, body.relation, target))
-        return {"allowed": allowed}
+        return {"allowed": await store.check(tenant_id, body.resource_type, body.resource_id, body.relation, target)}
     except json.JSONDecodeError as exc:
         # Must precede ValueError: JSONDecodeError subclasses it, and an upstream body
         # we cannot parse is an upstream fault, not the caller's malformed request.

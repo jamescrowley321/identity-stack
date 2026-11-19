@@ -2,6 +2,7 @@ import re
 
 from fastapi import HTTPException, Request
 
+from app.dependencies.identity import get_relationship_store
 from app.logbook import logbook
 from app.outbound import UpstreamStatusError, UpstreamTransportError
 
@@ -113,8 +114,7 @@ def require_fga(
 
     Extracts user_id from JWT claims (sub), tenant_id from JWT claims (dct),
     and resource_id from the path parameter named by ``resource_id_param``,
-    then calls check_permission with a tenant-prefixed resource_id on the
-    Descope Management API.
+    then checks the relation in the deployment's relationship store.
 
     Returns the caller's user_id for downstream use.
     Fail-closed: any FGA API error results in HTTP 502 (deny).
@@ -140,10 +140,9 @@ def require_fga(
                 status_code=422,
                 detail=f"Invalid {resource_id_param}: expected {resource_id_pattern}",
             )
-        prefixed_id = f"{tenant_id}:{resource_id}"
         try:
-            client = request.app.state.descope_client
-            allowed = await client.check_permission(resource_type, prefixed_id, relation, user_id)
+            store = get_relationship_store(request)
+            allowed = await store.check(tenant_id, resource_type, resource_id, relation, user_id)
         except UpstreamStatusError as exc:
             # Include the upstream body. Without it a 400 here says only "the
             # authz store refused", and the reason — a relation the schema does

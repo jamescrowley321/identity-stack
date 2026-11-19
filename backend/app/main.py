@@ -170,6 +170,8 @@ async def lifespan(app: FastAPI):
     base_url = knob("DESCOPE_BASE_URL", "https://api.descope.com")
     app.state.descope_client = DescopeManagementClient(project_id, management_key, base_url, http_client=http_client)
     try:
+        # A RELATIONSHIP_STORE no store is built for stops startup (RelationshipStoreNotAvailable).
+        logger.info("Relationship store: %s", identity_dependencies.relationship_store_kind())
         sync_http_client = await _start_sync_provider(app)
     except Exception:
         # Startup stops here: close what was opened before it, each close whatever the one before did.

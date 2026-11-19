@@ -955,14 +955,14 @@ async def test_400_error_detail_non_json_sanitized(mock_validate, client):
 
 
 def test_prefix_resource_id():
-    from app.routers.fga import _prefix_resource_id
+    from app.services.relationship_store import _prefix_resource_id
 
     assert _prefix_resource_id("tenant-abc", "doc-1") == "tenant-abc:doc-1"
     assert _prefix_resource_id("t1", "x") == "t1:x"
 
 
 def test_strip_tenant_prefix():
-    from app.routers.fga import _strip_tenant_prefix
+    from app.services.relationship_store import _strip_tenant_prefix
 
     assert _strip_tenant_prefix("tenant-abc", "tenant-abc:doc-1") == "doc-1"
     assert _strip_tenant_prefix("tenant-abc", "other-tenant:doc-1") == "other-tenant:doc-1"

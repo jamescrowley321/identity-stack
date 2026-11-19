@@ -10,12 +10,14 @@ from sqlmodel import select
 from app.dependencies.capabilities import require_relationship_store
 from app.dependencies.descope import require_descope_principal
 from app.dependencies.fga import extract_user_id, require_fga
+from app.dependencies.identity import get_relationship_store
 from app.dependencies.tenant import get_tenant_id
 from app.logbook import logbook
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.models.database import get_async_session
 from app.models.document import Document
 from app.outbound import UpstreamStatusError, UpstreamTransportError
+from app.services.relationship_store import RelationshipStore
 
 logger = logbook(__name__)
 
@@ -35,11 +37,6 @@ _UUID_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
 
 # Type alias for validated document_id path parameter
 DocumentId = Annotated[str, Path(pattern=_UUID_PATTERN)]
-
-
-def _prefix_resource_id(tenant_id: str, resource_id: str) -> str:
-    """Prefix a resource ID with the tenant ID for FGA tenant isolation."""
-    return f"{tenant_id}:{resource_id}"
 
 
 class CreateDocumentRequest(BaseModel):
@@ -69,6 +66,7 @@ async def create_document(
     body: CreateDocumentRequest,
     tenant_id: str = Depends(get_tenant_id),
     session: AsyncSession = Depends(get_async_session),
+    store: RelationshipStore = Depends(get_relationship_store),
 ):
     """Create a document. FGA owner relation is created before DB commit (compensation on failure)."""
     user_id = extract_user_id(request)
@@ -81,10 +79,8 @@ async def create_document(
     )
 
     # FGA relation FIRST — if this fails, no DB row is created
-    prefixed_id = _prefix_resource_id(tenant_id, document.id)
     try:
-        client = request.app.state.descope_client
-        await client.create_relation("document", prefixed_id, "owner", user_id)
+        await store.write(tenant_id, "document", document.id, "owner", user_id)
     except json.JSONDecodeError as exc:
         # Must precede ValueError: JSONDecodeError subclasses it, so an upstream
         # body this service cannot parse would otherwise be answered 422 — an
@@ -112,7 +108,7 @@ async def create_document(
         await session.rollback()
         logger.warning("DB commit failed for doc %s, compensating FGA relation", document.id)
         try:
-            await client.delete_relation("document", prefixed_id, "owner", user_id)
+            await store.delete(tenant_id, "document", document.id, "owner", user_id)
         except Exception:
             logger.warning("FGA compensation failed for doc %s", document.id)
         raise HTTPException(status_code=500, detail="Failed to create document") from exc
@@ -126,7 +122,9 @@ async def create_document(
     return document.model_dump()
 
 
-async def _restore_relations(client, prefixed_id: str, deleted_relations: list[dict], document_id: str) -> None:
+async def _restore_relations(
+    store: RelationshipStore, tenant_id: str, deleted_relations: list[dict], document_id: str
+) -> None:
     """Put back relations a failed delete had already removed.
 
     Best-effort: a compensation that itself fails is logged, not raised, because
@@ -135,7 +133,7 @@ async def _restore_relations(client, prefixed_id: str, deleted_relations: list[d
     """
     for dr in deleted_relations:
         try:
-            await client.create_relation("document", prefixed_id, dr["relation"], dr["target"])
+            await store.write(tenant_id, "document", document_id, dr["relation"], dr["target"])
         except Exception:
             logger.warning(
                 "FGA compensation failed for doc %s relation %s->%s",
@@ -150,13 +148,13 @@ async def list_documents(
     request: Request,
     tenant_id: str = Depends(get_tenant_id),
     session: AsyncSession = Depends(get_async_session),
+    store: RelationshipStore = Depends(get_relationship_store),
 ):
     """List documents the caller can view, filtered by tenant."""
     user_id = extract_user_id(request)
 
     try:
-        client = request.app.state.descope_client
-        resources = await client.list_user_resources("document", "can_view", user_id)
+        doc_ids = await store.objects(tenant_id, "document", "can_view", user_id)
     except json.JSONDecodeError as exc:
         # Must precede ValueError: JSONDecodeError subclasses it, so an upstream
         # body this service cannot parse would otherwise be answered 422 — an
@@ -176,15 +174,6 @@ async def list_documents(
         )
         raise HTTPException(status_code=502, detail="Failed to check document permissions") from exc
 
-    resources = resources or []
-    # Strip tenant prefix from resource IDs returned by FGA
-    tenant_prefix = f"{tenant_id}:"
-    doc_ids = []
-    for r in resources:
-        if isinstance(r, dict) and r.get("resource"):
-            rid = r["resource"]
-            if rid.startswith(tenant_prefix):
-                doc_ids.append(rid[len(tenant_prefix) :])
     if not doc_ids:
         return {"documents": []}
 
@@ -262,19 +251,17 @@ async def delete_document(
     user_id: str = Depends(require_fga("document", "can_delete", resource_id_pattern=_UUID_PATTERN)),
     tenant_id: str = Depends(get_tenant_id),
     session: AsyncSession = Depends(get_async_session),
+    store: RelationshipStore = Depends(get_relationship_store),
 ):
     """Delete a document. FGA relations cleaned up first; abort on FGA failure."""
     document = await session.get(Document, document_id)
     if not document or document.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    prefixed_id = _prefix_resource_id(tenant_id, document_id)
-
     # FGA cleanup first — abort if it fails or if too many relations
     try:
-        client = request.app.state.descope_client
         # Every relation on the document, so cleanup deletes all of them.
-        relations = (await client.list_all_relations("document", prefixed_id)) or []
+        relations = await store.all_relations(tenant_id, "document", document_id)
     except json.JSONDecodeError as exc:
         # Must precede ValueError: JSONDecodeError subclasses it, so an upstream
         # body this service cannot parse would otherwise be answered 422 — an
@@ -303,18 +290,18 @@ async def delete_document(
             rd = rel.get("relationDefinition", "") if isinstance(rel, dict) else ""
             target = rel.get("target", "") if isinstance(rel, dict) else ""
             if rd and target:
-                await client.delete_relation("document", prefixed_id, rd, target)
+                await store.delete(tenant_id, "document", document_id, rd, target)
                 deleted_relations.append({"relation": rd, "target": target})
     except json.JSONDecodeError as exc:
         # Must precede ValueError (it subclasses it): an unparseable upstream body
         # is an upstream fault, and the ACL stripped so far must still be put back.
         logger.warning("Descope returned an unparseable body: %s", exc)
-        await _restore_relations(client, prefixed_id, deleted_relations, document_id)
+        await _restore_relations(store, tenant_id, deleted_relations, document_id)
         raise HTTPException(status_code=502, detail="Descope returned an unparseable response") from exc
     except ValueError as exc:
         # DescopeManagementClient validates FGA identifiers and raises ValueError.
         # A rejected identifier is a malformed request, not a server fault.
-        await _restore_relations(client, prefixed_id, deleted_relations, document_id)
+        await _restore_relations(store, tenant_id, deleted_relations, document_id)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (UpstreamStatusError, UpstreamTransportError) as exc:
         # A 429 or 5xx partway through leaves the document with a partially
@@ -323,7 +310,7 @@ async def delete_document(
         # request removed before reporting the failure — the same compensation the
         # DB-failure path below has always done.
         logger.error("FGA cleanup failed for doc %s: %s", document_id, type(exc).__name__)
-        await _restore_relations(client, prefixed_id, deleted_relations, document_id)
+        await _restore_relations(store, tenant_id, deleted_relations, document_id)
         raise HTTPException(status_code=502, detail="Failed to clean up document permissions") from exc
 
     # DB delete — compensate FGA on failure by re-creating deleted relations
@@ -344,7 +331,7 @@ async def delete_document(
             "DB delete failed for doc %s after FGA cleanup — attempting compensation",
             document_id,
         )
-        await _restore_relations(client, prefixed_id, deleted_relations, document_id)
+        await _restore_relations(store, tenant_id, deleted_relations, document_id)
         raise HTTPException(status_code=500, detail="Failed to delete document") from exc
 
     return {"status": "deleted", "id": document_id}
@@ -359,6 +346,7 @@ async def share_document(
     user_id: str = Depends(require_fga("document", "owner", resource_id_pattern=_UUID_PATTERN)),
     tenant_id: str = Depends(get_tenant_id),
     session: AsyncSession = Depends(get_async_session),
+    store: RelationshipStore = Depends(get_relationship_store),
 ):
     """Share a document with another user. Only the owner can share."""
     document = await session.get(Document, document_id)
@@ -408,10 +396,8 @@ async def share_document(
     if target_user_id == user_id:
         raise HTTPException(status_code=400, detail="Cannot share a document with yourself")
 
-    # Create FGA relation with tenant-prefixed resource ID
-    prefixed_id = _prefix_resource_id(tenant_id, document_id)
     try:
-        await client.create_relation("document", prefixed_id, body.relation, target_user_id)
+        await store.write(tenant_id, "document", document_id, body.relation, target_user_id)
     except json.JSONDecodeError as exc:
         # Must precede ValueError: JSONDecodeError subclasses it, so an upstream
         # body this service cannot parse would otherwise be answered 422 — an
@@ -447,6 +433,7 @@ async def revoke_share(
     user_id: str = Depends(require_fga("document", "owner", resource_id_pattern=_UUID_PATTERN)),
     tenant_id: str = Depends(get_tenant_id),
     session: AsyncSession = Depends(get_async_session),
+    store: RelationshipStore = Depends(get_relationship_store),
 ):
     """Revoke a user's access to a document. Deletes both viewer and editor relations."""
     document = await session.get(Document, document_id)
@@ -497,10 +484,9 @@ async def revoke_share(
     if not resolved_target_id:
         raise HTTPException(status_code=404, detail="Target user not found")
 
-    prefixed_id = _prefix_resource_id(tenant_id, document_id)
     for relation in ("viewer", "editor"):
         try:
-            await client.delete_relation("document", prefixed_id, relation, resolved_target_id)
+            await store.delete(tenant_id, "document", document_id, relation, resolved_target_id)
         except UpstreamStatusError as exc:
             # Relation may not exist — tolerate 400/404 from Descope
             if exc.response.status_code not in (400, 404):

@@ -363,6 +363,10 @@ that Descope's (its adapter's capabilities, its FGA store) serve only a principa
 `descope_managed` provider, being keyed on Descope's ids. A caller not served answers 404
 (`CapabilityMissing`), not the guard's 403: the route is not there for them.
 `GET /api/capabilities` reports `served`, and the SPA shows a page only when it is there.
+The FGA and document routes reach relations only through the `RelationshipStore` interface
+(`app/services/relationship_store.py`, from `get_relationship_store`), which
+`RELATIONSHIP_STORE` selects; only that module calls the Descope client's FGA methods
+(`tests/unit/test_relationship_store.py`).
 
 A route over state that belongs to the whole Descope project **MUST** carry the same guard
 and be listed in `DESCOPE_PROJECT_ROUTES` in that file: the role and permission definition
