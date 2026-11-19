@@ -103,6 +103,19 @@ def _ory(op: LocalProvider) -> ProviderTokenConfig:
     return ory_config(op.issuer, ORY_AUDIENCE, client_id=ORY_CLIENT_ID)
 
 
+def _hydra_access_token_claims(op: LocalProvider, aud: list[str]) -> dict:
+    """An Ory Hydra JWT access token: its scopes in ``scp``, the client in ``client_id``, no ``azp``."""
+    return {
+        "iss": op.issuer,
+        "sub": "ory-user",
+        "aud": aud,
+        "client_id": ORY_CLIENT_ID,
+        "scp": ["openid", "offline_access"],
+        "jti": "6c5a8b2e-hydra",
+        "ext": {},
+    }
+
+
 class Deployment:
     """Four configured providers, each on a loopback provider of its own."""
 
@@ -141,13 +154,7 @@ class Deployment:
                 "azp": DESCOPE_PROJECT_ID,
                 "scope": "openid",
             }
-        return {
-            "iss": op.issuer,
-            "sub": "ory-user",
-            "aud": [ORY_AUDIENCE],
-            "client_id": ORY_CLIENT_ID,
-            "scope": "openid",
-        }
+        return _hydra_access_token_claims(op, [ORY_AUDIENCE])
 
 
 @pytest.fixture(scope="module")
@@ -298,6 +305,16 @@ class TestRefused:
         self, monkeypatch, deployment, caplog
     ):
         token = deployment.ops[DESCOPE].token(RS256, deployment.access_token_claims(DESCOPE))
+
+        with caplog.at_level("DEBUG"):
+            _assert_uniform_401(_post(_deployed(monkeypatch, deployment), token))
+
+        assert _route_records(caplog) == [REFUSED_ACCESS_TOKEN]
+
+    def test_an_ory_access_token_naming_the_client_is_refused_for_its_scp(self, monkeypatch, deployment, caplog):
+        """Passes the ID-token profile (``aud`` the client, no ``azp``); only ``scp`` marks it."""
+        op = deployment.ops[ORY]
+        token = op.token(RS256, _hydra_access_token_claims(op, [ORY_CLIENT_ID]))
 
         with caplog.at_level("DEBUG"):
             _assert_uniform_401(_post(_deployed(monkeypatch, deployment), token))
@@ -499,6 +516,18 @@ class TestProviderFault:
             self._assert_503(_post(_client(monkeypatch, [provider]), self._token(faulty)))
 
         assert _route_records(caplog) == [("ERROR", "ID validation hit a provider fault: DiscoveryHTTPSRequiredError")]
+
+    def test_ory_with_an_audience_and_no_client_id(self, monkeypatch, faulty, caplog):
+        """``ORY_AUDIENCE`` is the API's: an ID token is not checked against it, so a Hydra
+        access token for the API is not taken for an ID token."""
+        provider = ory_config(faulty.issuer, ORY_AUDIENCE)
+        token = faulty.token(RS256, _hydra_access_token_claims(faulty, [ORY_AUDIENCE]))
+
+        with caplog.at_level("DEBUG"):
+            self._assert_503(_post(_client(monkeypatch, [provider]), token))
+
+        assert id_token_client_id(provider) is None
+        assert _route_records(caplog) == [("ERROR", "ID validation hit a provider fault: NO_CLIENT_ID (Ory)")]
 
     def test_a_provider_with_no_client_id(self, monkeypatch, faulty, caplog):
         """Ory with audience enforcement knowingly off and no ``ORY_CLIENT_ID``: no audience to check."""

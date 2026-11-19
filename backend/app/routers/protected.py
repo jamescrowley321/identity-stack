@@ -44,16 +44,17 @@ logger = logbook(__name__)
 PROVIDER_FAULTS = (NetworkException, DiscoveryValidationError, JwksValidationError, ConfigurationException)
 REFUSED_DETAIL = "Invalid or expired token"
 UNAVAILABLE_DETAIL = "Identity provider unavailable"
-# A claim every access token of a configured provider carries and no ID token
-# does (Descope, Keycloak; Zitadel's access token is refused by the ``azp`` rule).
-SCOPE_CLAIM = "scope"
+# The claims that mark an access token: ``scope`` (Descope, Keycloak) and ``scp``
+# (Ory Hydra). No ID token carries either. Zitadel's access token carries neither
+# and is refused by the ``azp`` rule.
+SCOPE_CLAIMS = frozenset({"scope", "scp"})
 
 
 class IdTokenRefusal(StrEnum):
     """Why ``POST /validate-id-token`` refused a token before or after the library judged it."""
 
     UNKNOWN_ISSUER = "no configured provider has the token's issuer"
-    CARRIES_SCOPE = "an access token: it carries scope"
+    CARRIES_SCOPE = "an access token: it carries scope or scp"
 
 
 class IdTokenProviderFault(StrEnum):
@@ -337,7 +338,7 @@ async def validate_id_token(request: Request, authorization: str = Header()):
         # DecodeError out for a token that is not a JWT (identity-model#1179).
         logger.warning("ID validation refused: %s", _cause(exc))
         raise HTTPException(status_code=401, detail=REFUSED_DETAIL) from exc
-    if SCOPE_CLAIM in claims:
+    if not SCOPE_CLAIMS.isdisjoint(claims):
         logger.warning("ID validation refused: %s", IdTokenRefusal.CARRIES_SCOPE.name)
         raise HTTPException(status_code=401, detail=REFUSED_DETAIL)
     return claims

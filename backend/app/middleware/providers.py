@@ -783,13 +783,17 @@ def id_token_issuers(provider: ProviderTokenConfig) -> frozenset[str]:
 
 
 def id_token_client_id(provider: ProviderTokenConfig) -> str | None:
-    """The SPA's client id, which an ID token of ``provider`` names in ``aud`` and ``azp``.
+    """The SPA's client id, which an ID token of ``provider`` names in ``aud`` and ``azp``, or None.
 
     The RP-initiated logout client id where the provider has one (Keycloak,
-    Zitadel, Ory with ``ORY_CLIENT_ID``), else its audience: Descope's project
-    id, the client id of its OIDC application.
+    Zitadel, Ory with ``ORY_CLIENT_ID``). Only Descope (``descope_managed``)
+    falls back to its audience: its project id is the client id of its OIDC
+    application. Every other provider's audience is the API's, which its access
+    tokens carry, so an Ory with no ``ORY_CLIENT_ID`` has no client id here.
     """
-    return provider.logout_client_id or provider.audience
+    if provider.logout_client_id:
+        return provider.logout_client_id
+    return provider.audience if provider.descope_managed else None
 
 
 def id_token_disco_address(provider: ProviderTokenConfig, iss: str | None) -> str:
