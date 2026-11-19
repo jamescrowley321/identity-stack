@@ -267,7 +267,9 @@ class TestFirstSignIn:
         ).all()
         assert [tuple(row) for row in assignments] == [(realm.acme.id, "member")]
         body = response.json()
-        assert body["tenant_memberships"] == [{"tenant_id": str(realm.acme.id), "tenant_name": realm.acme.name}]
+        assert body["tenant_memberships"] == [
+            {"tenant_id": str(realm.acme.id), "tenant_name": realm.acme.name, "external_org_id": "acme"}
+        ]
 
         # The provisioned member is authorized from those rows.
         viewer = await client.get(VIEWER_ROLE, headers=_bearer(tokens.alice_acme.access_token))

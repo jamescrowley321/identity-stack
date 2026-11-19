@@ -108,7 +108,7 @@ class IdentityResolutionService:
                 return Error(NotFound("Linked user not found"))
 
             # Build the full identity payload
-            payload = await self._build_identity_payload(user, link.user_id)
+            payload = await self._build_identity_payload(user, link.user_id, provider_entity.id)
 
             # Cache the result (AC-4.3.2)
             await self._cache_set(cache_key, payload, link.user_id)
@@ -119,8 +119,14 @@ class IdentityResolutionService:
         self,
         user: Any,
         user_id: uuid.UUID,
+        provider_id: uuid.UUID,
     ) -> dict[str, Any]:
-        """Build the canonical identity payload with roles, permissions, and memberships."""
+        """Build the canonical identity payload with roles, permissions, and memberships.
+
+        A membership's ``external_org_id`` is its tenant's organization at the
+        resolving provider (``provider_id``), and ``None`` when the tenant is
+        linked to no organization or to another provider's.
+        """
         # Get all role assignments for this user
         assignments = await self._assignment_repository.list_by_user(user_id)
 
@@ -143,7 +149,7 @@ class IdentityResolutionService:
             )
 
         # Load tenant details for memberships
-        tenant_memberships: list[dict[str, str]] = []
+        tenant_memberships: list[dict[str, str | None]] = []
         for tid in tenant_ids:
             tenant = await self._tenant_repository.get(tid)
             if tenant is not None:
@@ -151,6 +157,9 @@ class IdentityResolutionService:
                     {
                         "tenant_id": str(tenant.id),
                         "tenant_name": tenant.name,
+                        "external_org_id": (
+                            tenant.external_org_id if tenant.external_org_provider_id == provider_id else None
+                        ),
                     }
                 )
 

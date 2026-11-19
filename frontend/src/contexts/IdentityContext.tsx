@@ -10,6 +10,7 @@ import type { ReactNode } from "react";
 import { useAuth } from "react-oidc-context";
 import { useApiClient } from "../hooks/useApiClient";
 import { TenantSelectorContext } from "./TenantSelector";
+import { initialTenantId, readStoredTenantId, signInOrganization, storeTenantId } from "./tenantSelection";
 
 /**
  * Shape of the canonical `GET /api/identity` payload (provider-neutral).
@@ -28,6 +29,8 @@ export interface CanonicalRole {
 export interface CanonicalTenantMembership {
   tenant_id: string;
   tenant_name: string;
+  /** The tenant's organization at the caller's provider; `null` (or absent) when it has none there. */
+  external_org_id?: string | null;
 }
 
 export interface CanonicalLinkedIdp {
@@ -53,24 +56,16 @@ interface IdentityContextValue {
   identity: CanonicalIdentity | null;
   loading: boolean;
   error: Error | null;
-  /** Active tenant — client-side selection, defaults to the first membership. */
+  /**
+   * Active tenant — client-side selection; defaults to the membership whose
+   * organization the sign-in named, else the first membership.
+   */
   currentTenantId: string | null;
   /** Switch the active tenant (persisted to localStorage, validated on read). */
   setCurrentTenantId: (tenantId: string) => void;
 }
 
 const IdentityContext = createContext<IdentityContextValue | null>(null);
-
-/** localStorage key for the persisted active-tenant selection. */
-const STORAGE_KEY = "identity.currentTenantId";
-
-function readStoredTenantId(): string | null {
-  try {
-    return window.localStorage.getItem(STORAGE_KEY);
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Fetches the canonical identity once per authenticated session and exposes
@@ -93,6 +88,9 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
   // same tab (SPA local-logout → login, no page reload), so one user's roles/
   // tenants/email can never be surfaced to the next.
   const subject = auth.user?.profile?.sub ?? null;
+  // The organization the sign-in named (Keycloak `organization`, Zitadel
+  // `urn:zitadel:iam:user:resourceowner:id`): only where the selector starts.
+  const organization = signInOrganization(auth.user?.profile, auth.user?.access_token);
   const [fetchedIdentity, setFetchedIdentity] = useState<CanonicalIdentity | null>(null);
   // The subject the cached identity/error belongs to. Recorded at fetch
   // completion so the render-time gate below can reject a cache left over from
@@ -120,6 +118,8 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
       setFetchedIdentity(null);
       setFetchError(null);
       setFetchLoading(true);
+      // A new sign-in has dropped the persisted selection (onSigninCallback).
+      setSelectedTenantId(readStoredTenantId());
       try {
         const res = await apiFetch("/api/identity");
         if (!res.ok) throw new Error(`identity fetch failed: ${res.status}`);
@@ -163,23 +163,16 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
     cacheMatchesSubject && (fetchedIdentity !== null || fetchError !== null);
   const loading = isAuthenticated ? fetchLoading || !resolvedForSubject : false;
 
-  const currentTenantId = useMemo(() => {
-    const memberships = identity?.tenant_memberships ?? [];
-    if (memberships.length === 0) return null;
-    const memberIds = new Set(memberships.map((m) => m.tenant_id));
-    // Honor the client-side selection only while it remains a valid membership;
-    // a stale selection falls back to the first membership.
-    if (selectedTenantId && memberIds.has(selectedTenantId)) return selectedTenantId;
-    return memberships[0].tenant_id;
-  }, [identity, selectedTenantId]);
+  // Honor the client-side selection only while it remains a valid membership;
+  // otherwise start on the sign-in's organization, else the first membership.
+  const currentTenantId = useMemo(
+    () => initialTenantId(identity?.tenant_memberships ?? [], selectedTenantId, organization),
+    [identity, selectedTenantId, organization],
+  );
 
   const setCurrentTenantId = useCallback((tenantId: string) => {
     setSelectedTenantId(tenantId);
-    try {
-      window.localStorage.setItem(STORAGE_KEY, tenantId);
-    } catch {
-      // localStorage unavailable — selection persists for this session only.
-    }
+    storeTenantId(tenantId);
   }, []);
 
   const value = useMemo<IdentityContextValue>(
