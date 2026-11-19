@@ -74,7 +74,7 @@ CAROL = TARGET.users[CASES.no_grant.key]
 DAVE = TARGET.users[CASES.tenant_admin.key]
 # A ``member`` of ``acme``.
 ERIN = TARGET.users[CASES.write_only.key]
-# A tenant admin in ``acme`` only, whom tests move between organizations.
+# A tenant admin in ``acme`` only, whom tests add to other organizations.
 FRANK = TARGET.users[CASES.moving_admin.key]
 
 
@@ -227,8 +227,11 @@ class KeycloakTokenSource:
                 http.delete(f"/organizations/{target}/members/{user.id}").raise_for_status()
 
     @contextmanager
-    def joined(self, user: KeycloakUser, organization: str) -> Iterator[None]:
-        """Add ``user`` to ``organization``; remove them again afterwards."""
+    def joined(self, user: KeycloakUser, organization: str, *, role: str | None = None) -> Iterator[None]:
+        """Add ``user`` to ``organization``, and to its group for ``role`` if given; remove them afterwards.
+
+        Leaving the organization takes the user out of its groups too.
+        """
         with self._admin() as http:
             target = self._organization_id(http, organization)
             added = http.post(f"/organizations/{target}/members", json=user.id)
@@ -238,6 +241,13 @@ class KeycloakTokenSource:
                     "recreate keycloak-test (make test-down && make test-up-keycloak)"
                 )
             added.raise_for_status()
+            try:
+                if role is not None:
+                    group = self._organization_group_id(http, target, role)
+                    http.put(f"/organizations/{target}/groups/{group}/members/{user.id}").raise_for_status()
+            except BaseException:
+                http.delete(f"/organizations/{target}/members/{user.id}")
+                raise
         try:
             yield
         except BaseException as failure:
@@ -249,9 +259,40 @@ class KeycloakTokenSource:
             raise
         self._remove_member(target, user)
 
+    @staticmethod
+    def _organization_group_id(http: httpx.Client, organization_id: str, name: str) -> str:
+        response = http.get(f"/organizations/{organization_id}/groups")
+        response.raise_for_status()
+        matches = [group["id"] for group in response.json() if group["name"] == name]
+        if len(matches) != 1:
+            raise KeycloakFlowError(
+                f"expected one group {name!r} in organization {organization_id}, found {len(matches)}"
+            )
+        return matches[0]
+
     def _remove_member(self, organization_id: str, user: KeycloakUser) -> None:
         with self._admin() as http:
             http.delete(f"/organizations/{organization_id}/members/{user.id}").raise_for_status()
+
+    @contextmanager
+    def disabled(self, user: KeycloakUser) -> Iterator[None]:
+        """Disable ``user``'s account, as an administrator does in the console; enable it again afterwards."""
+        self._set_enabled(user, enabled=False)
+        try:
+            yield
+        except BaseException as failure:
+            try:
+                self._set_enabled(user, enabled=True)
+            except Exception as enabling:
+                failure.add_note(f"enabling {user.username} afterwards also failed: {enabling}")
+            raise
+        self._set_enabled(user, enabled=True)
+
+    def _set_enabled(self, user: KeycloakUser, *, enabled: bool) -> None:
+        with self._admin() as http:
+            response = http.get(f"/users/{user.id}")
+            response.raise_for_status()
+            http.put(f"/users/{user.id}", json={**response.json(), "enabled": enabled}).raise_for_status()
 
     def session_ids(self, user: KeycloakUser) -> set[str]:
         """The ids of the user's live sessions in the realm: a token's ``sid`` is one of them."""

@@ -450,7 +450,7 @@ jobs:
     # keycloak-test with the compose bootstrap admin, so this runs on every
     # pull request, forks and Dependabot included. The Descope E2E job above
     # needs secrets and serves its own SPA on localhost:3000, the only origin
-    # the realm's app clients redirect to, so Keycloak has a job of its own: the
+    # the realm's clients redirect to, so Keycloak has a job of its own: the
     # shared UI and API suite (backend/tests/e2e/, E2E_PROVIDER=keycloak) and
     # the Keycloak suite (backend/tests/e2e_keycloak/).
     env:
@@ -507,7 +507,7 @@ jobs:
           eval "$vars"
           cd frontend && npm run build
 
-      - name: Apply database schema, register the Keycloak provider and link the tenants
+      - name: Apply database schema, register the Keycloak provider, link the tenants and users
         run: |
           (cd backend && python -m alembic upgrade head)
           make keycloak-seed
@@ -524,18 +524,19 @@ jobs:
           done
 
       - name: Start backend
-        # The root's backend_environment without the admin client, with
-        # canonical authorization and first login for keycloak. This backend
-        # does not sync to Keycloak (SYNC_PROVIDER stays descope), so it gets no
-        # credential that writes to the realm. Descope is left unconfigured:
-        # these tests present Keycloak tokens only. The log goes to a file: the
-        # backend outlives this step.
+        # The root's backend_environment, admin client included: the backend
+        # syncs with the realm (SYNC_PROVIDER=keycloak), so it pushes canonical
+        # changes, polls the realm's events (every 2 seconds here, so a test
+        # waits for one console change briefly) and runs the reconciliation the
+        # suites start with. Canonical authorization and first login for
+        # keycloak. Descope is left unconfigured: these tests present Keycloak
+        # tokens only. The log goes to a file: the backend outlives this step.
         run: |
           # Captured first: `eval "$(...)"` would drop a terraform or jq failure.
           set -o pipefail
           environment="$(terraform -chdir=infra/keycloak output -json backend_environment)"
           vars="$(printf '%s' "$environment" \
-            | jq -er 'to_entries[] | select(.key | startswith("KEYCLOAK_ADMIN_CLIENT_") | not) | if (.key | test("^KEYCLOAK_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
+            | jq -er 'to_entries[] | if (.key | test("^KEYCLOAK_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
           eval "$vars"
           cd backend
           uvicorn app.main:app --host 127.0.0.1 --port 8000 > "$RUNNER_TEMP/backend.log" 2>&1 &
@@ -546,6 +547,8 @@ jobs:
           REDIS_URL: redis://localhost:16379/0
           CANONICAL_RBAC_PROVIDERS: keycloak
           JIT_ENABLED_PROVIDERS: keycloak
+          SYNC_PROVIDER: keycloak
+          KEYCLOAK_PULL_INTERVAL_SECONDS: "2"
           # The limiter runs before token validation, so its key is the client
           # address, shared by every request in this job. At the 60/minute
           # default, the every-protected-route refusal test would get 429s
@@ -562,8 +565,10 @@ jobs:
 
       - name: Run Keycloak E2E tests
         # The suite's session fixture fails every test, never skips, when
-        # keycloak-test, the backend or the SPA does not answer. The target
-        # reads the realm, user ids and passwords from the root's outputs.
+        # keycloak-test, the backend or the SPA does not answer, and first runs
+        # reconciliation passes until the backend holds the realm's role
+        # assignments. The target reads the realm, user ids and passwords from
+        # the root's outputs.
         run: >-
           make test-e2e-keycloak
           PYTEST_ARGS='--screenshot=only-on-failure --tracing=retain-on-failure --output=${{ runner.temp }}/playwright'

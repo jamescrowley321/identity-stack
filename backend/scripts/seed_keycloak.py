@@ -19,6 +19,18 @@ It writes no ``domains``: a first login is admitted only for an email in its
 tenant's domains, so until an operator writes them only users linked
 beforehand sign in, as with ``scripts/seed_zitadel.py``.
 
+With ``--link-users`` the seed instead reads a JSON object of username to
+account (``external_sub``, the Keycloak user id, and ``email``, ``given_name``,
+``family_name``) on standard input and links each account to a canonical user:
+it creates the user with an ``idp_links`` row for ``keycloak``, as the provider's
+state (nothing is marked for reconciliation to push), and leaves a user already
+linked to the account as it is, whatever its status. It refuses, writing
+nothing, an email a user holds without a link to that account.
+It assigns no role: a reconciliation pass (``POST /api/internal/reconciliation/run``
+with ``SYNC_PROVIDER=keycloak``) takes each linked user's role assignments, and
+the realm's permissions and roles, from Keycloak. ``make keycloak-seed`` links
+the fixture users that hold a role in a linked tenant.
+
 The row's type is ``oidc``. ``ProviderType`` has no ``keycloak`` member, and
 Keycloak is used here as a standard OIDC provider, so no enum migration is
 needed.
@@ -33,6 +45,7 @@ Usage:
         python -m scripts.seed_keycloak [--dry-run]
     terraform -chdir=infra/keycloak output -json organization_aliases | ... \
         | python -m scripts.seed_keycloak --link-organizations
+    ... | python -m scripts.seed_keycloak --link-users
 """
 
 import argparse
@@ -42,12 +55,15 @@ import logging
 import os
 import sys
 import uuid as uuid_mod
+from dataclasses import dataclass
 
 from sqlmodel import select
 
 from app.models.database import get_session_factory
 from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.tenant import Tenant, TenantStatus
+from app.models.identity.user import LINK_ORIGIN, LINKED_BY_BACKEND, IdPLink, User, UserStatus
+from app.repositories.sync_ledger import PendingPushRepository
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +78,28 @@ class OrganizationLinkConflict(RuntimeError):
     """The canonical store holds a link the seed would have to take over from someone else."""
 
 
+class UsersInputError(ValueError):
+    """Standard input is not a JSON object of username to Keycloak account."""
+
+
+class UserLinkConflict(RuntimeError):
+    """The canonical store holds a user the seed would have to take over from someone else."""
+
+
+@dataclass(frozen=True)
+class KeycloakAccount:
+    """A realm user the seed links to a canonical user."""
+
+    username: str
+    external_sub: str
+    email: str
+    given_name: str
+    family_name: str
+
+
+_ACCOUNT_FIELDS = ("external_sub", "email", "given_name", "family_name")
+
+
 def parse_organizations(raw: object) -> dict[str, str]:
     """A non-empty JSON object of tenant name to non-empty organization alias, else ``OrganizationsInputError``."""
     if not isinstance(raw, dict) or not raw:
@@ -70,6 +108,91 @@ def parse_organizations(raw: object) -> dict[str, str]:
         if not isinstance(alias, str) or not alias:
             raise OrganizationsInputError(f"the alias of tenant {name!r} must be a non-empty string")
     return dict(raw)
+
+
+def parse_users(raw: object) -> list[KeycloakAccount]:
+    """A non-empty JSON object of username to account, each field a non-empty string, else ``UsersInputError``."""
+    if not isinstance(raw, dict) or not raw:
+        raise UsersInputError("the users must be a non-empty JSON object of username to account")
+    accounts = []
+    for username, account in sorted(raw.items()):
+        if not isinstance(account, dict) or set(account) != set(_ACCOUNT_FIELDS):
+            raise UsersInputError(f"user {username!r} must be an object of exactly {', '.join(_ACCOUNT_FIELDS)}")
+        for field in _ACCOUNT_FIELDS:
+            if not isinstance(account[field], str) or not account[field]:
+                raise UsersInputError(f"{field} of user {username!r} must be a non-empty string")
+        accounts.append(KeycloakAccount(username=username, **account))
+    for field in ("external_sub", "email"):
+        values = [getattr(account, field) for account in accounts]
+        if len(set(values)) != len(values):
+            raise UsersInputError(f"two users name the same {field}")
+    return accounts
+
+
+def linked_user(account: KeycloakAccount, link: IdPLink | None, user: User | None) -> User:
+    """The canonical user ``account`` stands for.
+
+    ``user`` is the user ``link`` names when the account is linked, else the
+    user holding the account's email, if any. A linked user is returned as it
+    is, whatever its status: the status is Keycloak's to say, through the event
+    pull and reconciliation. With no link, a new user is returned; a user that
+    holds the email without the link is refused (``UserLinkConflict``): an email
+    match proves nothing about who holds the row.
+    """
+    if link is not None:
+        if user is None or user.id != link.user_id:
+            raise UserLinkConflict(f"the link of Keycloak user {account.external_sub} names no user")
+        return user
+    if user is not None:
+        raise UserLinkConflict(
+            f"a user {account.email!r} exists that is not linked to Keycloak user {account.external_sub}"
+        )
+    return User(
+        email=account.email,
+        user_name=account.username,
+        given_name=account.given_name,
+        family_name=account.family_name,
+        status=UserStatus.active,
+    )
+
+
+async def link_users(*, provider_id: uuid_mod.UUID, accounts: list[KeycloakAccount], dry_run: bool) -> None:
+    """Link each account to a canonical user in one transaction: a refusal, or a dry run, writes nothing.
+
+    The users are written as Keycloak holds them, so they are the provider's
+    state (``provider_writes``): nothing is marked for a reconciliation pass to
+    push back.
+    """
+    async with get_session_factory()() as session:
+        await PendingPushRepository(session).provider_writes(True)
+        for account in accounts:
+            link_query = select(IdPLink).where(
+                IdPLink.provider_id == provider_id, IdPLink.external_sub == account.external_sub
+            )
+            link = (await session.execute(link_query)).scalars().first()
+            holder = User.id == link.user_id if link is not None else User.email == account.email
+            user = (await session.execute(select(User).where(holder))).scalars().first()
+            canonical = linked_user(account, link, user)
+            if link is not None:
+                print(f"  [skip] user {account.username!r} is already linked")
+                continue
+            session.add(canonical)
+            await session.flush()
+            session.add(
+                IdPLink(
+                    user_id=canonical.id,
+                    provider_id=provider_id,
+                    external_sub=account.external_sub,
+                    external_email=account.email,
+                    metadata_={LINK_ORIGIN: LINKED_BY_BACKEND},
+                )
+            )
+            done = "dry-run" if dry_run else "linked"
+            print(f"  [{done}] user {account.username!r} to Keycloak user {account.external_sub}")
+        if dry_run:
+            await session.rollback()
+        else:
+            await session.commit()
 
 
 def link_tenant(tenant: Tenant | None, name: str, alias: str, provider_id: uuid_mod.UUID) -> Tenant:
@@ -169,19 +292,28 @@ async def ensure_keycloak_provider(
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Register the Keycloak provider in the canonical registry")
     parser.add_argument("--dry-run", action="store_true", help="Report what would be created without writing")
-    parser.add_argument(
+    links = parser.add_mutually_exclusive_group()
+    links.add_argument(
         "--link-organizations",
         action="store_true",
         help="Also link tenants to organizations, from a JSON object of tenant name to alias on standard input",
     )
+    links.add_argument(
+        "--link-users",
+        action="store_true",
+        help="Also link canonical users to Keycloak users, from a JSON object of username to account on standard input",
+    )
     args = parser.parse_args()
     organizations: dict[str, str] = {}
-    if args.link_organizations:
-        try:
+    accounts: list[KeycloakAccount] = []
+    try:
+        if args.link_organizations:
             organizations = parse_organizations(json.load(sys.stdin))
-        except (json.JSONDecodeError, OrganizationsInputError) as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            sys.exit(1)
+        if args.link_users:
+            accounts = parse_users(json.load(sys.stdin))
+    except (json.JSONDecodeError, OrganizationsInputError, UsersInputError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     issuer_url = _require_env("KEYCLOAK_ISSUER_URL")
     base_url = os.getenv("KEYCLOAK_BASE_URL", "")
@@ -209,6 +341,18 @@ async def main() -> None:
         try:
             await link_organizations(provider_id=provider_id, organizations=organizations, dry_run=args.dry_run)
         except OrganizationLinkConflict as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    if accounts and provider_id is None:
+        print(
+            "2. [dry-run] Would link users to Keycloak users once the provider exists:", [a.username for a in accounts]
+        )
+    elif accounts and provider_id is not None:
+        print("2. Linking users to Keycloak users...")
+        try:
+            await link_users(provider_id=provider_id, accounts=accounts, dry_run=args.dry_run)
+        except UserLinkConflict as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             sys.exit(1)
 

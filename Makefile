@@ -148,13 +148,23 @@ zitadel-terraform-integration: ## zitadel-terraform-check, then the backend's li
 	TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TF_VAR_zitadel_access_token="$$($(MAKE) -s zitadel-admin-pat)" \
 	infra/zitadel/scripts/check-against-compose.sh --integration-tests
 
-keycloak-seed: ## register the keycloak provider and link canonical tenants to the applied infra/keycloak root's organization aliases in DATABASE_URL (migrated database; idempotent)
+# The fixture users linked are those holding a role in a canonical tenant; their
+# role assignments, and the realm's permissions and roles, come in with the first
+# reconciliation pass (docs/keycloak.md#reconciliation).
+keycloak-seed: ## register the keycloak provider, link canonical tenants to the applied infra/keycloak root's organization aliases and the fixture users to its users, in DATABASE_URL (migrated database; idempotent)
 	@environment="$$(terraform -chdir=infra/keycloak output -json backend_environment)" || exit 1; \
 	issuer="$$(printf '%s' "$$environment" | jq -er .KEYCLOAK_ISSUER_URL)" || exit 1; \
 	aliases="$$(terraform -chdir=infra/keycloak output -json organization_aliases)" || exit 1; \
 	linked="$$(printf '%s' "$$aliases" | jq -e --slurpfile fixture infra/fixtures/test-identities.json \
 		'with_entries(select($$fixture[0].tenants[.key].canonical))')" || exit 1; \
-	printf '%s' "$$linked" | (cd backend && KEYCLOAK_ISSUER_URL="$$issuer" python -m scripts.seed_keycloak --link-organizations)
+	ids="$$(terraform -chdir=infra/keycloak output -json user_ids)" || exit 1; \
+	users="$$(printf '%s' "$$ids" | jq -e --slurpfile fixture infra/fixtures/test-identities.json \
+		'$$fixture[0] as $$f | with_entries(.key as $$name | $$f.users[$$name] as $$user \
+		| select($$user.roles | to_entries | any(.value != null and $$f.tenants[.key].canonical)) \
+		| .value = {external_sub: .value, email: "\($$name)@\($$f.tenants[$$user.home].domain)", \
+			given_name: $$user.first_name, family_name: $$user.last_name})')" || exit 1; \
+	printf '%s' "$$linked" | (cd backend && KEYCLOAK_ISSUER_URL="$$issuer" python -m scripts.seed_keycloak --link-organizations) || exit 1; \
+	printf '%s' "$$users" | (cd backend && KEYCLOAK_ISSUER_URL="$$issuer" python -m scripts.seed_keycloak --link-users)
 
 zitadel-seed: ## link the applied infra/zitadel root to canonical tenants in DATABASE_URL (migrated database; idempotent)
 	terraform -chdir=infra/zitadel output -json canonical_seed | (cd backend && python -m scripts.seed_zitadel)

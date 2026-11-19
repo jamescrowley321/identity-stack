@@ -69,28 +69,15 @@ DESCOPE_ONLY_ROUTE = (
 DESCOPE_MANAGEMENT_API = "calls the Descope Management API itself; the run has no Descope project"
 DESCOPE_ACCESS_KEY = "is about a Descope access-key session, which no other provider has"
 TENANTS_CLAIM = (
-    "the route reads Descope's tenants claim, which this provider's tokens do not carry; it answers "
-    "403 TENANTS_CLAIM_NOT_READ (#557)"
+    "the route reads Descope's tenants claim and serves Descope principals only (get_descope_claims): "
+    "it answers this provider's principals 403; their tenants come from GET /api/identity"
 )
 ID_TOKEN_VALIDATION = (
     "POST /api/validate-id-token validates against the Descope provider only: 503 for this provider (#636)"
 )
-ZITADEL_TENANTS_CLAIM = (
-    "the route reads Descope's tenants claim, which a Zitadel token does not carry: it lists no "
-    "tenant and refuses the tenant's routes as not a member (as for Ory, #597); a Zitadel "
-    "principal's tenants come from GET /api/identity"
-)
 TENANT_SETTINGS = (
     "the Tenant Settings page loads GET /api/tenants/current/settings, the Descope tenant's custom "
     "attributes, which serves Descope principals only (#590)"
-)
-KEYCLOAK_ROLE_GATE = (
-    "the route is gated on canonical role names (require_role); a Keycloak principal is granted "
-    "permissions from client roles in its token and holds no role (#557)"
-)
-KEYCLOAK_SPA_ADMIN = (
-    "the SPA is built for the member type's app client (member-app); a Keycloak tenant admin signs "
-    "in through tenant-admin-app, which no SPA build serves"
 )
 ORY_PROVIDER = "proves the Ory provider, which only the Descope run's backend configures"
 
@@ -109,21 +96,18 @@ def _each(module: str, tests: list[str], reasons: dict[str, str]) -> dict[str, d
 NOT_APPLICABLE: dict[str, dict[str, str]] = {
     "test_ory_sso_e2e.py": {KEYCLOAK: ORY_PROVIDER, ZITADEL: ORY_PROVIDER},
     # Login, session and identity
-    "test_api_authenticated.py::test_tenants_endpoint_lists_user_tenants": {KEYCLOAK: TENANTS_CLAIM},
+    "test_api_authenticated.py::test_tenants_endpoint_lists_user_tenants": _both(TENANTS_CLAIM),
     "test_api_authenticated.py::test_validate_id_token": _both(ID_TOKEN_VALIDATION),
     "test_page_content.py::test_no_5xx_errors_on_dashboard": _both(ID_TOKEN_VALIDATION),
-    "test_api_endpoints.py::TestAuthenticatedEndpoints::test_tenants_returns_200": {KEYCLOAK: TENANTS_CLAIM},
-    "test_async_db_migration.py::TestAsyncTenantEndpoints::test_list_tenants_returns_list": {KEYCLOAK: TENANTS_CLAIM},
-    "test_identity_crud_e2e.py::TestTenantOperations::test_list_tenants_returns_jwt_tenants": {
-        KEYCLOAK: TENANTS_CLAIM,
-        ZITADEL: ZITADEL_TENANTS_CLAIM,
-    },
+    "test_api_endpoints.py::TestAuthenticatedEndpoints::test_tenants_returns_200": _both(TENANTS_CLAIM),
+    "test_async_db_migration.py::TestAsyncTenantEndpoints::test_list_tenants_returns_list": _both(TENANTS_CLAIM),
+    "test_identity_crud_e2e.py::TestTenantOperations::test_list_tenants_returns_jwt_tenants": _both(TENANTS_CLAIM),
     "test_identity_crud_e2e.py::TestTenantOperations::test_get_current_tenant": _both(DESCOPE_ONLY_ROUTE),
     # Tenant resources
     **_each(
         "test_async_db_migration.py::TestAsyncTenantResourcesCRUD",
         ["test_tenant_resource_create_and_list", "test_tenant_resource_duplicate_returns_409"],
-        {KEYCLOAK: TENANTS_CLAIM, ZITADEL: ZITADEL_TENANTS_CLAIM},
+        _both(TENANTS_CLAIM),
     ),
     # RBAC administration
     **_each(
@@ -136,8 +120,6 @@ NOT_APPLICABLE: dict[str, dict[str, str]] = {
         ],
         _both(DESCOPE_ONLY_ROUTE),
     ),
-    "test_api_endpoints.py::TestAdminEndpoints::test_idp_links_responds": {KEYCLOAK: KEYCLOAK_ROLE_GATE},
-    "test_multi_idp_e2e.py::TestIdPLinkCrudAdmin": {KEYCLOAK: KEYCLOAK_ROLE_GATE},
     "test_identity_crud_e2e.py::TestPermissionCrudCanonical": _both(DESCOPE_ONLY_ROUTE),
     "test_identity_crud_e2e.py::TestRoleCrudCanonical": _both(DESCOPE_ONLY_ROUTE),
     "test_identity_crud_e2e.py::TestMemberCrud": _both(DESCOPE_ONLY_ROUTE),
@@ -157,10 +139,7 @@ NOT_APPLICABLE: dict[str, dict[str, str]] = {
         ["test_tf_seeded_roles_present", "test_tf_seeded_permissions_present", "test_runtime_role_assignment"],
         _both(DESCOPE_MANAGEMENT_API),
     ),
-    "test_identity_repository_ui.py::test_navigate_to_settings_page": {
-        KEYCLOAK: KEYCLOAK_SPA_ADMIN,
-        ZITADEL: TENANT_SETTINGS,
-    },
+    "test_identity_repository_ui.py::test_navigate_to_settings_page": _both(TENANT_SETTINGS),
     "test_identity_repository_ui.py::test_role_created_via_api_is_invisible_to_an_access_key_session": _both(
         DESCOPE_ACCESS_KEY
     ),

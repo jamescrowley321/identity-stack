@@ -1,13 +1,16 @@
-"""Keycloak logins driven through Chromium, for the cases the SPA cannot ask for.
+"""Keycloak logins driven through Chromium.
 
-The SPA logs in through one app client with one scope. The suite also needs a
-token from ``tenant-admin-app``, a token for an organization the SPA would not
-offer, and a token for a user the backend refuses. Those logins run the realm's
-authorization-code flow with PKCE S256 in a browser context, through the same
-login form a person fills in, up to the redirect back to the SPA's origin. The
-``code`` on that redirect is exchanged at the token endpoint, as the SPA would.
-The SPA page it lands on finds no sign-in of its own for the ``state`` and
-exchanges nothing.
+Two kinds. ``sign_in`` fills in Keycloak's forms on whatever page the SPA's own
+Sign In led to. ``BrowserLogin.authorize`` runs the realm's authorization-code
+flow with PKCE S256 for a client or scope the SPA does not use (the other
+client, whose tokens lack the API audience), through the same forms a person
+fills in, up to the redirect back to the SPA's origin. The ``code`` on that
+redirect is exchanged at the token endpoint, as the SPA would. The SPA page it
+lands on finds no sign-in of its own for the ``state`` and exchanges nothing.
+
+The forms are identity-first: the username page, then, for a member of several
+organizations asked for the plain ``organization`` scope, Keycloak's
+organization picker, then the password page.
 
 Keycloak sets its session cookies ``Secure`` on a plain-HTTP origin. Chromium
 keeps them for a ``*.localhost`` host, so a second authorize request in the same
@@ -27,9 +30,14 @@ from tests.helpers.keycloak import KEYCLOAK_REDIRECT_URI, KeycloakTokenSource, K
 
 # A form step that does not leave the page within this long has failed.
 _STEP_TIMEOUT_MS = 20_000
-# Identity-first: the username page, then the password page. A live session may
-# skip either or both.
-_MAX_FORM_STEPS = 2
+# Identity-first: the username page, the organization picker, the password
+# page. A live session may skip any of them.
+_MAX_FORM_STEPS = 3
+USERNAME = "username"
+PASSWORD = "password"
+ORGANIZATION = "organization"
+# The picker's one button per organization (name kc.org, id organization-<alias>).
+_ORGANIZATION_CHOICE = 'button[name="kc.org"]'
 
 
 class KeycloakBrowserFlowError(Exception):
@@ -82,14 +90,28 @@ class BrowserLogin:
     def __init__(self, keycloak: KeycloakTokenSource) -> None:
         self.keycloak = keycloak
 
-    def authorize(self, context: BrowserContext, user: KeycloakUser, *, client_id: str, scope: str) -> BrowserTokens:
-        """Log ``user`` in (or reuse the context's session) and return the tokens."""
+    def authorize(
+        self, context: BrowserContext, user: KeycloakUser, *, client_id: str, scope: str, organization: str
+    ) -> BrowserTokens:
+        """Log ``user`` in (or reuse the context's session) and return the tokens.
+
+        ``organization`` is the alias picked if Keycloak asks which organization.
+        """
         verifier = secrets.token_urlsafe(48)
-        authorization = self.authorization(context, user, client_id=client_id, scope=scope, verifier=verifier)
+        authorization = self.authorization(
+            context, user, client_id=client_id, scope=scope, verifier=verifier, organization=organization
+        )
         return self.exchange(context, authorization.code, client_id=client_id, verifier=verifier)
 
     def authorization(
-        self, context: BrowserContext, user: KeycloakUser, *, client_id: str, scope: str, verifier: str
+        self,
+        context: BrowserContext,
+        user: KeycloakUser,
+        *,
+        client_id: str,
+        scope: str,
+        verifier: str,
+        organization: str,
     ) -> Authorization:
         """Run one authorize request in ``context`` and fill in whatever form Keycloak shows."""
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
@@ -124,8 +146,7 @@ class BrowserLogin:
                 field = _form_field(page)
                 forms.append(field)
                 with page.expect_navigation(timeout=_STEP_TIMEOUT_MS):
-                    page.fill(f'input[name="{field}"]', user.username if field == "username" else user.password)
-                    page.press(f'input[name="{field}"]', "Enter")
+                    _fill(page, field, user, organization)
             if not redirects:
                 raise KeycloakBrowserFlowError(f"no redirect back after {forms}; the page is at {page.url}")
         finally:
@@ -151,8 +172,44 @@ class BrowserLogin:
 
 
 def _form_field(page: Page) -> str:
-    """The one credential field the login page asks for."""
-    for field in ("username", "password"):
+    """The one form the login page shows: a credential field or the organization picker."""
+    for field in (USERNAME, PASSWORD):
         if page.locator(f'input[name="{field}"]:visible').count():
             return field
+    if page.locator(_ORGANIZATION_CHOICE).count():
+        return ORGANIZATION
     raise KeycloakBrowserFlowError(f"expected a Keycloak login form at {page.url}")
+
+
+def _fill(page: Page, form: str, user: KeycloakUser, organization: str) -> None:
+    """Answer one login page: type the username or password, or pick ``organization``."""
+    if form == ORGANIZATION:
+        choice = page.locator(f"{_ORGANIZATION_CHOICE}#organization-{organization}")
+        if not choice.count():
+            offered = page.locator(_ORGANIZATION_CHOICE).evaluate_all("buttons => buttons.map(b => b.value)")
+            raise KeycloakBrowserFlowError(f"Keycloak offers {user.username} {offered}, not {organization!r}")
+        choice.click()
+        return
+    page.fill(f'input[name="{form}"]', user.username if form == USERNAME else user.password)
+    page.press(f'input[name="{form}"]', "Enter")
+
+
+def sign_in(page: Page, user: KeycloakUser, frontend_url: str, *, organization: str) -> list[str]:
+    """After the SPA's Sign In, answer Keycloak's pages until the browser is back on the SPA's root.
+
+    ``organization`` is the alias picked if Keycloak asks which organization.
+    Returns the pages answered, in order.
+    """
+    forms: list[str] = []
+    for _ in range(_MAX_FORM_STEPS):
+        # Off the SPA's login page: on one of Keycloak's, or back on the SPA.
+        page.wait_for_url(lambda url: not url.startswith(f"{frontend_url}/login"), timeout=_STEP_TIMEOUT_MS)
+        if page.url.startswith(frontend_url):
+            break
+        page.wait_for_load_state()
+        form = _form_field(page)
+        forms.append(form)
+        with page.expect_navigation(timeout=_STEP_TIMEOUT_MS):
+            _fill(page, form, user, organization)
+    page.wait_for_url(f"{frontend_url}/", timeout=_STEP_TIMEOUT_MS)
+    return forms

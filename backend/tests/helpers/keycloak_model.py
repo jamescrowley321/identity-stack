@@ -13,6 +13,9 @@ from tests.helpers.keycloak_target import keycloak_test_target
 
 API_AUDIENCE = "identity-stack-api"
 SPA_CLIENT_ID = "identity-stack-spa"
+# The scope the SPA asks for (infra/keycloak's frontend_environment): the plain
+# organization scope, so Keycloak asks a member of several organizations which one.
+SPA_SCOPE = "openid profile email organization"
 OTHER_CLIENT_ID = "identity-stack-other"
 # The realm's admin client, which the Keycloak sync adapter writes with.
 ADMIN_CLIENT_ID = "identity-stack-admin"
