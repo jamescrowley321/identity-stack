@@ -14,6 +14,7 @@ import uuid
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
+from app.domain import access
 from app.errors.identity import Forbidden, IdentityError, NotFound
 from app.services.adapters.base import PROVIDER_SYNC, PROVIDER_SYNC_FAILED
 from app.services.descope_management import DescopeManagementAdapter
@@ -91,6 +92,16 @@ class MemberService:
             if not (user_pushed and roles_pushed.is_ok() and roles_pushed.ok):
                 invited[PROVIDER_SYNC] = PROVIDER_SYNC_FAILED
             return Ok(invited)
+
+    async def tenant_member(self, user_id: str, tenant_id: str) -> Result[access.TenantMember, IdentityError]:
+        """The user as the tenant holds it, for ``access.act_on_member``: no roles for a user it does not have."""
+        with tracer.start_as_current_span("MemberService.tenant_member") as span:
+            span.set_attribute("tenant.id", tenant_id)
+            user, tenant = _uuid(user_id), _uuid(tenant_id)
+            if user is None or tenant is None:
+                return Ok(access.TenantMember(user_id=user_id, roles=frozenset()))
+            roles = await self._roles.roles_held(user_id=user, tenant_id=tenant)
+            return roles.map(lambda held: access.TenantMember(user_id=str(user), roles=held))
 
     async def set_member_status(
         self, user_id: str, tenant_id: str, status: MemberStatus

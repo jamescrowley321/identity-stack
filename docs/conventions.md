@@ -381,7 +381,13 @@ already has, in any case, is refused (409, `MemberRefusal.ACCOUNT_EXISTS`) whate
 an admin can neither enrol another tenant's account nor learn about it. A member's status
 is the account's (the model keeps no status per membership), so it is set only for a user
 whose sole tenant is the request's, under a lock on the user's row (409 otherwise), and a user who is no member of the tenant reads
-the same whether or not it exists. In a Descope deployment (`SYNC_PROVIDER=descope`, the
+the same whether or not it exists. Deactivating, activating and removing a member
+**MUST** first pass `access.act_on_member` over the member's roles in the tenant, read
+from the same directory (Descope's `userTenants` or the canonical assignments): its
+`owner` only by an owner (403, `MemberActionRefusal.OWNER_REQUIRED`), its `operator`
+only by an operator (`operator_grant_check`), and never the caller itself for a
+deactivation or a removal (403, `MemberActionRefusal.ACTING_ON_SELF`), since a
+deactivated user cannot sign back in to undo it. In a Descope deployment (`SYNC_PROVIDER=descope`, the
 default) the guard passes exactly the `descope_managed` principals `require_descope_principal`
 passes, with the same body. The definitions belong to no tenant and every tenant's grants read
 them, so their routes are gated by `app.dependencies.rbac.require_definitions_role`

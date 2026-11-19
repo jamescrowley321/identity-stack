@@ -46,6 +46,7 @@ from app.dependencies.tenant_access import (
     TenantAccess,
     resolve_tenant_access,
 )
+from app.domain import access as access_domain
 from app.knobs import knob_set
 from app.logbook import logbook
 from app.middleware.providers import ProviderTokenConfig
@@ -158,6 +159,7 @@ async def _load_canonical_memberships(
         raise HTTPException(status_code=403, detail=NO_TENANT_CONTEXT)
 
     return CanonicalMemberships(
+        user_id=(result.ok.get("user") or {}).get("id"),
         grants=tuple(
             CanonicalGrant(
                 tenant_id=grant["tenant_id"],
@@ -165,7 +167,7 @@ async def _load_canonical_memberships(
                 permissions=tuple(grant.get("permissions", [])),
             )
             for grant in result.ok.get("roles", [])
-        )
+        ),
     )
 
 
@@ -393,7 +395,7 @@ require_definitions_role = require_global_role("operator", claimed_roles=("owner
 
 
 # The role that opens state belonging to no tenant (``require_global_role``).
-OPERATOR_ROLE = "operator"
+OPERATOR_ROLE = access_domain.OPERATOR_ROLE
 
 _require_global_operator = require_global_role(OPERATOR_ROLE)
 
@@ -453,3 +455,24 @@ def operator_definition_check(
     what it grants, or rename another role to or from it.
     """
     return _operator_check(request, session, RoleGrantRefusal.OPERATOR_DEFINITION)
+
+
+async def caller_user_id(
+    request: Request,
+    session: AsyncSession | None = Depends(get_rbac_session),
+) -> str | None:
+    """Dependency: the caller's user id as the member routes spell a member's.
+
+    The canonical user id for a principal authorized from the canonical model
+    (read once per request, with its memberships); the token's ``sub`` otherwise,
+    which for Descope is the ``userId`` its member routes take. None when there
+    is neither.
+    """
+    claims = getattr(request.state, "claims", None)
+    if claims is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    memberships = await _canonical_memberships(request, claims, session)
+    if memberships is not None:
+        return memberships.user_id
+    sub = claims.get("sub")
+    return sub if isinstance(sub, str) and sub else None

@@ -93,3 +93,17 @@ class NotATenantMember(AccessError):
 
     user_id: uuid.UUID
     tenant_id: uuid.UUID
+
+
+@dataclass(frozen=True)
+class ActingOnSelf(AccessError):
+    """A caller deactivates or removes itself: it could not sign back in to undo it."""
+
+    user_id: str
+
+
+@dataclass(frozen=True)
+class OwnerRequired(AccessError):
+    """The member holds ``owner`` in the tenant: only an owner deactivates, activates or removes it."""
+
+    user_id: str

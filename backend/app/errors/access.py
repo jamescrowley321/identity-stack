@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import enum
+
 from app.domain import access
 from app.errors.identity import Conflict, Forbidden, IdentityError, NotFound, ValidationError
 
@@ -15,6 +17,13 @@ _NAME_FAULTS = {
 }
 
 NOT_A_MEMBER_OF_THE_TENANT = "The user is not a member of the tenant: a role is assigned only to a member"
+
+
+class MemberActionRefusal(enum.StrEnum):
+    """Why a deactivation, activation or removal of a member was refused (``access.act_on_member``)."""
+
+    ACTING_ON_SELF = "You cannot deactivate or remove yourself"
+    OWNER_REQUIRED = "Only owners can deactivate, activate or remove an owner"
 
 
 def identity_error(error: access.AccessError) -> IdentityError:
@@ -41,6 +50,10 @@ def identity_error(error: access.AccessError) -> IdentityError:
         case access.NotATenantMember():
             # The same answer for an unknown user and a user of another tenant: no enumeration.
             return Forbidden(message=NOT_A_MEMBER_OF_THE_TENANT)
+        case access.ActingOnSelf():
+            return Forbidden(message=MemberActionRefusal.ACTING_ON_SELF)
+        case access.OwnerRequired():
+            return Forbidden(message=MemberActionRefusal.OWNER_REQUIRED)
         case access.InvalidName(subject=subject, fault=fault):
             return ValidationError(message=f"{_NAME_SUBJECTS[subject]} name {_NAME_FAULTS[fault]}")
     raise TypeError(f"no IdentityError for {type(error).__name__}")

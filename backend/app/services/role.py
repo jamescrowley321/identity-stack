@@ -366,6 +366,18 @@ class RoleService:
                 staged.append(assigned)
             return Ok(staged)
 
+    async def roles_held(self, *, user_id: uuid.UUID, tenant_id: uuid.UUID) -> Result[frozenset[str], IdentityError]:
+        """The names of the roles the user holds in the tenant: none for a user the tenant does not have."""
+        with tracer.start_as_current_span("RoleService.roles_held") as span:
+            span.set_attribute("user.id", str(user_id))
+            span.set_attribute("tenant.id", str(tenant_id))
+            names: set[str] = set()
+            for held in await self._assignment_repository.list_by_user_tenant(user_id, tenant_id):
+                row = await self._repository.get(held.role_id)
+                if row is not None:
+                    names.add(role_from_row(row).name.value)
+            return Ok(frozenset(names))
+
     async def push_member_roles(self, assigned: list[access.RoleAssigned]) -> Result[bool, IdentityError]:
         """After the commit: invalidate and push each staged assignment (Keycloak: organization member and group).
 

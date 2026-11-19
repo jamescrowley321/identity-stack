@@ -50,9 +50,10 @@ class CanonicalGrant:
 
 @dataclass(frozen=True)
 class CanonicalMemberships:
-    """Every grant the canonical model holds for the caller, across all their tenants."""
+    """Every grant the canonical model holds for the caller, across all their tenants, and its canonical user id."""
 
     grants: tuple[CanonicalGrant, ...]
+    user_id: str | None = None
 
     @property
     def tenant_ids(self) -> frozenset[str]:
