@@ -68,7 +68,11 @@ GENERIC_NOT_FOUND_ANSWER = {"error": "HTTP 404 Not Found"}
 # users and organizations (with their groups) to write, the API client to find,
 # and the events the pull reads.
 REALM_MANAGEMENT_CLIENT = "realm-management"
-REQUIRED_ROLES = frozenset({"manage-users", "manage-organizations", "query-clients", "view-events"})
+# ``create-client`` registers a machine credential's client through client
+# registration (``register_client``); nothing else is created with it.
+REQUIRED_ROLES = frozenset({"manage-users", "manage-organizations", "query-clients", "view-events", "create-client"})
+# Client registration (Keycloak's own representation), relative to the realm's issuer.
+CLIENT_REGISTRATION_PATH = "/clients-registrations/default"
 # What the API client's ``access`` must say for the service account: it reads the
 # client and manages its roles (the fine-grained ``view`` and ``manage``).
 REQUIRED_API_CLIENT_ACCESS = frozenset({"view", "manage"})
@@ -150,6 +154,9 @@ class KeycloakAdminSettings:
 
     def _token_url(self) -> str:
         return f"{self.issuer.rstrip('/')}/protocol/openid-connect/token"
+
+    def _registration_url(self) -> str:
+        return f"{self.issuer.rstrip('/')}{CLIENT_REGISTRATION_PATH}"
 
 
 def _names_a_realm(issuer: str) -> bool:
@@ -248,16 +255,19 @@ class KeycloakAdminApi:
         return value
 
     async def _call(
-        self, method: str, path: str, *, params: dict | None = None, json: object = None
+        self, method: str, path: str, *, params: dict | None = None, json: object = None, base: str | None = None
     ) -> OutboundResponse:
-        """One Admin API call, asked once more with a new token after a 401. Non-2xx answers are returned."""
+        """One Admin API call, asked once more with a new token after a 401. Non-2xx answers are returned.
+
+        ``base`` replaces the Admin API's realm URL (client registration is under the issuer).
+        """
 
         async def once() -> OutboundResponse:
             token = await self._service_account_token()
             try:
                 response = await self._http.request(
                     method,
-                    f"{self.settings._admin_realm()}{path}",
+                    f"{self.settings._admin_realm() if base is None else base}{path}",
                     params=params,
                     json=json,
                     headers={"Authorization": f"Bearer {token}"},
@@ -296,8 +306,9 @@ class KeycloakAdminApi:
         params: dict | None = None,
         json: object = None,
         also_done: Callable[[OutboundResponse], bool] = lambda _response: False,
+        base: str | None = None,
     ) -> OutboundResponse:
-        response = await self._call(method, path, params=params, json=json)
+        response = await self._call(method, path, params=params, json=json, base=base)
         if response.status_code in ok or also_done(response):
             return response
         raise self._refused(method, path, response)
@@ -615,6 +626,50 @@ class KeycloakAdminApi:
         with tracer.start_as_current_span("KeycloakAdminApi.remove_composites"):
             path = f"/roles-by-id/{quote(role_id, safe='')}/composites"
             await self._expect("DELETE", path, ok=frozenset({204}), json=[{"id": entry} for entry in composite_ids])
+
+    async def register_client(self, representation: dict) -> dict:
+        """Create a client through client registration, as the service account (``create-client``).
+
+        The answer is the created client: its ``id``, ``clientId``, ``secret`` and
+        ``registrationAccessToken``, the token that manages that one client later.
+        The admin client may create clients this way but read or change none
+        through the Admin API (``keycloak/fixtures/README.md``).
+        """
+        with tracer.start_as_current_span("KeycloakAdminApi.register_client"):
+            response = await self._expect(
+                "POST", "", ok=frozenset({201}), json=representation, base=self.settings._registration_url()
+            )
+            created = _body(response)
+            fields = ("id", "clientId", "secret", "registrationAccessToken")
+            if not isinstance(created, dict) or not all(
+                isinstance(created.get(key), str) and created[key] for key in fields
+            ):
+                logger.warning("keycloak admin: client registration answered without the created client")
+                raise KeycloakAdminError("client registration answer unreadable", status=response.status_code)
+            return created
+
+    async def unregister_client(self, client_id: str, registration_token: str) -> bool:
+        """Delete a registered client with its registration access token.
+
+        ``True`` when Keycloak deleted it, ``False`` when it refused the token (401),
+        which it answers both for a wrong token and for a client already gone.
+        """
+        with tracer.start_as_current_span("KeycloakAdminApi.unregister_client"):
+            path = f"{CLIENT_REGISTRATION_PATH}/{quote(client_id, safe='')}"
+            try:
+                response = await self._http.request(
+                    "DELETE",
+                    f"{self.settings._registration_url()}/{quote(client_id, safe='')}",
+                    headers={"Authorization": f"Bearer {registration_token}"},
+                )
+            except UpstreamTransportError as exc:
+                logger.warning("keycloak admin: DELETE %s did not answer (%s)", path, type(exc).__name__)
+                raise KeycloakAdminUnavailable("client registration unreachable") from exc
+            if response.status_code == 204:
+                return True
+            if response.status_code == 401:
+                return False
+            raise self._refused("DELETE", path, response)
 
     async def service_account_id(self) -> str:
         """The Keycloak id of the admin client's service account: the user its own admin events name."""

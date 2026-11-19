@@ -79,7 +79,7 @@ the listener is `jboss-logging`.
 
 `identity-stack-admin` pushes canonical changes to the realm and reads its events back. Its
 service account holds the `realm-management` roles `manage-users`, `manage-organizations`,
-`query-clients` and `view-events`, no realm role, and two fine-grained admin permissions, through
+`query-clients`, `view-events` and `create-client`, no realm role, and two fine-grained admin permissions, through
 a user policy naming the service account: `view`, `manage` and `map-roles-composite` on the client
 `identity-stack-api`, and `view` on the client `realm-management`. The import names both clients
 by `clientId` in the permissions' `resources`; Keycloak resolves them to the clients' ids. Without `kc-admin-api` as a client scope its token lacks
@@ -97,10 +97,15 @@ Probed on 26.8.2 against both the imported realm and the Terraform-built one:
 | List, create, update and delete the API client's roles | the permission's `view` and `manage` | 200/201/204/204; with `manage` alone, 403 |
 | Add and remove a role's composites | the permission's `map-roles-composite` | 204/204; without it 403 |
 | Read admin events and user events | `view-events` | 200/200 |
+| Register a client through client registration (`POST /realms/{realm}/clients-registrations/default`), as the backend does for a machine credential | `create-client`, mapped to the client's scope as well as to its service account | 201 with the client's secret and a registration access token; without the scope mapping, 403. Through the Admin API (`POST /clients`) the same role is 403: that path needs `manage` on every client |
+| Register a client with an `oidc-audience-mapper` | the authenticated "Allowed Protocol Mapper Types" policy and the realm attribute `allowedProtocolMapperTypesForClientAdministrators` both naming the type | 201; with either one alone, 403 "ProtocolMapper type not allowed" |
+| Disable and enable a registered client's service account | `manage-users` | 204/204; the client's client-credentials grant answers 401 `invalid_request` while disabled |
+| Delete a registered client with its registration access token | the token alone | 204; afterwards the token answers 401, and the client's grant 401 `invalid_client` |
 | Read its own `realm-management` roles (`GET /users/{id}/role-mappings/clients/{realm-management}/composite`), as the adapter does at startup | the `view` permission on `realm-management` | 200 with the four roles; without it Keycloak leaves `realm-management` out of the answer (`{}` and `[]`) |
 
 Refused (403): reading or changing any other client (the SPA's redirect URIs among them), changing
-the `realm-management` client, giving itself `realm-admin`, listing or creating realm roles,
+the `realm-management` client, giving itself `realm-admin`, reading or changing a client it
+registered through the Admin API, listing or creating realm roles,
 changing realm settings. A realm-wide `manage-clients` would let it
 rewrite the SPA client, so the client permission replaces it. What the grants still allow beyond
 the adapter's needs, because Keycloak offers nothing narrower: `manage-users` also creates realm

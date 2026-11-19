@@ -41,7 +41,7 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from slowapi.errors import RateLimitExceeded
 
-from app.dependencies import rbac
+from app.dependencies import capabilities, identity, rbac
 from app.dependencies.capabilities import (
     require_custom_attributes,
     require_machine_credentials,
@@ -49,6 +49,7 @@ from app.dependencies.capabilities import (
 )
 from app.dependencies.descope import NOT_A_DESCOPE_PRINCIPAL, get_descope_management, require_descope_principal
 from app.dependencies.identity import (
+    get_machine_credential_service,
     get_permission_service,
     get_provider_service,
     get_role_service,
@@ -65,8 +66,10 @@ from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.providers import ProviderTokenConfig, TenantClaims, descope_config, ory_config
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.models.database import get_async_session
+from app.services.adapters.base import Capability
 from app.services.permission import PermissionService
 from app.services.provider import ProviderService
+from app.services.relationship_store import RelationshipStoreKind
 from app.services.role import RoleService
 from app.services.sync_status import SyncStatusService
 from app.services.user import UserService
@@ -83,6 +86,8 @@ RESOURCE_ID = "33333333-3333-3333-3333-333333333333"
 ORY_SUB = "ory-subject-1"
 
 REFUSED = {"detail": "This route serves Descope principals only"}
+DESCOPE_EVERYTHING = capabilities.Served(frozenset(Capability), RelationshipStoreKind.DESCOPE)
+KEY_BODY = {"name": "a key", "expire_time": 4_102_444_800, "role_names": ["owner"]}
 NO_TENANT = {"detail": "No tenant context"}
 NOT_GRANTED = {"detail": "Insufficient permissions"}
 
@@ -101,12 +106,6 @@ DESCOPE_TENANT_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/api/members/{user_id}/deactivate"),
         ("POST", "/api/members/{user_id}/activate"),
         ("DELETE", "/api/members/{user_id}"),
-        ("POST", "/api/keys"),
-        ("GET", "/api/keys"),
-        ("GET", "/api/keys/{key_id}"),
-        ("POST", "/api/keys/{key_id}/deactivate"),
-        ("POST", "/api/keys/{key_id}/activate"),
-        ("DELETE", "/api/keys/{key_id}"),
         ("POST", "/api/fga/relations"),
         ("DELETE", "/api/fga/relations"),
         ("GET", "/api/fga/relations"),
@@ -118,6 +117,22 @@ DESCOPE_TENANT_ROUTES: frozenset[tuple[str, str]] = frozenset(
         # ``RoleService`` mirrors every assignment to Descope (``DescopeSyncAdapter``).
         ("POST", "/api/roles/assign"),
         ("POST", "/api/roles/remove"),
+    }
+)
+
+# (method, path) of every route whose service is the sync provider's own
+# implementation: the ``machine_credentials`` capability (``/api/keys``). A Descope
+# deployment's builds Descope's access keys only after ``require_descope_principal``
+# (``app.dependencies.identity._descope_access_keys``); a canonical provider's keeps
+# canonical rows and never reaches Descope.
+PER_PROVIDER_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("POST", "/api/keys"),
+        ("GET", "/api/keys"),
+        ("GET", "/api/keys/{key_id}"),
+        ("POST", "/api/keys/{key_id}/deactivate"),
+        ("POST", "/api/keys/{key_id}/activate"),
+        ("DELETE", "/api/keys/{key_id}"),
     }
 )
 
@@ -404,7 +419,12 @@ class TestTheRegisters:
         assert _routes_depending_on(require_descope_principal) == DESCOPE_BACKED_ROUTES
 
     def test_every_route_that_takes_a_tenant_is_in_one_register(self):
-        assert _routes_depending_on(get_tenant_id) == DESCOPE_TENANT_ROUTES | set(PROVIDER_NEUTRAL_ROUTES)
+        assert _routes_depending_on(get_tenant_id) == (
+            DESCOPE_TENANT_ROUTES | set(PROVIDER_NEUTRAL_ROUTES) | PER_PROVIDER_ROUTES
+        )
+
+    def test_every_per_provider_route_builds_its_service_by_provider(self):
+        assert PER_PROVIDER_ROUTES == _routes_depending_on(get_machine_credential_service)
 
     def test_no_project_route_takes_a_tenant(self):
         assert DESCOPE_TENANT_ROUTES & DESCOPE_PROJECT_ROUTES == set()
@@ -418,9 +438,9 @@ class TestTheRegisters:
 
         assert handed_the_adapter - _routes_depending_on(require_descope_principal) == set(UNGUARDED_ADAPTER_ROUTES)
 
-    def test_every_capability_gated_route_is_descope_backed(self):
+    def test_every_capability_gated_route_is_descope_backed_or_per_provider(self):
         assert CAPABILITY_GATED_ROUTES
-        assert CAPABILITY_GATED_ROUTES - DESCOPE_BACKED_ROUTES == set()
+        assert CAPABILITY_GATED_ROUTES - DESCOPE_BACKED_ROUTES - PER_PROVIDER_ROUTES == set()
 
     def test_the_refusal_is_not_the_tenant_resolvers(self):
         """Selecting a tenant would not help the refused caller, so the body does not say to."""
@@ -429,6 +449,23 @@ class TestTheRegisters:
 
     def test_no_route_is_in_both(self):
         assert DESCOPE_BACKED_ROUTES & set(PROVIDER_NEUTRAL_ROUTES) == set()
+        assert PER_PROVIDER_ROUTES & (DESCOPE_BACKED_ROUTES | set(PROVIDER_NEUTRAL_ROUTES)) == set()
+
+
+class TestDescopesAccessKeysServeDescopePrincipalsOnly:
+    """Behind the capability gate, the Descope builder refuses another provider's principal itself."""
+
+    @pytest.mark.parametrize(("method", "path"), sorted(PER_PROVIDER_ROUTES))
+    def test_even_when_the_gate_lets_it_through(self, client, monkeypatch, store, descope_client, method, path):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "descope")
+        monkeypatch.setattr(capabilities, "served", lambda _request: DESCOPE_EVERYTHING)
+
+        response = client.request(
+            method, _url(path), json=KEY_BODY, headers={**_bearer(ORY_OWNER), "X-Tenant-ID": TENANT_A}
+        )
+
+        assert (response.status_code, response.json()) == (403, REFUSED)
+        assert descope_client.mock_calls == []
 
     def test_the_global_gate_is_on_exactly_the_global_routes(self):
         assert _routes_gated_by(require_global_role) == GLOBAL_ROLE_ROUTES

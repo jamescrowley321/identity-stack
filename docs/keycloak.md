@@ -118,8 +118,8 @@ realm through `KeycloakSyncAdapter` (`backend/app/services/adapters/keycloak.py`
 Descope. It writes through the Admin REST API with one service account,
 `KEYCLOAK_ADMIN_CLIENT_ID`/`KEYCLOAK_ADMIN_CLIENT_SECRET` (`identity-stack-admin` in the compose
 realm), on one HTTP client with a 5-second timeout. The service account holds the
-`realm-management` roles `manage-users`, `manage-organizations`, `query-clients` and
-`view-events`, and the fine-grained admin permissions `view`, `manage` and `map-roles-composite` on
+`realm-management` roles `manage-users`, `manage-organizations`, `query-clients`,
+`view-events` and `create-client`, and the fine-grained admin permissions `view`, `manage` and `map-roles-composite` on
 the API client (`KEYCLOAK_AUDIENCE`) alone; [`keycloak/fixtures/README.md`](../keycloak/fixtures/README.md#the-admin-service-account)
 records what each grant allows and refuses. Startup takes a token, makes one Admin API read with it,
 reads the service account's own `realm-management` roles (composites expanded) and looks the API
@@ -216,13 +216,59 @@ What Keycloak does not do, or the adapter does not take on:
 |---|---|
 | A Keycloak user who signed up through the login page and has no `keycloak` IdP link, such as the realm's fixture users, has another username and is not taken over by email. | Keycloak refuses to create a second user with the same email (409); the adapter returns that error. A membership or status change for such a user is an error, logged and told as above. |
 | The adapter treats any Keycloak user whose username equals a canonical user id as its own. | A realm must not let users choose their username where it can hold a canonical id: keep self-registration and brokered first login from setting usernames, and keep users from editing theirs (`editUsernameAllowed` off). The compose realm has registration off, no identity providers and `editUsernameAllowed` at Keycloak's default, off. |
-| The admin client's grants reach further than the adapter needs: `manage-users` also creates realm groups, and `manage` on the API client also changes that client's settings and reads its secret. | Keep its secret like a realm admin's. |
+| The admin client's grants reach further than the adapter needs: `manage-users` also creates realm groups, `manage` on the API client also changes that client's settings and reads its secret, and `create-client` registers any client through client registration. | Keep its secret like a realm admin's. |
 | A push that fails leaves Keycloak behind the canonical model. | It is logged and told as above; the next [reconciliation](#reconciliation) pass re-pushes it. |
 | An organization's alias cannot change in Keycloak. | The alias is the canonical tenant id, which does not change either, or the alias a tenant was linked to. |
 | A canonical tenant's row is gone by the time `delete_tenant` runs. | The organization it reaches is the one whose alias is the canonical tenant id; a tenant linked to another alias keeps its organization. Nothing deletes a canonical tenant today. |
 | An organization's domains must be valid domain names, each held by one organization in the realm. | A domain Keycloak refuses (400) is an error, and the organization keeps its name and domains. |
 | An organization's name must be unique in the realm. | A second tenant with a name another organization holds is refused (409). |
 | A client role's name is unique on the API client, for permissions and roles alike. | A permission and a role of the same name, or a name a realm admin gave another client role, are refused (`Refusal.NAME_HELD_BY_ANOTHER`). |
+
+## Machine credentials
+
+With `SYNC_PROVIDER=keycloak` the adapter declares the `machine_credentials` capability:
+`/api/keys` creates, lists, reads, deactivates, activates and deletes a tenant's machine
+credentials. Each is a `machine_credentials` row in Postgres (its tenant, its roles there, its
+client and the `sub` of the client's tokens) and a client the adapter registers in the realm:
+
+- **Created** through client registration (`POST /realms/{realm}/clients-registrations/default`)
+  with the admin client's token and its `create-client` role: client id
+  `identity-stack-machine-<credential id>`, confidential, service account on, no browser flow, no
+  direct grant, full scope off, an audience mapper putting `KEYCLOAK_AUDIENCE` in its tokens, and
+  the attributes `identity-stack.credential-id`, `identity-stack.tenant-id` and
+  `identity-stack.organization` (the alias of the tenant's organization, which owns it). A tenant
+  with no organization is refused. The secret is returned once and never stored; the registration
+  access token Keycloak answers is stored on the row, for the delete.
+- **Deactivated and activated** by disabling and enabling the client's service account
+  (`manage-users`): Keycloak 26.8.2 answers a disabled one's grant 401 `invalid_request`.
+- **Deleted** with the registration access token (`DELETE .../clients-registrations/default/{client id}`);
+  Keycloak deletes the service account with the client. A token Keycloak refuses for a client whose
+  service account is gone counts as deleted. A delete Keycloak refuses otherwise deactivates the
+  credential and keeps it, so it can be asked again.
+
+The admin client reads and changes no client through the Admin REST API: creating a client there
+needs `manage` on every client (`manage-clients`, or the fine-grained permission on all clients),
+which would let it rewrite the SPA client. Client registration with `create-client` creates
+clients only, and the registration access token manages just the one it created.
+
+Keycloak 26.8 allows a protocol mapper type in an authenticated client registration only when both
+the authenticated "Allowed Protocol Mapper Types" client registration policy and the realm attribute
+`allowedProtocolMapperTypesForClientAdministrators` name it. The realm import and `infra/keycloak`
+add `oidc-audience-mapper` to both, and to nothing else.
+
+A machine's client-credentials token passes the token binding by its `azp`
+(`identity-stack-machine-` prefix, `typ` `Bearer`, the API audience) and is authorized from its
+credential alone (conventions §18): it belongs to the credential's tenant only and holds the
+credential's roles there, and only while the credential is active and unexpired. A deactivated,
+expired or deleted credential's tokens are refused at once, before they expire; Keycloak issues no
+new ones to a deactivated or deleted client. A credential may carry only roles its creator holds in
+the tenant, and expires at most 365 days ahead.
+
+| Limit | What happens |
+|---|---|
+| The registration access token on each row manages that client (its flows, redirect URIs, secret). | Keep the database like a secret store. A token of a machine client whose `sub` is not the credential's grants nothing. |
+| Keycloak logs that the `default` client registration provider is deprecated (`KC-SERVICES0112`) on each registration. | It works on 26.8.2. A Keycloak that removes it fails the create with a provider error; the alternative is an Admin API path that does not grant `manage` on every client. |
+| Keycloak has no expiry for a client. | The backend refuses a credential's tokens after its expiry; the client stays until the credential is deleted. |
 
 ## Event pull
 

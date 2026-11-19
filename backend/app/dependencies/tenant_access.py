@@ -50,13 +50,18 @@ class CanonicalGrant:
 
 @dataclass(frozen=True)
 class CanonicalMemberships:
-    """Every grant the canonical model holds for the caller, across all their tenants."""
+    """Every grant the canonical model holds for the caller, across all their tenants.
+
+    ``tenants`` names tenants the caller belongs to beside those its grants name:
+    a machine credential belongs to its tenant whether or not it holds a role there.
+    """
 
     grants: tuple[CanonicalGrant, ...]
+    tenants: frozenset[str] = frozenset()
 
     @property
     def tenant_ids(self) -> frozenset[str]:
-        return frozenset(grant.tenant_id for grant in self.grants)
+        return self.tenants | frozenset(grant.tenant_id for grant in self.grants)
 
 
 @dataclass(frozen=True)

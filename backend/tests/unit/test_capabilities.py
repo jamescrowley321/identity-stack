@@ -47,13 +47,15 @@ DESCOPE_CAPABILITIES = frozenset({Capability.MACHINE_CREDENTIALS, Capability.CUS
 # in the application must be listed here (``test_every_adapter_is_listed``).
 DECLARED = {
     DescopeSyncAdapter: DESCOPE_CAPABILITIES,
-    KeycloakSyncAdapter: frozenset(),
+    KeycloakSyncAdapter: frozenset({Capability.MACHINE_CREDENTIALS}),
     ZitadelSyncAdapter: frozenset(),
     OrySyncAdapter: frozenset(),
     NoOpSyncAdapter: frozenset(),
 }
 
 DESCOPE_SERVED = Served(DESCOPE_CAPABILITIES, RelationshipStoreKind.DESCOPE)
+# Keycloak's machine credentials are canonical: they serve every principal.
+KEYCLOAK_SERVED = Served(frozenset({Capability.MACHINE_CREDENTIALS}), RelationshipStoreKind.NONE)
 
 # (method, path) of every route each capability serves.
 MACHINE_CREDENTIAL_ROUTES = frozenset(
@@ -187,7 +189,7 @@ class TestDeclarations:
         ("provider", "capabilities", "store"),
         [
             ("descope", DESCOPE_CAPABILITIES, RelationshipStoreKind.DESCOPE),
-            ("keycloak", frozenset(), RelationshipStoreKind.NONE),
+            ("keycloak", frozenset({Capability.MACHINE_CREDENTIALS}), RelationshipStoreKind.NONE),
             ("zitadel", frozenset(), RelationshipStoreKind.NONE),
         ],
     )
@@ -196,14 +198,21 @@ class TestDeclarations:
 
         assert (sync_capabilities(), relationship_store_kind()) == (capabilities, store)
 
+    def test_a_provider_has_machine_credentials_exactly_when_its_adapter_declares_them(self):
+        """The registration's builder and the adapter's declaration are one decision."""
+        assert {name: registration.machine_credentials is not None for name, registration in SYNC_ADAPTERS.items()} == {
+            name: Capability.MACHINE_CREDENTIALS in registration.adapter.capabilities
+            for name, registration in SYNC_ADAPTERS.items()
+        }
+
 
 # (sync provider, principal) -> what the caller is served. Descope's capabilities and
 # store are keyed on Descope ids: they serve a Descope principal only.
 SERVED_TO = [
     ("descope", "descope", DESCOPE_SERVED),
     ("descope", "ory", NOTHING),
-    ("keycloak", "descope", NOTHING),
-    ("keycloak", "ory", NOTHING),
+    ("keycloak", "descope", KEYCLOAK_SERVED),
+    ("keycloak", "ory", KEYCLOAK_SERVED),
     ("zitadel", "descope", NOTHING),
     ("zitadel", "ory", NOTHING),
 ]
@@ -255,14 +264,33 @@ MISSING_DETAIL = {
 }
 
 
+# What gives each gated route, read from what the caller is served.
+GIVEN_BY = {
+    **{
+        route: (lambda served: Capability.MACHINE_CREDENTIALS in served.capabilities)
+        for route in MACHINE_CREDENTIAL_ROUTES
+    },
+    **{
+        route: (lambda served: Capability.CUSTOM_ATTRIBUTES in served.capabilities) for route in CUSTOM_ATTRIBUTE_ROUTES
+    },
+    **{
+        route: (lambda served: served.relationship_store is not RelationshipStoreKind.NONE)
+        for route in RELATIONSHIP_STORE_ROUTES
+    },
+}
+# (sync provider, principal, method, path) of every gated route a caller is not served.
+MISSING_FOR = sorted(
+    (provider, principal, method, path)
+    for provider, principal, served in SERVED_TO
+    for (method, path) in EVERY_GATED_ROUTE
+    if not GIVEN_BY[(method, path)](served)
+)
+
+
 class TestAMissingCapabilityIs404:
     """Every gated route, for every caller the capability does not serve (``SERVED_TO``)."""
 
-    @pytest.mark.parametrize(("method", "path"), sorted(EVERY_GATED_ROUTE))
-    @pytest.mark.parametrize(
-        ("provider", "principal"),
-        [(provider, principal) for provider, principal, served in SERVED_TO if served == NOTHING],
-    )
+    @pytest.mark.parametrize(("provider", "principal", "method", "path"), MISSING_FOR)
     def test_on_every_gated_route(self, client, monkeypatch, descope_client, method, path, provider, principal):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", provider)
         url = _url(path)

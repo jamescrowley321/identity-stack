@@ -25,6 +25,7 @@ from app.errors.identity import (
     Conflict,
     EmailLinkRefused,
     Forbidden,
+    GrantRefused,
     IdentityError,
     NotFound,
     ProviderError,
@@ -87,8 +88,20 @@ class TestErrorTypeMap:
             SyncFailed,
             ProviderError,
             Forbidden,
+            GrantRefused,
         }
         assert set(_ERROR_TYPE_MAP.keys()) == expected
+
+    def test_a_refused_grant_is_a_403_that_names_the_roles(self):
+        """Unlike ``Forbidden``, its message is the detail: it names only what the caller asked to grant."""
+        result: Result[dict, IdentityError] = Error(GrantRefused(message="Cannot grant roles you do not hold: owner"))
+
+        response = result_to_response(result, _make_request())
+
+        assert (response.status_code, json.loads(response.body)["detail"]) == (
+            403,
+            "Cannot grant roles you do not hold: owner",
+        )
 
     def test_status_codes(self):
         """AC-1.3.3: exact status code mapping."""

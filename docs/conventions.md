@@ -222,8 +222,7 @@ RFC 9457 problem-detail bodies (`application/problem+json`) **MUST** be built on
   UserInfo `sub` that differs, 409 for an email a canonical user already holds, 500
   when the provider has no `providers` row, and 503 when UserInfo cannot be read, as
   for every provider fault in the module.
-- Exception: the handlers in `routers/users.py` and `routers/attributes.py`, and
-  `routers/accesskeys.py::_verify_key_tenant`. They answer an `Error` from
+- Exception: the handlers in `routers/users.py` and `routers/attributes.py`. They answer an `Error` from
   `DescopeManagementAdapter` with the `{"detail": ...}` 400/403/502 bodies those routes had
   before the adapter existed, and `get_profile` and `get_tenant_settings` answer one with
   blank defaults. The member activate and deactivate routes answer a member shared with
@@ -353,8 +352,21 @@ adapter is Descope-backed: `POST /api/roles/assign` and `/api/roles/remove` are,
 `/api/access-checks` routes, which answer the resolver's tenant to a holder of
 `documents:read` or `settings:manage` and depend on nothing but the resolver.
 
+The `/api/keys` routes serve the `machine_credentials` capability through
+`MachineCredentialService`, which the configured sync provider builds
+(`get_machine_credential_service`): a Descope deployment's Descope access keys, and a canonical
+provider's canonical machine credentials (Keycloak: a client the adapter registers). They carry
+no static guard, and are listed in `PER_PROVIDER_ROUTES` in `test_descope_backed_routes.py`: the
+Descope builder **MUST** call `require_descope_principal` before it builds anything, and each
+route **MUST** take its service before its tenant, so another provider's principal is refused
+before the tenant is resolved and before Descope is called. A token issued to a canonical
+provider's machine credential client (`ProviderTokenConfig.machine_client`) **MUST** be
+authorized from that credential alone (`rbac._load_machine_memberships`): its one tenant, its
+roles there, and nothing while it is inactive, expired or deleted. It is never resolved as a
+user.
+
 A route that serves an optional capability of the sync adapter (`Capability` in
-`app/services/adapters/base.py`: the access keys, the custom attributes of the profile and
+`app/services/adapters/base.py`: the machine credentials, the custom attributes of the profile and
 the tenant settings) or the relationship store (the FGA and document routes) **MUST** depend
 on that capability's dependency in `app/dependencies/capabilities.py` as its first
 dependency, before the guard. What serves the caller is decided by one function,
@@ -429,7 +441,8 @@ configuration at startup (`refuse_canonical_descope_managed`).
 `test_tenant_dependencies.py`, `test_descope_claim_routes.py`, which sends Keycloak, Ory
 and Zitadel tokens with forged `tenants` and `roles` claims to every route that reads them,
 `test_capabilities.py`, which holds each capability to its routes and its dependency first
-on each, and `test_descope_backed_routes.py`, which walks every route
+on each, `test_machine_principal.py`, which shows a machine token gets its credential's grants
+and nothing else, and `test_descope_backed_routes.py`, which walks every route
 of the application against its registers, calls each guarded route as a canonical
 principal, and calls each `require_global_role` route as an operator of one of several
 tenants who names it). `test_keycloak_canonical_authorization.py` shows a Keycloak

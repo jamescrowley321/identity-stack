@@ -20,6 +20,7 @@ from app.errors.identity import (
     Conflict,
     EmailLinkRefused,
     Forbidden,
+    GrantRefused,
     IdentityError,
     IdentityErrorRaised,
     NotFound,
@@ -62,6 +63,7 @@ _ERROR_TYPE_MAP: dict[type[IdentityError], _ErrorMapping] = {
     SyncFailed: _ErrorMapping(uri="/errors/sync-failed", status=207, title="Sync Partial Success"),
     ProviderError: _ErrorMapping(uri="/errors/provider-error", status=502, title="Provider Error"),
     Forbidden: _ErrorMapping(uri="/errors/forbidden", status=403, title="Forbidden"),
+    GrantRefused: _ErrorMapping(uri="/errors/forbidden", status=403, title="Forbidden"),
 }
 
 # Sanitized messages for error types where upstream details may leak.

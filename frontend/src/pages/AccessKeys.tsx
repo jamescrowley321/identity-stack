@@ -53,6 +53,9 @@ export default function AccessKeys() {
   const [name, setName] = useState("");
   const [expirationDays, setExpirationDays] = useState(DEFAULT_EXPIRATION_DAYS);
   const [newKeySecret, setNewKeySecret] = useState<string | null>(null);
+  // The client id a canonical provider's credential signs in with (client
+  // credentials grant); a Descope access key has none, its secret is the key.
+  const [newKeyClientId, setNewKeyClientId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   // The page is mounted afresh for each tenant, so once it has gone, a call it
@@ -98,6 +101,7 @@ export default function AccessKeys() {
   const handleCreate = useCallback(async () => {
     if (!name.trim()) return;
     setNewKeySecret(null);
+    setNewKeyClientId(null);
     // Always send an expiry. Omitting it used to mean "never expires", which the
     // API now refuses.
     const days = Number(expirationDays) || Number(DEFAULT_EXPIRATION_DAYS);
@@ -122,6 +126,7 @@ export default function AccessKeys() {
           return;
         }
         setNewKeySecret(data.cleartext || null);
+        setNewKeyClientId(typeof data.key?.clientId === "string" ? data.key.clientId : null);
         setName("");
         setCopied(false);
         toast.success("Access key created");
@@ -232,6 +237,12 @@ export default function AccessKeys() {
           <Alert>
             <AlertTitle>Key created!</AlertTitle>
             <AlertDescription className="space-y-2">
+              {newKeyClientId && (
+                <p>
+                  Client ID:{" "}
+                  <code className="rounded bg-muted px-1 text-xs font-mono">{newKeyClientId}</code>
+                </p>
+              )}
               <p>Copy the secret below — it will not be shown again.</p>
               <code className="block rounded bg-muted p-2 text-xs font-mono break-all">
                 {newKeySecret}

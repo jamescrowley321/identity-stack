@@ -75,6 +75,7 @@ from typing import ClassVar, Protocol
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
+from app.middleware.providers import KEYCLOAK_MACHINE_CLIENT_PREFIX
 from app.services.adapters.base import (
     CREATED_IN_TENANT,
     LAST_ROLE_IN_TENANT,
@@ -82,6 +83,9 @@ from app.services.adapters.base import (
     UNANSWERED,
     Capability,
     IdentityProviderAdapter,
+    MachineClient,
+    MachineClientRef,
+    MachineCredentialPush,
     SyncError,
 )
 from app.services.keycloak_admin import KeycloakAdminApi, KeycloakAdminError
@@ -96,6 +100,15 @@ PROVIDER_NAME = "keycloak"
 ROLE_ATTRIBUTE = "identity-stack.role-id"
 PERMISSION_ATTRIBUTE = "identity-stack.permission-id"
 _CANONICAL_ATTRIBUTES = (ROLE_ATTRIBUTE, PERMISSION_ATTRIBUTE)
+
+# The attributes a machine credential's client carries: the canonical credential
+# and tenant it stands for, and the tenant's organization alias, which owns it.
+CREDENTIAL_ATTRIBUTE = "identity-stack.credential-id"
+TENANT_ATTRIBUTE = "identity-stack.tenant-id"
+ORGANIZATION_ATTRIBUTE = "identity-stack.organization"
+# The protocol mapper that puts the API client (``KEYCLOAK_AUDIENCE``) in a
+# machine client's access tokens: the token middleware requires that audience.
+_AUDIENCE_MAPPER = "oidc-audience-mapper"
 
 # A Keycloak client's service account (``service-account-<client id>``): a client
 # signs in with it, no person does, so an IdP link naming one is not followed.
@@ -126,6 +139,8 @@ class Refusal(enum.StrEnum):
     DUPLICATE_CANONICAL_ID = "several client roles or groups carry the same canonical id"
     GROUP_NOT_SHOWN = "Keycloak does not show the organization group it was asked to create"
     LINK_REFUSED = "the canonical link could not be written"
+    NO_SERVICE_ACCOUNT = "Keycloak shows no service account for the machine client it registered"
+    REGISTRATION_REFUSED = "Keycloak refused the machine client's registration token and still has its service account"
 
 
 class KeycloakLinks(Protocol):
@@ -276,11 +291,65 @@ def _stamp(entry: dict, attribute: str, canonical_id: str) -> dict:
     return {**_attributes(entry), attribute: [canonical_id]}
 
 
-class KeycloakSyncAdapter(IdentityProviderAdapter):
-    """Pushes canonical tenants, users, memberships, permissions, roles and role assignments to Keycloak."""
+def machine_client_id(credential_id: uuid.UUID) -> str:
+    """The client id of a machine credential's client: the prefix the token binding knows, then the credential id."""
+    return f"{KEYCLOAK_MACHINE_CLIENT_PREFIX}{credential_id}"
+
+
+def _machine_client_representation(
+    credential_id: uuid.UUID, tenant_id: uuid.UUID, name: str, alias: str, api: str
+) -> dict:
+    """A confidential client that signs in with the client-credentials grant only, owned by the tenant."""
+    return {
+        "clientId": machine_client_id(credential_id),
+        "name": name,
+        "enabled": True,
+        "protocol": "openid-connect",
+        "publicClient": False,
+        "bearerOnly": False,
+        "serviceAccountsEnabled": True,
+        "standardFlowEnabled": False,
+        "implicitFlowEnabled": False,
+        "directAccessGrantsEnabled": False,
+        "frontchannelLogout": False,
+        "fullScopeAllowed": False,
+        "redirectUris": [],
+        "webOrigins": [],
+        "defaultClientScopes": [],
+        "optionalClientScopes": [],
+        "attributes": {
+            CREDENTIAL_ATTRIBUTE: str(credential_id),
+            TENANT_ATTRIBUTE: str(tenant_id),
+            ORGANIZATION_ATTRIBUTE: alias,
+        },
+        "protocolMappers": [
+            {
+                "name": "API audience",
+                "protocol": "openid-connect",
+                "protocolMapper": _AUDIENCE_MAPPER,
+                "config": {
+                    "included.client.audience": api,
+                    "access.token.claim": "true",
+                    "id.token.claim": "false",
+                    "introspection.token.claim": "true",
+                },
+            }
+        ],
+    }
+
+
+class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush):
+    """Pushes canonical tenants, users, memberships, permissions, roles and role assignments to Keycloak.
+
+    It also keeps each machine credential's client (``MachineCredentialPush``):
+    created through client registration with ``create-client``, enabled and
+    disabled through its service account (``manage-users``), and deleted with its
+    registration access token. The admin client reads or changes no client
+    through the Admin API (``keycloak/fixtures/README.md``).
+    """
 
     ends_memberships: ClassVar[bool] = True
-    capabilities: ClassVar[frozenset[Capability]] = frozenset()
+    capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.MACHINE_CREDENTIALS})
 
     def __init__(self, api: KeycloakAdminApi, links: KeycloakLinks) -> None:
         self._api = api
@@ -757,3 +826,72 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
             span.set_attribute("role.id", str(role_id))
             context = {"tenant_id": str(tenant_id), "user_id": str(user_id), "role_id": str(role_id)}
             return await _run("delete_role_assignment", context, push)
+
+    # --- machine credentials ------------------------------------------------------
+
+    async def create_machine_client(
+        self, *, credential_id: uuid.UUID, tenant_id: uuid.UUID, name: str
+    ) -> Result[MachineClient, SyncError]:
+        """Register the credential's client, owned by the tenant's organization, and read its service account.
+
+        A tenant with no linked organization is refused (``Refusal.NO_ORGANIZATION``).
+        A client whose service account Keycloak does not show is deleted again.
+        """
+        created: list[MachineClient] = []
+
+        async def push() -> None:
+            alias = await self._links.organization_alias(tenant_id)
+            if alias is None:
+                raise _Refused(Refusal.NO_ORGANIZATION)
+            client = await self._api.register_client(
+                _machine_client_representation(credential_id, tenant_id, name, alias, self._api.settings.api_client_id)
+            )
+            account = await self._api.find_user(f"{SERVICE_ACCOUNT_PREFIX}{client['clientId']}".lower())
+            if account is None:
+                await self._api.unregister_client(client["clientId"], client["registrationAccessToken"])
+                raise _Refused(Refusal.NO_SERVICE_ACCOUNT)
+            created.append(
+                MachineClient(
+                    client_id=client["clientId"],
+                    external_id=client["id"],
+                    subject=account["id"],
+                    secret=client["secret"],
+                    registration_token=client["registrationAccessToken"],
+                )
+            )
+
+        with tracer.start_as_current_span("keycloak.create_machine_client") as span:
+            span.set_attribute("tenant.id", str(tenant_id))
+            span.set_attribute("machine_credential.id", str(credential_id))
+            context = {"tenant_id": str(tenant_id), "credential_id": str(credential_id)}
+            result = await _run("create_machine_client", context, push)
+            if result.is_error():
+                return Error(result.error)
+            return Ok(created[0])
+
+    async def set_machine_client_enabled(self, *, client: MachineClientRef, enabled: bool) -> Result[None, SyncError]:
+        """Enable or disable the client's service account: a disabled one is refused the grant."""
+
+        async def push() -> None:
+            account = await self._api.get_user(client.subject)
+            if account is None or not _is_service_account(account):
+                raise _Refused(Refusal.NO_SERVICE_ACCOUNT)
+            if account.get("enabled") is not enabled:
+                await self._api.update_user(client.subject, {"enabled": enabled})
+
+        with tracer.start_as_current_span("keycloak.set_machine_client_enabled") as span:
+            span.set_attribute("machine_client.id", client.client_id)
+            return await _run("set_machine_client_enabled", {"client_id": client.client_id}, push)
+
+    async def delete_machine_client(self, *, client: MachineClientRef) -> Result[None, SyncError]:
+        """Delete the client with its registration token. One whose service account is gone is deleted already."""
+
+        async def push() -> None:
+            if await self._api.unregister_client(client.client_id, client.registration_token):
+                return
+            if await self._api.find_user(f"{SERVICE_ACCOUNT_PREFIX}{client.client_id}".lower()) is not None:
+                raise _Refused(Refusal.REGISTRATION_REFUSED)
+
+        with tracer.start_as_current_span("keycloak.delete_machine_client") as span:
+            span.set_attribute("machine_client.id", client.client_id)
+            return await _run("delete_machine_client", {"client_id": client.client_id}, push)

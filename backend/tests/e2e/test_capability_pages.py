@@ -27,7 +27,9 @@ EXPECTED = {
         "capabilities": sorted([Capability.CUSTOM_ATTRIBUTES, Capability.MACHINE_CREDENTIALS]),
         "relationship_store": RelationshipStoreKind.DESCOPE,
     },
-    KEYCLOAK: NOTHING,
+    # Keycloak's machine credentials are canonical: Keycloak clients the backend
+    # registers (#680), which serve every principal.
+    KEYCLOAK: {"capabilities": [Capability.MACHINE_CREDENTIALS], "relationship_store": RelationshipStoreKind.NONE},
     ZITADEL: NOTHING,
 }
 

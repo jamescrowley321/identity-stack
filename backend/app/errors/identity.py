@@ -81,6 +81,15 @@ class Forbidden(IdentityError):
     """Caller lacks permission for the requested operation."""
 
 
+@dataclass(frozen=True, unsafe_hash=False)
+class GrantRefused(Forbidden):
+    """The caller asked to grant something it does not hold itself (a machine credential's roles).
+
+    403 like ``Forbidden``, but its message is returned as it is: it names only the
+    roles the caller asked for.
+    """
+
+
 class IdentityErrorRaised(Exception):
     """Raise a domain ``IdentityError`` from a place that cannot return a Result.
 
