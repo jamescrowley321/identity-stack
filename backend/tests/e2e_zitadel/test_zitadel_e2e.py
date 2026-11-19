@@ -26,6 +26,7 @@ UNLINKED = IDENTITIES.cases.unlinked_tenant
 TENANT_ORGANIZATIONS = sorted(key for key, tenant in IDENTITIES.tenants.items() if tenant.canonical)
 
 IDENTITY = "/api/identity"
+VALIDATE_ID_TOKEN = "/api/validate-id-token"
 ADMIN_ROUTE = "/api/access-checks/admin-role"
 VIEWER_ROUTE = "/api/access-checks/viewer-role"
 
@@ -177,6 +178,21 @@ def test_a_live_id_token_is_refused(page: Page, frontend_url: str, api, zitadel:
     assert _answer(api(signed_in["access_token"]).get(IDENTITY))[0] == 200
 
     assert _answer(api(signed_in["id_token"]).get(IDENTITY)) == (401, TOKEN_REFUSED)
+
+
+def test_the_spas_live_id_token_is_validated_by_the_instance(page: Page, frontend_url: str, api, zitadel: Instance):
+    signed_in = _sign_in_to_the_spa(page, frontend_url, zitadel.users[LINKED.key])
+
+    response = api(signed_in["id_token"]).post(VALIDATE_ID_TOKEN)
+
+    assert response.status == 200, response.text()
+    body = response.json()
+    assert (body["iss"], body["azp"], zitadel.spa_client_id in body["aud"]) == (
+        zitadel.issuer,
+        zitadel.spa_client_id,
+        True,
+    )
+    assert _answer(api(signed_in["access_token"]).post(VALIDATE_ID_TOKEN)) == (401, TOKEN_REFUSED)
 
 
 def test_a_live_token_from_the_second_application_is_refused(

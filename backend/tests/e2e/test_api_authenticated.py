@@ -39,12 +39,13 @@ def test_tenants_endpoint_lists_user_tenants(auth_api_context: APIRequestContext
     assert "tenants" in body
 
 
-def test_validate_id_token(auth_api_context: APIRequestContext, backend_url: str, auth_access_token: str):
-    """POST /api/validate-id-token validates the access token."""
-    response = auth_api_context.post(
+def test_validate_id_token_refuses_an_access_token(
+    api_context: APIRequestContext, backend_url: str, auth_access_token: str
+):
+    """POST /api/validate-id-token takes ID tokens only: the provider's own access token gets the uniform 401."""
+    response = api_context.post(
         f"{backend_url}/api/validate-id-token",
         headers={"Authorization": f"Bearer {auth_access_token}"},
     )
-    assert response.status == 200
-    body = response.json()
-    assert "sub" in body
+    assert response.status == 401
+    assert response.json() == {"detail": "Invalid or expired token"}

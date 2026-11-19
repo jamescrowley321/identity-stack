@@ -1,4 +1,4 @@
-from enum import Enum
+from enum import Enum, StrEnum
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from py_identity_model import (
@@ -8,7 +8,7 @@ from py_identity_model import (
     NetworkException,
     TokenValidationConfig,
 )
-from py_identity_model.aio import validate_token
+from py_identity_model.aio import validate_id_token as validate_oidc_id_token
 from py_identity_model.identity import ClaimsPrincipal
 
 from app.dependencies.auth import get_claims, get_current_user
@@ -17,9 +17,18 @@ from app.dependencies.identity import (
     get_identity_resolution_service,
 )
 from app.errors.identity import Forbidden, NotFound, ValidationError
-from app.knobs import knob, knob_set
+from app.knobs import knob_set
 from app.logbook import logbook
-from app.middleware.providers import ORGANIZATION_FIRST_LOGIN_PROVIDERS, ProviderTokenConfig, descope_config
+from app.middleware.providers import (
+    ORGANIZATION_FIRST_LOGIN_PROVIDERS,
+    ProviderTokenConfig,
+    configured_providers,
+    id_token_client_id,
+    id_token_disco_address,
+    select_id_token_provider,
+    unverified_claims,
+    unverified_issuer,
+)
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.first_login_profile import userinfo_profile
 from app.services.identity_provisioning import IdentityProvisioningService
@@ -28,12 +37,6 @@ from app.services.identity_resolution import IdentityResolutionService
 router = APIRouter(tags=["Protected"])
 logger = logbook(__name__)
 
-DESCOPE_PROJECT_ID = knob("DESCOPE_PROJECT_ID", "")
-# ``POST /validate-id-token`` runs behind neither token middleware, so it takes
-# the Descope provider's discovery address, audience and signing algorithms
-# from the same config they use.
-DESCOPE = descope_config(DESCOPE_PROJECT_ID)
-
 # What stops ``POST /validate-id-token`` before the token is judged: the
 # provider's discovery document or JWKS cannot be fetched, was fetched and is
 # unusable, or the provider config itself is refused. None of them says
@@ -41,6 +44,25 @@ DESCOPE = descope_config(DESCOPE_PROJECT_ID)
 PROVIDER_FAULTS = (NetworkException, DiscoveryValidationError, JwksValidationError, ConfigurationException)
 REFUSED_DETAIL = "Invalid or expired token"
 UNAVAILABLE_DETAIL = "Identity provider unavailable"
+# The claims that mark an access token: ``scope`` (Descope, Keycloak) and ``scp``
+# (Ory Hydra). No ID token carries either. Zitadel's access token carries neither
+# and is refused by the ``azp`` rule.
+SCOPE_CLAIMS = frozenset({"scope", "scp"})
+
+
+class IdTokenRefusal(StrEnum):
+    """Why ``POST /validate-id-token`` refused a token before or after the library judged it."""
+
+    UNKNOWN_ISSUER = "no configured provider has the token's issuer"
+    CARRIES_SCOPE = "an access token: it carries scope or scp"
+
+
+class IdTokenProviderFault(StrEnum):
+    """Why ``POST /validate-id-token`` cannot judge a token of a configured provider."""
+
+    NO_CLIENT_ID = "the provider names no client id for its ID tokens"
+
+
 # First-login refusals of a provider whose organization picks the user's tenant (Zitadel, Keycloak).
 ORGANIZATION_NOT_LINKED = "Your organization is not linked to a tenant"
 USERINFO_SUBJECT_MISMATCH = "The identity provider's UserInfo does not match the token"
@@ -244,26 +266,67 @@ async def canonical_identity(
     return result.ok
 
 
+def _trusted_audiences(provider: ProviderTokenConfig, id_token: str) -> list[str] | None:
+    """The audiences besides the client id an ID token of ``provider`` may list.
+
+    Those the token lists, for a provider that adds audiences of its own
+    (``id_token_trusts_listed_audiences``, Zitadel); none for every other.
+    Read before the signature is verified: a token whose ``aud`` was changed
+    fails the signature check.
+    """
+    if not provider.id_token_trusts_listed_audiences:
+        return None
+    aud = unverified_claims(id_token).get("aud")
+    listed = aud if isinstance(aud, list) else [aud]
+    return [entry for entry in listed if isinstance(entry, str)]
+
+
 @router.post("/validate-id-token")
 @limiter.limit(RATE_LIMIT_AUTH)
 async def validate_id_token(request: Request, authorization: str = Header()):
-    """Validate an ID token server-side and return its claims."""
+    """Validate an ID token server-side and return its claims.
+
+    The route runs behind neither token middleware. It takes the configured
+    provider (the middlewares' registry, ``configured_providers``) one of whose
+    ID-token issuers is the token's unverified ``iss``, and validates the token
+    as an OIDC ID token with that provider's discovery document (of the token's
+    issuer, for Descope's two URL issuers: ``id_token_disco_address``), signing
+    algorithms and client id as audience and ``azp``. An ``iss`` no provider
+    has, a refused token and an access token get the uniform 401; a provider
+    that cannot be read gets 503.
+    """
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=400, detail="Invalid authorization header")
 
     id_token = authorization.removeprefix("Bearer ")
 
+    iss = unverified_issuer(id_token)
+    provider = select_id_token_provider(configured_providers(), iss)
+    if provider is None:
+        logger.warning("ID validation refused: %s", IdTokenRefusal.UNKNOWN_ISSUER.name)
+        raise HTTPException(status_code=401, detail=REFUSED_DETAIL)
+    client_id = id_token_client_id(provider)
+    if not client_id:
+        logger.error(
+            "ID validation hit a provider fault: %s (%s)", IdTokenProviderFault.NO_CLIENT_ID.name, provider.name
+        )
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_DETAIL)
+
     config = TokenValidationConfig(
         perform_disco=True,
-        audience=DESCOPE.audience or "",
-        algorithms=sorted(DESCOPE.algorithms) or None,
-        require_https=DESCOPE.require_https,
+        audience=client_id,
+        algorithms=sorted(provider.algorithms) or None,
+        require_https=provider.require_https,
     )
     try:
-        return await validate_token(
-            jwt=id_token,
-            token_validation_config=config,
-            disco_doc_address=DESCOPE.disco_address,
+        # ``nonce=None``: the SPA's code flow sends none, so a token carrying one is refused.
+        claims = await validate_oidc_id_token(
+            id_token,
+            config,
+            disco_doc_address=id_token_disco_address(provider, iss),
+            nonce=None,
+            trusted_audiences=_trusted_audiences(provider, id_token),
+            validate_azp=True,
         )
     except PROVIDER_FAULTS as exc:
         logger.error("ID validation hit a provider fault: %s", _cause(exc))
@@ -275,3 +338,7 @@ async def validate_id_token(request: Request, authorization: str = Header()):
         # DecodeError out for a token that is not a JWT (identity-model#1179).
         logger.warning("ID validation refused: %s", _cause(exc))
         raise HTTPException(status_code=401, detail=REFUSED_DETAIL) from exc
+    if not SCOPE_CLAIMS.isdisjoint(claims):
+        logger.warning("ID validation refused: %s", IdTokenRefusal.CARRIES_SCOPE.name)
+        raise HTTPException(status_code=401, detail=REFUSED_DETAIL)
+    return claims

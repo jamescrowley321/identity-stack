@@ -37,6 +37,7 @@ DOCUMENTS_READ = "documents:read"
 SETTINGS_MANAGE = "settings:manage"
 
 IDENTITY = "/api/identity"
+VALIDATE_ID_TOKEN = "/api/validate-id-token"
 DOCUMENTS_READ_ROUTE = "/api/access-checks/documents-read"
 SETTINGS_MANAGE_ROUTE = "/api/access-checks/settings-manage"
 
@@ -246,6 +247,26 @@ def test_another_clients_token_is_refused_on_every_protected_route(token_for, ap
         refused[(method, path)] = _answer(response)
 
     assert refused == dict.fromkeys(refused, (401, TOKEN_REFUSED))
+
+
+# --- The SPA's ID token validates at POST /api/validate-id-token ---------------------
+
+
+def test_the_spas_id_token_is_validated_by_the_realm(
+    new_context, browser_login: BrowserLogin, api, keycloak: KeycloakTokenSource
+):
+    tokens = browser_login.authorize(new_context(), BOB, client_id=SPA_CLIENT_ID, scope=SPA_SCOPE, organization=ACME)
+
+    response = api(tokens.id_token).post(VALIDATE_ID_TOKEN)
+
+    assert response.status == 200, response.text()
+    body = response.json()
+    assert {name: body[name] for name in ("iss", "aud", "azp")} == {
+        "iss": keycloak.issuer,
+        "aud": SPA_CLIENT_ID,
+        "azp": SPA_CLIENT_ID,
+    }
+    assert _answer(api(tokens.access_token).post(VALIDATE_ID_TOKEN)) == (401, TOKEN_REFUSED)
 
 
 # --- A tenant admin of two tenants is admin in each --------------------------------

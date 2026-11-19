@@ -137,6 +137,12 @@ class ProviderTokenConfig:
     # from the provider's UserInfo endpoint, whose ``sub`` must equal the
     # token's, rather than from the access token (Zitadel's carries no email).
     profile_from_userinfo: bool = False
+    # True when this provider's ID tokens list audiences besides the SPA's client
+    # id that the provider adds on its own: Zitadel names every application of
+    # the project and the project id (``tests/fixtures/zitadel/human-id-token-project.json``).
+    # ``POST /api/validate-id-token`` then trusts every audience the token lists;
+    # its ``azp`` must still be the SPA. False: the client id is the only one.
+    id_token_trusts_listed_audiences: bool = False
 
 
 def _string_list(value: object) -> list[str]:
@@ -451,6 +457,7 @@ def zitadel_config(
         token_binding=ZitadelTokenBinding(client_id),
         first_login_organization=zitadel_organization_id,
         profile_from_userinfo=True,
+        id_token_trusts_listed_audiences=True,
     )
 
 
@@ -737,6 +744,21 @@ def library_token_issuers(provider: ProviderTokenConfig) -> list[str] | None:
     return sorted(provider.accepted_issuers) if len(provider.accepted_issuers) > 1 else None
 
 
+def unverified_claims(token: str) -> dict:
+    """Best-effort read of the payload without verifying the signature; ``{}`` when unreadable.
+
+    Never a security decision on its own: whatever is read here only picks the
+    provider whose keys then verify the signature.
+    """
+    try:
+        payload_b64 = token.split(".")[1]
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload_b64))
+    except Exception:
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
 def unverified_issuer(token: str) -> str | None:
     """Best-effort read of ``iss`` without verifying the signature.
 
@@ -744,14 +766,61 @@ def unverified_issuer(token: str) -> str | None:
     security decision (the signature is always verified against the selected
     provider's JWKS). Returns None for opaque or mock tokens.
     """
-    try:
-        payload_b64 = token.split(".")[1]
-        payload_b64 += "=" * (-len(payload_b64) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(payload_b64))
-    except Exception:
-        return None
-    iss = claims.get("iss") if isinstance(claims, dict) else None
+    iss = unverified_claims(token).get("iss")
     return iss if isinstance(iss, str) else None
+
+
+def id_token_issuers(provider: ProviderTokenConfig) -> frozenset[str]:
+    """The ``iss`` values an ID token of ``provider`` may carry.
+
+    Its accepted issuers, without the bare issuer: Descope signs ID tokens on
+    ``https://api.descope.com/{pid}`` and ``https://api.descope.com/v1/apps/{pid}``,
+    and the bare project id is the issuer of SDK session and access-key tokens only.
+    """
+    if provider.bare_issuer is None:
+        return provider.accepted_issuers
+    return provider.accepted_issuers - {provider.bare_issuer}
+
+
+def id_token_client_id(provider: ProviderTokenConfig) -> str | None:
+    """The SPA's client id, which an ID token of ``provider`` names in ``aud`` and ``azp``, or None.
+
+    The RP-initiated logout client id where the provider has one (Keycloak,
+    Zitadel, Ory with ``ORY_CLIENT_ID``). Only Descope (``descope_managed``)
+    falls back to its audience: its project id is the client id of its OIDC
+    application. Every other provider's audience is the API's, which its access
+    tokens carry, so an Ory with no ``ORY_CLIENT_ID`` has no client id here.
+    """
+    if provider.logout_client_id:
+        return provider.logout_client_id
+    return provider.audience if provider.descope_managed else None
+
+
+def id_token_disco_address(provider: ProviderTokenConfig, iss: str | None) -> str:
+    """Where the discovery document for an ID token of ``provider`` on ``iss`` is fetched.
+
+    For a provider with several ID-token issuers (Descope), the document of the
+    token's own issuer: each of Descope's URL issuers serves one naming itself as
+    ``issuer``, over the project's one JWKS, and py-identity-model checks an ID
+    token's ``iss`` against the discovery issuer. ``iss`` is one of the provider's
+    configured issuers (``select_id_token_provider``), never an arbitrary URL.
+    For every other provider, its configured discovery address.
+    """
+    issuers = id_token_issuers(provider)
+    if iss is not None and len(issuers) > 1 and iss in issuers:
+        return f"{iss.rstrip('/')}/.well-known/openid-configuration"
+    return provider.disco_address
+
+
+def select_id_token_provider(providers: Iterable[ProviderTokenConfig], iss: object) -> ProviderTokenConfig | None:
+    """The provider one of whose ``id_token_issuers`` equals ``iss``, or None.
+
+    No fallback for a provider with no issuer configured: an ID token is
+    validated only by the provider whose issuer it names.
+    """
+    if not isinstance(iss, str):
+        return None
+    return next((provider for provider in providers if iss in id_token_issuers(provider)), None)
 
 
 def order_candidates(providers: list[ProviderTokenConfig], iss_hint: str | None) -> list[ProviderTokenConfig]:

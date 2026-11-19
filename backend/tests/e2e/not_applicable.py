@@ -68,9 +68,6 @@ DESCOPE_ONLY_ROUTE = (
 )
 DESCOPE_MANAGEMENT_API = "calls the Descope Management API itself; the run has no Descope project"
 DESCOPE_ACCESS_KEY = "is about a Descope access-key session, which no other provider has"
-ID_TOKEN_VALIDATION = (
-    "POST /api/validate-id-token validates against the Descope provider only: 503 for this provider (#636)"
-)
 TENANT_SETTINGS = (
     "the Tenant Settings page loads GET /api/tenants/current/settings, the Descope tenant's custom "
     "attributes, which serves Descope principals only (#590)"
@@ -92,8 +89,6 @@ def _each(module: str, tests: list[str], reasons: dict[str, str]) -> dict[str, d
 NOT_APPLICABLE: dict[str, dict[str, str]] = {
     "test_ory_sso_e2e.py": {KEYCLOAK: ORY_PROVIDER, ZITADEL: ORY_PROVIDER},
     # Login, session and identity
-    "test_api_authenticated.py::test_validate_id_token": _both(ID_TOKEN_VALIDATION),
-    "test_page_content.py::test_no_5xx_errors_on_dashboard": _both(ID_TOKEN_VALIDATION),
     # RBAC administration
     **_each(
         "test_api_endpoints.py::TestAdminEndpoints",
