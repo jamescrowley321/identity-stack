@@ -275,15 +275,18 @@ class TestKeycloakOperatorsAndAdmins:
     async def test_an_admin_of_its_sole_tenant_cannot_change_the_definitions(
         self, keycloak_deployment, client, realm, db_session
     ):
-        """``dave`` administers acme alone: its admin role is one tenant's, the definitions every tenant's."""
+        """``dave`` administers acme alone: its admin role is one tenant's, the definitions every tenant's.
+
+        It lists them, which changes nothing (#707), and changes none of them.
+        """
         provider = await _provider(db_session, keycloak_deployment.issuer)
         acme = await _tenant(db_session, provider, "acme")
         admin = await _signed_in(db_session, provider, keycloak_deployment, DAVE, acme, "admin")
         owner = await _global_role(db_session, "owner")
         name = f"rr-{uuid.uuid4().hex[:8]}"
         try:
+            listed = await client.get("/api/roles", headers=admin)
             refusals = {
-                "list roles": await client.get("/api/roles", headers=admin),
                 "create role": await client.post("/api/roles", json={"name": name}, headers=admin),
                 "grant the member role a permission": await client.put(
                     "/api/roles/member", json={"permission_names": ["settings:manage"]}, headers=admin
@@ -297,6 +300,7 @@ class TestKeycloakOperatorsAndAdmins:
         assert {what: (answer.status_code, answer.json()) for what, answer in refusals.items()} == dict.fromkeys(
             refusals, (403, NOT_GRANTED)
         )
+        assert (listed.status_code, "owner" in {role["name"] for role in listed.json()["roles"]}) == (200, True)
         assert await db_session.get(Role, owner.id) is not None
         assert (_client_role(realm, name), _client_role(realm, f"{name}:x")) == (None, None)
 
@@ -339,7 +343,10 @@ class TestKeycloakOperatorsAndAdmins:
     async def test_an_admin_of_one_of_two_tenants_cannot_change_the_definitions(
         self, keycloak_deployment, client, realm, db_session
     ):
-        """``bob`` administers acme and views globex: the definitions are every tenant's, so he is refused them."""
+        """``bob`` administers acme and views globex: the definitions are every tenant's, so he changes none.
+
+        Naming acme, the tenant he administers, he lists them (#707).
+        """
         provider = await _provider(db_session, keycloak_deployment.issuer)
         acme = await _tenant(db_session, provider, "acme")
         globex = await _tenant(db_session, provider, "globex")
@@ -354,8 +361,9 @@ class TestKeycloakOperatorsAndAdmins:
         finally:
             _remove_client_roles(realm, [name])
 
-        assert {"create": (created.status_code, created.json()), "list": (listed.status_code, listed.json())} == {
+        assert {"create": (created.status_code, created.json()), "list": listed.status_code} == {
             "create": (403, NO_TENANT),
-            "list": (403, NO_TENANT),
+            "list": 200,
         }
+        assert isinstance(listed.json()["permissions"], list)
         assert _client_role(realm, name) is None

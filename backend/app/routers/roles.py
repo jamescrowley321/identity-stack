@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from app.dependencies.identity import get_role_service
 from app.dependencies.rbac import (
+    DEFINITION_READERS,
     OperatorGrantCheck,
     operator_definition_check,
     operator_grant_check,
@@ -25,12 +26,13 @@ from app.services.role import RoleService
 # ``RoleService`` pushes each definition and each assignment to the configured sync
 # adapter (``SYNC_PROVIDER``), which takes the request's tenant and user ids as that
 # provider's: every route but ``/roles/me`` serves its principals only (conventions
-# §18). The definitions belong to no tenant, so their routes are gated by
-# ``require_definitions_role``: a canonical principal needs ``operator`` by its sole
-# membership, never a tenant's ``admin``; a Descope principal keeps ``owner`` or
-# ``admin`` from its claims. No machine credential changes roles or definitions
-# (``refuse_machine_principal``). ``/roles/me`` writes nothing and answers any
-# principal the tenant resolver places.
+# §18), and no machine credential (``refuse_machine_principal``). The definitions
+# belong to no tenant, so changing them is gated by ``require_definitions_role``: a
+# canonical principal needs ``operator`` by its sole membership, never a tenant's
+# ``admin``; a Descope principal keeps ``owner`` or ``admin`` from its claims.
+# Listing them changes nothing and shows only the global roles, so an owner, admin or
+# operator of the request's tenant lists them, to assign roles (#707). ``/roles/me``
+# writes nothing and answers any principal the tenant resolver places.
 router = APIRouter(tags=["Roles"])
 SYNC_PROVIDER_ONLY = [Depends(require_sync_provider_principal), Depends(refuse_machine_principal)]
 
@@ -168,10 +170,11 @@ async def remove_roles(
 @router.get("/roles", dependencies=SYNC_PROVIDER_ONLY)
 async def list_roles(
     request: Request,
-    _roles: list[str] = Depends(require_definitions_role),
+    _tenant: str = Depends(get_tenant_id),
+    _roles: list[str] = Depends(require_role(*DEFINITION_READERS)),
     role_service: RoleService = Depends(get_role_service),
 ):
-    """List all role definitions. Requires operator (canonical) or owner/admin (Descope claims)."""
+    """List all role definitions to an owner, admin or operator of the request's tenant (#707)."""
     result = await role_service.list_roles()
     if result.is_ok():
         result = Ok({"roles": result.ok})

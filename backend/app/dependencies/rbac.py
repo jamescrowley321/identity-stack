@@ -473,6 +473,11 @@ def require_global_role(*roles: str, claimed_roles: tuple[str, ...] | None = Non
 # ``admin`` from its claims (conventions §18).
 require_definitions_role = require_global_role("operator", claimed_roles=("owner", "admin"))
 
+# The roles that list the definitions in the request's tenant (``GET /api/roles``,
+# ``GET /api/permissions``): listing changes nothing and shows only the global
+# definitions, which every tenant's grants read (#707).
+DEFINITION_READERS = ("owner", "admin", "operator")
+
 
 # The role that opens state belonging to no tenant (``require_global_role``).
 OPERATOR_ROLE = "operator"
