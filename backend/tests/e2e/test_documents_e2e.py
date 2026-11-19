@@ -81,10 +81,10 @@ def test_create_document_creates_fga_owner(admin_api_context: APIRequestContext,
 # --- AC: Permission derivation (owner=all, editor=view+edit, viewer=view only) ---
 
 
-def test_owner_has_all_permissions(admin_api_context: APIRequestContext, backend_url: str):
+def test_owner_has_all_permissions(admin_api_context: APIRequestContext, backend_url: str, relation_target: str):
     """Owner should have can_view, can_edit, and can_delete permissions."""
     resource_id = unique_name("perm-doc")
-    target = unique_name("user")
+    target = relation_target
 
     # Create owner relation directly
     resp = admin_api_context.post(
@@ -113,10 +113,12 @@ def test_owner_has_all_permissions(admin_api_context: APIRequestContext, backend
             )
 
 
-def test_editor_has_view_and_edit_not_delete(admin_api_context: APIRequestContext, backend_url: str):
+def test_editor_has_view_and_edit_not_delete(
+    admin_api_context: APIRequestContext, backend_url: str, relation_target: str
+):
     """Editor should have can_view and can_edit but NOT can_delete."""
     resource_id = unique_name("perm-doc")
-    target = unique_name("user")
+    target = relation_target
 
     resp = admin_api_context.post(
         f"{backend_url}/api/fga/relations",
@@ -155,10 +157,10 @@ def test_editor_has_view_and_edit_not_delete(admin_api_context: APIRequestContex
             )
 
 
-def test_viewer_has_view_only(admin_api_context: APIRequestContext, backend_url: str):
+def test_viewer_has_view_only(admin_api_context: APIRequestContext, backend_url: str, relation_target: str):
     """Viewer should have can_view but NOT can_edit or can_delete."""
     resource_id = unique_name("perm-doc")
-    target = unique_name("user")
+    target = relation_target
 
     resp = admin_api_context.post(
         f"{backend_url}/api/fga/relations",
@@ -238,7 +240,9 @@ def test_document_update_allowed_for_owner(admin_api_context: APIRequestContext,
         _cleanup_doc(admin_api_context, backend_url, doc_id)
 
 
-def test_permission_derivation_through_endpoints(admin_api_context: APIRequestContext, backend_url: str):
+def test_permission_derivation_through_endpoints(
+    admin_api_context: APIRequestContext, backend_url: str, relation_target: str
+):
     """Verify FGA permission derivation works end-to-end through actual document endpoints.
 
     Creates a document (admin is owner), then verifies:
@@ -262,7 +266,7 @@ def test_permission_derivation_through_endpoints(admin_api_context: APIRequestCo
 
         # Verify FGA check confirms editor permissions are a proper subset of owner
         # An editor target should have can_view and can_edit but NOT can_delete
-        editor_target = unique_name("editor-user")
+        editor_target = relation_target
         resp = admin_api_context.post(
             f"{backend_url}/api/fga/relations",
             data={"resource_type": "document", "resource_id": doc_id, "relation": "editor", "target": editor_target},
@@ -473,7 +477,7 @@ def test_list_documents_excludes_unauthorized(admin_api_context: APIRequestConte
 # --- AC: Share a document and verify access, then revoke ---
 
 
-def test_share_document_grants_access(admin_api_context: APIRequestContext, backend_url: str, test_user_id: str):
+def test_share_document_grants_access(admin_api_context: APIRequestContext, backend_url: str, share_target: str):
     """Sharing a document grants the target user FGA-level access."""
     doc = _create_doc(admin_api_context, backend_url)
     if doc is None:
@@ -484,10 +488,13 @@ def test_share_document_grants_access(admin_api_context: APIRequestContext, back
         # Share with test user as viewer
         resp = admin_api_context.post(
             f"{backend_url}/api/documents/{doc_id}/share",
-            data={"user_id": test_user_id, "relation": "viewer"},
+            data={"user_id": share_target, "relation": "viewer"},
         )
         if resp.status == 404:
-            pytest.fail("Target user not found in Descope — share test requires the E2E_TEST_EMAIL user")
+            pytest.fail(
+                "Target user not found — the share target must be a user of the admin's tenant "
+                "(Descope: the E2E_TEST_EMAIL user; Keycloak and Zitadel: the seeded write_only user)"
+            )
         if resp.status == 403:
             pytest.fail("Owner was refused a share — the grant path under test")
         assert resp.status == 200, f"Share failed: {resp.status}"
@@ -495,23 +502,23 @@ def test_share_document_grants_access(admin_api_context: APIRequestContext, back
         # Verify via FGA check that the target user now has can_view
         resp = admin_api_context.post(
             f"{backend_url}/api/fga/check",
-            data={"resource_type": "document", "resource_id": doc_id, "relation": "can_view", "target": test_user_id},
+            data={"resource_type": "document", "resource_id": doc_id, "relation": "can_view", "target": share_target},
         )
         if resp.status == 502:
             pytest.fail("FGA check not operational")
         assert resp.status == 200
-        _assert_fga_allowed(resp, True, f"Shared user {test_user_id} should have can_view")
+        _assert_fga_allowed(resp, True, f"Shared user {share_target} should have can_view")
     finally:
         # Cleanup: revoke share then delete doc
         with contextlib.suppress(Exception):
             admin_api_context.delete(
                 f"{backend_url}/api/fga/relations",
-                data={"resource_type": "document", "resource_id": doc_id, "relation": "viewer", "target": test_user_id},
+                data={"resource_type": "document", "resource_id": doc_id, "relation": "viewer", "target": share_target},
             )
         _cleanup_doc(admin_api_context, backend_url, doc_id)
 
 
-def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backend_url: str, test_user_id: str):
+def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backend_url: str, share_target: str):
     """Revoking a share removes the user's FGA-level access."""
     doc = _create_doc(admin_api_context, backend_url)
     if doc is None:
@@ -522,7 +529,7 @@ def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backen
         # Share first
         resp = admin_api_context.post(
             f"{backend_url}/api/documents/{doc_id}/share",
-            data={"user_id": test_user_id, "relation": "viewer"},
+            data={"user_id": share_target, "relation": "viewer"},
         )
         if resp.status in (403, 404):
             pytest.fail(f"Share prerequisite failed (status {resp.status})")
@@ -531,7 +538,7 @@ def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backen
         # Verify access granted
         resp = admin_api_context.post(
             f"{backend_url}/api/fga/check",
-            data={"resource_type": "document", "resource_id": doc_id, "relation": "can_view", "target": test_user_id},
+            data={"resource_type": "document", "resource_id": doc_id, "relation": "can_view", "target": share_target},
         )
         if resp.status == 502:
             pytest.fail("FGA check not operational")
@@ -540,7 +547,7 @@ def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backen
 
         # Revoke
         resp = admin_api_context.delete(
-            f"{backend_url}/api/documents/{doc_id}/share/{test_user_id}",
+            f"{backend_url}/api/documents/{doc_id}/share/{share_target}",
         )
         if resp.status == 403:
             pytest.fail("Owner was refused a revoke — the revocation path under test")
@@ -549,7 +556,7 @@ def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backen
         # Verify access denied
         resp = admin_api_context.post(
             f"{backend_url}/api/fga/check",
-            data={"resource_type": "document", "resource_id": doc_id, "relation": "can_view", "target": test_user_id},
+            data={"resource_type": "document", "resource_id": doc_id, "relation": "can_view", "target": share_target},
         )
         if resp.status == 502:
             pytest.fail("FGA check not operational")
@@ -560,7 +567,7 @@ def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backen
         with contextlib.suppress(Exception):
             admin_api_context.delete(
                 f"{backend_url}/api/fga/relations",
-                data={"resource_type": "document", "resource_id": doc_id, "relation": "viewer", "target": test_user_id},
+                data={"resource_type": "document", "resource_id": doc_id, "relation": "viewer", "target": share_target},
             )
         _cleanup_doc(admin_api_context, backend_url, doc_id)
 
@@ -568,10 +575,12 @@ def test_revoke_share_denies_access(admin_api_context: APIRequestContext, backen
 # --- AC: Sequential relation revocation (no stale grants) ---
 
 
-def test_sequential_relation_revocation_no_stale_grants(admin_api_context: APIRequestContext, backend_url: str):
+def test_sequential_relation_revocation_no_stale_grants(
+    admin_api_context: APIRequestContext, backend_url: str, relation_target: str
+):
     """Delete→check→re-create cycles: permission check must never return true after delete."""
     resource_id = unique_name("revoke-doc")
-    target = unique_name("user")
+    target = relation_target
     base_body = {"resource_type": "document", "resource_id": resource_id, "relation": "viewer", "target": target}
 
     # Create the relation first to verify FGA is operational

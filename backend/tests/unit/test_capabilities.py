@@ -54,7 +54,8 @@ DECLARED = {
 }
 
 DESCOPE_SERVED = Served(DESCOPE_CAPABILITIES, RelationshipStoreKind.DESCOPE)
-# Keycloak's machine credentials are canonical: they serve every principal.
+# Keycloak's machine credentials are canonical: they serve every principal. Its store,
+# OpenFGA, serves a canonical principal only.
 KEYCLOAK_SERVED = Served(frozenset({Capability.MACHINE_CREDENTIALS}), RelationshipStoreKind.NONE)
 
 # (method, path) of every route each capability serves.
@@ -189,12 +190,13 @@ class TestDeclarations:
         ("provider", "capabilities", "store"),
         [
             ("descope", DESCOPE_CAPABILITIES, RelationshipStoreKind.DESCOPE),
-            ("keycloak", frozenset({Capability.MACHINE_CREDENTIALS}), RelationshipStoreKind.NONE),
-            ("zitadel", frozenset(), RelationshipStoreKind.NONE),
+            ("keycloak", frozenset({Capability.MACHINE_CREDENTIALS}), RelationshipStoreKind.OPENFGA),
+            ("zitadel", frozenset(), RelationshipStoreKind.OPENFGA),
         ],
     )
     def test_the_deployment_has_its_sync_adapters_capabilities(self, monkeypatch, provider, capabilities, store):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", provider)
+        monkeypatch.setattr(identity, "RELATIONSHIP_STORE", "")
 
         assert (sync_capabilities(), relationship_store_kind()) == (capabilities, store)
 
@@ -206,23 +208,32 @@ class TestDeclarations:
         }
 
 
-# (sync provider, principal) -> what the caller is served. Descope's capabilities and
-# store are keyed on Descope ids: they serve a Descope principal only.
+OPENFGA_SERVED = Served(frozenset(), RelationshipStoreKind.OPENFGA)
+
+# (sync provider, RELATIONSHIP_STORE, principal) -> what the caller is served.
+# Descope's capabilities and store are keyed on Descope ids: they serve a Descope
+# principal only. OpenFGA is keyed on canonical ids: it serves a principal of a
+# provider in CANONICAL_RBAC_PROVIDERS (Ory here) only.
 SERVED_TO = [
-    ("descope", "descope", DESCOPE_SERVED),
-    ("descope", "ory", NOTHING),
-    ("keycloak", "descope", KEYCLOAK_SERVED),
-    ("keycloak", "ory", KEYCLOAK_SERVED),
-    ("zitadel", "descope", NOTHING),
-    ("zitadel", "ory", NOTHING),
+    ("descope", "", "descope", DESCOPE_SERVED),
+    ("descope", "", "ory", NOTHING),
+    ("keycloak", "", "descope", KEYCLOAK_SERVED),
+    ("keycloak", "", "ory", Served(frozenset({Capability.MACHINE_CREDENTIALS}), RelationshipStoreKind.OPENFGA)),
+    ("zitadel", "", "descope", NOTHING),
+    ("zitadel", "", "ory", OPENFGA_SERVED),
+    ("descope", "openfga", "descope", Served(DESCOPE_CAPABILITIES, RelationshipStoreKind.NONE)),
+    ("descope", "openfga", "ory", OPENFGA_SERVED),
+    ("keycloak", "none", "ory", KEYCLOAK_SERVED),
+    ("keycloak", "descope", "ory", KEYCLOAK_SERVED),
 ]
 PRINCIPALS = {"descope": DESCOPE_MEMBER, "ory": ORY_OWNER}
 
 
 class TestTheCapabilitiesRoute:
-    @pytest.mark.parametrize(("provider", "principal", "expected"), SERVED_TO)
-    def test_reports_what_serves_the_caller(self, client, monkeypatch, provider, principal, expected):
+    @pytest.mark.parametrize(("provider", "store", "principal", "expected"), SERVED_TO)
+    def test_reports_what_serves_the_caller(self, client, monkeypatch, provider, store, principal, expected):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", provider)
+        monkeypatch.setattr(identity, "RELATIONSHIP_STORE", store)
 
         response = client.get("/api/capabilities", headers=_bearer(PRINCIPALS[principal]))
 
@@ -278,10 +289,10 @@ GIVEN_BY = {
         for route in RELATIONSHIP_STORE_ROUTES
     },
 }
-# (sync provider, principal, method, path) of every gated route a caller is not served.
+# (sync provider, RELATIONSHIP_STORE, principal, method, path) of every gated route a caller is not served.
 MISSING_FOR = sorted(
-    (provider, principal, method, path)
-    for provider, principal, served in SERVED_TO
+    (provider, store, principal, method, path)
+    for provider, store, principal, served in SERVED_TO
     for (method, path) in EVERY_GATED_ROUTE
     if not GIVEN_BY[(method, path)](served)
 )
@@ -290,9 +301,10 @@ MISSING_FOR = sorted(
 class TestAMissingCapabilityIs404:
     """Every gated route, for every caller the capability does not serve (``SERVED_TO``)."""
 
-    @pytest.mark.parametrize(("provider", "principal", "method", "path"), MISSING_FOR)
-    def test_on_every_gated_route(self, client, monkeypatch, descope_client, method, path, provider, principal):
+    @pytest.mark.parametrize(("provider", "store", "principal", "method", "path"), MISSING_FOR)
+    def test_on_every_gated_route(self, client, monkeypatch, descope_client, method, path, provider, store, principal):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", provider)
+        monkeypatch.setattr(identity, "RELATIONSHIP_STORE", store)
         url = _url(path)
 
         response = client.request(method, url, headers=_bearer(PRINCIPALS[principal]))

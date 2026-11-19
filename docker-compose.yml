@@ -23,6 +23,12 @@
 #   zitadel:            local Zitadel issuer at http://zitadel.localhost:8480
 #                       (proxy + API + Login V2 + its own Postgres). Start it
 #                       with `make zitadel-up`; see docs/zitadel.md.
+#
+#   openfga:            local OpenFGA at http://localhost:8380 (with its own
+#                       Postgres), the relationship store of a Keycloak,
+#                       Zitadel or Ory deployment. Apply infra/openfga to it;
+#                       see infra/openfga/README.md.
+#                       docker compose --profile openfga up --wait openfga
 
 services:
   frontend:
@@ -364,9 +370,62 @@ services:
     profiles:
       - zitadel
 
+  # --- openfga profile -------------------------------------------------------
+  # Local OpenFGA with Postgres storage. No authentication: its only published
+  # port binds to loopback. The database password is a LOCAL-ONLY throwaway.
+  openfga-db:
+    image: postgres:17.10-alpine
+    environment:
+      - POSTGRES_DB=openfga
+      - POSTGRES_USER=openfga
+      - POSTGRES_PASSWORD=local-only-openfga-db
+    volumes:
+      - openfga-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openfga -d openfga"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    profiles:
+      - openfga
+
+  # Creates or upgrades OpenFGA's tables, then exits.
+  openfga-migrate:
+    image: openfga/openfga:v1.22.1
+    command: migrate
+    environment:
+      - OPENFGA_DATASTORE_ENGINE=postgres
+      - OPENFGA_DATASTORE_URI=postgres://openfga:local-only-openfga-db@openfga-db:5432/openfga?sslmode=disable
+    depends_on:
+      openfga-db:
+        condition: service_healthy
+    profiles:
+      - openfga
+
+  openfga:
+    image: openfga/openfga:v1.22.1
+    command: run
+    ports:
+      - "127.0.0.1:8380:8080"
+    environment:
+      - OPENFGA_DATASTORE_ENGINE=postgres
+      - OPENFGA_DATASTORE_URI=postgres://openfga:local-only-openfga-db@openfga-db:5432/openfga?sslmode=disable
+      - OPENFGA_PLAYGROUND_ENABLED=false
+    depends_on:
+      openfga-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr=127.0.0.1:8081"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    profiles:
+      - openfga
+
 volumes:
   pgdata:
   tyk-redis-data:
   tyk-apps:
   zitadel-pgdata:
   zitadel-bootstrap:
+  openfga-pgdata:

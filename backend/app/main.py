@@ -169,11 +169,18 @@ async def lifespan(app: FastAPI):
     http_client = outbound_client(timeout=30.0)
     base_url = knob("DESCOPE_BASE_URL", "https://api.descope.com")
     app.state.descope_client = DescopeManagementClient(project_id, management_key, base_url, http_client=http_client)
+    sync_http_client: OutboundClient | None = None
     try:
+        # A RELATIONSHIP_STORE that names no store stops startup (RelationshipStoreNotAvailable).
+        relationship_store = identity_dependencies.relationship_store_kind()
+        logger.info("Relationship store: %s", relationship_store)
         sync_http_client = await _start_sync_provider(app)
+        stop_relationship_store = await identity_dependencies.start_relationship_store(app.state, relationship_store)
     except Exception:
         # Startup stops here: close what was opened before it, each close whatever the one before did.
         try:
+            if sync_http_client is not None:
+                await sync_http_client.aclose()
             await http_client.aclose()
         finally:
             try:
@@ -276,6 +283,8 @@ async def lifespan(app: FastAPI):
                             app.state.keycloak_admin = None
                             if sync_http_client is not None:
                                 await sync_http_client.aclose()
+                            if stop_relationship_store is not None:
+                                await stop_relationship_store()
                         except Exception:
                             logger.warning("Sync provider HTTP client close failed", exc_info=True)
                         finally:

@@ -1,9 +1,16 @@
 import re
+from dataclasses import dataclass
+from typing import Annotated
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 
+from app.dependencies.identity import get_relationship_store
+from app.dependencies.rbac import canonical_memberships
+from app.dependencies.tenant import get_tenant_id
+from app.dependencies.tenant_access import NO_TENANT_CONTEXT, CanonicalMemberships, resolve_tenant_access
 from app.logbook import logbook
-from app.outbound import UpstreamStatusError, UpstreamTransportError
+from app.services.relationship_store import RelationshipStoreError, RelationshipStoreErrorKind
+from app.services.relationship_users import DirectoryUser, UserDirectory, UserDirectoryUnavailable
 
 logger = logbook(__name__)
 
@@ -23,35 +30,92 @@ def extract_user_id(request: Request) -> str:
     return user_id
 
 
-def _extract_tenant_id(request: Request) -> str:
-    """The Descope tenant that prefixes a resource id in Descope's FGA store: the ``dct`` claim.
+@dataclass(frozen=True)
+class RelationshipCaller:
+    """Whom the FGA and document routes act for: the request's tenant and the caller's subject id in the store."""
 
-    Not the tenant resolver (conventions §18). ``require_fga`` checks relations
-    in Descope's store, which is keyed on Descope tenant and user ids, so a
-    principal from any other provider has no ``dct`` and is refused here.
+    tenant_id: str
+    user_id: str
+
+
+def _subject(request: Request, memberships: CanonicalMemberships | None) -> str:
+    """The caller's id in the relationship store.
+
+    A Descope principal's is its ``sub``, the Descope user id Descope's store keys
+    on. A principal authorized from the canonical model is keyed by its canonical
+    user id, never its provider's ``sub`` (``RELATIONSHIP_STORES`` pairs each store
+    with the principals whose ids it holds).
+    """
+    if memberships is None:
+        return extract_user_id(request)
+    if not memberships.user_id:
+        raise HTTPException(status_code=403, detail=NO_TENANT_CONTEXT)
+    return memberships.user_id
+
+
+async def get_relationship_caller(
+    request: Request,
+    tenant_id: Annotated[str, Depends(get_tenant_id)],
+    memberships: Annotated[CanonicalMemberships | None, Depends(canonical_memberships)] = None,
+) -> RelationshipCaller:
+    """Dependency: the request's tenant from the resolver (conventions §18) and the caller's subject id."""
+    return RelationshipCaller(tenant_id=tenant_id, user_id=_subject(request, memberships))
+
+
+async def _relationship_caller(request: Request) -> RelationshipCaller:
+    """``get_relationship_caller`` for ``require_fga``, which resolves its own dependencies.
+
+    The subject first, so a token without one is 401 before it is 403 for its tenant.
     """
     claims = getattr(request.state, "claims", None)
     if not isinstance(claims, dict):
         raise HTTPException(status_code=401, detail="Not authenticated")
-    tenant_id = claims.get("dct")
-    if not tenant_id:
-        raise HTTPException(status_code=403, detail="No tenant context")
-    return tenant_id
+    memberships = await canonical_memberships(request)
+    user_id = _subject(request, memberships)
+    return RelationshipCaller(tenant_id=resolve_tenant_access(request, claims, memberships).tenant_id, user_id=user_id)
 
 
-async def resolve_fga_user_target(client, identifier: str, tenant_id: str) -> str:
-    """Resolve a user identifier to the Descope userId FGA keys on, if it names one.
+def store_error_response(exc: RelationshipStoreError) -> HTTPException:
+    """What a route answers for a failed store call. ``ABSENT`` and ``UNAVAILABLE`` are the store's fault."""
+    status = {
+        RelationshipStoreErrorKind.INVALID: 422,
+        RelationshipStoreErrorKind.REFUSED: 400,
+        RelationshipStoreErrorKind.SCHEMA_READ_ONLY: 409,
+    }.get(exc.kind, 502)
+    return HTTPException(status_code=status, detail=exc.detail)
 
-    Every FGA *read* in this service keys on the JWT ``sub``, which is a Descope
-    userId: ``require_fga`` checks with it, and the owner tuple is written from
-    it. A write that keys on whatever the caller happened to type therefore lands
-    on a target no read will ever match. Sharing by email failed loudly (the ``@``
-    is outside the FGA charset, so the client rejected it), but sharing by a
-    charset-legal username returned 200 while granting nothing at all, and
-    revoking reported success while removing nothing. Resolving caller-supplied
-    targets through the same lookup makes both ends of the tuple agree.
 
-    Best-effort by design: an identifier that names no Descope user is returned
+async def find_user(directory: UserDirectory, identifier: str) -> DirectoryUser | None:
+    """``directory.find``, with a directory that cannot answer as 502."""
+    try:
+        return await directory.find(identifier)
+    except UserDirectoryUnavailable as exc:
+        logger.error("Failed to look up a relation's target user: %s", exc.upstream)
+        raise HTTPException(status_code=502, detail="Failed to verify target user") from exc
+
+
+async def resolve_fga_user_target(
+    directory: UserDirectory, identifier: str, tenant_id: str, *, open_subjects: bool = True
+) -> str | None:
+    """Resolve a user identifier to the user id the relationship store keys on, if it names one.
+
+    ``open_subjects`` is the store's (``RelationshipStoreRegistration``). Off, as on
+    OpenFGA, whose subjects are canonical users only, an identifier that does not
+    resolve inside the caller's tenant gives ``None``: the caller refuses the write
+    and answers a check ``allowed: false`` without asking the store. Otherwise a
+    tenant admin could key a real grant on another tenant's user by their
+    canonical id.
+
+    Every FGA *read* in this service keys on the caller's subject id
+    (``_subject``): ``require_fga`` checks with it, and the owner tuple is written
+    from it. A write that keys on whatever the caller happened to type therefore
+    lands on a target no read will ever match: sharing by a username returned 200
+    while granting nothing at all, and revoking reported success while removing
+    nothing. Resolving caller-supplied targets in the store's own user directory
+    (Descope's users for Descope's store, the canonical users for OpenFGA) makes
+    both ends of the tuple agree.
+
+    Best-effort by design: an identifier that names no user is returned
     unchanged. ``/api/fga/relations`` and ``/api/fga/check`` are the raw admin
     surface over the authz store, where a target need not be a user at all — a
     permission check for a subject that does not exist must be answerable
@@ -62,10 +126,10 @@ async def resolve_fga_user_target(client, identifier: str, tenant_id: str) -> st
     Scoped to ``tenant_id``: a user the caller's tenant does not contain is
     treated exactly like a user that does not exist, and the identifier falls
     through unresolved. Without that check these routes resolved by login id
-    **project-wide**, which made them an existence oracle over every account in
-    the project — a hit echoed back the victim's Descope ``userId`` while a miss
-    echoed the input unchanged — and let an admin of one tenant write a real
-    grant keyed on a subject belonging to another.
+    across every tenant, which made them an existence oracle over every account —
+    a hit echoed back the victim's user id while a miss echoed the input
+    unchanged — and let an admin of one tenant write a real grant keyed on a
+    subject belonging to another.
 
     Falling through is deliberate, rather than answering 403. A distinct status
     for "exists, but not in your tenant" would rebuild the same oracle in the
@@ -74,32 +138,22 @@ async def resolve_fga_user_target(client, identifier: str, tenant_id: str) -> st
     it confers nothing on the real user.
 
     ``tenant_id`` is required, not optional: a caller that has no tenant to scope
-    by must not reach this function, and a future route that forgets to pass one
-    fails to call it at all rather than silently resolving project-wide.
+    by must not reach this function.
 
-    An upstream fault is never silently swallowed: only a clean "no such user"
-    falls through to the identifier.
+    A directory that cannot answer is never silently swallowed (502): only a
+    clean "no such user" falls through to the identifier.
     """
     try:
-        user = await client.load_user(identifier)
-    except UpstreamStatusError as exc:
-        if exc.response.status_code == 404:
-            return identifier
-        logger.error("Failed to resolve FGA target: HTTP %s", exc.response.status_code)
+        user = await directory.find(identifier)
+    except UserDirectoryUnavailable as exc:
+        logger.error("Failed to resolve FGA target: %s", exc.upstream)
         raise HTTPException(status_code=502, detail="Failed to resolve target user") from exc
-    except UpstreamTransportError as exc:
-        logger.error("Network error resolving FGA target: %s", type(exc).__name__)
-        raise HTTPException(status_code=502, detail="Failed to resolve target user") from exc
-
-    if not isinstance(user, dict) or not user.get("userId"):
-        return identifier
-
-    target_tenants = {t.get("tenantId") for t in user.get("userTenants") or [] if isinstance(t, dict)}
-    if tenant_id not in target_tenants:
+    if user is None:
+        return identifier if open_subjects else None
+    if tenant_id not in user.tenant_ids:
         logger.info("FGA target resolved to a user outside the caller's tenant; leaving it unresolved")
-        return identifier
-
-    return str(user["userId"])
+        return identifier if open_subjects else None
+    return user.user_id
 
 
 def require_fga(
@@ -111,12 +165,12 @@ def require_fga(
 ):
     """Dependency factory that enforces an FGA permission check.
 
-    Extracts user_id from JWT claims (sub), tenant_id from JWT claims (dct),
-    and resource_id from the path parameter named by ``resource_id_param``,
-    then calls check_permission with a tenant-prefixed resource_id on the
-    Descope Management API.
+    Takes the tenant from the resolver (conventions §18) and the caller's subject
+    id (``_subject``), and the resource id from the path parameter named by
+    ``resource_id_param``, then checks the relation in the deployment's
+    relationship store.
 
-    Returns the caller's user_id for downstream use.
+    Returns the caller's subject id for downstream use.
     Fail-closed: any FGA API error results in HTTP 502 (deny).
 
     ``resource_id_pattern`` is checked here rather than left to the path
@@ -130,8 +184,8 @@ def require_fga(
     compiled = re.compile(resource_id_pattern) if resource_id_pattern else None
 
     async def dependency(request: Request) -> str:
-        user_id = extract_user_id(request)
-        tenant_id = _extract_tenant_id(request)
+        caller = await _relationship_caller(request)
+        user_id, tenant_id = caller.user_id, caller.tenant_id
         resource_id = request.path_params.get(resource_id_param, "")
         if not resource_id:
             raise HTTPException(status_code=400, detail="Missing resource identifier")
@@ -140,32 +194,22 @@ def require_fga(
                 status_code=422,
                 detail=f"Invalid {resource_id_param}: expected {resource_id_pattern}",
             )
-        prefixed_id = f"{tenant_id}:{resource_id}"
         try:
-            client = request.app.state.descope_client
-            allowed = await client.check_permission(resource_type, prefixed_id, relation, user_id)
-        except UpstreamStatusError as exc:
-            # Include the upstream body. Without it a 400 here says only "the
+            store = get_relationship_store(request)
+            allowed = await store.check(tenant_id, resource_type, resource_id, relation, user_id)
+        except RelationshipStoreError as exc:
+            # Include the store's answer. Without it a refusal here says only "the
             # authz store refused", and the reason — a relation the schema does
             # not define, a malformed identifier — is nowhere in the logs, which
             # is what made a drifted FGA schema undiagnosable from CI alone.
             logger.error(
-                "FGA check failed (HTTP %s) user=%s resource=%s:%s relation=%s upstream=%s",
-                exc.response.status_code,
+                "FGA check failed (%s) user=%s resource=%s:%s relation=%s upstream=%s",
+                exc.kind,
                 user_id,
                 resource_type,
                 resource_id,
                 relation,
-                exc.response.text[:500],
-            )
-            raise HTTPException(status_code=502, detail="Authorization check failed") from exc
-        except UpstreamTransportError as exc:
-            logger.error(
-                "FGA check network error user=%s resource=%s:%s relation=%s",
-                user_id,
-                resource_type,
-                resource_id,
-                relation,
+                exc.upstream,
             )
             raise HTTPException(status_code=502, detail="Authorization check failed") from exc
         if not allowed:

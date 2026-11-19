@@ -14,7 +14,7 @@ AC-4.3.1: get_identity_resolution_service() for identity resolution with Redis c
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -23,16 +23,22 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import State
 
-from app.dependencies.descope import get_descope_management, require_descope_management, require_descope_principal
+from app.dependencies.descope import (
+    get_descope_management,
+    is_descope_principal,
+    require_descope_management,
+    require_descope_principal,
+)
 from app.dependencies.keycloak_reconciliation import build_keycloak_reconciliation
 from app.dependencies.keycloak_sync import build_keycloak_sync_adapter
-from app.dependencies.rbac import get_rbac_session
+from app.dependencies.rbac import get_rbac_session, is_canonical_principal
 from app.dependencies.zitadel_sync import build_zitadel_sync_adapter
-from app.errors.identity import Conflict, IdentityErrorRaised
+from app.errors.identity import CapabilityMissing, Conflict, IdentityErrorRaised
 from app.knobs import knob
 from app.logbook import logbook
 from app.middleware.providers import KEYCLOAK_PROVIDER_NAME, ZITADEL_PROVIDER_NAME, ProviderTokenConfig
 from app.models.database import get_async_session, get_engine
+from app.outbound import outbound_client
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.machine_credential import MachineCredentialRepository
@@ -58,10 +64,18 @@ from app.services.machine_credentials import (
     MachineCredentialService,
 )
 from app.services.members import MemberDirectory, MemberService
+from app.services.openfga import OPENFGA_TIMEOUT_SECONDS, OpenFgaRelationshipStore, connect_openfga
 from app.services.permission import PermissionService
 from app.services.provider import ProviderService
 from app.services.reconciliation import ProviderReconciliation, ReconciliationService
-from app.services.relationship_store import RelationshipStoreKind
+from app.services.relationship_store import (
+    DescopeRelationshipStore,
+    RelationshipStore,
+    RelationshipStoreFault,
+    RelationshipStoreKind,
+    RelationshipStoreNotAvailable,
+)
+from app.services.relationship_users import CanonicalUserDirectory, DescopeUserDirectory, UserDirectory
 from app.services.role import RoleService
 from app.services.sync_status import SyncStatusService
 from app.services.tenant import TenantService
@@ -131,7 +145,8 @@ def _keycloak_machine_credentials(request: Request, session: AsyncSession | None
 
 @dataclass(frozen=True)
 class SyncAdapterRegistration:
-    """A provider's sync adapter: its class, which declares its capabilities, and how it is built.
+    """A provider's sync adapter: its class, which declares its capabilities and its default
+    relationship store, and how it is built.
 
     ``machine_credentials`` builds the provider's ``MachineCredentials`` when its
     adapter declares ``Capability.MACHINE_CREDENTIALS``, and is ``None`` otherwise
@@ -205,15 +220,117 @@ def sync_capabilities() -> frozenset[Capability]:
     return SYNC_ADAPTERS[SYNC_PROVIDER].adapter.capabilities
 
 
-# The relationship store of a deployment, by its sync provider: Descope's FGA store
-# for Descope, none for any other. Descope's store is keyed on Descope ids, which a
-# canonical principal does not have.
-RELATIONSHIP_STORES: dict[str, RelationshipStoreKind] = {"descope": RelationshipStoreKind.DESCOPE}
+# The relationship store a deployment selects (RelationshipStoreKind). Unset, the
+# sync provider's registration chooses. Fixed for the process; main.lifespan refuses
+# a value that names no store.
+RELATIONSHIP_STORE = knob("RELATIONSHIP_STORE", "").strip().lower()
+
+
+@dataclass(frozen=True)
+class RelationshipStoreRegistration:
+    """A relationship store: whom it serves, how it is built, and the user directory of its subjects.
+
+    ``serves`` is whether the request's principal has the ids the store keys on:
+    Descope's store keys on Descope tenant and user ids, so it serves Descope
+    principals; OpenFGA keys on canonical ids, so it serves the principals
+    authorized from the canonical model (conventions §18).
+    """
+
+    serves: Callable[[Request], bool]
+    build: Callable[[State], RelationshipStore]
+    users: Callable[[State, AsyncSession], UserDirectory]
+    # Whether a relation may name a subject the store's directory does not find in
+    # the caller's tenant. Descope's raw admin surface keys on whatever it is given;
+    # OpenFGA's subjects are canonical users only, so anything else is refused.
+    open_subjects: bool
+    # Opens what the store needs for the life of the process, at startup, and
+    # returns what closes it. ``None``: the store needs nothing of its own.
+    start: Callable[[State], Awaitable[Callable[[], Awaitable[None]]]] | None = None
+
+
+async def _start_openfga(state: State) -> Callable[[], Awaitable[None]]:
+    """Connect OpenFGA (``connect_openfga``): a missing setting, an unreachable server or a
+    model it does not hold stops startup (``RelationshipStoreNotAvailable``)."""
+    http = outbound_client(timeout=OPENFGA_TIMEOUT_SECONDS)
+    try:
+        state.openfga = await connect_openfga(http)
+    except Exception:
+        await http.aclose()
+        raise
+    logger.info(
+        "OpenFGA connected: store %s, authorization model %s",
+        state.openfga.settings.store_id,
+        state.openfga.settings.authorization_model_id,
+    )
+
+    async def stop() -> None:
+        state.openfga = None
+        await http.aclose()
+
+    return stop
+
+
+# One entry per store.
+RELATIONSHIP_STORES: dict[RelationshipStoreKind, RelationshipStoreRegistration] = {
+    RelationshipStoreKind.DESCOPE: RelationshipStoreRegistration(
+        serves=is_descope_principal,
+        build=lambda state: DescopeRelationshipStore(state.descope_client),
+        users=lambda state, _session: DescopeUserDirectory(state.descope_client),
+        open_subjects=True,
+    ),
+    RelationshipStoreKind.OPENFGA: RelationshipStoreRegistration(
+        serves=is_canonical_principal,
+        build=lambda state: OpenFgaRelationshipStore(state.openfga),
+        users=lambda _state, session: CanonicalUserDirectory(
+            UserRepository(session), UserTenantRoleRepository(session)
+        ),
+        open_subjects=False,
+        start=_start_openfga,
+    ),
+}
 
 
 def relationship_store_kind() -> RelationshipStoreKind:
-    """The kind of the deployment's relationship store (``RELATIONSHIP_STORES``)."""
-    return RELATIONSHIP_STORES.get(SYNC_PROVIDER, RelationshipStoreKind.NONE)
+    """The kind of the deployment's relationship store: ``RELATIONSHIP_STORE``, else the sync provider's.
+
+    Raises ``RelationshipStoreNotAvailable`` for a ``RELATIONSHIP_STORE`` that names no store.
+    """
+    if not RELATIONSHIP_STORE:
+        return SYNC_ADAPTERS[SYNC_PROVIDER].adapter.relationship_store
+    try:
+        kind = RelationshipStoreKind(RELATIONSHIP_STORE)
+    except ValueError as exc:
+        raise RelationshipStoreNotAvailable(RelationshipStoreFault.UNKNOWN, RELATIONSHIP_STORE) from exc
+    return kind
+
+
+async def start_relationship_store(state: State, kind: RelationshipStoreKind) -> Callable[[], Awaitable[None]] | None:
+    """Start the deployment's store (its registration's ``start``) for ``main.lifespan``; what stops it, or ``None``."""
+    registration = RELATIONSHIP_STORES.get(kind)
+    if registration is None or registration.start is None:
+        return None
+    return await registration.start(state)
+
+
+def relationship_store_registration() -> RelationshipStoreRegistration:
+    """The deployment's store's registration; ``CapabilityMissing`` when it has none."""
+    registration = RELATIONSHIP_STORES.get(relationship_store_kind())
+    if registration is None:
+        raise IdentityErrorRaised(CapabilityMissing(message="This deployment has no relationship store"))
+    return registration
+
+
+def get_relationship_store(request: Request) -> RelationshipStore:
+    """The deployment's relationship store. The FGA and document routes reach relations only through it.
+
+    Their ``require_relationship_store`` gate refuses a deployment with none before this runs.
+    """
+    return relationship_store_registration().build(request.app.state)
+
+
+def get_user_directory(request: Request, session: AsyncSession = Depends(get_async_session)) -> UserDirectory:
+    """The directory of the users the deployment's relationship store names (``app.services.relationship_users``)."""
+    return relationship_store_registration().users(request.app.state, session)
 
 
 async def get_machine_credential_service(

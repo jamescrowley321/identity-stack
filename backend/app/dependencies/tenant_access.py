@@ -55,12 +55,14 @@ class CanonicalMemberships:
 
     ``tenants`` names tenants the caller belongs to beside those its grants name:
     a machine credential belongs to its tenant whether or not it holds a role there.
+    ``user_id`` is the caller's canonical user id: the subject OpenFGA keys their relations on.
     """
 
     grants: tuple[CanonicalGrant, ...]
     # Tenant id -> the canonical tenant's name, for the tenants the grants name.
     tenant_names: Mapping[str, str] = field(default_factory=dict)
     tenants: frozenset[str] = frozenset()
+    user_id: str | None = None
 
     @property
     def tenant_ids(self) -> frozenset[str]:

@@ -48,6 +48,14 @@ locals {
     if role != null && contains(keys(local.tenant_organizations), tenant)
   }
 
+  # A second user of the two-tenant user's admin tenant, linked the same way: the
+  # one the shared e2e suite shares documents with (backend/tests/e2e/helpers/providers.py).
+  share_target = local.fixture.cases.write_only
+  share_target_roles = {
+    for tenant, role in local.fixture.users[local.share_target].roles : tenant => role
+    if role != null && contains(keys(local.tenant_organizations), tenant)
+  }
+
   # Zitadel's check lifetimes on a fresh instance, by length.
   ten_days    = "240h0m0s"
   thirty_days = "720h0m0s"

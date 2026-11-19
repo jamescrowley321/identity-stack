@@ -77,12 +77,15 @@ and `make test-e2e-keycloak` read whichever instance was applied last.
 KEYCLOAK_USER=admin KEYCLOAK_PASSWORD=admin terraform -chdir=infra/keycloak apply \
   -var issuer_url=http://keycloak-test.localhost:18180/realms/identity-stack-terraform
 make keycloak-env   # the backend/.env and frontend/.env lines
+make test-up-openfga  # the relationship store: SYNC_PROVIDER=keycloak defaults to OpenFGA
+terraform -chdir=infra/openfga init && terraform -chdir=infra/openfga apply -var api_url=http://localhost:18380
+terraform -chdir=infra/openfga output backend_environment   # RELATIONSHIP_STORE and OPENFGA_* lines
 
 export DATABASE_URL=postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
 (cd backend && python -m alembic upgrade head)
 make keycloak-seed  # the provider row, the tenants' and the fixture users' links
 # then start the backend on :8000 (from backend/) with every backend line, the
-# KEYCLOAK_ADMIN_CLIENT_* pair included, and SYNC_PROVIDER=keycloak (the suites need the event
+# KEYCLOAK_ADMIN_CLIENT_* pair included, the infra/openfga lines, and SYNC_PROVIDER=keycloak (the suites need the event
 # pull and reconciliation), CANONICAL_RBAC_PROVIDERS=keycloak, JIT_ENABLED_PROVIDERS=keycloak,
 # DESCOPE_PROJECT_ID= DESCOPE_MANAGEMENT_KEY=, plus RATE_LIMIT_DEFAULT=2000/minute
 # RATE_LIMIT_AUTH=1000/minute: the suite's refused requests share one client address, and the

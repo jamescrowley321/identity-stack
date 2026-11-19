@@ -13,6 +13,8 @@ from typing import ClassVar
 
 from expression import Result
 
+from app.services.relationship_store import RelationshipStoreKind
+
 # ``delete_role_assignment`` data key: ``True`` when the removed assignment was the
 # user's last role in the tenant, so they no longer belong to it (RoleService).
 LAST_ROLE_IN_TENANT = "last_role_in_tenant"
@@ -138,6 +140,12 @@ class IdentityProviderAdapter(ABC):
     # The optional capabilities the adapter implements. Every concrete adapter
     # declares its own set, empty when it implements none.
     capabilities: ClassVar[frozenset[Capability]]
+
+    # The relationship store a deployment syncing to the provider gets when
+    # RELATIONSHIP_STORE is unset: OpenFGA, for a provider with no Zanzibar-style
+    # store of its own (Keycloak, Zitadel, Ory: owner decision 1 of #672). Descope
+    # declares its own FGA store.
+    relationship_store: ClassVar[RelationshipStoreKind] = RelationshipStoreKind.OPENFGA
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         """Refuse an adapter class that does not declare its ``capabilities``."""

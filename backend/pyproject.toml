@@ -141,7 +141,7 @@ rules = [
 unmigrated = [
     "Directory (#515): app.routers.canonical_users app.routers.tenants app.services.tenant app.services.user",
     "Federation (#516): app.routers.idp_links app.routers.providers app.services.identity_provisioning app.services.idp_link app.services.provider",
-    "Documents and FGA (#517): app.routers.documents app.routers.fga",
+    "Documents and FGA (#517): app.routers.documents",
     "Synchronisation (#518): app.routers.sync_status app.services.inbound_sync app.services.keycloak_reconciliation app.services.reconciliation app.services.sync_status",
 ]
 

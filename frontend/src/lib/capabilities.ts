@@ -11,6 +11,7 @@ const CAPABILITIES: readonly Capability[] = Object.values(Capability);
 /** The relationship store serving the caller (the backend's `RelationshipStoreKind`); `none` serves no FGA. */
 export const RelationshipStoreKind = {
   DESCOPE: "descope",
+  OPENFGA: "openfga",
   NONE: "none",
 } as const;
 export type RelationshipStoreKind = (typeof RelationshipStoreKind)[keyof typeof RelationshipStoreKind];

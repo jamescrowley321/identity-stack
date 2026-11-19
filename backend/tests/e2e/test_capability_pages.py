@@ -16,21 +16,23 @@ from app.services.adapters.base import Capability
 from app.services.relationship_store import RelationshipStoreKind
 from tests.e2e.not_applicable import DESCOPE, KEYCLOAK, ZITADEL, selected_provider
 
-NOTHING = {"capabilities": [], "relationship_store": RelationshipStoreKind.NONE}
+OPENFGA_ONLY = {"capabilities": [], "relationship_store": RelationshipStoreKind.OPENFGA}
 
 # What each run's principals are served. Descope's capabilities and FGA store are
 # keyed on Descope ids, so they serve Descope principals only: the Zitadel run's
 # backend syncs with Descope (SYNC_PROVIDER stays descope, .github/workflows/ci.yml),
-# but serves its Zitadel principals none of them.
+# but serves its Zitadel principals none of Descope's capabilities. Both canonical
+# runs apply infra/openfga, whose RELATIONSHIP_STORE=openfga serves their principals
+# FGA and documents by canonical id (#682).
 EXPECTED = {
     DESCOPE: {
         "capabilities": sorted([Capability.CUSTOM_ATTRIBUTES, Capability.MACHINE_CREDENTIALS]),
         "relationship_store": RelationshipStoreKind.DESCOPE,
     },
     # Keycloak's machine credentials are canonical: Keycloak clients the backend
-    # registers (#680), which serve every principal.
-    KEYCLOAK: {"capabilities": [Capability.MACHINE_CREDENTIALS], "relationship_store": RelationshipStoreKind.NONE},
-    ZITADEL: NOTHING,
+    # registers (#680), which serve every principal; its relationship store is OpenFGA.
+    KEYCLOAK: {"capabilities": [Capability.MACHINE_CREDENTIALS], "relationship_store": RelationshipStoreKind.OPENFGA},
+    ZITADEL: OPENFGA_ONLY,
 }
 
 # The sidebar links shown whatever the capabilities, to an admin and to anyone.

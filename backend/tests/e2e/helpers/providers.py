@@ -35,6 +35,7 @@ import pytest
 from playwright.sync_api import Browser, BrowserContext, Page, Request, expect
 from playwright.sync_api import Error as PlaywrightError
 
+from tests.e2e.helpers.api import unique_name
 from tests.e2e.not_applicable import (
     DESCOPE,
     INTERNAL_ENDPOINT_SECRETS,
@@ -173,6 +174,17 @@ class E2EProvider(ABC):
     @abstractmethod
     def user_id(self, request: pytest.FixtureRequest) -> str:
         """The id the backend's routes take for ``MEMBER``."""
+
+    def share_target(self, request: pytest.FixtureRequest) -> str:
+        """A user of ``ADMIN``'s tenant other than ``ADMIN``, as a share takes them: ``MEMBER`` by default."""
+        return self.user_id(request)
+
+    def relation_target(self, request: pytest.FixtureRequest) -> str:
+        """A subject the FGA admin routes write relations for.
+
+        Descope's store keys on whatever it is given, so a fresh name each time.
+        """
+        return unique_name("user")
 
     # --- shared by the providers that sign in through the SPA ---------------------
 
@@ -465,6 +477,21 @@ class TwoTenantUserProvider(E2EProvider):
 
     def user_id(self, request: pytest.FixtureRequest) -> str:
         return self._identity(self._signed_in_token())["user"]["id"]
+
+    def share_target(self, request: pytest.FixtureRequest) -> str:
+        """The fixture's second member of ``ADMIN``'s tenant, by email: ``ADMIN`` and ``MEMBER`` are one user.
+
+        The provider's seed links them (``make keycloak-seed``, ``make zitadel-seed``).
+        """
+        from tests.helpers.identity_fixture import IDENTITIES
+
+        user = IDENTITIES.cases.write_only
+        assert user.roles.get(self._tenant_key(ADMIN)), f"{user.key} is not a member of the admin's tenant"
+        return user.email
+
+    def relation_target(self, request: pytest.FixtureRequest) -> str:
+        """The share target: OpenFGA's subjects are users of the caller's tenant only."""
+        return self.share_target(request)
 
 
 class KeycloakProvider(TwoTenantUserProvider):

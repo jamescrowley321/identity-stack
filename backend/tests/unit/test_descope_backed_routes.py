@@ -9,9 +9,9 @@ principal on them before anything is read.
 Every tenant-scoped route is in exactly one of the two registers here. A new
 route that depends on ``get_tenant_id`` fails this file until it is put in one.
 
-The route over project-wide state that Descope holds (the FGA schema) takes no
-tenant from ``get_tenant_id`` but carries the same guard: a canonical principal
-who is an admin of any one of their tenants would otherwise change it in Descope.
+The FGA and document routes are not Descope's: they reach the deployment's
+relationship store, which ``capabilities.served`` gives only to the principals
+whose ids it holds (``RELATIONSHIP_STORE_ROUTES``).
 
 The role and permission routes are not Descope's: their services push every
 write to the configured sync adapter (``SYNC_PROVIDER``), so
@@ -116,17 +116,6 @@ KEYCLOAK_ONLY = {"detail": NOT_A_SYNC_PROVIDER_PRINCIPAL.format(provider="Keyclo
 # (method, path) of every route that hands the tenant or the subject to Descope.
 DESCOPE_TENANT_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
-        ("POST", "/api/documents"),
-        ("GET", "/api/documents"),
-        ("GET", "/api/documents/{document_id}"),
-        ("PUT", "/api/documents/{document_id}"),
-        ("DELETE", "/api/documents/{document_id}"),
-        ("POST", "/api/documents/{document_id}/share"),
-        ("DELETE", "/api/documents/{document_id}/share/{target_user_id}"),
-        ("POST", "/api/fga/relations"),
-        ("DELETE", "/api/fga/relations"),
-        ("GET", "/api/fga/relations"),
-        ("POST", "/api/fga/check"),
         ("GET", "/api/tenants/current/settings"),
         ("PATCH", "/api/tenants/current/settings"),
     }
@@ -148,14 +137,37 @@ PER_PROVIDER_ROUTES: frozenset[tuple[str, str]] = frozenset(
     }
 )
 
-# (method, path) of every guarded route over state that belongs to no tenant: the
-# FGA schema is the Descope project's own.
-DESCOPE_PROJECT_ROUTES: frozenset[tuple[str, str]] = frozenset(
+# (method, path) of every guarded route over state that belongs to no tenant. None is
+# left: the role and permission definitions are the sync provider's
+# (``SYNC_PROVIDER_PROJECT_ROUTES``), the FGA schema the relationship store's.
+DESCOPE_PROJECT_ROUTES: frozenset[tuple[str, str]] = frozenset()
+
+# (method, path) of every route that keys the relationship store on the request's
+# tenant and the caller's subject id. No guard: ``capabilities.served`` gives each
+# store only to the principals whose ids it holds (Descope's store to Descope
+# principals, OpenFGA to canonical ones), and refuses everyone else 404 first.
+RELATIONSHIP_STORE_TENANT_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
-        ("GET", "/api/fga/schema"),
-        ("PUT", "/api/fga/schema"),
+        ("POST", "/api/documents"),
+        ("GET", "/api/documents"),
+        ("GET", "/api/documents/{document_id}"),
+        ("PUT", "/api/documents/{document_id}"),
+        ("DELETE", "/api/documents/{document_id}"),
+        ("POST", "/api/documents/{document_id}/share"),
+        ("DELETE", "/api/documents/{document_id}/share/{target_user_id}"),
+        ("POST", "/api/fga/relations"),
+        ("DELETE", "/api/fga/relations"),
+        ("GET", "/api/fga/relations"),
+        ("POST", "/api/fga/check"),
     }
 )
+
+# (method, path) of the relationship store's schema routes: the store's own, no
+# tenant's. Gated like the tenant routes above; on OpenFGA the schema is read-only.
+RELATIONSHIP_STORE_SCHEMA_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {("GET", "/api/fga/schema"), ("PUT", "/api/fga/schema")}
+)
+RELATIONSHIP_STORE_ROUTES = RELATIONSHIP_STORE_TENANT_ROUTES | RELATIONSHIP_STORE_SCHEMA_ROUTES
 
 # (method, path) of every guarded route that hands Descope the caller's ``sub`` and no tenant.
 DESCOPE_SUBJECT_ROUTES: frozenset[tuple[str, str]] = frozenset({("PATCH", "/api/profile")})
@@ -479,7 +491,11 @@ class TestTheRegisters:
         takes_a_tenant = _routes_depending_on(get_tenant_id) | _routes_depending_on(get_tenant_access)
 
         assert takes_a_tenant == (
-            DESCOPE_TENANT_ROUTES | set(PROVIDER_NEUTRAL_ROUTES) | SYNC_PROVIDER_TENANT_ROUTES | PER_PROVIDER_ROUTES
+            DESCOPE_TENANT_ROUTES
+            | set(PROVIDER_NEUTRAL_ROUTES)
+            | SYNC_PROVIDER_TENANT_ROUTES
+            | PER_PROVIDER_ROUTES
+            | RELATIONSHIP_STORE_TENANT_ROUTES
         )
 
     def test_the_sync_provider_guard_is_on_exactly_the_sync_provider_routes(self):
@@ -490,6 +506,9 @@ class TestTheRegisters:
 
     def test_every_per_provider_route_builds_its_service_by_provider(self):
         assert PER_PROVIDER_ROUTES == _routes_depending_on(get_machine_credential_service)
+
+    def test_the_relationship_store_gate_is_on_exactly_its_routes(self):
+        assert _routes_depending_on(require_relationship_store) == RELATIONSHIP_STORE_ROUTES
 
     def test_no_project_route_takes_a_tenant(self):
         assert DESCOPE_TENANT_ROUTES & DESCOPE_PROJECT_ROUTES == set()
@@ -503,9 +522,9 @@ class TestTheRegisters:
 
         assert handed_the_adapter - _routes_depending_on(require_descope_principal) == set(UNGUARDED_ADAPTER_ROUTES)
 
-    def test_every_capability_gated_route_is_descope_backed_or_per_provider(self):
+    def test_every_capability_gated_route_is_descope_backed_per_provider_or_the_relationship_stores(self):
         assert CAPABILITY_GATED_ROUTES
-        assert CAPABILITY_GATED_ROUTES - DESCOPE_BACKED_ROUTES - PER_PROVIDER_ROUTES == set()
+        assert CAPABILITY_GATED_ROUTES - DESCOPE_BACKED_ROUTES - PER_PROVIDER_ROUTES == RELATIONSHIP_STORE_ROUTES
 
     def test_the_refusal_is_not_the_tenant_resolvers(self):
         """Selecting a tenant would not help the refused caller, so the body does not say to."""
@@ -546,7 +565,7 @@ class TestDescopesAccessKeysServeDescopePrincipalsOnly:
         gated = _routes_gated_by(require_role, require_permission)
         accounted_for = _routes_depending_on(get_tenant_id) | _routes_depending_on(require_descope_principal)
 
-        assert gated - accounted_for == set(SELF_SCOPED_ROLE_ROUTES)
+        assert gated - accounted_for == set(SELF_SCOPED_ROLE_ROUTES) | RELATIONSHIP_STORE_SCHEMA_ROUTES
 
 
 class TestACanonicalProviderPrincipalIsRefused:

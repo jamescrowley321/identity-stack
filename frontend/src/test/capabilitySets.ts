@@ -19,6 +19,8 @@ export const CAPABILITY_SETS = {
   machineCredentialsOnly: set([MACHINE_CREDENTIALS], RelationshipStoreKind.NONE),
   customAttributesOnly: set([CUSTOM_ATTRIBUTES], RelationshipStoreKind.NONE),
   relationshipStoreOnly: set([], RelationshipStoreKind.DESCOPE),
+  /** A Keycloak, Zitadel or Ory deployment: OpenFGA and no adapter capability. */
+  openfga: set([], RelationshipStoreKind.OPENFGA),
 } as const;
 
 export type CapabilitySetName = keyof typeof CAPABILITY_SETS;

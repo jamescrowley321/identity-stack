@@ -925,6 +925,9 @@ class TestLifespan:
     @pytest.fixture
     def started(self, monkeypatch) -> list[httpx.AsyncClient]:
         monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        # No relationship store: these tests count the Keycloak client alone
+        # (OpenFGA's startup is test_relationship_store.py::TestStartup).
+        monkeypatch.setattr(identity, "RELATIONSHIP_STORE", "none")
         monkeypatch.setenv("DESCOPE_PROJECT_ID", "P-local-test")
         monkeypatch.setenv("DESCOPE_MANAGEMENT_KEY", "local-test-key")
         monkeypatch.delenv("REDIS_URL", raising=False)
