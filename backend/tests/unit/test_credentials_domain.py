@@ -60,6 +60,17 @@ class TestRoles:
             credentials.RolesNotHeld(roles=("billing", "owner"))
         )
 
+    def test_no_role_is_refused(self):
+        assert credentials.grantable_roles((), held=frozenset({"admin"})) == Error(credentials.RolesMissing())
+
+    def test_operator_is_refused_even_to_an_operator(self):
+        assert credentials.grantable_roles(("operator", "admin"), held=frozenset({"operator", "admin"})) == Error(
+            credentials.RolesNotForMachines(roles=("operator",))
+        )
+
+    def test_operator_is_never_for_machines(self):
+        assert "operator" in credentials.ROLES_NOT_FOR_MACHINES
+
     def test_roles_the_tenant_lacks_are_named(self):
         assert credentials.known_roles(("admin", "ghost"), found=frozenset({"admin"})) == Error(
             credentials.RolesNotFound(roles=("ghost",))
@@ -102,6 +113,14 @@ TRANSLATIONS = [
     (
         credentials.RolesNotHeld(roles=("billing", "owner")),
         GrantRefused(message="Cannot grant roles you do not hold: billing, owner"),
+    ),
+    (
+        credentials.RolesMissing(),
+        ValidationError(message="role_names must name at least one role the credential holds"),
+    ),
+    (
+        credentials.RolesNotForMachines(roles=("operator",)),
+        GrantRefused(message="A machine credential cannot hold: operator"),
     ),
     (credentials.RolesNotFound(roles=("ghost",)), ValidationError(message="The tenant has no roles named: ghost")),
     (credentials.CredentialNotFound(credential_id="x"), NotFound(message="Machine credential not found")),

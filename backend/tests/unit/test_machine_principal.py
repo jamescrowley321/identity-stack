@@ -17,8 +17,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.dependencies import rbac
-from app.dependencies.rbac import get_rbac_session
+from app.dependencies import identity, rbac
+from app.dependencies.rbac import MACHINE_PRINCIPAL_REFUSED, get_rbac_session
 from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER
 from app.domain import credentials
 from app.main import app as shipped_app
@@ -96,6 +96,8 @@ def stored(monkeypatch) -> type[_Credentials]:
 @pytest.fixture
 def client(op) -> TestClient:
     app = FastAPI()
+    for exception, handler in shipped_app.exception_handlers.items():
+        app.add_exception_handler(exception, handler)
     app.include_router(shipped_app.router)
 
     async def _session():
@@ -177,3 +179,36 @@ class TestARefusedCredential:
         response = _get(client, ADMIN_ROLE, _machine_token(op, sub=ACCESS["sub"]))
 
         assert (response.status_code, response.json()) == (403, NO_TENANT)
+
+
+KEY_ROUTES = [
+    ("POST", "/api/keys"),
+    ("GET", "/api/keys"),
+    ("GET", "/api/keys/k1"),
+    ("POST", "/api/keys/k1/deactivate"),
+    ("POST", "/api/keys/k1/activate"),
+    ("DELETE", "/api/keys/k1"),
+]
+
+
+class TestAMachineManagesNoCredential:
+    """A credential holding admin would otherwise mint its own successor before it expires."""
+
+    @pytest.mark.parametrize(("method", "path"), KEY_ROUTES)
+    def test_every_key_route_refuses_a_machine_token(self, op, client, stored, monkeypatch, method, path):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+
+        response = client.request(
+            method,
+            path,
+            json={"name": "successor", "expire_time": 4_102_444_800, "role_names": ["admin"]},
+            headers={"Authorization": f"Bearer {_machine_token(op)}"},
+        )
+
+        assert (response.status_code, response.json()["type"], response.json()["detail"]) == (
+            403,
+            "/errors/forbidden",
+            MACHINE_PRINCIPAL_REFUSED,
+        )
+        # Refused before any credential was looked up.
+        assert stored.lookups == []

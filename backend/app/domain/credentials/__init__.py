@@ -11,13 +11,21 @@ from app.domain.credentials.errors import (
     ExpiryMissing,
     ExpiryNotInFuture,
     ExpiryTooFar,
+    RolesMissing,
+    RolesNotForMachines,
     RolesNotFound,
     RolesNotHeld,
 )
-from app.domain.credentials.values import MAX_LIFETIME_SECONDS, CredentialStatus, MachineCredential
+from app.domain.credentials.values import (
+    MAX_LIFETIME_SECONDS,
+    ROLES_NOT_FOR_MACHINES,
+    CredentialStatus,
+    MachineCredential,
+)
 
 __all__ = [
     "MAX_LIFETIME_SECONDS",
+    "ROLES_NOT_FOR_MACHINES",
     "CredentialError",
     "CredentialNotFound",
     "CredentialStatus",
@@ -25,6 +33,8 @@ __all__ = [
     "ExpiryNotInFuture",
     "ExpiryTooFar",
     "MachineCredential",
+    "RolesMissing",
+    "RolesNotForMachines",
     "RolesNotFound",
     "RolesNotHeld",
     "expiry",

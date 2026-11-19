@@ -35,6 +35,18 @@ class RolesNotHeld(CredentialError):
 
 
 @dataclass(frozen=True)
+class RolesMissing(CredentialError):
+    """No role: a credential holding none would still count as a member of its tenant."""
+
+
+@dataclass(frozen=True)
+class RolesNotForMachines(CredentialError):
+    """Roles no machine credential may hold, whoever creates it (``ROLES_NOT_FOR_MACHINES``)."""
+
+    roles: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class RolesNotFound(CredentialError):
     """Roles the tenant has none of: neither its own nor global."""
 

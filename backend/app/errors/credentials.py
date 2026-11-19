@@ -21,6 +21,10 @@ def identity_error(error: credentials.CredentialError) -> IdentityError:
             return ValidationError(message=f"expire_time may be at most {max_days} days in the future")
         case credentials.RolesNotHeld(roles=roles):
             return GrantRefused(message=f"Cannot grant roles you do not hold: {', '.join(roles)}")
+        case credentials.RolesMissing():
+            return ValidationError(message="role_names must name at least one role the credential holds")
+        case credentials.RolesNotForMachines(roles=roles):
+            return GrantRefused(message=f"A machine credential cannot hold: {', '.join(roles)}")
         case credentials.RolesNotFound(roles=roles):
             return ValidationError(message=f"The tenant has no roles named: {', '.join(roles)}")
         case credentials.CredentialNotFound():

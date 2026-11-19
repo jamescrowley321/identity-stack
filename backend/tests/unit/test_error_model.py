@@ -27,6 +27,7 @@ from app.errors.identity import (
     Forbidden,
     GrantRefused,
     IdentityError,
+    MachinePrincipalRefused,
     NotFound,
     ProviderError,
     SyncFailed,
@@ -89,6 +90,7 @@ class TestErrorTypeMap:
             ProviderError,
             Forbidden,
             GrantRefused,
+            MachinePrincipalRefused,
         }
         assert set(_ERROR_TYPE_MAP.keys()) == expected
 

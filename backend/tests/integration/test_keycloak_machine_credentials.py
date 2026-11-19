@@ -23,7 +23,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 from app.dependencies import identity, rbac
-from app.dependencies.rbac import get_rbac_session
+from app.dependencies.rbac import MACHINE_PRINCIPAL_REFUSED, get_rbac_session
 from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER
 from app.errors.identity import IdentityErrorRaised
 from app.errors.problem_detail import identity_error_raised_handler
@@ -310,3 +310,44 @@ class TestWhatACredentialMayCarry:
 
         assert response.status_code == 404
         assert _registered_client(keycloak_token_source, key["clientId"]) is not None
+
+
+class TestAMachineManagesNoCredential:
+    async def test_its_token_cannot_mint_a_successor_or_touch_itself(self, client, credential, keycloak_token_source):
+        key = credential["key"]
+        token = _token(keycloak_token_source, key["clientId"], credential["cleartext"])
+
+        minted = await client.post(
+            KEYS,
+            json={"name": "successor", "expire_time": int(time.time()) + DAY, "role_names": ["admin"]},
+            headers=_headers(token),
+        )
+        listed = await client.get(KEYS, headers=_headers(token))
+        deleted = await client.delete(f"{KEYS}/{key['id']}", headers=_headers(token))
+
+        assert [response.status_code for response in (minted, listed, deleted)] == [403, 403, 403]
+        assert {response.json()["detail"] for response in (minted, listed, deleted)} == {MACHINE_PRINCIPAL_REFUSED}
+        assert _registered_client(keycloak_token_source, key["clientId"]) is not None
+
+
+class TestWhatACredentialMustNotCarry:
+    @pytest.mark.parametrize(
+        ("role_names", "expected"),
+        [
+            ([], (422, "role_names must name at least one role the credential holds")),
+            (["operator"], (403, "A machine credential cannot hold: operator")),
+        ],
+        ids=["no role", "operator"],
+    )
+    async def test_is_refused_before_keycloak(self, client, realm, admin_api, monkeypatch, role_names, expected):
+        registered = []
+        monkeypatch.setattr(admin_api, "register_client", lambda representation: registered.append(representation))
+
+        response = await client.post(
+            KEYS,
+            json={"name": "refused", "expire_time": int(time.time()) + DAY, "role_names": role_names},
+            headers=_headers(realm.bob_token, realm.acme),
+        )
+
+        assert (response.status_code, response.json()["detail"]) == expected
+        assert registered == []

@@ -12,6 +12,13 @@ from datetime import datetime
 MAX_LIFETIME_SECONDS = 365 * 24 * 60 * 60
 
 
+# Roles no machine credential may hold. ``operator`` opens the state of every
+# tenant (``require_global_role``) to a caller whose sole membership grants it,
+# and a credential always has exactly one membership: holding it there would
+# give the credential what its creator, a member of several tenants, is refused.
+ROLES_NOT_FOR_MACHINES = frozenset({"operator"})
+
+
 class CredentialStatus(enum.StrEnum):
     """Whether a credential may sign in. The names are the ones the API reports."""
 

@@ -23,6 +23,7 @@ from app.errors.identity import (
     GrantRefused,
     IdentityError,
     IdentityErrorRaised,
+    MachinePrincipalRefused,
     NotFound,
     ProviderError,
     SyncFailed,
@@ -64,6 +65,7 @@ _ERROR_TYPE_MAP: dict[type[IdentityError], _ErrorMapping] = {
     ProviderError: _ErrorMapping(uri="/errors/provider-error", status=502, title="Provider Error"),
     Forbidden: _ErrorMapping(uri="/errors/forbidden", status=403, title="Forbidden"),
     GrantRefused: _ErrorMapping(uri="/errors/forbidden", status=403, title="Forbidden"),
+    MachinePrincipalRefused: _ErrorMapping(uri="/errors/forbidden", status=403, title="Forbidden"),
 }
 
 # Sanitized messages for error types where upstream details may leak.

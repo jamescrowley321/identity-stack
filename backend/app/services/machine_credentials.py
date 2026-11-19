@@ -49,7 +49,7 @@ class MachineCredentials(ABC):
 
     @abstractmethod
     async def create(
-        self, *, tenant_id: str, name: str, expire_time: int, role_names: tuple[str, ...] | None
+        self, *, tenant_id: str, name: str, expire_time: int, role_names: tuple[str, ...]
     ) -> Result[dict, IdentityError]:
         """Create a credential. The value carries its secret (``cleartext``), shown once."""
 
@@ -73,14 +73,14 @@ class DescopeAccessKeys(MachineCredentials):
         self._management = management
 
     async def create(
-        self, *, tenant_id: str, name: str, expire_time: int, role_names: tuple[str, ...] | None
+        self, *, tenant_id: str, name: str, expire_time: int, role_names: tuple[str, ...]
     ) -> Result[dict, IdentityError]:
         with tracer.start_as_current_span("DescopeAccessKeys.create"):
             return await self._management.create_access_key(
                 name=name,
                 tenant_id=tenant_id,
                 expire_time=expire_time,
-                role_names=None if role_names is None else list(role_names),
+                role_names=list(role_names),
             )
 
     async def list(self, *, tenant_id: str) -> Result[dict, IdentityError]:
@@ -170,13 +170,13 @@ class CanonicalMachineCredentials(MachineCredentials):
         return Ok(found)
 
     async def create(
-        self, *, tenant_id: str, name: str, expire_time: int, role_names: tuple[str, ...] | None
+        self, *, tenant_id: str, name: str, expire_time: int, role_names: tuple[str, ...]
     ) -> Result[dict, IdentityError]:
         with tracer.start_as_current_span("CanonicalMachineCredentials.create"):
             tenant = _uuid(tenant_id)
             if tenant is None:
                 return Error(NotFound(message="Tenant not found"))
-            requested = role_names or ()
+            requested = role_names
             roles = await self._repository.roles_named(tenant, requested)
             known = credentials.known_roles(requested, found=frozenset(roles))
             if known.is_error():
@@ -294,8 +294,8 @@ class MachineCredentialService:
     ) -> Result[dict, IdentityError]:
         """Create a credential carrying only roles the caller holds, with a bounded future expiry."""
         with tracer.start_as_current_span("MachineCredentialService.create"):
-            requested = None if role_names is None else tuple(role_names)
-            held = credentials.grantable_roles(requested or (), held=frozenset(caller_roles))
+            requested = tuple(role_names or ())
+            held = credentials.grantable_roles(requested, held=frozenset(caller_roles))
             if held.is_error():
                 return Error(identity_error(held.error))
             bounded = credentials.expiry(expire_time, now=int(self._clock()))
@@ -305,7 +305,7 @@ class MachineCredentialService:
                 tenant_id=tenant_id,
                 name=name,
                 expire_time=bounded.ok,
-                role_names=None if requested is None else held.ok,
+                role_names=held.ok,
             )
 
     async def list(self, *, tenant_id: str) -> Result[dict, IdentityError]:

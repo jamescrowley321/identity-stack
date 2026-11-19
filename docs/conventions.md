@@ -363,7 +363,10 @@ before the tenant is resolved and before Descope is called. A token issued to a 
 provider's machine credential client (`ProviderTokenConfig.machine_client`) **MUST** be
 authorized from that credential alone (`rbac._load_machine_memberships`): its one tenant, its
 roles there, and nothing while it is inactive, expired or deleted. It is never resolved as a
-user.
+user. The `/api/keys` routes **MUST** refuse such a token (`refuse_machine_principal`, 403
+`MachinePrincipalRefused`), and no machine credential **MAY** hold `operator`
+(`ROLES_NOT_FOR_MACHINES` in `app/domain/credentials`): a credential has exactly one membership,
+so `require_global_role` would serve it every tenant's state.
 
 A route that serves an optional capability of the sync adapter (`Capability` in
 `app/services/adapters/base.py`: the machine credentials, the custom attributes of the profile and

@@ -11,10 +11,17 @@ from app.domain.credentials.errors import (
     ExpiryMissing,
     ExpiryNotInFuture,
     ExpiryTooFar,
+    RolesMissing,
+    RolesNotForMachines,
     RolesNotFound,
     RolesNotHeld,
 )
-from app.domain.credentials.values import MAX_LIFETIME_SECONDS, CredentialStatus, MachineCredential
+from app.domain.credentials.values import (
+    MAX_LIFETIME_SECONDS,
+    ROLES_NOT_FOR_MACHINES,
+    CredentialStatus,
+    MachineCredential,
+)
 
 
 def expiry(expire_time: int | None, *, now: int) -> Result[int, CredentialError]:
@@ -33,11 +40,17 @@ def expiry(expire_time: int | None, *, now: int) -> Result[int, CredentialError]
 
 
 def grantable_roles(requested: tuple[str, ...], *, held: frozenset[str]) -> Result[tuple[str, ...], CredentialError]:
-    """The roles a new credential may carry: only roles its creator holds in the tenant.
+    """The roles a new credential may carry: at least one, none of ``ROLES_NOT_FOR_MACHINES``, and only
+    roles its creator holds in the tenant.
 
     There is no role hierarchy, and authorization gates on role names, so "a lesser
     role" cannot be decided: containment is the rule, and it covers ``owner``.
     """
+    if not requested:
+        return Error(RolesMissing())
+    refused = tuple(sorted(set(requested) & ROLES_NOT_FOR_MACHINES))
+    if refused:
+        return Error(RolesNotForMachines(roles=refused))
     escalated = tuple(sorted(set(requested) - held))
     if escalated:
         return Error(RolesNotHeld(roles=escalated))

@@ -90,6 +90,14 @@ class GrantRefused(Forbidden):
     """
 
 
+@dataclass(frozen=True, unsafe_hash=False)
+class MachinePrincipalRefused(Forbidden):
+    """A machine credential's token on a route that only a person may call (``/api/keys``).
+
+    403 like ``Forbidden``; its message names only the rule, so it is returned as it is.
+    """
+
+
 class IdentityErrorRaised(Exception):
     """Raise a domain ``IdentityError`` from a place that cannot return a Result.
 

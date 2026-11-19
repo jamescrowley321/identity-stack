@@ -261,12 +261,15 @@ A machine's client-credentials token passes the token binding by its `azp`
 credential alone (conventions §18): it belongs to the credential's tenant only and holds the
 credential's roles there, and only while the credential is active and unexpired. A deactivated,
 expired or deleted credential's tokens are refused at once, before they expire; Keycloak issues no
-new ones to a deactivated or deleted client. A credential may carry only roles its creator holds in
-the tenant, and expires at most 365 days ahead.
+new ones to a deactivated or deleted client. A credential must carry at least one role, only roles
+its creator holds in the tenant, and never `operator` (which would open every tenant's state to it
+through `require_global_role`); it expires at most 365 days ahead. A machine's own token is refused
+(403) on every `/api/keys` route, so no credential creates, renews or manages credentials.
 
 | Limit | What happens |
 |---|---|
-| The registration access token on each row manages that client (its flows, redirect URIs, secret). | Keep the database like a secret store. A token of a machine client whose `sub` is not the credential's grants nothing. |
+| The registration access token on each row is stored in plaintext (`machine_credentials.registration_token`): the backend has no encryption key for data at rest. With it, Keycloak's client registration endpoint returns the client's secret and changes the client (its flows, redirect URIs, secret). | Keep the database like a secret store. A token of a machine client whose `sub` is not the credential's grants nothing. Encrypting it at rest is a follow-up. |
+| `allowedProtocolMapperTypesForClientAdministrators` lets the admin client add an `oidc-audience-mapper` to the API client too, which Keycloak refuses without it (probed, `keycloak/fixtures/README.md`). | It is the one type named, and the API client has no flow on, so no token of it reaches the SPA's users. |
 | Keycloak logs that the `default` client registration provider is deprecated (`KC-SERVICES0112`) on each registration. | It works on 26.8.2. A Keycloak that removes it fails the create with a provider error; the alternative is an Admin API path that does not grant `manage` on every client. |
 | Keycloak has no expiry for a client. | The backend refuses a credential's tokens after its expiry; the client stays until the credential is deleted. |
 

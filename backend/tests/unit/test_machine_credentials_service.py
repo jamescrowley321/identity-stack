@@ -7,6 +7,7 @@ The router, the dependencies and the live Keycloak client are covered by
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 
 import pytest
 from expression import Error, Ok
@@ -15,7 +16,11 @@ from app.domain import credentials
 from app.errors.identity import Conflict, GrantRefused, NotFound, ProviderError, SyncFailed, ValidationError
 from app.repositories.base import RepositoryConflictError
 from app.services.adapters.base import MachineClient, MachineClientRef, MachineCredentialPush, SyncError
-from app.services.machine_credentials import CanonicalMachineCredentials, MachineCredentialService
+from app.services.machine_credentials import (
+    CanonicalMachineCredentials,
+    DescopeAccessKeys,
+    MachineCredentialService,
+)
 
 NOW = 1_800_000_000
 CREATED = datetime(2027, 1, 15, 8, 0, tzinfo=timezone.utc)
@@ -147,6 +152,40 @@ class TestCreate:
 
         assert result == Error(GrantRefused(message="Cannot grant roles you do not hold: owner"))
         assert push.calls == []
+
+    @pytest.mark.parametrize(
+        ("role_names", "caller_roles", "expected"),
+        [
+            (None, ["admin"], ValidationError(message="role_names must name at least one role the credential holds")),
+            ([], ["admin"], ValidationError(message="role_names must name at least one role the credential holds")),
+            (
+                ["operator"],
+                ["admin", "operator"],
+                GrantRefused(message="A machine credential cannot hold: operator"),
+            ),
+        ],
+        ids=["absent", "empty", "operator, though the caller holds it"],
+    )
+    async def test_a_credential_must_hold_a_role_and_never_operator(self, role_names, caller_roles, expected):
+        repository, push = FakeRepository(roles={"admin": ADMIN_ROLE, "operator": uuid.uuid4()}), FakePush()
+
+        result = await _create(_service(repository, push), role_names=role_names, caller_roles=caller_roles)
+
+        assert result == Error(expected)
+        assert push.calls == []
+        assert repository.rows == {}
+
+    async def test_the_same_rules_hold_for_descope_access_keys(self):
+        management = AsyncMock()
+        service = MachineCredentialService(DescopeAccessKeys(management), clock=lambda: NOW)
+
+        refused = [
+            await _create(service, role_names=role_names, caller_roles=["admin", "operator"])
+            for role_names in (None, ["operator"], ["owner"])
+        ]
+
+        assert [type(result.error) for result in refused] == [ValidationError, GrantRefused, GrantRefused]
+        management.create_access_key.assert_not_awaited()
 
     async def test_a_role_the_tenant_lacks_is_refused_before_the_provider(self):
         repository, push = FakeRepository(roles={}), FakePush()

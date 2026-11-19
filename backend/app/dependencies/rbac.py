@@ -47,6 +47,7 @@ from app.dependencies.tenant_access import (
     resolve_tenant_access,
 )
 from app.domain import credentials
+from app.errors.identity import IdentityErrorRaised, MachinePrincipalRefused
 from app.knobs import knob_set
 from app.logbook import logbook
 from app.middleware.providers import ProviderTokenConfig
@@ -108,6 +109,24 @@ def _machine_client(request: Request, claims: dict) -> str | None:
     if not isinstance(provider, ProviderTokenConfig) or provider.machine_client is None:
         return None
     return provider.machine_client(claims)
+
+
+MACHINE_PRINCIPAL_REFUSED = "A machine credential cannot manage machine credentials"
+
+
+def refuse_machine_principal(request: Request) -> None:
+    """Refuse a token issued to a machine credential's client (403, ``MachinePrincipalRefused``).
+
+    On ``/api/keys``: a credential holding ``owner`` or ``admin`` would otherwise
+    mint its own successor before it expires, and so outlive its 365-day cap and
+    the membership of the person who created it, and manage its siblings. Which
+    tokens are a machine's is the provider's ``machine_client`` reader.
+    """
+    claims = getattr(request.state, "claims", None)
+    if not isinstance(claims, dict):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if _machine_client(request, claims) is not None:
+        raise IdentityErrorRaised(MachinePrincipalRefused(message=MACHINE_PRINCIPAL_REFUSED))
 
 
 async def _load_machine_memberships(

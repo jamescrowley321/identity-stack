@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from app.dependencies.capabilities import require_machine_credentials
 from app.dependencies.identity import get_machine_credential_service
-from app.dependencies.rbac import require_role
+from app.dependencies.rbac import refuse_machine_principal, require_role
 from app.dependencies.tenant import get_tenant_id
 from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
@@ -21,7 +21,12 @@ from app.services.machine_credentials import MachineCredentialService
 
 # Each route takes its service before its tenant: a Descope deployment's builder
 # refuses another provider's principal before the tenant is resolved (§18).
-router = APIRouter(tags=["Access Keys"], dependencies=[Depends(require_machine_credentials)])
+# A machine credential's own token is refused on every route here, after the
+# capability gate: no credential creates, renews or manages credentials.
+router = APIRouter(
+    tags=["Access Keys"],
+    dependencies=[Depends(require_machine_credentials), Depends(refuse_machine_principal)],
+)
 
 
 class CreateAccessKeyRequest(BaseModel):
