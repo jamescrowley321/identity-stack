@@ -381,7 +381,10 @@ from its claims and keeps `owner` or `admin`, as before. Assigning or removing `
 `POST /api/roles/assign` or `/api/roles/remove` **MUST** be refused (403,
 `RoleGrantRefusal.OPERATOR_GRANT`) unless the caller holds `operator` as
 `require_global_role` decides it (`app.dependencies.rbac.operator_grant_check`): the routes
-take `owner` or `admin` in one tenant, and `operator` opens every tenant's state.
+take `owner` or `admin` in one tenant, and `operator` opens every tenant's state. Creating, changing, renaming to or from, or deleting the
+`operator` role definition **MUST** be refused the same way (`RoleGrantRefusal.OPERATOR_DEFINITION`,
+`operator_definition_check`): a Descope `owner` or `admin` passes `require_definitions_role`
+and could otherwise strip `operator` from every operator.
 
 A route over state that belongs to the whole Descope project **MUST** carry the same guard
 and be listed in `DESCOPE_PROJECT_ROUTES` in that file: `GET` and `PUT /api/fga/schema`.

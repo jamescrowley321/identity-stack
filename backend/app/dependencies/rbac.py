@@ -402,23 +402,18 @@ class RoleGrantRefusal(enum.StrEnum):
     """Why a role assignment route refused to assign or remove a role."""
 
     OPERATOR_GRANT = "Only operators can assign or remove the operator role"
+    OPERATOR_DEFINITION = "Only operators can create, change or delete the operator role"
 
 
 OperatorGrantCheck = Callable[[list[str]], Awaitable[None]]
 
 
-def operator_grant_check(
-    request: Request,
-    session: AsyncSession | None = Depends(get_rbac_session),
-) -> OperatorGrantCheck:
-    """Dependency: a check that refuses to assign or remove ``operator`` for a caller who is not one.
+def _operator_check(request: Request, session: AsyncSession | None, refusal: RoleGrantRefusal) -> OperatorGrantCheck:
+    """A check that refuses (403, ``refusal``) when the names include ``operator`` and the caller is not one.
 
-    ``operator`` opens every tenant's state (conventions §18), while assigning
-    takes only ``owner`` or ``admin`` in one tenant: without this a tenant admin
-    could make itself, or anyone, an operator. The caller must hold ``operator``
-    as ``require_global_role`` decides it: a canonical principal by its sole
-    membership, a Descope principal from its claims. The check runs only when
-    the request names ``operator``, so other assignments read nothing more.
+    The caller must hold ``operator`` as ``require_global_role`` decides it: a
+    canonical principal by its sole membership, a Descope principal from its
+    claims. The check reads nothing when the names do not include ``operator``.
     """
 
     async def check(role_names: list[str]) -> None:
@@ -429,6 +424,32 @@ def operator_grant_check(
         except HTTPException as refused:
             if refused.status_code != 403:
                 raise
-            raise HTTPException(status_code=403, detail=RoleGrantRefusal.OPERATOR_GRANT) from refused
+            raise HTTPException(status_code=403, detail=refusal) from refused
 
     return check
+
+
+def operator_grant_check(
+    request: Request,
+    session: AsyncSession | None = Depends(get_rbac_session),
+) -> OperatorGrantCheck:
+    """Dependency: a check that refuses to assign or remove ``operator`` for a caller who is not one.
+
+    ``operator`` opens every tenant's state (conventions §18), while assigning
+    takes only ``owner`` or ``admin`` in one tenant: without this a tenant admin
+    could make itself, or anyone, an operator.
+    """
+    return _operator_check(request, session, RoleGrantRefusal.OPERATOR_GRANT)
+
+
+def operator_definition_check(
+    request: Request,
+    session: AsyncSession | None = Depends(get_rbac_session),
+) -> OperatorGrantCheck:
+    """Dependency: a check that refuses to create, change, rename or delete the ``operator`` role for a non-operator.
+
+    A Descope ``owner`` or ``admin`` passes ``require_definitions_role``: without
+    this it could delete ``operator`` (ending it for every operator) or change
+    what it grants, or rename another role to or from it.
+    """
+    return _operator_check(request, session, RoleGrantRefusal.OPERATOR_DEFINITION)

@@ -989,6 +989,74 @@ class TestOnlyAnOperatorAssignsOrRemovesOperator:
         assert (response.status_code, response.json()) == (200, ASSIGNMENT_ANSWERS[path])
 
 
+OPERATOR_DEFINITION_REFUSED = {"detail": RoleGrantRefusal.OPERATOR_DEFINITION}
+OPERATOR_DEFINITION = {"id": ROLE_ID, "name": OPERATOR_ROLE}
+# What touches the ``operator`` definition: (method, path, body, the RoleService call that answers it).
+OPERATOR_DEFINITION_CHANGES = {
+    "create it": ("POST", "/api/roles", {"name": OPERATOR_ROLE}, "create_role"),
+    "change it": ("PUT", f"/api/roles/{OPERATOR_ROLE}", {"description": "changed"}, "update_role"),
+    "rename it": ("PUT", f"/api/roles/{OPERATOR_ROLE}", {"new_name": "renamed"}, "update_role"),
+    "rename another role to it": ("PUT", "/api/roles/editor", {"new_name": OPERATOR_ROLE}, "update_role"),
+    "delete it": ("DELETE", f"/api/roles/{OPERATOR_ROLE}", None, "delete_role"),
+}
+OPERATOR_DEFINITION_STATUS = {"create_role": 201, "update_role": 200, "delete_role": 200}
+DESCOPE_ADMIN_AND_OPERATOR = {
+    **DESCOPE_ADMIN,
+    "sub": "descope-operator-admin",
+    "tenants": {"t1": {"roles": ["admin", OPERATOR_ROLE], "permissions": []}},
+}
+
+
+class TestOnlyAnOperatorChangesTheOperatorDefinition:
+    """A Descope admin passes the definitions gate, but ``operator`` opens every tenant: only an operator touches it."""
+
+    @staticmethod
+    def _answer(role_service: AsyncMock) -> None:
+        role_service.list_roles.return_value = Ok([OPERATOR_DEFINITION, {"id": RESOURCE_ID, "name": "editor"}])
+        for call in OPERATOR_DEFINITION_STATUS:
+            getattr(role_service, call).return_value = Ok(OPERATOR_DEFINITION)
+
+    @pytest.mark.parametrize("change", sorted(OPERATOR_DEFINITION_CHANGES))
+    def test_a_descope_admin_is_refused(self, client, role_service, change):
+        method, path, body, _call = OPERATOR_DEFINITION_CHANGES[change]
+
+        response = client.request(method, path, json=body, headers=_bearer(DESCOPE_ADMIN))
+
+        assert (response.status_code, response.json()) == (403, OPERATOR_DEFINITION_REFUSED)
+        assert role_service.mock_calls == []
+
+    @pytest.mark.parametrize("change", sorted(OPERATOR_DEFINITION_CHANGES))
+    def test_a_descope_operator_is_served(self, client, role_service, change):
+        method, path, body, call = OPERATOR_DEFINITION_CHANGES[change]
+        self._answer(role_service)
+
+        response = client.request(method, path, json=body, headers=_bearer(DESCOPE_ADMIN_AND_OPERATOR))
+
+        assert (response.status_code, response.json()) == (OPERATOR_DEFINITION_STATUS[call], OPERATOR_DEFINITION)
+        getattr(role_service, call).assert_awaited_once()
+
+    @pytest.mark.parametrize("change", sorted(OPERATOR_DEFINITION_CHANGES))
+    def test_a_canonical_operator_is_served(self, monkeypatch, client, store, role_service, change):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        monkeypatch.setattr(rbac, "CANONICAL_RBAC_PROVIDERS", frozenset({"ory", "keycloak"}))
+        store.roles = SOLE_OPERATOR
+        method, path, body, call = OPERATOR_DEFINITION_CHANGES[change]
+        self._answer(role_service)
+
+        response = client.request(method, path, json=body, headers=_bearer(KEYCLOAK_USER))
+
+        assert (response.status_code, response.json()) == (OPERATOR_DEFINITION_STATUS[call], OPERATOR_DEFINITION)
+        getattr(role_service, call).assert_awaited_once()
+
+    def test_another_role_needs_no_operator(self, client, role_service):
+        role_service.list_roles.return_value = Ok([{"id": RESOURCE_ID, "name": "editor"}])
+        role_service.delete_role.return_value = Ok({"status": "deleted", "name": "editor"})
+
+        response = client.delete("/api/roles/editor", headers=_bearer(DESCOPE_ADMIN))
+
+        assert (response.status_code, response.json()) == (200, {"status": "deleted", "name": "editor"})
+
+
 class TestTheSyncProviderGuard:
     def test_every_sync_adapter_names_its_principals(self):
         assert identity.SYNC_PROVIDER_PRINCIPALS.keys() == identity.SYNC_ADAPTERS.keys()

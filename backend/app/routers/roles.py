@@ -6,7 +6,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.dependencies.identity import get_role_service
-from app.dependencies.rbac import OperatorGrantCheck, operator_grant_check, require_definitions_role, require_role
+from app.dependencies.rbac import (
+    OperatorGrantCheck,
+    operator_definition_check,
+    operator_grant_check,
+    require_definitions_role,
+    require_role,
+)
 from app.dependencies.sync_provider import require_sync_provider_principal
 from app.dependencies.tenant import get_tenant_access, get_tenant_id
 from app.dependencies.tenant_access import TenantAccess
@@ -176,9 +182,11 @@ async def create_role(
     request: Request,
     body: CreateRoleRequest,
     _roles: list[str] = Depends(require_definitions_role),
+    check_operator_definition: OperatorGrantCheck = Depends(operator_definition_check),
     role_service: RoleService = Depends(get_role_service),
 ):
     """Create a new role definition. Requires operator (canonical) or owner/admin (Descope claims)."""
+    await check_operator_definition([body.name])
     result = await role_service.create_role(
         name=body.name,
         description=body.description,
@@ -194,9 +202,11 @@ async def update_role(
     name: str,
     body: UpdateRoleRequest,
     _roles: list[str] = Depends(require_definitions_role),
+    check_operator_definition: OperatorGrantCheck = Depends(operator_definition_check),
     role_service: RoleService = Depends(get_role_service),
 ):
     """Update a role definition. Requires operator (canonical) or owner/admin (Descope claims)."""
+    await check_operator_definition([name] if body.new_name is None else [name, body.new_name])
     # Resolve role name to canonical ID
     roles_result = await role_service.list_roles()
     if roles_result.is_error():
@@ -220,9 +230,11 @@ async def delete_role(
     request: Request,
     name: str,
     _roles: list[str] = Depends(require_definitions_role),
+    check_operator_definition: OperatorGrantCheck = Depends(operator_definition_check),
     role_service: RoleService = Depends(get_role_service),
 ):
     """Delete a role definition. Requires operator (canonical) or owner/admin (Descope claims)."""
+    await check_operator_definition([name])
     # Resolve role name to canonical ID
     roles_result = await role_service.list_roles()
     if roles_result.is_error():
