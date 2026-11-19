@@ -80,7 +80,7 @@ function Login() {
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center gap-4">
-      <h1 className="text-3xl font-bold">Descope SaaS Starter</h1>
+      <h1 className="text-3xl font-bold">Identity Stack</h1>
       {sessionExpired && (
         <p className="text-sm text-orange-500">Your session has expired. Please sign in again.</p>
       )}

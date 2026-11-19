@@ -76,6 +76,6 @@ describe("AppSidebar", () => {
   it("renders app name in header", () => {
     mockUseRBAC.mockReturnValue({ isAdmin: false });
     renderSidebar();
-    expect(screen.getByText("Descope Starter")).toBeInTheDocument();
+    expect(screen.getByText("Identity Stack")).toBeInTheDocument();
   });
 });

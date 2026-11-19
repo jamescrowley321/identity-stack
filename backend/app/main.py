@@ -249,7 +249,7 @@ async def lifespan(app: FastAPI):
                             await engine.dispose()
 
 
-app = FastAPI(title="Descope SaaS Starter API", docs_url=None, redoc_url="/redoc", lifespan=lifespan)
+app = FastAPI(title="Identity Stack API", docs_url=None, redoc_url="/redoc", lifespan=lifespan)
 
 # Rate limiter state and exception handler — must remain registered even in
 # gateway mode to prevent import errors from @limiter decorators on routes.
