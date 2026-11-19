@@ -5,20 +5,25 @@ from expression import Error, Ok
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.dependencies.descope import require_descope_principal
 from app.dependencies.identity import get_role_service
-from app.dependencies.rbac import require_role
-from app.dependencies.tenant import get_tenant_claims, get_tenant_id
+from app.dependencies.rbac import require_global_role, require_role
+from app.dependencies.sync_provider import require_sync_provider_principal
+from app.dependencies.tenant import get_tenant_access, get_tenant_id
+from app.dependencies.tenant_access import TenantAccess
 from app.errors.identity import NotFound
 from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.role import RoleService
 
-# Every route here is Descope-backed (conventions §18). ``RoleService`` mirrors each
-# definition and each assignment to Descope (``DescopeSyncAdapter``), and ``/roles/me``
-# reads the Descope ``tenants`` claim. The definitions belong to no tenant, so without
-# the guard an admin of any one canonical tenant would change them for every tenant.
-router = APIRouter(tags=["Roles"], dependencies=[Depends(require_descope_principal)])
+# ``RoleService`` pushes each definition and each assignment to the configured sync
+# adapter (``SYNC_PROVIDER``), which takes the request's tenant and user ids as that
+# provider's: every route but ``/roles/me`` serves its principals only (conventions
+# §18). The definitions belong to no tenant, so their routes are gated by
+# ``require_global_role``: an admin of one of several canonical tenants cannot name
+# that tenant to change them for every tenant. ``/roles/me`` writes nothing and
+# answers any principal the tenant resolver places.
+router = APIRouter(tags=["Roles"])
+SYNC_PROVIDER_ONLY = [Depends(require_sync_provider_principal)]
 
 
 class RoleAssignmentRequest(BaseModel):
@@ -55,22 +60,12 @@ def _parse_uuid(value: str, field_name: str) -> uuid.UUID:
 
 
 @router.get("/roles/me")
-async def get_my_roles(
-    tenant_id: str = Depends(get_tenant_id),
-    tenant_claims: dict = Depends(get_tenant_claims),
-):
-    """Get the current user's roles and permissions in their active tenant."""
-    tenant_info = tenant_claims.get(tenant_id, {})
-    if not isinstance(tenant_info, dict):
-        tenant_info = {}
-    return {
-        "tenant_id": tenant_id,
-        "roles": tenant_info.get("roles", []),
-        "permissions": tenant_info.get("permissions", []),
-    }
+async def get_my_roles(access: TenantAccess = Depends(get_tenant_access)):
+    """The caller's roles and permissions in the request's tenant, as the tenant resolver grants them."""
+    return {"tenant_id": access.tenant_id, "roles": access.roles, "permissions": access.permissions}
 
 
-@router.post("/roles/assign")
+@router.post("/roles/assign", dependencies=SYNC_PROVIDER_ONLY)
 @limiter.limit(RATE_LIMIT_AUTH)
 async def assign_roles(
     request: Request,
@@ -112,7 +107,7 @@ async def assign_roles(
     )
 
 
-@router.post("/roles/remove")
+@router.post("/roles/remove", dependencies=SYNC_PROVIDER_ONLY)
 @limiter.limit(RATE_LIMIT_AUTH)
 async def remove_roles(
     request: Request,
@@ -157,10 +152,10 @@ async def remove_roles(
 # --- Role definition CRUD (admin-only) ---
 
 
-@router.get("/roles")
+@router.get("/roles", dependencies=SYNC_PROVIDER_ONLY)
 async def list_roles(
     request: Request,
-    _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    _admin_roles: list[str] = Depends(require_global_role("owner", "admin")),
     role_service: RoleService = Depends(get_role_service),
 ):
     """List all role definitions. Requires owner or admin role."""
@@ -170,12 +165,12 @@ async def list_roles(
     return result_to_response(result, request)
 
 
-@router.post("/roles", status_code=201)
+@router.post("/roles", status_code=201, dependencies=SYNC_PROVIDER_ONLY)
 @limiter.limit(RATE_LIMIT_AUTH)
 async def create_role(
     request: Request,
     body: CreateRoleRequest,
-    _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    _admin_roles: list[str] = Depends(require_global_role("owner", "admin")),
     role_service: RoleService = Depends(get_role_service),
 ):
     """Create a new role definition. Requires owner or admin role."""
@@ -187,13 +182,13 @@ async def create_role(
     return result_to_response(result, request, status=201)
 
 
-@router.put("/roles/{name}")
+@router.put("/roles/{name}", dependencies=SYNC_PROVIDER_ONLY)
 @limiter.limit(RATE_LIMIT_AUTH)
 async def update_role(
     request: Request,
     name: str,
     body: UpdateRoleRequest,
-    _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    _admin_roles: list[str] = Depends(require_global_role("owner", "admin")),
     role_service: RoleService = Depends(get_role_service),
 ):
     """Update a role definition. Requires owner or admin role."""
@@ -214,12 +209,12 @@ async def update_role(
     return result_to_response(result, request)
 
 
-@router.delete("/roles/{name}")
+@router.delete("/roles/{name}", dependencies=SYNC_PROVIDER_ONLY)
 @limiter.limit(RATE_LIMIT_AUTH)
 async def delete_role(
     request: Request,
     name: str,
-    _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    _admin_roles: list[str] = Depends(require_global_role("owner", "admin")),
     role_service: RoleService = Depends(get_role_service),
 ):
     """Delete a role definition. Requires owner or admin role."""

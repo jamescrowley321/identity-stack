@@ -4,18 +4,20 @@ from expression import Error, Ok
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
-from app.dependencies.descope import require_descope_principal
 from app.dependencies.identity import get_permission_service
-from app.dependencies.rbac import require_role
+from app.dependencies.rbac import require_global_role
+from app.dependencies.sync_provider import require_sync_provider_principal
 from app.errors.identity import NotFound
 from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.permission import PermissionService
 
-# Every route here is Descope-backed (conventions §18): ``PermissionService`` mirrors each
-# definition to Descope (``DescopeSyncAdapter``), and the definitions belong to no tenant,
-# so without the guard an admin of any one canonical tenant would change them for all.
-router = APIRouter(tags=["Permissions"], dependencies=[Depends(require_descope_principal)])
+# ``PermissionService`` pushes each definition to the configured sync adapter
+# (``SYNC_PROVIDER``), so every route here serves that provider's principals only
+# (conventions §18). The definitions belong to no tenant, so the routes are gated by
+# ``require_global_role``: an admin of one of several canonical tenants cannot name
+# that tenant to change them for every tenant.
+router = APIRouter(tags=["Permissions"], dependencies=[Depends(require_sync_provider_principal)])
 
 
 class CreatePermissionRequest(BaseModel):
@@ -33,7 +35,7 @@ class UpdatePermissionRequest(BaseModel):
 @router.get("/permissions")
 async def list_permissions(
     request: Request,
-    _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    _admin_roles: list[str] = Depends(require_global_role("owner", "admin")),
     permission_service: PermissionService = Depends(get_permission_service),
 ):
     """List all permission definitions. Requires owner or admin role."""
@@ -48,7 +50,7 @@ async def list_permissions(
 async def create_permission(
     request: Request,
     body: CreatePermissionRequest,
-    _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    _admin_roles: list[str] = Depends(require_global_role("owner", "admin")),
     permission_service: PermissionService = Depends(get_permission_service),
 ):
     """Create a new permission definition. Requires owner or admin role."""
@@ -65,7 +67,7 @@ async def update_permission(
     request: Request,
     name: str,
     body: UpdatePermissionRequest,
-    _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    _admin_roles: list[str] = Depends(require_global_role("owner", "admin")),
     permission_service: PermissionService = Depends(get_permission_service),
 ):
     """Update a permission definition. Requires owner or admin role."""
@@ -90,7 +92,7 @@ async def update_permission(
 async def delete_permission(
     request: Request,
     name: str,
-    _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    _admin_roles: list[str] = Depends(require_global_role("owner", "admin")),
     permission_service: PermissionService = Depends(get_permission_service),
 ):
     """Delete a permission definition. Requires owner or admin role."""

@@ -9,10 +9,15 @@ principal on them before anything is read.
 Every tenant-scoped route is in exactly one of the two registers here. A new
 route that depends on ``get_tenant_id`` fails this file until it is put in one.
 
-The routes over project-wide state that Descope holds or mirrors (the role and
-permission definitions, the FGA schema) take no tenant from ``get_tenant_id``
-but carry the same guard: a canonical principal who is an admin of any one of
-their tenants would otherwise change every tenant's definitions in Descope.
+The route over project-wide state that Descope holds (the FGA schema) takes no
+tenant from ``get_tenant_id`` but carries the same guard: a canonical principal
+who is an admin of any one of their tenants would otherwise change it in Descope.
+
+The role and permission routes are not Descope's: their services push every
+write to the configured sync adapter (``SYNC_PROVIDER``), so
+``require_sync_provider_principal`` serves that provider's principals, which in
+a Descope deployment are exactly the Descope guard's. The definitions belong to
+no tenant and are gated by ``require_global_role``.
 
 The routes that take the caller's ``sub`` to Descope and no tenant (the profile)
 are held the same way: every route that is handed the Descope management adapter
@@ -29,6 +34,7 @@ shapes, so a new one has to choose.
 import base64
 import json
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -41,7 +47,7 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from slowapi.errors import RateLimitExceeded
 
-from app.dependencies import rbac
+from app.dependencies import identity, rbac
 from app.dependencies.descope import NOT_A_DESCOPE_PRINCIPAL, get_descope_management, require_descope_principal
 from app.dependencies.identity import (
     get_permission_service,
@@ -51,11 +57,12 @@ from app.dependencies.identity import (
     get_user_service,
 )
 from app.dependencies.rbac import get_rbac_session, require_global_role, require_permission, require_role
-from app.dependencies.tenant import get_tenant_id
+from app.dependencies.sync_provider import require_sync_provider_principal
+from app.dependencies.tenant import get_tenant_access, get_tenant_id
 from app.dependencies.tenant_access import SELECT_A_TENANT_FIRST
 from app.main import app as shipped_app
 from app.middleware.claims import GatewayClaimsMiddleware
-from app.middleware.providers import ProviderTokenConfig, TenantClaims, descope_config, ory_config
+from app.middleware.providers import ProviderTokenConfig, TenantClaims, descope_config, keycloak_config, ory_config
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.models.database import get_async_session
 from app.services.permission import PermissionService
@@ -69,6 +76,9 @@ DESCOPE_ISSUER = f"https://api.descope.com/{DESCOPE_PROJECT}"
 ORY_ISSUER = "https://ory.example.test"
 ORY_AUDIENCE = "https://identity-stack-api"
 FAKE_ISSUER = "https://fake.example.test"
+KEYCLOAK_ISSUER = "https://keycloak.example.test/realms/r"
+KEYCLOAK_AUDIENCE = "identity-stack-api"
+KEYCLOAK_SPA = "identity-stack-spa"
 
 TENANT_A = "11111111-1111-1111-1111-111111111111"
 TENANT_B = "22222222-2222-2222-2222-222222222222"
@@ -78,6 +88,7 @@ ORY_SUB = "ory-subject-1"
 REFUSED = {"detail": "This route serves Descope principals only"}
 NO_TENANT = {"detail": "No tenant context"}
 NOT_GRANTED = {"detail": "Insufficient permissions"}
+KEYCLOAK_ONLY = {"detail": "This route serves Keycloak principals only"}
 
 # (method, path) of every route that hands the tenant or the subject to Descope.
 DESCOPE_TENANT_ROUTES: frozenset[tuple[str, str]] = frozenset(
@@ -107,26 +118,13 @@ DESCOPE_TENANT_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/api/tenants/current"),
         ("GET", "/api/tenants/current/settings"),
         ("PATCH", "/api/tenants/current/settings"),
-        ("GET", "/api/roles/me"),
-        # ``RoleService`` mirrors every assignment to Descope (``DescopeSyncAdapter``).
-        ("POST", "/api/roles/assign"),
-        ("POST", "/api/roles/remove"),
     }
 )
 
-# (method, path) of every guarded route over state that belongs to no tenant:
-# ``RoleService`` and ``PermissionService`` mirror each definition to Descope, and
-# the FGA schema is the Descope project's own.
+# (method, path) of every guarded route over state that belongs to no tenant: the
+# FGA schema is the Descope project's own.
 DESCOPE_PROJECT_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
-        ("GET", "/api/roles"),
-        ("POST", "/api/roles"),
-        ("PUT", "/api/roles/{name}"),
-        ("DELETE", "/api/roles/{name}"),
-        ("GET", "/api/permissions"),
-        ("POST", "/api/permissions"),
-        ("PUT", "/api/permissions/{name}"),
-        ("DELETE", "/api/permissions/{name}"),
         ("GET", "/api/fga/schema"),
         ("PUT", "/api/fga/schema"),
     }
@@ -136,6 +134,34 @@ DESCOPE_PROJECT_ROUTES: frozenset[tuple[str, str]] = frozenset(
 DESCOPE_SUBJECT_ROUTES: frozenset[tuple[str, str]] = frozenset({("PATCH", "/api/profile")})
 
 DESCOPE_BACKED_ROUTES = DESCOPE_TENANT_ROUTES | DESCOPE_PROJECT_ROUTES | DESCOPE_SUBJECT_ROUTES
+
+# (method, path) of every route whose service pushes its writes to the configured sync
+# adapter (``SYNC_PROVIDER``): ``require_sync_provider_principal`` passes only that
+# provider's principals, whose tenant and user ids the adapter takes as its own. In a
+# Descope deployment that is exactly the Descope guard. The assignments take the
+# resolver's tenant ...
+SYNC_PROVIDER_TENANT_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("POST", "/api/roles/assign"),
+        ("POST", "/api/roles/remove"),
+    }
+)
+
+# ... and the definitions belong to no tenant, so ``require_global_role`` gates them.
+SYNC_PROVIDER_PROJECT_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/api/roles"),
+        ("POST", "/api/roles"),
+        ("PUT", "/api/roles/{name}"),
+        ("DELETE", "/api/roles/{name}"),
+        ("GET", "/api/permissions"),
+        ("POST", "/api/permissions"),
+        ("PUT", "/api/permissions/{name}"),
+        ("DELETE", "/api/permissions/{name}"),
+    }
+)
+
+SYNC_PROVIDER_ROUTES = SYNC_PROVIDER_TENANT_ROUTES | SYNC_PROVIDER_PROJECT_ROUTES
 
 # (method, path) -> what keeps another provider's subject from Descope on a route
 # that is handed the management adapter and carries no guard.
@@ -155,6 +181,10 @@ PROVIDER_NEUTRAL_ROUTES: dict[tuple[str, str], str] = {
     ),
     ("GET", "/api/access-checks/settings-manage"): (
         "answers the resolver's tenant to a holder of settings:manage: the handler calls no provider and reads no table"
+    ),
+    ("GET", "/api/roles/me"): (
+        "answers the caller's own roles and permissions in the resolver's tenant: the handler calls no provider "
+        "and reads no table"
     ),
 }
 
@@ -261,10 +291,18 @@ DESCOPE_ADMIN = {
     "dct": "t1",
     "tenants": {"t1": {"roles": ["admin"], "permissions": []}},
 }
+KEYCLOAK_ADMIN = {
+    "iss": KEYCLOAK_ISSUER,
+    "sub": "keycloak-admin",
+    "aud": KEYCLOAK_AUDIENCE,
+    "azp": KEYCLOAK_SPA,
+    "typ": "Bearer",
+}
 FAKE_ADMIN = {"iss": FAKE_ISSUER, "sub": "fake-user", "org": "org-1", "org_roles": ["owner"]}
 
 
 SOLE_OWNER = [{"tenant_id": TENANT_A, "role_name": "owner", "permissions": ["documents.read"]}]
+SOLE_ADMIN = [{"tenant_id": TENANT_A, "role_name": "admin", "permissions": []}]
 SOLE_OPERATOR = [{"tenant_id": TENANT_A, "role_name": "operator", "permissions": []}]
 MEMBER_OF_A_OPERATOR_OF_B = [
     {"tenant_id": TENANT_A, "role_name": "member", "permissions": []},
@@ -352,7 +390,12 @@ def client(
     app.dependency_overrides[get_sync_status_service] = lambda: sync_status_service
     app.add_middleware(
         GatewayClaimsMiddleware,
-        providers=[descope_config(DESCOPE_PROJECT), ory_config(ORY_ISSUER, ORY_AUDIENCE), FAKE_PROVIDER],
+        providers=[
+            descope_config(DESCOPE_PROJECT),
+            ory_config(ORY_ISSUER, ORY_AUDIENCE),
+            keycloak_config(KEYCLOAK_ISSUER, KEYCLOAK_AUDIENCE, KEYCLOAK_SPA),
+            FAKE_PROVIDER,
+        ],
     )
     return TestClient(app)
 
@@ -373,7 +416,15 @@ class TestTheRegisters:
         assert _routes_depending_on(require_descope_principal) == DESCOPE_BACKED_ROUTES
 
     def test_every_route_that_takes_a_tenant_is_in_one_register(self):
-        assert _routes_depending_on(get_tenant_id) == DESCOPE_TENANT_ROUTES | set(PROVIDER_NEUTRAL_ROUTES)
+        takes_a_tenant = _routes_depending_on(get_tenant_id) | _routes_depending_on(get_tenant_access)
+
+        assert takes_a_tenant == DESCOPE_TENANT_ROUTES | set(PROVIDER_NEUTRAL_ROUTES) | SYNC_PROVIDER_TENANT_ROUTES
+
+    def test_the_sync_provider_guard_is_on_exactly_the_sync_provider_routes(self):
+        assert _routes_depending_on(require_sync_provider_principal) == SYNC_PROVIDER_ROUTES
+
+    def test_no_route_carries_both_guards(self):
+        assert SYNC_PROVIDER_ROUTES & DESCOPE_BACKED_ROUTES == set()
 
     def test_no_project_route_takes_a_tenant(self):
         assert DESCOPE_TENANT_ROUTES & DESCOPE_PROJECT_ROUTES == set()
@@ -393,15 +444,15 @@ class TestTheRegisters:
         assert NOT_A_DESCOPE_PRINCIPAL != SELECT_A_TENANT_FIRST
 
     def test_no_route_is_in_both(self):
-        assert DESCOPE_BACKED_ROUTES & set(PROVIDER_NEUTRAL_ROUTES) == set()
+        assert (DESCOPE_BACKED_ROUTES | SYNC_PROVIDER_ROUTES) & set(PROVIDER_NEUTRAL_ROUTES) == set()
 
     def test_the_global_gate_is_on_exactly_the_global_routes(self):
-        assert _routes_gated_by(require_global_role) == GLOBAL_ROLE_ROUTES
+        assert _routes_gated_by(require_global_role) == GLOBAL_ROLE_ROUTES | SYNC_PROVIDER_PROJECT_ROUTES
 
     def test_a_global_route_has_no_tenant_gate_beside_it(self):
         tenant_scoped = _routes_depending_on(get_tenant_id) | _routes_gated_by(require_role, require_permission)
 
-        assert GLOBAL_ROLE_ROUTES & tenant_scoped == set()
+        assert (GLOBAL_ROLE_ROUTES | SYNC_PROVIDER_PROJECT_ROUTES) & tenant_scoped == set()
 
     def test_every_tenant_gated_route_resolves_its_tenant_or_is_guarded_or_says_why(self):
         """A new route behind ``require_role`` alone fails here until it chooses."""
@@ -607,6 +658,156 @@ class TestProjectWideStateIsDescopeBacked:
         assert response.status_code == 403
         assert response.json() != REFUSED
         assert role_service.mock_calls == []
+
+
+ROLE_ID = "44444444-4444-4444-4444-444444444444"
+ASSIGNMENT = {"user_id": RESOURCE_ID, "tenant_id": TENANT_A, "role_names": ["member"]}
+
+
+class TestTheRoleRoutesServeTheSyncProvidersPrincipals:
+    """``RoleService`` and ``PermissionService`` push to ``SYNC_PROVIDER``: its principals are served, no others."""
+
+    @pytest.fixture
+    def keycloak_sync(self, monkeypatch, store):
+        """A Keycloak deployment: Keycloak principals are authorized from the canonical model, writes go to Keycloak."""
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        monkeypatch.setattr(rbac, "CANONICAL_RBAC_PROVIDERS", frozenset({"ory", "keycloak"}))
+        store.roles = SOLE_ADMIN
+        return store
+
+    @pytest.mark.parametrize(("method", "path"), sorted(SYNC_PROVIDER_ROUTES))
+    def test_an_ory_owner_is_refused_where_descope_is_synced(
+        self, client, store, descope_client, role_service, permission_service, method, path
+    ):
+        response = client.request(method, _url(path), headers={**_bearer(ORY_OWNER), "X-Tenant-ID": TENANT_A})
+
+        assert (response.status_code, response.json()) == (403, REFUSED)
+        assert descope_client.mock_calls == []
+        assert role_service.mock_calls == []
+        assert permission_service.mock_calls == []
+        assert store.calls == []
+
+    @pytest.mark.parametrize(("method", "path"), sorted(SYNC_PROVIDER_ROUTES))
+    def test_a_descope_admin_is_refused_where_keycloak_is_synced(
+        self, keycloak_sync, client, descope_client, role_service, permission_service, method, path
+    ):
+        response = client.request(method, _url(path), headers=_bearer(DESCOPE_ADMIN))
+
+        assert (response.status_code, response.json()) == (403, KEYCLOAK_ONLY)
+        assert descope_client.mock_calls == []
+        assert role_service.mock_calls == []
+        assert permission_service.mock_calls == []
+
+    def test_a_keycloak_admin_lists_the_definitions(self, keycloak_sync, client, role_service, permission_service):
+        role_service.list_roles.return_value = Ok([{"id": ROLE_ID, "name": "member"}])
+        permission_service.list_permissions.return_value = Ok([{"id": RESOURCE_ID, "name": "documents.read"}])
+
+        roles = client.get("/api/roles", headers=_bearer(KEYCLOAK_ADMIN))
+        permissions = client.get("/api/permissions", headers=_bearer(KEYCLOAK_ADMIN))
+
+        assert (roles.status_code, roles.json()) == (200, {"roles": [{"id": ROLE_ID, "name": "member"}]})
+        assert (permissions.status_code, permissions.json()) == (
+            200,
+            {"permissions": [{"id": RESOURCE_ID, "name": "documents.read"}]},
+        )
+        # Each request decided from the canonical model, never from the token.
+        assert keycloak_sync.calls == [("keycloak", KEYCLOAK_ADMIN["sub"])] * 2
+
+    def test_a_keycloak_admin_creates_a_role(self, keycloak_sync, client, role_service):
+        role_service.create_role.return_value = Ok({"id": ROLE_ID, "name": "editor"})
+
+        response = client.post("/api/roles", json={"name": "editor"}, headers=_bearer(KEYCLOAK_ADMIN))
+
+        assert (response.status_code, response.json()) == (201, {"id": ROLE_ID, "name": "editor"})
+        role_service.create_role.assert_awaited_once_with(name="editor", description="", permission_names=None)
+
+    @pytest.mark.parametrize(
+        ("path", "service_call"),
+        [("/api/roles/assign", "assign_role_to_user"), ("/api/roles/remove", "unassign_role_from_user")],
+    )
+    def test_a_keycloak_admin_assigns_in_the_tenant_it_administers(
+        self, keycloak_sync, client, role_service, path, service_call
+    ):
+        role_service.list_roles.return_value = Ok([{"id": ROLE_ID, "name": "member"}])
+        getattr(role_service, service_call).return_value = Ok({})
+
+        response = client.post(path, json=ASSIGNMENT, headers={**_bearer(KEYCLOAK_ADMIN), "X-Tenant-ID": TENANT_A})
+
+        assert response.status_code == 200
+        getattr(role_service, service_call).assert_awaited_once_with(
+            user_id=uuid.UUID(RESOURCE_ID), tenant_id=uuid.UUID(TENANT_A), role_id=uuid.UUID(ROLE_ID)
+        )
+
+    @pytest.mark.parametrize(("method", "path"), sorted(SYNC_PROVIDER_PROJECT_ROUTES))
+    def test_a_keycloak_admin_of_one_of_several_tenants_cannot_change_the_definitions(
+        self, keycloak_sync, client, role_service, permission_service, method, path
+    ):
+        """The definitions belong to no tenant: naming the tenant the caller administers does not open them."""
+        keycloak_sync.roles = MEMBER_OF_A_ADMIN_OF_B
+
+        response = client.request(method, _url(path), headers={**_bearer(KEYCLOAK_ADMIN), "X-Tenant-ID": TENANT_B})
+
+        assert (response.status_code, response.json()) == (403, NO_TENANT)
+        assert role_service.mock_calls == []
+        assert permission_service.mock_calls == []
+
+    def test_that_admin_still_assigns_in_the_tenant_it_administers(self, keycloak_sync, client, role_service):
+        keycloak_sync.roles = MEMBER_OF_A_ADMIN_OF_B
+        role_service.list_roles.return_value = Ok([{"id": ROLE_ID, "name": "member"}])
+        role_service.assign_role_to_user.return_value = Ok({})
+
+        response = client.post(
+            "/api/roles/assign",
+            json={**ASSIGNMENT, "tenant_id": TENANT_B},
+            headers={**_bearer(KEYCLOAK_ADMIN), "X-Tenant-ID": TENANT_B},
+        )
+
+        assert response.status_code == 200
+        role_service.assign_role_to_user.assert_awaited_once_with(
+            user_id=uuid.UUID(RESOURCE_ID), tenant_id=uuid.UUID(TENANT_B), role_id=uuid.UUID(ROLE_ID)
+        )
+
+    def test_a_keycloak_member_reads_its_canonical_roles(self, keycloak_sync, client):
+        keycloak_sync.roles = [{"tenant_id": TENANT_A, "role_name": "member", "permissions": ["documents.read"]}]
+
+        response = client.get("/api/roles/me", headers=_bearer(KEYCLOAK_ADMIN))
+
+        assert (response.status_code, response.json()) == (
+            200,
+            {"tenant_id": TENANT_A, "roles": ["member"], "permissions": ["documents.read"]},
+        )
+
+
+class TestTheSyncProviderGuard:
+    def test_every_sync_adapter_names_its_principals(self):
+        assert identity.SYNC_PROVIDER_PRINCIPALS.keys() == identity.SYNC_ADAPTERS.keys()
+
+    @pytest.mark.parametrize("state", [{}, {"claims": None}], ids=["no claims", "claims is None"])
+    def test_a_request_with_no_claims_is_refused_by_the_guard_itself(self, state):
+        with pytest.raises(HTTPException) as refused:
+            require_sync_provider_principal(_hand_built_request(**state))
+
+        assert (refused.value.status_code, refused.value.detail) == (401, "Not authenticated")
+
+    def test_claims_that_no_provider_is_recorded_for_are_refused(self):
+        with pytest.raises(HTTPException) as refused:
+            require_sync_provider_principal(_hand_built_request(claims=DESCOPE_ADMIN))
+
+        assert (refused.value.status_code, refused.value.detail) == (403, REFUSED["detail"])
+
+    def test_an_unknown_sync_provider_passes_nobody(self, monkeypatch):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "unknown")
+        request = _hand_built_request(claims=DESCOPE_ADMIN, provider=descope_config(DESCOPE_PROJECT))
+
+        with pytest.raises(HTTPException) as refused:
+            require_sync_provider_principal(request)
+
+        assert (refused.value.status_code, refused.value.detail) == (403, "This route serves unknown principals only")
+
+    def test_a_descope_principal_passes_where_descope_is_synced(self):
+        request = _hand_built_request(claims=DESCOPE_ADMIN, provider=descope_config(DESCOPE_PROJECT))
+
+        assert require_sync_provider_principal(request) is None
 
 
 class TestStateThatBelongsToNoTenant:

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from fastapi import Depends, Request
 from sqlalchemy import text
@@ -28,6 +29,7 @@ from app.dependencies.zitadel_sync import build_zitadel_sync_adapter
 from app.errors.identity import Conflict, IdentityErrorRaised
 from app.knobs import knob
 from app.logbook import logbook
+from app.middleware.providers import KEYCLOAK_PROVIDER_NAME, ZITADEL_PROVIDER_NAME, ProviderTokenConfig
 from app.models.database import get_async_session, get_engine
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
@@ -103,6 +105,33 @@ SYNC_ADAPTERS: dict[str, Callable[[State, AsyncSession], IdentityProviderAdapter
     "descope": lambda state, _session: DescopeSyncAdapter(client=state.descope_client),
     "keycloak": lambda state, session: build_keycloak_sync_adapter(state.keycloak_admin, session),
     "zitadel": lambda state, session: build_zitadel_sync_adapter(state.zitadel_admin, session),
+}
+
+
+@dataclass(frozen=True)
+class SyncProviderPrincipal:
+    """Whose principals a sync provider's adapter takes the tenant and the user ids of.
+
+    ``name`` is the provider's registration name (``ProviderTokenConfig.name``),
+    which the refusal of ``require_sync_provider_principal`` names.
+    """
+
+    name: str
+    is_principal: Callable[[ProviderTokenConfig], bool]
+
+
+# One entry per key of SYNC_ADAPTERS: which principals the canonical services may
+# push writes for (``app.dependencies.sync_provider``). Descope's are the
+# ``descope_managed`` ones, as ``require_descope_principal`` reads them; the others
+# are their registration's.
+SYNC_PROVIDER_PRINCIPALS: dict[str, SyncProviderPrincipal] = {
+    "descope": SyncProviderPrincipal(name="Descope", is_principal=lambda provider: provider.descope_managed),
+    "keycloak": SyncProviderPrincipal(
+        name=KEYCLOAK_PROVIDER_NAME, is_principal=lambda provider: provider.name == KEYCLOAK_PROVIDER_NAME
+    ),
+    "zitadel": SyncProviderPrincipal(
+        name=ZITADEL_PROVIDER_NAME, is_principal=lambda provider: provider.name == ZITADEL_PROVIDER_NAME
+    ),
 }
 
 
