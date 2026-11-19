@@ -1,12 +1,16 @@
 """The routes that read Descope's ``tenants`` or top-level ``roles`` claim serve Descope principals only.
 
-``GET /api/tenants``, ``GET`` and ``POST /api/tenants/{tenant_id}/resources`` and
-``GET /api/roles/me`` read the ``tenants`` claim (``get_tenant_claims``), and
+``GET /api/roles/me`` reads the ``tenants`` claim (``get_tenant_claims``), and
 ``POST /api/tenants`` the top-level ``roles`` claim (``require_admin_role``). A
 Keycloak, Ory or Zitadel principal is authorized from the canonical model, so
 those claims on its token are refused with 403, whatever they say: a provider
 mapper that put them there would otherwise grant membership of any tenant, or
 an admin role (identity-stack#596). A Descope principal is served as before.
+
+``GET /api/tenants`` and the ``/api/tenants/{tenant_id}/resources`` routes take
+the caller's tenants from ``get_tenant_memberships`` (#673): a canonical
+principal's from the canonical model, so forged claims there grant nothing
+either: they are not read.
 
 Requests go through the shipped gateway middleware and the shipped routers.
 The canonical store is a stub that makes every canonical principal a member
@@ -44,6 +48,8 @@ from app.models.database import get_async_session
 
 DESCOPE_PROJECT = "P2descopeclaimroutes"
 TENANT = "11111111-1111-4111-8111-111111111111"
+# A tenant the canonical model gives the caller no membership in.
+OTHER_TENANT = "22222222-2222-4222-8222-222222222222"
 SUB = "subject-1"
 
 KEYCLOAK = keycloak_config("https://keycloak.example.test/realms/r", "identity-stack-api", "identity-stack-spa")
@@ -67,9 +73,6 @@ REFUSED = {"detail": DESCOPE_CLAIMS_ONLY}
 # ``GET /api/roles/me`` sits on the roles router, which ``require_descope_principal``
 # guards before the claim is read: the same refusal, with that guard's own body.
 ROUTES = [
-    ("GET", "/api/tenants", None, REFUSED),
-    ("GET", f"/api/tenants/{TENANT}/resources", None, REFUSED),
-    ("POST", f"/api/tenants/{TENANT}/resources", {"name": "forged"}, REFUSED),
     ("GET", "/api/roles/me", None, {"detail": NOT_A_DESCOPE_PRINCIPAL}),
     ("POST", "/api/tenants", {"name": "Forged"}, REFUSED),
 ]
@@ -157,6 +160,39 @@ def test_a_canonical_principal_with_forged_descope_claims_is_refused(
     assert (response.status_code, response.json()) == (403, refusal)
     tenant_service.create_tenant.assert_not_awaited()
     session.add.assert_not_called()
+
+
+@pytest.mark.parametrize("provider", sorted(CANONICAL))
+class TestForgedTenantsClaimsOnTheTenantRoutesAreNotRead:
+    """A canonical principal whose token names ``OTHER_TENANT`` is a member of ``TENANT`` only."""
+
+    @staticmethod
+    def _token(provider: str) -> str:
+        (issuer,) = CANONICAL[provider].accepted_issuers
+        forged = {"tenants": {OTHER_TENANT: {"roles": ["owner"], "permissions": ["settings:manage"]}}}
+        return _jwt({"iss": issuer, "sub": SUB, **_BOUND[provider], **forged})
+
+    def test_the_tenant_list_is_the_canonical_membership(self, client, provider):
+        response = client.get("/api/tenants", headers={"Authorization": f"Bearer {self._token(provider)}"})
+
+        assert (response.status_code, response.json()) == (
+            200,
+            {"tenants": [{"id": TENANT, "name": TENANT, "roles": ["owner"], "permissions": ["settings:manage"]}]},
+        )
+
+    @pytest.mark.parametrize(("method", "body"), [("GET", None), ("POST", {"name": "forged"})])
+    def test_the_forged_tenants_resources_are_refused(self, client, services, provider, method, body):
+        _, session = services
+
+        response = client.request(
+            method,
+            f"/api/tenants/{OTHER_TENANT}/resources",
+            headers={"Authorization": f"Bearer {self._token(provider)}"},
+            json=body,
+        )
+
+        assert (response.status_code, response.json()) == (403, {"detail": "Not a member of this tenant"})
+        session.add.assert_not_called()
 
 
 class TestADescopePrincipalIsServedAsBefore:

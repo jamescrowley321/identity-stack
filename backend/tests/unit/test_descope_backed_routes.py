@@ -104,7 +104,6 @@ DESCOPE_TENANT_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("DELETE", "/api/fga/relations"),
         ("GET", "/api/fga/relations"),
         ("POST", "/api/fga/check"),
-        ("GET", "/api/tenants/current"),
         ("GET", "/api/tenants/current/settings"),
         ("PATCH", "/api/tenants/current/settings"),
         ("GET", "/api/roles/me"),
@@ -150,6 +149,10 @@ UNGUARDED_ADAPTER_ROUTES: dict[tuple[str, str], str] = {
 # A route belongs here only when nothing behind it, its service's sync adapter
 # included, hands the tenant or a user id to Descope.
 PROVIDER_NEUTRAL_ROUTES: dict[tuple[str, str], str] = {
+    ("GET", "/api/tenants/current"): (
+        "reads a canonical principal's tenant from the canonical model; only a Descope principal's tenant, "
+        "its dct, is loaded from Descope, and any other principal is refused (#673)"
+    ),
     ("GET", "/api/access-checks/documents-read"): (
         "answers the resolver's tenant to a holder of documents:read: the handler calls no provider and reads no table"
     ),

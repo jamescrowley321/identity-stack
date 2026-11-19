@@ -68,10 +68,6 @@ DESCOPE_ONLY_ROUTE = (
 )
 DESCOPE_MANAGEMENT_API = "calls the Descope Management API itself; the run has no Descope project"
 DESCOPE_ACCESS_KEY = "is about a Descope access-key session, which no other provider has"
-TENANTS_CLAIM = (
-    "the route reads Descope's tenants claim and serves Descope principals only (get_descope_claims): "
-    "it answers this provider's principals 403; their tenants come from GET /api/identity"
-)
 ID_TOKEN_VALIDATION = (
     "POST /api/validate-id-token validates against the Descope provider only: 503 for this provider (#636)"
 )
@@ -96,19 +92,8 @@ def _each(module: str, tests: list[str], reasons: dict[str, str]) -> dict[str, d
 NOT_APPLICABLE: dict[str, dict[str, str]] = {
     "test_ory_sso_e2e.py": {KEYCLOAK: ORY_PROVIDER, ZITADEL: ORY_PROVIDER},
     # Login, session and identity
-    "test_api_authenticated.py::test_tenants_endpoint_lists_user_tenants": _both(TENANTS_CLAIM),
     "test_api_authenticated.py::test_validate_id_token": _both(ID_TOKEN_VALIDATION),
     "test_page_content.py::test_no_5xx_errors_on_dashboard": _both(ID_TOKEN_VALIDATION),
-    "test_api_endpoints.py::TestAuthenticatedEndpoints::test_tenants_returns_200": _both(TENANTS_CLAIM),
-    "test_async_db_migration.py::TestAsyncTenantEndpoints::test_list_tenants_returns_list": _both(TENANTS_CLAIM),
-    "test_identity_crud_e2e.py::TestTenantOperations::test_list_tenants_returns_jwt_tenants": _both(TENANTS_CLAIM),
-    "test_identity_crud_e2e.py::TestTenantOperations::test_get_current_tenant": _both(DESCOPE_ONLY_ROUTE),
-    # Tenant resources
-    **_each(
-        "test_async_db_migration.py::TestAsyncTenantResourcesCRUD",
-        ["test_tenant_resource_create_and_list", "test_tenant_resource_duplicate_returns_409"],
-        _both(TENANTS_CLAIM),
-    ),
     # RBAC administration
     **_each(
         "test_api_endpoints.py::TestAdminEndpoints",

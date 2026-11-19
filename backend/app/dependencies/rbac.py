@@ -157,7 +157,10 @@ async def _load_canonical_memberships(
                 permissions=tuple(grant.get("permissions", [])),
             )
             for grant in result.ok.get("roles", [])
-        )
+        ),
+        tenant_names={
+            membership["tenant_id"]: membership["tenant_name"] for membership in result.ok.get("tenant_memberships", [])
+        },
     )
 
 
