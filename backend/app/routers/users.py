@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
 
 from app.dependencies.identity import get_member_directory
-from app.dependencies.rbac import require_role
+from app.dependencies.rbac import OperatorGrantCheck, operator_grant_check, require_role
 from app.dependencies.sync_provider import require_sync_provider_principal
 from app.dependencies.tenant import get_tenant_id
 from app.errors.identity import Conflict, Forbidden, IdentityError, ValidationError
@@ -79,11 +79,13 @@ async def invite_member(
     body: InviteUserRequest,
     tenant_id: str = Depends(get_tenant_id),
     caller_roles: list[str] = Depends(require_role("owner", "admin")),
+    check_operator_grant: OperatorGrantCheck = Depends(operator_grant_check),
     members: MemberDirectory = Depends(get_member_directory),
 ):
     """Invite a user to the current tenant by email with specified roles."""
     if "owner" in body.role_names and "owner" not in caller_roles:
         raise HTTPException(status_code=403, detail="Only owners can assign the owner role")
+    await check_operator_grant(body.role_names)
 
     result = await members.invite_member(email=body.email, tenant_id=tenant_id, role_names=body.role_names)
     if result.is_error():

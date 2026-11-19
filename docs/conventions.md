@@ -389,7 +389,8 @@ state that belongs to no tenant. A tenant `admin` is refused: its role is one te
 and with it the caller could delete the `owner` role, which ends that role in every
 tenant, or grant the `member` role a permission everywhere. A Descope principal is decided
 from its claims and keeps `owner` or `admin`, as before. Assigning or removing `operator` through
-`POST /api/roles/assign` or `/api/roles/remove` **MUST** be refused (403,
+`POST /api/roles/assign` or `/api/roles/remove`, or inviting with it through
+`POST /api/members/invite`, **MUST** be refused (403,
 `RoleGrantRefusal.OPERATOR_GRANT`) unless the caller holds `operator` as
 `require_global_role` decides it (`app.dependencies.rbac.operator_grant_check`): the routes
 take `owner` or `admin` in one tenant, and `operator` opens every tenant's state. Creating, changing, renaming to or from, or deleting the

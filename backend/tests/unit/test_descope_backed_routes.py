@@ -1140,6 +1140,50 @@ class TestTheMemberRoutesServeTheSyncProvidersPrincipals:
         assert (response.status_code, response.json()) == (403, {"detail": "Only owners can assign the owner role"})
         assert members.mock_calls == []
 
+    @pytest.mark.parametrize(
+        "roles", [SOLE_ADMIN, ADMIN_OF_A_OPERATOR_OF_B], ids=["admin of its sole tenant", "operator of another"]
+    )
+    def test_a_keycloak_admin_cannot_invite_an_operator(self, keycloak_sync, client, members, roles):
+        """An invitation with ``operator`` hands out every tenant's state, as an assignment of it would."""
+        keycloak_sync.roles = roles
+
+        response = client.post(
+            "/api/members/invite",
+            json={"email": "new@example.com", "role_names": ["member", OPERATOR_ROLE]},
+            headers={**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A},
+        )
+
+        assert (response.status_code, response.json()) == (403, OPERATOR_GRANT_REFUSED)
+        assert members.mock_calls == []
+
+    def test_a_keycloak_operator_and_admin_of_its_sole_tenant_invites_an_operator(self, keycloak_sync, client, members):
+        keycloak_sync.roles = ADMIN_AND_OPERATOR_OF_A
+
+        response = client.post(
+            "/api/members/invite",
+            json={"email": "new@example.com", "role_names": [OPERATOR_ROLE]},
+            headers={**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A},
+        )
+
+        assert (response.status_code, response.json()) == (200, {"status": "invited"})
+        members.invite_member.assert_awaited_once_with(
+            email="new@example.com", tenant_id=TENANT_A, role_names=[OPERATOR_ROLE]
+        )
+
+    @pytest.mark.parametrize(
+        ("roles", "answer"),
+        [(["admin"], (403, OPERATOR_GRANT_REFUSED)), (["admin", OPERATOR_ROLE], (200, {"status": "invited"}))],
+        ids=["admin", "admin and operator"],
+    )
+    def test_a_descope_admin_invites_an_operator_only_as_an_operator(self, client, members, roles, answer):
+        response = client.post(
+            "/api/members/invite",
+            json={"email": "new@example.com", "role_names": [OPERATOR_ROLE]},
+            headers=_bearer(_descope_token_in_tenant_a(roles)),
+        )
+
+        assert (response.status_code, response.json()) == answer
+
     def test_a_revocation_keycloak_did_not_take_is_told(self, keycloak_sync, client, members):
         members.set_member_status.return_value = Ok({"email": "m@acme.test", "provider_sync": "failed"})
 

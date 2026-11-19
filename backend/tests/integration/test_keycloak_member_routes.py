@@ -21,7 +21,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 from app.dependencies import identity, rbac
-from app.dependencies.rbac import get_rbac_session
+from app.dependencies.rbac import RoleGrantRefusal, get_rbac_session
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.providers import keycloak_config
 from app.middleware.rate_limit import limiter
@@ -230,3 +230,21 @@ class TestKeycloakTenantAdminsManageMembers:
         )
         assert realm.get("/users", params={"email": email, "exact": "true"}).json() == []
         assert realm.get(f"/users/{account['id']}").json()["enabled"] is True
+
+    async def test_an_admin_of_its_sole_tenant_cannot_invite_an_operator(
+        self, keycloak_deployment, client, realm, db_session
+    ):
+        """``operator`` opens every tenant's state: ``dave`` administers acme alone and is no operator."""
+        provider = await _provider(db_session, keycloak_deployment.issuer)
+        acme = await _tenant(db_session, provider, "acme")
+        admin = await _signed_in(db_session, provider, keycloak_deployment, DAVE, acme, "admin")
+        await _global_role(db_session, "operator")
+        email = f"operator-{uuid.uuid4().hex[:12]}@example.com"
+
+        refused = await client.post(
+            "/api/members/invite", json={"email": email, "role_names": ["operator"]}, headers=admin
+        )
+
+        assert (refused.status_code, refused.json()) == (403, {"detail": RoleGrantRefusal.OPERATOR_GRANT})
+        assert (await db_session.execute(select(User).where(User.email == email))).scalar_one_or_none() is None
+        assert realm.get("/users", params={"email": email, "exact": "true"}).json() == []
