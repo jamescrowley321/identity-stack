@@ -403,13 +403,17 @@ class UserService:
         ``stage_memberships`` writes the new user's role assignments in the same
         transaction without committing (``RoleService.stage_member_roles``); its
         ``Ok`` value is returned beside the member for the caller to push after
-        the commit. An existing account with that email is ``Conflict``
-        (``MemberRefusal.ACCOUNT_EXISTS``), whichever tenant holds it. On any
-        ``Error`` nothing is committed.
+        the commit. The member carries ``PROVIDER_SYNC`` when the user's push
+        failed. An account whose email is ``email`` in any case is ``Conflict``
+        (``MemberRefusal.ACCOUNT_EXISTS``), whichever tenant holds it; the new
+        one is stored lower case. On any ``Error`` nothing is committed.
         """
         with tracer.start_as_current_span("UserService.create_member") as span:
             span.set_attribute("tenant.id", str(tenant_id))
-            if await self._repository.get_by_email(email) is not None:
+            # Stored as one spelling, and compared ignoring case: ``Bob@x.com`` is
+            # the account ``bob@x.com`` already names, whatever case it was stored in.
+            email = email.strip().lower()
+            if await self._repository.email_taken(email):
                 return Error(Conflict(message=MemberRefusal.ACCOUNT_EXISTS))
             try:
                 user = await self._repository.create(User(email=email, user_name=email))
@@ -433,7 +437,10 @@ class UserService:
             await self._publisher.publish(
                 entity_type="user", entity_id=user_id, operation="create", tenant_id=tenant_id
             )
-            self._log_sync_failure(await self._adapter.sync_user(user_id=user_id, data=sync_data), user_id, "create")
+            pushed = await self._adapter.sync_user(user_id=user_id, data=sync_data)
+            self._log_sync_failure(pushed, user_id, "create")
+            if pushed.is_error():
+                member[PROVIDER_SYNC] = PROVIDER_SYNC_FAILED
             return Ok((member, staged.ok))
 
     async def set_member_status(

@@ -161,6 +161,10 @@ class TestKeycloakTenantAdminsManageMembers:
 
         again = await client.post("/api/members/invite", json={"email": email}, headers=admin)
         assert (again.status_code, again.json()) == (409, {"detail": MemberRefusal.ACCOUNT_EXISTS})
+        # The same address in other case is the same account, not a second one.
+        recased = await client.post("/api/members/invite", json={"email": email.capitalize()}, headers=admin)
+        assert (recased.status_code, recased.json()) == (409, {"detail": MemberRefusal.ACCOUNT_EXISTS})
+        assert (await db_session.execute(select(User).where(User.email.ilike(email)))).scalars().all() == [canonical]
 
         deactivated = await client.post(f"/api/members/{user_id}/deactivate", headers=admin)
         assert (deactivated.status_code, deactivated.json()) == (200, {"status": "deactivated", "user_id": user_id})

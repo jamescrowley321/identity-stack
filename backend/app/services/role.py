@@ -369,23 +369,25 @@ class RoleService:
                 staged.append(assigned)
             return Ok(staged)
 
-    async def push_member_roles(self, assigned: list[access.RoleAssigned]) -> Result[None, IdentityError]:
-        """After the commit: invalidate and push each staged assignment (Keycloak: organization member and group)."""
+    async def push_member_roles(self, assigned: list[access.RoleAssigned]) -> Result[bool, IdentityError]:
+        """After the commit: invalidate and push each staged assignment (Keycloak: organization member and group).
+
+        ``Ok(True)`` when every push succeeded; a failed one is logged and makes it ``Ok(False)``.
+        """
         with tracer.start_as_current_span("RoleService.push_member_roles") as span:
             span.set_attribute("assignments.count", len(assigned))
+            every_pushed = True
             for event in assigned:
                 await self._invalidate(event, event.role_id, event.tenant_id)
-                self._log_sync_failure(
-                    await self._adapter.sync_role_assignment(
-                        user_id=event.user_id,
-                        tenant_id=event.tenant_id,
-                        role_id=event.role_id,
-                        data={"role_name": event.role_name},
-                    ),
-                    event.role_id,
-                    "push_member_roles",
+                pushed = await self._adapter.sync_role_assignment(
+                    user_id=event.user_id,
+                    tenant_id=event.tenant_id,
+                    role_id=event.role_id,
+                    data={"role_name": event.role_name},
                 )
-            return Ok(None)
+                self._log_sync_failure(pushed, event.role_id, "push_member_roles")
+                every_pushed = every_pushed and pushed.is_ok()
+            return Ok(every_pushed)
 
     async def list_roles(
         self,

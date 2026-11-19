@@ -377,7 +377,7 @@ canonical users and memberships, whose changes the sync adapter pushes (Keycloak
 organization membership and the role's organization group). They stay
 `require_role("owner", "admin")` in the request's tenant. An invitation **MUST** only
 create: the user and its memberships commit together, and an email any canonical user
-already has is refused (409, `MemberRefusal.ACCOUNT_EXISTS`) whatever tenant holds it, so
+already has, in any case, is refused (409, `MemberRefusal.ACCOUNT_EXISTS`) whatever tenant holds it, so
 an admin can neither enrol another tenant's account nor learn about it. A member's status
 is the account's (the model keeps no status per membership), so it is set only for a user
 whose sole tenant is the request's, under a lock on the user's row (409 otherwise), and a user who is no member of the tenant reads

@@ -35,6 +35,12 @@ class UserRepository(BaseRepository[User]):
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def email_taken(self, email: str) -> bool:
+        """Whether any user's email is ``email``, ignoring case (an invitation's check, ``create_member``)."""
+        stmt = sa.select(sa.exists().where(sa.func.lower(User.email) == sa.func.lower(email)))
+        result = await self._session.execute(stmt)
+        return bool(result.scalar())
+
     async def search(
         self,
         *,

@@ -14,7 +14,15 @@ from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.permission import PermissionRepository
 from app.repositories.role import RoleRepository
 from app.repositories.user import UserRepository
-from app.services.adapters.base import CHANGED_IN_TENANT, CREATED_IN_TENANT, STATUS_CHANGED, IdentityProviderAdapter
+from app.services.adapters.base import (
+    CHANGED_IN_TENANT,
+    CREATED_IN_TENANT,
+    PROVIDER_SYNC,
+    PROVIDER_SYNC_FAILED,
+    STATUS_CHANGED,
+    IdentityProviderAdapter,
+    SyncError,
+)
 from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.members import MemberService
 from app.services.role import RoleService
@@ -120,7 +128,7 @@ class TestInviteMember:
         created = _user(email="new@example.com", user_name="new@example.com", given_name="", family_name="")
         deployment.roles.get_by_name.side_effect = _roles_named(member_role)
         deployment.roles.get.return_value = member_role
-        deployment.users.get_by_email.return_value = None
+        deployment.users.email_taken.return_value = False
         deployment.users.create.return_value = created
         deployment.assignments.get.return_value = None
         deployment.assignments.create.side_effect = lambda row: row
@@ -146,11 +154,56 @@ class TestInviteMember:
             user_id=created.id, tenant_id=TENANT, role_id=member_role.id, data={"role_name": "member"}
         )
 
+    async def test_the_email_is_checked_and_stored_in_one_spelling(self, deployment):
+        member_role = Role(id=uuid.uuid4(), name="member")
+        deployment.roles.get_by_name.side_effect = _roles_named(member_role)
+        deployment.roles.get.return_value = member_role
+        deployment.users.email_taken.return_value = False
+        deployment.users.create.side_effect = lambda row: row
+        deployment.assignments.get.return_value = None
+        deployment.assignments.create.side_effect = lambda row: row
+
+        invited = await deployment.members.invite_member(
+            email=" New@Example.com ", tenant_id=str(TENANT), role_names=["member"]
+        )
+
+        deployment.users.email_taken.assert_awaited_once_with("new@example.com")
+        stored = deployment.users.create.await_args.args[0]
+        assert (stored.email, stored.user_name) == ("new@example.com", "new@example.com")
+        assert (invited.ok["email"], invited.ok["user"]["email"]) == ("new@example.com", "new@example.com")
+
+    @pytest.mark.parametrize("failing", ["sync_user", "sync_role_assignment"])
+    async def test_a_push_that_failed_is_told(self, deployment, failing):
+        """The invitation is committed; the answer says the provider does not hold all of it yet."""
+        member_role = Role(id=uuid.uuid4(), name="member")
+        created = _user(email="new@example.com")
+        deployment.roles.get_by_name.side_effect = _roles_named(member_role)
+        deployment.roles.get.return_value = member_role
+        deployment.users.email_taken.return_value = False
+        deployment.users.create.return_value = created
+        deployment.assignments.get.return_value = None
+        deployment.assignments.create.side_effect = lambda row: row
+        getattr(deployment.adapter, failing).return_value = Error(SyncError(message="Keycloak is down"))
+
+        invited = await deployment.members.invite_member(
+            email="new@example.com", tenant_id=str(TENANT), role_names=["member"]
+        )
+
+        assert invited == Ok(
+            {
+                "status": "invited",
+                "email": "new@example.com",
+                "user": {"userId": str(created.id), "email": "new@example.com", "roleNames": ["member"]},
+                PROVIDER_SYNC: PROVIDER_SYNC_FAILED,
+            }
+        )
+        deployment.users.commit.assert_awaited_once()
+
     async def test_an_existing_account_is_refused_and_given_nothing_whatever_the_adapter(self, deployment):
         """Another tenant's account is neither enrolled nor described (the #693 hole is not repeated here)."""
         member_role = Role(id=uuid.uuid4(), name="member")
         deployment.roles.get_by_name.side_effect = _roles_named(member_role)
-        deployment.users.get_by_email.return_value = _user()
+        deployment.users.email_taken.return_value = True
 
         invited = await deployment.members.invite_member(
             email="alice@example.com", tenant_id=str(TENANT), role_names=["member"]
@@ -170,7 +223,7 @@ class TestInviteMember:
         created = _user(email="new@example.com")
         roles = {member_role.id: member_role, other_tenants.id: other_tenants}
         deployment.roles.get.side_effect = roles.get
-        deployment.users.get_by_email.return_value = None
+        deployment.users.email_taken.return_value = False
         deployment.users.create.return_value = created
         deployment.assignments.get.return_value = None
         deployment.assignments.create.side_effect = lambda row: row

@@ -15,6 +15,7 @@ from expression import Error, Ok, Result
 from opentelemetry import trace
 
 from app.errors.identity import Forbidden, IdentityError, NotFound
+from app.services.adapters.base import PROVIDER_SYNC, PROVIDER_SYNC_FAILED
 from app.services.descope_management import DescopeManagementAdapter
 from app.services.role import RoleService
 from app.services.user import MemberRefusal, MemberStatus, UserService
@@ -79,9 +80,17 @@ class MemberService:
             if created.is_error():
                 return Error(created.error)
             member, assigned = created.ok
-            await self._roles.push_member_roles(assigned)
-            user = {**member, "roleNames": list(dict.fromkeys(role_names))}
-            return Ok({"status": "invited", "email": email, "user": user})
+            roles_pushed = await self._roles.push_member_roles(assigned)
+            user_pushed = member.pop(PROVIDER_SYNC, None) is None
+            invited = {
+                "status": "invited",
+                "email": member["email"],
+                "user": {**member, "roleNames": list(dict.fromkeys(role_names))},
+            }
+            # Committed either way; the provider does not hold all of it yet (as deactivate tells, #677).
+            if not (user_pushed and roles_pushed.is_ok() and roles_pushed.ok):
+                invited[PROVIDER_SYNC] = PROVIDER_SYNC_FAILED
+            return Ok(invited)
 
     async def set_member_status(
         self, user_id: str, tenant_id: str, status: MemberStatus
