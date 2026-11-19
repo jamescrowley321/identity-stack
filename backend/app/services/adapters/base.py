@@ -5,6 +5,7 @@ All methods return Result[None, SyncError] — never raise for domain errors.
 
 from __future__ import annotations
 
+import enum
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -45,6 +46,21 @@ CREATED_IN_TENANT = "created_in_tenant"
 CHANGED_IN_TENANT = "changed_in_tenant"
 
 
+class Capability(enum.StrEnum):
+    """An optional feature a sync adapter implements beyond the canonical sync.
+
+    ``GET /api/capabilities`` reports the configured adapter's set, the SPA shows a
+    page only when its capability is there, and a route for a capability the
+    adapter lacks answers 404 (``app.dependencies.capabilities``).
+    """
+
+    # Credentials a machine signs in with, owned by a tenant (Descope access keys).
+    MACHINE_CREDENTIALS = "machine_credentials"
+    # Free-form attributes on a user and on a tenant: the profile's custom
+    # attributes and the tenant settings (Descope custom attributes).
+    CUSTOM_ATTRIBUTES = "custom_attributes"
+
+
 @dataclass(frozen=True)
 class SyncError:
     """Error returned when an adapter sync operation fails."""
@@ -66,6 +82,10 @@ class IdentityProviderAdapter(ABC):
     # users the deleted role was the last role of; other adapters get the role
     # delete alone.
     ends_memberships: ClassVar[bool] = False
+
+    # The optional capabilities the adapter implements. Every concrete adapter
+    # declares its own set, empty when it implements none.
+    capabilities: ClassVar[frozenset[Capability]]
 
     @abstractmethod
     async def sync_user(self, *, user_id: uuid.UUID, data: dict) -> Result[None, SyncError]: ...

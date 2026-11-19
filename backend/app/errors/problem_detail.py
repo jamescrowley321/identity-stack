@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.errors.identity import (
+    CapabilityMissing,
     Conflict,
     EmailLinkRefused,
     Forbidden,
@@ -54,6 +55,7 @@ class _ErrorMapping:
 # Error type -> structured mapping (URI path, HTTP status, title)
 _ERROR_TYPE_MAP: dict[type[IdentityError], _ErrorMapping] = {
     NotFound: _ErrorMapping(uri="/errors/not-found", status=404, title="Resource Not Found"),
+    CapabilityMissing: _ErrorMapping(uri="/errors/capability-missing", status=404, title="Capability Not Available"),
     Conflict: _ErrorMapping(uri="/errors/conflict", status=409, title="Conflict"),
     EmailLinkRefused: _ErrorMapping(uri="/errors/conflict", status=409, title="Conflict"),
     ValidationError: _ErrorMapping(uri="/errors/validation", status=422, title="Validation Error"),

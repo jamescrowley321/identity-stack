@@ -29,6 +29,14 @@ class NotFound(IdentityError):
 
 
 @dataclass(frozen=True, unsafe_hash=False)
+class CapabilityMissing(NotFound):
+    """The deployment lacks the capability a route serves (``app.dependencies.capabilities``).
+
+    404, not the provider's 403: no principal is refused, the route is not there.
+    """
+
+
+@dataclass(frozen=True, unsafe_hash=False)
 class Conflict(IdentityError):
     """Operation conflicts with existing state (e.g. duplicate name)."""
 

@@ -80,6 +80,14 @@ TENANT_SETTINGS = (
     "attributes, which serves Descope principals only (#590)"
 )
 ORY_PROVIDER = "proves the Ory provider, which only the Descope run's backend configures"
+NO_CUSTOM_ATTRIBUTES = (
+    "the run's backend syncs with Keycloak, whose adapter declares no custom_attributes capability: "
+    "the SPA has no Tenant Settings page (#678)"
+)
+NO_MACHINE_CREDENTIALS = (
+    "the run's backend syncs with Keycloak, whose adapter declares no machine_credentials capability: "
+    "the SPA has no Access Keys page (#678)"
+)
 
 
 def _both(reason: str) -> dict[str, str]:
@@ -140,6 +148,10 @@ NOT_APPLICABLE: dict[str, dict[str, str]] = {
         _both(DESCOPE_MANAGEMENT_API),
     ),
     "test_identity_repository_ui.py::test_navigate_to_settings_page": _both(TENANT_SETTINGS),
+    # Pages a capability gives (test_capability_pages.py checks each run sees exactly its own)
+    "test_authenticated_ui.py::test_navigate_to_settings": {KEYCLOAK: NO_CUSTOM_ATTRIBUTES},
+    "test_page_content.py::test_tenant_settings_handles_no_tenant": {KEYCLOAK: NO_CUSTOM_ATTRIBUTES},
+    "test_page_content.py::test_access_keys_page_loads": {KEYCLOAK: NO_MACHINE_CREDENTIALS},
     "test_identity_repository_ui.py::test_role_created_via_api_is_invisible_to_an_access_key_session": _both(
         DESCOPE_ACCESS_KEY
     ),

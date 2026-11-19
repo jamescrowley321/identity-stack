@@ -80,6 +80,7 @@ from app.services.adapters.base import (
     LAST_ROLE_IN_TENANT,
     STATUS_CHANGED,
     UNANSWERED,
+    Capability,
     IdentityProviderAdapter,
     SyncError,
 )
@@ -279,6 +280,7 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
     """Pushes canonical tenants, users, memberships, permissions, roles and role assignments to Keycloak."""
 
     ends_memberships: ClassVar[bool] = True
+    capabilities: ClassVar[frozenset[Capability]] = frozenset()
 
     def __init__(self, api: KeycloakAdminApi, links: KeycloakLinks) -> None:
         self._api = api

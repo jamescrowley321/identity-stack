@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from fastapi import Depends, Request
 from sqlalchemy import text
@@ -38,8 +39,10 @@ from app.repositories.sync_event import SyncEventRepository
 from app.repositories.sync_ledger import PendingPushRepository, ReconciliationRunRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
-from app.services.adapters.base import IdentityProviderAdapter
+from app.services.adapters.base import Capability, IdentityProviderAdapter
 from app.services.adapters.descope import DescopeSyncAdapter
+from app.services.adapters.keycloak import KeycloakSyncAdapter
+from app.services.adapters.zitadel import ZitadelSyncAdapter
 from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
 from app.services.idp_link import IdPLinkService
@@ -47,6 +50,7 @@ from app.services.inbound_sync import InboundSyncService
 from app.services.permission import PermissionService
 from app.services.provider import ProviderService
 from app.services.reconciliation import ProviderReconciliation, ReconciliationService
+from app.services.relationship_store import RelationshipStoreKind
 from app.services.role import RoleService
 from app.services.sync_status import SyncStatusService
 from app.services.tenant import TenantService
@@ -97,12 +101,26 @@ logger = logbook(__name__)
 SYNC_PROVIDER = knob("SYNC_PROVIDER", "descope").strip().lower()
 
 
-# One entry per provider: how its adapter is built from the application state and
-# the request's database session.
-SYNC_ADAPTERS: dict[str, Callable[[State, AsyncSession], IdentityProviderAdapter]] = {
-    "descope": lambda state, _session: DescopeSyncAdapter(client=state.descope_client),
-    "keycloak": lambda state, session: build_keycloak_sync_adapter(state.keycloak_admin, session),
-    "zitadel": lambda state, session: build_zitadel_sync_adapter(state.zitadel_admin, session),
+@dataclass(frozen=True)
+class SyncAdapterRegistration:
+    """A provider's sync adapter: its class, which declares its capabilities, and how it is built."""
+
+    adapter: type[IdentityProviderAdapter]
+    build: Callable[[State, AsyncSession], IdentityProviderAdapter]
+
+
+# One entry per provider: its adapter's class and how the adapter is built from the
+# application state and the request's database session.
+SYNC_ADAPTERS: dict[str, SyncAdapterRegistration] = {
+    "descope": SyncAdapterRegistration(
+        DescopeSyncAdapter, lambda state, _session: DescopeSyncAdapter(client=state.descope_client)
+    ),
+    "keycloak": SyncAdapterRegistration(
+        KeycloakSyncAdapter, lambda state, session: build_keycloak_sync_adapter(state.keycloak_admin, session)
+    ),
+    "zitadel": SyncAdapterRegistration(
+        ZitadelSyncAdapter, lambda state, session: build_zitadel_sync_adapter(state.zitadel_admin, session)
+    ),
 }
 
 
@@ -114,7 +132,23 @@ RECONCILIATION_HAS_NO_READER = "Reconciliation has no reader for SYNC_PROVIDER; 
 
 def get_sync_adapter(request: Request, session: AsyncSession) -> IdentityProviderAdapter:
     """The sync adapter of the configured provider (``SYNC_PROVIDER``)."""
-    return SYNC_ADAPTERS[SYNC_PROVIDER](request.app.state, session)
+    return SYNC_ADAPTERS[SYNC_PROVIDER].build(request.app.state, session)
+
+
+def sync_capabilities() -> frozenset[Capability]:
+    """The optional capabilities the configured provider's sync adapter declares."""
+    return SYNC_ADAPTERS[SYNC_PROVIDER].adapter.capabilities
+
+
+# The relationship store of a deployment, by its sync provider: Descope's FGA store
+# for Descope, none for any other. Descope's store is keyed on Descope ids, which a
+# canonical principal does not have.
+RELATIONSHIP_STORES: dict[str, RelationshipStoreKind] = {"descope": RelationshipStoreKind.DESCOPE}
+
+
+def relationship_store_kind() -> RelationshipStoreKind:
+    """The kind of the deployment's relationship store (``RELATIONSHIP_STORES``)."""
+    return RELATIONSHIP_STORES.get(SYNC_PROVIDER, RelationshipStoreKind.NONE)
 
 
 async def get_user_service(

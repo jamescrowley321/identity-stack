@@ -24,6 +24,7 @@ from app.routers import (
     attributes,
     auth,
     canonical_users,
+    capabilities,
     documents,
     fga,
     health,
@@ -312,6 +313,7 @@ app.include_router(providers.router, prefix="/api")
 app.include_router(sync_status.router, prefix="/api")
 app.include_router(canonical_users.router, prefix="/api")
 app.include_router(access_checks.router, prefix="/api")
+app.include_router(capabilities.router, prefix="/api")
 
 
 @app.get("/docs", include_in_schema=False)

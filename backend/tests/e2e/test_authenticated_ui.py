@@ -28,11 +28,10 @@ def test_authenticated_user_sees_dashboard(auth_page: Page):
 
 
 def test_sidebar_navigation_links(auth_page: Page):
-    """Sidebar shows navigation links."""
+    """Sidebar shows navigation links (the pages a capability gives: test_capability_pages.py)."""
     sidebar = auth_page.locator("[data-slot='sidebar']")
     expect(sidebar.get_by_text("Dashboard")).to_be_visible()
     expect(sidebar.get_by_text("Profile")).to_be_visible()
-    expect(sidebar.get_by_text("Tenant Settings")).to_be_visible()
 
 
 def test_theme_toggle(auth_page: Page):

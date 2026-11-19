@@ -6,12 +6,13 @@ Wraps DescopeManagementClient with Result[None, SyncError] returns and OTel span
 from __future__ import annotations
 
 import uuid
+from typing import ClassVar
 
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
 from app.logbook import logbook
-from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.adapters.base import Capability, IdentityProviderAdapter, SyncError
 from app.services.descope import DescopeManagementClient
 
 logger = logbook(__name__)
@@ -32,6 +33,12 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
     - On failure: returns Error(SyncError) with operation context
     - OTel span on every call for tracing
     """
+
+    # Access keys and user and tenant custom attributes, through the Descope
+    # Management API (DescopeManagementAdapter).
+    capabilities: ClassVar[frozenset[Capability]] = frozenset(
+        {Capability.MACHINE_CREDENTIALS, Capability.CUSTOM_ATTRIBUTES}
+    )
 
     def __init__(self, client: DescopeManagementClient) -> None:
         self._client = client
