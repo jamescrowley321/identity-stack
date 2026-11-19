@@ -10,6 +10,8 @@ import json
 import pytest
 from playwright.sync_api import APIRequestContext
 
+from app.services.openfga import MODEL_IN_TERRAFORM
+from app.services.relationship_store import RelationshipStoreKind
 from tests.e2e.helpers.api import unique_name
 from tests.e2e.not_applicable import descope_credentials_missing
 
@@ -36,14 +38,14 @@ def test_get_fga_schema(admin_api_context: APIRequestContext, backend_url: str):
 # --- AC-3: Create and delete relation ---
 
 
-def test_relation_create_and_delete(admin_api_context: APIRequestContext, backend_url: str):
+def test_relation_create_and_delete(admin_api_context: APIRequestContext, backend_url: str, relation_target: str):
     """Relation can be created and deleted via API."""
     resource_id = unique_name("doc")
     relation_body = {
         "resource_type": "document",
         "resource_id": resource_id,
         "relation": "owner",
-        "target": unique_name("u"),
+        "target": relation_target,
     }
 
     # Create relation
@@ -55,6 +57,8 @@ def test_relation_create_and_delete(admin_api_context: APIRequestContext, backen
     if resp.status in (400, 502):
         pytest.fail(f"FGA not operational in this Descope project (status {resp.status})")
     assert resp.status == 201, f"Create failed: {resp.status}"
+    # The subject the store keyed on: the target as given, or the user id it names.
+    subject = resp.json()["target"]
 
     # Verify via list
     resp = admin_api_context.get(
@@ -63,7 +67,7 @@ def test_relation_create_and_delete(admin_api_context: APIRequestContext, backen
     )
     assert resp.status == 200
     relations = resp.json().get("relations", [])
-    assert any(r["target"] == relation_body["target"] for r in relations), "Created relation not found in list"
+    assert any(r["target"] == subject for r in relations), "Created relation not found in list"
 
     # Delete relation
     resp = admin_api_context.delete(
@@ -173,10 +177,12 @@ def test_check_permission_validation(admin_api_context: APIRequestContext, backe
 # --- Relation lifecycle with authorization check ---
 
 
-def test_relation_lifecycle_with_permission_check(admin_api_context: APIRequestContext, backend_url: str):
+def test_relation_lifecycle_with_permission_check(
+    admin_api_context: APIRequestContext, backend_url: str, relation_target: str
+):
     """Create relation → verify allowed → delete → verify denied (full lifecycle)."""
     resource_id = unique_name("lifecycle")
-    target = unique_name("u")
+    target = relation_target
     relation_body = {
         "resource_type": "document",
         "resource_id": resource_id,
@@ -228,11 +234,19 @@ def test_relation_lifecycle_with_permission_check(admin_api_context: APIRequestC
 
 
 def test_update_fga_schema(admin_api_context: APIRequestContext, backend_url: str):
-    """PUT /api/fga/schema updates the schema and returns the result."""
+    """PUT /api/fga/schema updates the schema and returns the result; on OpenFGA it is read-only (409)."""
     # Read current schema first
     resp = admin_api_context.get(f"{backend_url}/api/fga/schema")
     assert resp.status == 200
     original = resp.json().get("schema", "")
+
+    served = admin_api_context.get(f"{backend_url}/api/capabilities")
+    assert served.status == 200
+    if served.json()["relationship_store"] == RelationshipStoreKind.OPENFGA:
+        # infra/openfga holds the model; the backend never writes one.
+        resp = admin_api_context.put(f"{backend_url}/api/fga/schema", data={"schema": original})
+        assert (resp.status, resp.json()) == (409, {"detail": MODEL_IN_TERRAFORM})
+        return
 
     if not original:
         pytest.fail("No FGA schema configured — the project this suite runs against must have one")

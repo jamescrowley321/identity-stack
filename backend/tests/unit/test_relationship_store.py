@@ -16,6 +16,11 @@ from app.dependencies import identity
 from app.dependencies.capabilities import served
 from app.dependencies.fga import store_error_response
 from app.middleware.providers import descope_config, ory_config
+from app.services.adapters.descope import DescopeSyncAdapter
+from app.services.adapters.keycloak import KeycloakSyncAdapter
+from app.services.adapters.noop import NoOpSyncAdapter
+from app.services.adapters.ory import OrySyncAdapter
+from app.services.adapters.zitadel import ZitadelSyncAdapter
 from app.services.descope import DescopeManagementClient
 from app.services.openfga import (
     MODEL_IN_TERRAFORM,
@@ -215,6 +220,20 @@ class TestSelection:
             identity.relationship_store_kind()
         assert (raised.value.fault, raised.value.selected) == (RelationshipStoreFault.UNKNOWN, "keto")
 
+    @pytest.mark.parametrize(
+        ("adapter", "store"),
+        [
+            (DescopeSyncAdapter, RelationshipStoreKind.DESCOPE),
+            (KeycloakSyncAdapter, RelationshipStoreKind.OPENFGA),
+            (ZitadelSyncAdapter, RelationshipStoreKind.OPENFGA),
+            (OrySyncAdapter, RelationshipStoreKind.OPENFGA),
+            (NoOpSyncAdapter, RelationshipStoreKind.OPENFGA),
+        ],
+    )
+    def test_each_adapter_declares_its_default_store(self, adapter, store):
+        """Only Descope has a Zanzibar-style store of its own; Ory gets OpenFGA too (owner decision 1 of #672)."""
+        assert adapter.relationship_store is store
+
     def test_every_store_but_none_is_registered(self):
         assert set(identity.RELATIONSHIP_STORES) == set(RelationshipStoreKind) - {RelationshipStoreKind.NONE}
 
@@ -362,6 +381,7 @@ def _mock_clients(monkeypatch, handler) -> list[httpx.AsyncClient]:
         return client
 
     monkeypatch.setattr(main, "outbound_client", build)
+    monkeypatch.setattr(identity, "outbound_client", build)
     return built
 
 
@@ -507,7 +527,7 @@ class TestOpenFgaStore:
         store = _openfga(answer)
         assert await store.check("t1", "document", "d1", "can_view", "u1") is True
         await store.write("t1", "document", "d1", "owner", "u1")
-        await store.delete("t1", "document", "d1", "owner", "user:u1")
+        await store.delete("t1", "document", "d1", "owner", "u1")
 
         key = {"user": "user:u1", "relation": "owner", "object": "document:t1/d1"}
         assert seen == [

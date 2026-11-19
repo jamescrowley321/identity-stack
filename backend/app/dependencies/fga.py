@@ -94,8 +94,17 @@ async def find_user(directory: UserDirectory, identifier: str) -> DirectoryUser 
         raise HTTPException(status_code=502, detail="Failed to verify target user") from exc
 
 
-async def resolve_fga_user_target(directory: UserDirectory, identifier: str, tenant_id: str) -> str:
+async def resolve_fga_user_target(
+    directory: UserDirectory, identifier: str, tenant_id: str, *, open_subjects: bool = True
+) -> str | None:
     """Resolve a user identifier to the user id the relationship store keys on, if it names one.
+
+    ``open_subjects`` is the store's (``RelationshipStoreRegistration``). Off, as on
+    OpenFGA, whose subjects are canonical users only, an identifier that does not
+    resolve inside the caller's tenant gives ``None``: the caller refuses the write
+    and answers a check ``allowed: false`` without asking the store. Otherwise a
+    tenant admin could key a real grant on another tenant's user by their
+    canonical id.
 
     Every FGA *read* in this service keys on the caller's subject id
     (``_subject``): ``require_fga`` checks with it, and the owner tuple is written
@@ -140,10 +149,10 @@ async def resolve_fga_user_target(directory: UserDirectory, identifier: str, ten
         logger.error("Failed to resolve FGA target: %s", exc.upstream)
         raise HTTPException(status_code=502, detail="Failed to resolve target user") from exc
     if user is None:
-        return identifier
+        return identifier if open_subjects else None
     if tenant_id not in user.tenant_ids:
         logger.info("FGA target resolved to a user outside the caller's tenant; leaving it unresolved")
-        return identifier
+        return identifier if open_subjects else None
     return user.user_id
 
 

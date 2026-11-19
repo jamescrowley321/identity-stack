@@ -71,6 +71,7 @@ Variables. `issuer_url` and `frontend_url` are the variables every local provide
 | `frontend_environment` | Frontend `VITE_OIDC_AUTHORITY`, `VITE_OIDC_CLIENT_ID`, `VITE_OIDC_REDIRECT_URI`, `VITE_OIDC_SCOPE`. The scope asks for `offline_access` (a refresh token) and `urn:zitadel:iam:user:resourceowner`, which puts the user's organization in the access token. |
 | `backend_environment` (sensitive) | Backend `ZITADEL_ISSUER_URL`, `ZITADEL_AUDIENCE` (the project id), `ZITADEL_CLIENT_ID` (the SPA), `ZITADEL_REQUIRE_HTTPS` and `ZITADEL_ADMIN_TOKEN` (the sync adapter's personal access token, the reason it is sensitive). |
 | `canonical_seed` | What the seed reads. |
+| `share_target_seed` | What the seed reads second: the same, linking the fixture's `write_only` user (`erin`, a member of `acme`), whom the shared e2e suite shares documents with. |
 
 The provider marks client ids sensitive; the root outputs them as plain values, because a
 client id is public.

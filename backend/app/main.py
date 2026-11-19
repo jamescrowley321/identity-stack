@@ -55,8 +55,6 @@ from app.services.keycloak_admin import (
     KeycloakApiClientNotManaged,
     connect_keycloak_admin,
 )
-from app.services.openfga import OPENFGA_TIMEOUT_SECONDS, connect_openfga
-from app.services.relationship_store import RelationshipStoreKind
 from app.telemetry import init_telemetry, shutdown_telemetry
 
 logger = logbook(__name__)
@@ -144,31 +142,6 @@ async def _start_sync_provider(app: FastAPI) -> OutboundClient | None:
     return http
 
 
-async def _start_relationship_store(app: FastAPI, kind: RelationshipStoreKind) -> OutboundClient | None:
-    """Connect the relationship store that needs a client of its own: OpenFGA.
-
-    Reads its settings and its authorization model once (``connect_openfga``), so a
-    missing setting, an unreachable server or a model it does not hold stops
-    startup (``RelationshipStoreNotAvailable``). Returns the client for the
-    lifespan to close, or ``None``.
-    """
-    app.state.openfga = None
-    if kind is not RelationshipStoreKind.OPENFGA:
-        return None
-    http = outbound_client(timeout=OPENFGA_TIMEOUT_SECONDS)
-    try:
-        app.state.openfga = await connect_openfga(http)
-    except Exception:
-        await http.aclose()
-        raise
-    logger.info(
-        "OpenFGA connected: store %s, authorization model %s",
-        app.state.openfga.settings.store_id,
-        app.state.openfga.settings.authorization_model_id,
-    )
-    return http
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
@@ -202,7 +175,7 @@ async def lifespan(app: FastAPI):
         relationship_store = identity_dependencies.relationship_store_kind()
         logger.info("Relationship store: %s", relationship_store)
         sync_http_client = await _start_sync_provider(app)
-        relationship_http_client = await _start_relationship_store(app, relationship_store)
+        stop_relationship_store = await identity_dependencies.start_relationship_store(app.state, relationship_store)
     except Exception:
         # Startup stops here: close what was opened before it, each close whatever the one before did.
         try:
@@ -308,11 +281,10 @@ async def lifespan(app: FastAPI):
                     finally:
                         try:
                             app.state.keycloak_admin = None
-                            app.state.openfga = None
                             if sync_http_client is not None:
                                 await sync_http_client.aclose()
-                            if relationship_http_client is not None:
-                                await relationship_http_client.aclose()
+                            if stop_relationship_store is not None:
+                                await stop_relationship_store()
                         except Exception:
                             logger.warning("Sync provider HTTP client close failed", exc_info=True)
                         finally:

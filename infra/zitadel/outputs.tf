@@ -86,6 +86,22 @@ output "test_credentials" {
   }
 }
 
+output "share_target_seed" {
+  description = "What `make zitadel-seed` reads second: canonical_seed with the fixture's second member of the two-tenant user's admin tenant as its linked user, so the shared e2e suite can share a document with them."
+  value = {
+    issuer_url = local.issuer_url
+    tenants    = { for key in keys(local.tenant_organizations) : key => zitadel_org.this[key].id }
+    linked_user = {
+      external_sub = zitadel_human_user.this[local.share_target].id
+      email        = zitadel_human_user.this[local.share_target].email
+      user_name    = zitadel_human_user.this[local.share_target].user_name
+      given_name   = zitadel_human_user.this[local.share_target].first_name
+      family_name  = zitadel_human_user.this[local.share_target].last_name
+      roles        = local.share_target_roles
+    }
+  }
+}
+
 output "canonical_seed" {
   description = "What `make zitadel-seed` reads: the issuer, the tenant organizations' ids, and the fixture's two-tenant user it links with their canonical roles."
   value = {

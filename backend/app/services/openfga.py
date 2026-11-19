@@ -150,9 +150,8 @@ def _object(object_type: str, tenant_id: str, object_id: str) -> str:
 
 
 def _subject(subject: str) -> str:
-    """``user:<subject>``. A subject given as ``user:<id>`` already names that user."""
-    prefix = f"{SUBJECT_TYPE}:"
-    return subject if subject.startswith(prefix) else f"{prefix}{subject}"
+    """``user:<subject>``: every subject is a canonical user id."""
+    return f"{SUBJECT_TYPE}:{subject}"
 
 
 def _tuple(tenant_id: str, object_type: str, object_id: str, relation: str, subject: str) -> dict[str, str]:

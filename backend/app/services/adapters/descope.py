@@ -14,6 +14,7 @@ from opentelemetry import trace
 from app.logbook import logbook
 from app.services.adapters.base import Capability, IdentityProviderAdapter, SyncError
 from app.services.descope import DescopeManagementClient
+from app.services.relationship_store import RelationshipStoreKind
 
 logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
@@ -39,6 +40,8 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
     capabilities: ClassVar[frozenset[Capability]] = frozenset(
         {Capability.MACHINE_CREDENTIALS, Capability.CUSTOM_ATTRIBUTES}
     )
+    # Descope's own FGA store, keyed on Descope tenant and user ids.
+    relationship_store: ClassVar[RelationshipStoreKind] = RelationshipStoreKind.DESCOPE
 
     def __init__(self, client: DescopeManagementClient) -> None:
         self._client = client

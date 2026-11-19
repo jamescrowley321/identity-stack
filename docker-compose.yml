@@ -374,7 +374,7 @@ services:
   # Local OpenFGA with Postgres storage. No authentication: its only published
   # port binds to loopback. The database password is a LOCAL-ONLY throwaway.
   openfga-db:
-    image: postgres:16-alpine
+    image: postgres:17.10-alpine
     environment:
       - POSTGRES_DB=openfga
       - POSTGRES_USER=openfga

@@ -83,13 +83,14 @@ class TestOpenFgaOnly(FreshIds):
             await store.delete(ids["tenant"], DOCUMENT, ids["doc"], "viewer", ids["alice"])
         assert await store.all_relations(ids["tenant"], DOCUMENT, ids["doc"]) == []
 
-    async def test_an_email_subject_is_a_user(self, store, ids):
-        await store.write(ids["tenant"], DOCUMENT, ids["doc"], "viewer", "someone@example.test")
+    async def test_a_subject_is_always_typed_user_and_never_passed_through(self, store, ids):
+        """``user:<id>`` is not taken as already typed: the store types every subject itself."""
+        await store.write(ids["tenant"], DOCUMENT, ids["doc"], "viewer", ids["alice"])
 
-        assert await store.check(ids["tenant"], DOCUMENT, ids["doc"], "can_view", "user:someone@example.test")
-        assert await store.relations(ids["tenant"], DOCUMENT, ids["doc"]) == [
-            Relation("viewer", "someone@example.test")
-        ]
+        assert await store.check(ids["tenant"], DOCUMENT, ids["doc"], "can_view", ids["alice"]) is True
+        with pytest.raises(RelationshipStoreError) as caught:
+            await store.check(ids["tenant"], DOCUMENT, ids["doc"], "can_view", f"user:{ids['alice']}")
+        assert caught.value.kind is RelationshipStoreErrorKind.REFUSED
 
     async def test_a_relation_the_model_does_not_define_is_refused(self, store, ids):
         with pytest.raises(RelationshipStoreError) as caught:

@@ -231,18 +231,32 @@ class TestFgaAdministration:
         assert (response.status_code, response.json()["target"]) == (201, COLLEAGUE)
         assert store.tuples == {(TENANT_A, "document", "d1", "viewer", COLLEAGUE)}
 
-    def test_a_user_outside_the_tenant_is_left_unresolved(self, client, store):
+    @pytest.mark.parametrize(
+        "target",
+        ["outsider@globex.test", OUTSIDER, f"user:{OUTSIDER}", f"user:{COLLEAGUE}", "nobody@acme.test", "u-random"],
+    )
+    @pytest.mark.parametrize("method", ["POST", "DELETE"])
+    def test_a_target_that_is_no_user_of_the_tenant_is_refused(self, client, store, method, target):
+        """Another tenant's user, by email, canonical id or typed id, is refused like no user at all."""
         test_client, _ = client
-        body = {
-            "resource_type": "document",
-            "resource_id": "d1",
-            "relation": "viewer",
-            "target": "outsider@globex.test",
-        }
+        store.tuples.add((TENANT_A, "document", "d1", "viewer", OUTSIDER))
+        before = set(store.tuples)
+        body = {"resource_type": "document", "resource_id": "d1", "relation": "viewer", "target": target}
 
-        test_client.post("/api/fga/relations", json=body, headers=OWNER)
+        response = test_client.request(method, "/api/fga/relations", json=body, headers=OWNER)
 
-        assert store.tuples == {(TENANT_A, "document", "d1", "viewer", "outsider@globex.test")}
+        assert (response.status_code, response.json()) == (404, {"detail": "Target user not found"})
+        assert store.tuples == before
+
+    @pytest.mark.parametrize("target", [OUTSIDER, f"user:{OUTSIDER}", "nobody@acme.test"])
+    def test_a_check_for_no_user_of_the_tenant_is_false_without_asking_the_store(self, client, store, target):
+        test_client, _ = client
+        store.check = AsyncMock(side_effect=AssertionError("the store was asked"))
+        body = {"resource_type": "document", "resource_id": "d1", "relation": "can_view", "target": target}
+
+        response = test_client.post("/api/fga/check", json=body, headers=OWNER)
+
+        assert (response.status_code, response.json()) == (200, {"allowed": False})
 
     def test_the_schema_is_read_only(self, client):
         test_client, _ = client

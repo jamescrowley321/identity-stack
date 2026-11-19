@@ -175,8 +175,9 @@ keycloak-seed: ## register the keycloak provider, link canonical tenants to the 
 	printf '%s' "$$linked" | (cd backend && KEYCLOAK_ISSUER_URL="$$issuer" python -m scripts.seed_keycloak --link-organizations) || exit 1; \
 	printf '%s' "$$users" | (cd backend && KEYCLOAK_ISSUER_URL="$$issuer" python -m scripts.seed_keycloak --link-users)
 
-zitadel-seed: ## link the applied infra/zitadel root to canonical tenants in DATABASE_URL (migrated database; idempotent)
+zitadel-seed: ## link the applied infra/zitadel root to canonical tenants and its two-tenant user and share target in DATABASE_URL (migrated database; idempotent)
 	terraform -chdir=infra/zitadel output -json canonical_seed | (cd backend && python -m scripts.seed_zitadel)
+	terraform -chdir=infra/zitadel output -json share_target_seed | (cd backend && python -m scripts.seed_zitadel)
 
 # The SPA's VITE_OIDC_* values are the applied root's frontend_environment
 # output. Only VITE_OIDC_* keys are exported; any other key in the output is an error.

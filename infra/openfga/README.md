@@ -21,6 +21,11 @@ Outputs: `store_id`, `authorization_model_id`, and `backend_environment`, the ba
 `RELATIONSHIP_STORE`, `OPENFGA_API_URL`, `OPENFGA_STORE_ID` and `OPENFGA_AUTHORIZATION_MODEL_ID`
 ([environment variables](../../docs/environment-variables.md)).
 
+`OPENFGA_API_URL` in the output is `api_url`, the address Terraform reached OpenFGA at: right for a
+backend on the host (`make dev-backend`, CI). A backend in the compose network (`docker compose up`
+with the `openfga` profile) reaches the same server as `http://openfga:8080`: set that instead
+in `.env`; the store and model ids stay the same.
+
 The model lives here only. OpenFGA never changes a model: a changed `model.json` writes a new
 model with a new id, and the backend uses the id it was started with, so restart it with the new
 output. The backend never writes a model: `PUT /api/fga/schema` answers 409 on OpenFGA. Tuples the

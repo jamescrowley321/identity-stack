@@ -14,7 +14,7 @@ AC-4.3.1: get_identity_resolution_service() for identity resolution with Redis c
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -32,6 +32,7 @@ from app.errors.identity import CapabilityMissing, Conflict, IdentityErrorRaised
 from app.knobs import knob
 from app.logbook import logbook
 from app.models.database import get_async_session, get_engine
+from app.outbound import outbound_client
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.permission import PermissionRepository
@@ -49,7 +50,7 @@ from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
 from app.services.idp_link import IdPLinkService
 from app.services.inbound_sync import InboundSyncService
-from app.services.openfga import OpenFgaRelationshipStore
+from app.services.openfga import OPENFGA_TIMEOUT_SECONDS, OpenFgaRelationshipStore, connect_openfga
 from app.services.permission import PermissionService
 from app.services.provider import ProviderService
 from app.services.reconciliation import ProviderReconciliation, ReconciliationService
@@ -113,35 +114,24 @@ SYNC_PROVIDER = knob("SYNC_PROVIDER", "descope").strip().lower()
 
 @dataclass(frozen=True)
 class SyncAdapterRegistration:
-    """A provider's sync adapter: its class, which declares its capabilities, and how it is built.
-
-    ``relationship_store`` is the store a deployment syncing to the provider gets when
-    ``RELATIONSHIP_STORE`` is unset: the provider's own Zanzibar-style store, or
-    OpenFGA for a provider without one.
-    """
+    """A provider's sync adapter: its class, which declares its capabilities and its default
+    relationship store, and how it is built."""
 
     adapter: type[IdentityProviderAdapter]
     build: Callable[[State, AsyncSession], IdentityProviderAdapter]
-    relationship_store: RelationshipStoreKind
 
 
 # One entry per provider: its adapter's class and how the adapter is built from the
 # application state and the request's database session.
 SYNC_ADAPTERS: dict[str, SyncAdapterRegistration] = {
     "descope": SyncAdapterRegistration(
-        DescopeSyncAdapter,
-        lambda state, _session: DescopeSyncAdapter(client=state.descope_client),
-        RelationshipStoreKind.DESCOPE,
+        DescopeSyncAdapter, lambda state, _session: DescopeSyncAdapter(client=state.descope_client)
     ),
     "keycloak": SyncAdapterRegistration(
-        KeycloakSyncAdapter,
-        lambda state, session: build_keycloak_sync_adapter(state.keycloak_admin, session),
-        RelationshipStoreKind.OPENFGA,
+        KeycloakSyncAdapter, lambda state, session: build_keycloak_sync_adapter(state.keycloak_admin, session)
     ),
     "zitadel": SyncAdapterRegistration(
-        ZitadelSyncAdapter,
-        lambda state, session: build_zitadel_sync_adapter(state.zitadel_admin, session),
-        RelationshipStoreKind.OPENFGA,
+        ZitadelSyncAdapter, lambda state, session: build_zitadel_sync_adapter(state.zitadel_admin, session)
     ),
 }
 
@@ -181,6 +171,35 @@ class RelationshipStoreRegistration:
     serves: Callable[[Request], bool]
     build: Callable[[State], RelationshipStore]
     users: Callable[[State, AsyncSession], UserDirectory]
+    # Whether a relation may name a subject the store's directory does not find in
+    # the caller's tenant. Descope's raw admin surface keys on whatever it is given;
+    # OpenFGA's subjects are canonical users only, so anything else is refused.
+    open_subjects: bool
+    # Opens what the store needs for the life of the process, at startup, and
+    # returns what closes it. ``None``: the store needs nothing of its own.
+    start: Callable[[State], Awaitable[Callable[[], Awaitable[None]]]] | None = None
+
+
+async def _start_openfga(state: State) -> Callable[[], Awaitable[None]]:
+    """Connect OpenFGA (``connect_openfga``): a missing setting, an unreachable server or a
+    model it does not hold stops startup (``RelationshipStoreNotAvailable``)."""
+    http = outbound_client(timeout=OPENFGA_TIMEOUT_SECONDS)
+    try:
+        state.openfga = await connect_openfga(http)
+    except Exception:
+        await http.aclose()
+        raise
+    logger.info(
+        "OpenFGA connected: store %s, authorization model %s",
+        state.openfga.settings.store_id,
+        state.openfga.settings.authorization_model_id,
+    )
+
+    async def stop() -> None:
+        state.openfga = None
+        await http.aclose()
+
+    return stop
 
 
 # One entry per store.
@@ -189,6 +208,7 @@ RELATIONSHIP_STORES: dict[RelationshipStoreKind, RelationshipStoreRegistration] 
         serves=is_descope_principal,
         build=lambda state: DescopeRelationshipStore(state.descope_client),
         users=lambda state, _session: DescopeUserDirectory(state.descope_client),
+        open_subjects=True,
     ),
     RelationshipStoreKind.OPENFGA: RelationshipStoreRegistration(
         serves=is_canonical_principal,
@@ -196,6 +216,8 @@ RELATIONSHIP_STORES: dict[RelationshipStoreKind, RelationshipStoreRegistration] 
         users=lambda _state, session: CanonicalUserDirectory(
             UserRepository(session), UserTenantRoleRepository(session)
         ),
+        open_subjects=False,
+        start=_start_openfga,
     ),
 }
 
@@ -206,7 +228,7 @@ def relationship_store_kind() -> RelationshipStoreKind:
     Raises ``RelationshipStoreNotAvailable`` for a ``RELATIONSHIP_STORE`` that names no store.
     """
     if not RELATIONSHIP_STORE:
-        return SYNC_ADAPTERS[SYNC_PROVIDER].relationship_store
+        return SYNC_ADAPTERS[SYNC_PROVIDER].adapter.relationship_store
     try:
         kind = RelationshipStoreKind(RELATIONSHIP_STORE)
     except ValueError as exc:
@@ -214,7 +236,16 @@ def relationship_store_kind() -> RelationshipStoreKind:
     return kind
 
 
-def _registration() -> RelationshipStoreRegistration:
+async def start_relationship_store(state: State, kind: RelationshipStoreKind) -> Callable[[], Awaitable[None]] | None:
+    """Start the deployment's store (its registration's ``start``) for ``main.lifespan``; what stops it, or ``None``."""
+    registration = RELATIONSHIP_STORES.get(kind)
+    if registration is None or registration.start is None:
+        return None
+    return await registration.start(state)
+
+
+def relationship_store_registration() -> RelationshipStoreRegistration:
+    """The deployment's store's registration; ``CapabilityMissing`` when it has none."""
     registration = RELATIONSHIP_STORES.get(relationship_store_kind())
     if registration is None:
         raise IdentityErrorRaised(CapabilityMissing(message="This deployment has no relationship store"))
@@ -226,12 +257,12 @@ def get_relationship_store(request: Request) -> RelationshipStore:
 
     Their ``require_relationship_store`` gate refuses a deployment with none before this runs.
     """
-    return _registration().build(request.app.state)
+    return relationship_store_registration().build(request.app.state)
 
 
 def get_user_directory(request: Request, session: AsyncSession = Depends(get_async_session)) -> UserDirectory:
     """The directory of the users the deployment's relationship store names (``app.services.relationship_users``)."""
-    return _registration().users(request.app.state, session)
+    return relationship_store_registration().users(request.app.state, session)
 
 
 async def get_user_service(

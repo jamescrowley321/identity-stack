@@ -8,7 +8,7 @@ from app.dependencies.fga import (
     resolve_fga_user_target,
     store_error_response,
 )
-from app.dependencies.identity import get_relationship_store, get_user_directory
+from app.dependencies.identity import get_relationship_store, get_user_directory, relationship_store_registration
 from app.dependencies.rbac import require_role
 from app.logbook import logbook
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
@@ -40,6 +40,20 @@ class RelationRequest(BaseModel):
     # It is resolved to the user id the store keys on before it reaches the store,
     # because that is what every read keys on. See resolve_fga_user_target.
     target: str = Field(min_length=1, max_length=200)
+
+
+# Nonexistent and outside the caller's tenant answer alike, so the answer is no existence oracle.
+TARGET_NOT_FOUND = "Target user not found"
+
+
+async def _target(directory: UserDirectory, body: RelationRequest, caller: RelationshipCaller) -> str | None:
+    """The subject ``body.target`` names, resolved as the deployment's store requires (``open_subjects``)."""
+    return await resolve_fga_user_target(
+        directory,
+        body.target,
+        caller.tenant_id,
+        open_subjects=relationship_store_registration().open_subjects,
+    )
 
 
 def _failed(exc: RelationshipStoreError, action: str) -> HTTPException:
@@ -109,7 +123,9 @@ async def create_relation(
     directory: UserDirectory = Depends(get_user_directory),
 ):
     """Create an FGA relation tuple. Requires owner or admin role."""
-    target = await resolve_fga_user_target(directory, body.target, caller.tenant_id)
+    target = await _target(directory, body, caller)
+    if target is None:
+        raise HTTPException(status_code=404, detail=TARGET_NOT_FOUND)
     try:
         await store.write(caller.tenant_id, body.resource_type, body.resource_id, body.relation, target)
         return {
@@ -133,7 +149,9 @@ async def delete_relation(
     directory: UserDirectory = Depends(get_user_directory),
 ):
     """Delete an FGA relation tuple. Requires owner or admin role."""
-    target = await resolve_fga_user_target(directory, body.target, caller.tenant_id)
+    target = await _target(directory, body, caller)
+    if target is None:
+        raise HTTPException(status_code=404, detail=TARGET_NOT_FOUND)
     try:
         await store.delete(caller.tenant_id, body.resource_type, body.resource_id, body.relation, target)
         return {"status": "deleted"}
@@ -185,7 +203,10 @@ async def check_permission(
     directory: UserDirectory = Depends(get_user_directory),
 ):
     """Check an FGA permission. Requires owner or admin role. Fail-closed: errors deny access."""
-    target = await resolve_fga_user_target(directory, body.target, caller.tenant_id)
+    target = await _target(directory, body, caller)
+    if target is None:
+        # No user of the caller's tenant: it holds nothing here, and the store is not asked.
+        return {"allowed": False}
     try:
         return {
             "allowed": await store.check(caller.tenant_id, body.resource_type, body.resource_id, body.relation, target)
