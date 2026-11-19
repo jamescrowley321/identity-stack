@@ -756,6 +756,33 @@ class TestTheRoleRoutesServeTheSyncProvidersPrincipals:
         assert permission_service.mock_calls == []
 
     @pytest.mark.parametrize(("method", "path"), sorted(SYNC_PROVIDER_PROJECT_ROUTES))
+    def test_a_keycloak_token_with_forged_descope_owner_claims_cannot_change_the_definitions(
+        self, keycloak_sync, client, role_service, permission_service, method, path
+    ):
+        """The canonical model decides a Keycloak principal: an ``owner`` in a forged ``tenants`` claim is not read."""
+        forged = {**KEYCLOAK_USER, "dct": TENANT_A, "tenants": {TENANT_A: {"roles": ["owner"], "permissions": []}}}
+
+        response = client.request(method, _url(path), headers={**_bearer(forged), "X-Tenant-ID": TENANT_A})
+
+        assert (response.status_code, response.json()) == (403, NOT_GRANTED)
+        assert role_service.mock_calls == []
+        assert permission_service.mock_calls == []
+
+    @pytest.mark.parametrize(("method", "path"), sorted(SYNC_PROVIDER_PROJECT_ROUTES))
+    def test_a_keycloak_principal_is_refused_where_keycloak_is_synced_but_not_canonical(
+        self, keycloak_sync, monkeypatch, client, role_service, permission_service, method, path
+    ):
+        """Keycloak has no claims extractor: without canonical authorization nothing grants it a role."""
+        monkeypatch.setattr(rbac, "CANONICAL_RBAC_PROVIDERS", frozenset({"ory"}))
+        forged = {**KEYCLOAK_USER, "dct": TENANT_A, "tenants": {TENANT_A: {"roles": ["owner"], "permissions": []}}}
+
+        response = client.request(method, _url(path), headers={**_bearer(forged), "X-Tenant-ID": TENANT_A})
+
+        assert (response.status_code, response.json()) == (403, NO_TENANT)
+        assert role_service.mock_calls == []
+        assert permission_service.mock_calls == []
+
+    @pytest.mark.parametrize(("method", "path"), sorted(SYNC_PROVIDER_PROJECT_ROUTES))
     def test_a_keycloak_operator_of_one_of_several_tenants_cannot_change_the_definitions(
         self, keycloak_sync, client, role_service, permission_service, method, path
     ):
@@ -806,6 +833,48 @@ class TestTheRoleRoutesServeTheSyncProvidersPrincipals:
             200,
             {"tenant_id": TENANT_A, "roles": ["member"], "permissions": ["documents.read"]},
         )
+
+
+DEFINITION = {"id": ROLE_ID, "name": "editor"}
+# (method, path) -> the request body, the status and the service method that answers it.
+DEFINITION_CALLS: dict[tuple[str, str], tuple[dict | None, int, str]] = {
+    ("GET", "/api/roles"): (None, 200, "list_roles"),
+    ("POST", "/api/roles"): ({"name": "editor"}, 201, "create_role"),
+    ("PUT", "/api/roles/{name}"): ({"description": "changed"}, 200, "update_role"),
+    ("DELETE", "/api/roles/{name}"): (None, 200, "delete_role"),
+    ("GET", "/api/permissions"): (None, 200, "list_permissions"),
+    ("POST", "/api/permissions"): ({"name": "editor"}, 201, "create_permission"),
+    ("PUT", "/api/permissions/{name}"): ({"new_name": "editor2"}, 200, "update_permission"),
+    ("DELETE", "/api/permissions/{name}"): (None, 200, "delete_permission"),
+}
+DEFINITION_ANSWERS = {
+    "list_roles": {"roles": [DEFINITION]},
+    "list_permissions": {"permissions": [DEFINITION]},
+}
+
+
+class TestADescopeAdminChangesTheDefinitions:
+    """Where Descope is synced, a Descope admin reaches every definition route from its claims, as before."""
+
+    def test_every_definition_route_is_listed(self):
+        assert DEFINITION_CALLS.keys() == SYNC_PROVIDER_PROJECT_ROUTES
+
+    @pytest.mark.parametrize(("method", "path"), sorted(SYNC_PROVIDER_PROJECT_ROUTES))
+    def test_on_every_definition_route(self, client, store, role_service, permission_service, method, path):
+        body, status, call = DEFINITION_CALLS[(method, path)]
+        role_service.list_roles.return_value = Ok([DEFINITION])
+        permission_service.list_permissions.return_value = Ok([DEFINITION])
+        for name in ("create_role", "update_role", "delete_role"):
+            getattr(role_service, name).return_value = Ok(DEFINITION)
+        for name in ("create_permission", "update_permission", "delete_permission"):
+            getattr(permission_service, name).return_value = Ok(DEFINITION)
+        service = permission_service if path.startswith("/api/permissions") else role_service
+
+        response = client.request(method, _url(path), headers=_bearer(DESCOPE_ADMIN), json=body)
+
+        assert (response.status_code, response.json()) == (status, DEFINITION_ANSWERS.get(call, DEFINITION))
+        getattr(service, call).assert_awaited_once()
+        assert store.calls == []
 
 
 class TestTheSyncProviderGuard:

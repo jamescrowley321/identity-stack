@@ -47,6 +47,7 @@ from app.dependencies.tenant_access import (
 )
 from app.knobs import knob_set
 from app.logbook import logbook
+from app.middleware.providers import ProviderTokenConfig
 from app.models.database import get_session_factory
 from app.models.identity.user import UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
@@ -88,6 +89,12 @@ async def get_rbac_session() -> AsyncIterator[AsyncSession | None]:
         return
     async with factory() as session:
         yield session
+
+
+def _is_descope_principal(request: Request) -> bool:
+    """Whether a middleware recorded a ``descope_managed`` provider for the request's claims."""
+    provider = getattr(request.state, "provider", None)
+    return isinstance(provider, ProviderTokenConfig) and provider.descope_managed
 
 
 def _principal_provider(request: Request) -> str:
@@ -334,11 +341,13 @@ def require_global_role(*roles: str, claimed_roles: tuple[str, ...] | None = Non
     Descope principal is decided from its ``dct`` + ``tenants`` claims, as by
     ``require_role``.
 
-    ``claimed_roles``, when given, is what a principal decided from its token's
-    claims (Descope) must hold instead of ``roles``: the role and permission
-    definitions take ``owner`` or ``admin`` from a Descope token, as they always
-    have, and ``operator`` from the canonical model, where a tenant admin's role
-    is one tenant's and the definitions are every tenant's.
+    ``claimed_roles``, when given, is what a Descope principal (a recorded
+    ``descope_managed`` provider) must hold instead of ``roles``: the role and
+    permission definitions take ``owner`` or ``admin`` from a Descope token, as
+    they always have, and ``operator`` from the canonical model, where a tenant
+    admin's role is one tenant's and the definitions are every tenant's. Any
+    other principal decided from its claims (an unrecorded provider, another
+    provider's extractor) is refused: its claims are not Descope's.
 
     Returns the user's role list for downstream use.
     """
@@ -354,7 +363,20 @@ def require_global_role(*roles: str, claimed_roles: tuple[str, ...] | None = Non
             raise HTTPException(status_code=401, detail="Not authenticated")
         memberships = await _canonical_memberships(request, claims, session)
         access = resolve_tenant_access(request, claims, memberships, request_selects=False)
-        holds = holds_claimed if memberships is None else holds_canonical
+        if memberships is not None:
+            holds = holds_canonical
+        elif claimed_roles is None:
+            holds = holds_claimed
+        elif _is_descope_principal(request):
+            holds = holds_claimed
+        else:
+            logger.warning(
+                "refused: provider=%s sub=%r holds claims that are not Descope's on a route that reads "
+                "only Descope's claimed roles",
+                _principal_provider(request) or "unrecorded",
+                claims.get("sub") if isinstance(claims, dict) else None,
+            )
+            raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
         if not holds(access):
             raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
         return access.roles
