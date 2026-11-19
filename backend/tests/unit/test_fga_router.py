@@ -679,9 +679,10 @@ async def test_list_relations_strips_tenant_prefix(mock_validate, client):
         "/api/fga/relations", headers=AUTH_HEADER, params={"resource_type": "doc", "resource_id": "doc-1"}
     )
     assert response.status_code == 200
-    relations = response.json()["relations"]
-    assert relations[0]["resource_id"] == "doc-1"
-    assert relations[1]["resource"] == "doc-1"
+    assert response.json()["relations"] == [
+        {"namespace": "doc", "resource": "doc-1", "relationDefinition": "owner", "target": "user:u1"},
+        {"namespace": "doc", "resource": "doc-1", "relationDefinition": "viewer", "target": "user:u2"},
+    ]
 
 
 @pytest.mark.anyio
@@ -961,14 +962,6 @@ def test_prefix_resource_id():
     assert _prefix_resource_id("t1", "x") == "t1:x"
 
 
-def test_strip_tenant_prefix():
-    from app.services.relationship_store import _strip_tenant_prefix
-
-    assert _strip_tenant_prefix("tenant-abc", "tenant-abc:doc-1") == "doc-1"
-    assert _strip_tenant_prefix("tenant-abc", "other-tenant:doc-1") == "other-tenant:doc-1"
-    assert _strip_tenant_prefix("tenant-abc", "doc-1") == "doc-1"
-
-
 def test_sanitize_error_detail_json():
     from app.routers.fga import _sanitize_error_detail
 
@@ -1128,8 +1121,8 @@ async def test_list_relations_tolerates_a_null_resource(mock_validate, client):
 
     assert response.status_code == 200
     assert response.json()["relations"] == [
-        {"resource": None, "relationDefinition": "owner", "target": "u1"},
-        {"resource": "doc-1", "relationDefinition": "viewer", "target": "u2"},
+        {"namespace": "doc", "resource": "doc-1", "relationDefinition": "owner", "target": "u1"},
+        {"namespace": "doc", "resource": "doc-1", "relationDefinition": "viewer", "target": "u2"},
     ]
 
 

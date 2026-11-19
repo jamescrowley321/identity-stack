@@ -211,7 +211,18 @@ async def list_relations(
     returns every relation the schema defines for the resource type.
     """
     try:
-        return {"relations": await store.relations(tenant_id, resource_type, resource_id, relation=relation)}
+        relations = await store.relations(tenant_id, resource_type, resource_id, relation=relation)
+        return {
+            "relations": [
+                {
+                    "namespace": resource_type,
+                    "resource": resource_id,
+                    "relationDefinition": rel.relation,
+                    "target": rel.subject,
+                }
+                for rel in relations
+            ]
+        }
     except json.JSONDecodeError as exc:
         # Must precede ValueError: JSONDecodeError subclasses it, and an upstream body
         # we cannot parse is an upstream fault, not the caller's malformed request.

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import enum
 from abc import abstractmethod
+from dataclasses import dataclass
 from typing import Protocol
 
 from opentelemetry import trace
@@ -58,6 +59,14 @@ class RelationshipStoreNotAvailable(ValueError):
         super().__init__(message)
 
 
+@dataclass(frozen=True)
+class Relation:
+    """A relation held on an object: ``subject`` holds ``relation``."""
+
+    relation: str
+    subject: str
+
+
 class RelationshipStore(Protocol):
     """Check, write and list relations between subjects and the objects of a tenant, and read or write the schema.
 
@@ -94,17 +103,13 @@ class RelationshipStore(Protocol):
     @abstractmethod
     async def relations(
         self, tenant_id: str, object_type: str, object_id: str, relation: str | None = None
-    ) -> list[dict]:
-        """The relations held on the object, narrowed to ``relation`` when given.
-
-        Each is a dict with ``relationDefinition`` and ``target``; an object id in it
-        is the tenant's own id, not the store's key.
-        """
+    ) -> list[Relation]:
+        """The relations held on the object, narrowed to ``relation`` when given."""
         ...
 
     @abstractmethod
-    async def all_relations(self, tenant_id: str, object_type: str, object_id: str) -> list[dict]:
-        """Every relation held on the object, as ``relations`` gives them, to remove them all."""
+    async def all_relations(self, tenant_id: str, object_type: str, object_id: str) -> list[Relation]:
+        """Every relation held on the object, to remove them all."""
         ...
 
     @abstractmethod
@@ -116,18 +121,6 @@ class RelationshipStore(Protocol):
 def _prefix_resource_id(tenant_id: str, resource_id: str) -> str:
     """Descope's key for a tenant's object: the object id prefixed with the tenant id."""
     return f"{tenant_id}:{resource_id}"
-
-
-def _strip_tenant_prefix(tenant_id: str, resource_id: object) -> object:
-    """The object id of a key of ``tenant_id``. Non-strings and other tenants' keys pass unchanged.
-
-    A null ``resource`` in an upstream relation reached ``.startswith`` and raised
-    AttributeError, which Starlette turned into a 500.
-    """
-    if not isinstance(resource_id, str):
-        return resource_id
-    prefix = f"{tenant_id}:"
-    return resource_id[len(prefix) :] if resource_id.startswith(prefix) else resource_id
 
 
 class DescopeRelationshipStore:
@@ -177,21 +170,21 @@ class DescopeRelationshipStore:
 
     async def relations(
         self, tenant_id: str, object_type: str, object_id: str, relation: str | None = None
-    ) -> list[dict]:
+    ) -> list[Relation]:
         with tracer.start_as_current_span(
             "DescopeRelationshipStore.relations", record_exception=False, set_status_on_exception=False
         ):
             found = await self._client.list_relations(
                 object_type, _prefix_resource_id(tenant_id, object_id), relation=relation
             )
-            return self._unkeyed(tenant_id, found or [])
+            return _relations(found)
 
-    async def all_relations(self, tenant_id: str, object_type: str, object_id: str) -> list[dict]:
+    async def all_relations(self, tenant_id: str, object_type: str, object_id: str) -> list[Relation]:
         with tracer.start_as_current_span(
             "DescopeRelationshipStore.all_relations", record_exception=False, set_status_on_exception=False
         ):
             found = await self._client.list_all_relations(object_type, _prefix_resource_id(tenant_id, object_id))
-            return self._unkeyed(tenant_id, found or [])
+            return _relations(found)
 
     async def objects(self, tenant_id: str, object_type: str, relation: str, subject: str) -> list[str]:
         with tracer.start_as_current_span(
@@ -206,10 +199,15 @@ class DescopeRelationshipStore:
             ]
             return [key[len(prefix) :] for key in keys if key.startswith(prefix)]
 
-    def _unkeyed(self, tenant_id: str, relations: list) -> list[dict]:
-        for rel in relations:
-            if isinstance(rel, dict) and "resource" in rel:
-                rel["resource"] = _strip_tenant_prefix(tenant_id, rel["resource"])
-            if isinstance(rel, dict) and "resource_id" in rel:
-                rel["resource_id"] = _strip_tenant_prefix(tenant_id, rel["resource_id"])
-        return relations
+
+def _relations(found: list | None) -> list[Relation]:
+    """Descope's relation dicts as ``Relation``s. One without a non-empty relation and target names nothing: skipped."""
+    return [
+        Relation(relation=r["relationDefinition"], subject=r["target"])
+        for r in found or []
+        if isinstance(r, dict) and _named(r.get("relationDefinition")) and _named(r.get("target"))
+    ]
+
+
+def _named(value: object) -> bool:
+    return isinstance(value, str) and bool(value)

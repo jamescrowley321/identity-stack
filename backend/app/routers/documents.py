@@ -17,7 +17,7 @@ from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.models.database import get_async_session
 from app.models.document import Document
 from app.outbound import UpstreamStatusError, UpstreamTransportError
-from app.services.relationship_store import RelationshipStore
+from app.services.relationship_store import Relation, RelationshipStore
 
 logger = logbook(__name__)
 
@@ -123,7 +123,7 @@ async def create_document(
 
 
 async def _restore_relations(
-    store: RelationshipStore, tenant_id: str, deleted_relations: list[dict], document_id: str
+    store: RelationshipStore, tenant_id: str, deleted_relations: list[Relation], document_id: str
 ) -> None:
     """Put back relations a failed delete had already removed.
 
@@ -133,13 +133,13 @@ async def _restore_relations(
     """
     for dr in deleted_relations:
         try:
-            await store.write(tenant_id, "document", document_id, dr["relation"], dr["target"])
+            await store.write(tenant_id, "document", document_id, dr.relation, dr.subject)
         except Exception:
             logger.warning(
                 "FGA compensation failed for doc %s relation %s->%s",
                 document_id,
-                dr["relation"],
-                dr["target"],
+                dr.relation,
+                dr.subject,
             )
 
 
@@ -284,14 +284,11 @@ async def delete_document(
         )
 
     # Store relations for compensation before deleting them
-    deleted_relations: list[dict] = []
+    deleted_relations: list[Relation] = []
     try:
         for rel in relations:
-            rd = rel.get("relationDefinition", "") if isinstance(rel, dict) else ""
-            target = rel.get("target", "") if isinstance(rel, dict) else ""
-            if rd and target:
-                await store.delete(tenant_id, "document", document_id, rd, target)
-                deleted_relations.append({"relation": rd, "target": target})
+            await store.delete(tenant_id, "document", document_id, rel.relation, rel.subject)
+            deleted_relations.append(rel)
     except json.JSONDecodeError as exc:
         # Must precede ValueError (it subclasses it): an unparseable upstream body
         # is an upstream fault, and the ACL stripped so far must still be put back.
