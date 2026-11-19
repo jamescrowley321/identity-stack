@@ -208,6 +208,20 @@ class TestDeclarations:
     def test_each_adapter_declares_its_own_set(self):
         assert {adapter: vars(adapter)["capabilities"] for adapter in DECLARED} == DECLARED
 
+    def test_only_keycloaks_machine_credentials_serve_every_principal(self):
+        assert {adapter: adapter.canonical_capabilities for adapter in DECLARED} == {
+            **{adapter: frozenset() for adapter in DECLARED},
+            KeycloakSyncAdapter: KEYCLOAK_MACHINE_CREDENTIALS,
+        }
+
+    def test_an_adapter_whose_canonical_capabilities_it_does_not_declare_is_refused(self):
+        with pytest.raises(TypeError, match="Overreaching declares canonical_capabilities it does not declare"):
+            type(
+                "Overreaching",
+                (IdentityProviderAdapter,),
+                {"capabilities": frozenset(), "canonical_capabilities": KEYCLOAK_MACHINE_CREDENTIALS},
+            )
+
     def test_an_adapter_that_declares_none_is_refused(self):
         with pytest.raises(TypeError, match="Undeclared must declare capabilities"):
             type("Undeclared", (IdentityProviderAdapter,), {})

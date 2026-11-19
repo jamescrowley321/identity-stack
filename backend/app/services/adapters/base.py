@@ -190,6 +190,12 @@ class IdentityProviderAdapter(ABC):
     # declares its own set, empty when it implements none.
     capabilities: ClassVar[frozenset[Capability]]
 
+    # The declared capabilities kept in the canonical model rather than at the
+    # provider: they take none of the caller's provider ids, so they serve every
+    # principal, not only the provider's own (``app.dependencies.capabilities.served``).
+    # Keycloak's machine credentials are canonical rows the adapter pushes as clients.
+    canonical_capabilities: ClassVar[frozenset[Capability]] = frozenset()
+
     # The relationship store a deployment syncing to the provider gets when
     # RELATIONSHIP_STORE is unset: OpenFGA, for a provider with no Zanzibar-style
     # store of its own (Keycloak, Zitadel, Ory: owner decision 1 of #672). Descope
@@ -202,6 +208,8 @@ class IdentityProviderAdapter(ABC):
         capabilities = getattr(cls, "capabilities", None)
         if not isinstance(capabilities, frozenset):
             raise TypeError(f"{cls.__name__} must declare capabilities: ClassVar[frozenset[Capability]]")
+        if not cls.canonical_capabilities <= capabilities:
+            raise TypeError(f"{cls.__name__} declares canonical_capabilities it does not declare as capabilities")
         if Capability.CUSTOM_ATTRIBUTES in capabilities and not issubclass(cls, CustomAttributes):
             raise TypeError(f"{cls.__name__} declares {Capability.CUSTOM_ATTRIBUTES} but is no CustomAttributes")
 

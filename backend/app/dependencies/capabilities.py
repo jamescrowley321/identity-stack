@@ -37,14 +37,17 @@ def served(request: Request) -> Served:
     An adapter's capabilities take the caller's ``sub`` and tenant as its own
     provider's ids, so they serve only that provider's principals
     (``identity.is_sync_provider_principal``; for Descope, a ``descope_managed``
-    provider's, conventions §18): any other principal is served none. Each store says
+    provider's, conventions §18): any other principal is served only the adapter's
+    ``canonical_capabilities``, which take none of its provider ids. Each store says
     whom it serves (``identity.RELATIONSHIP_STORES``): Descope's FGA store is keyed on
     Descope's ids, so it serves only a Descope principal; OpenFGA is keyed on canonical
     ids, so it serves only a principal authorized from the canonical model.
     """
     if getattr(request.state, "claims", None) is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    capabilities = identity.sync_capabilities() if identity.is_sync_provider_principal(request) else frozenset()
+    capabilities = identity.sync_capabilities()
+    if not identity.is_sync_provider_principal(request):
+        capabilities = capabilities & identity.SYNC_ADAPTERS[identity.SYNC_PROVIDER].adapter.canonical_capabilities
     store = identity.relationship_store_kind()
     registration = identity.RELATIONSHIP_STORES.get(store)
     if registration is None or not registration.serves(request):

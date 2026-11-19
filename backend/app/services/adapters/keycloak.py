@@ -399,6 +399,7 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush, Custom
     capabilities: ClassVar[frozenset[Capability]] = frozenset(
         {Capability.MACHINE_CREDENTIALS, Capability.CUSTOM_ATTRIBUTES}
     )
+    canonical_capabilities: ClassVar[frozenset[Capability]] = frozenset({Capability.MACHINE_CREDENTIALS})
 
     def __init__(self, api: KeycloakAdminApi, links: KeycloakLinks) -> None:
         self._api = api
