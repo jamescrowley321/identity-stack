@@ -49,6 +49,8 @@ from app.services.keycloak_admin import (
     connect_keycloak_admin,
 )
 from app.services.role import RoleService
+from scripts.seed_keycloak import KeycloakAccount as SeededAccount
+from scripts.seed_keycloak import linked_user
 from tests.helpers.identity_fixture import IDENTITIES
 from tests.helpers.keycloak import KeycloakTokenSource, decode_unverified
 from tests.helpers.keycloak_links import MemoryKeycloakLinks
@@ -571,6 +573,61 @@ class TestLinkedAccounts:
         assert {key: account[key] for key in ("enabled", "email")} == {
             "enabled": False,
             "email": linked_account["email"],
+        }
+        assert find_user(realm, user_id) is None
+
+
+class TestSeededLinks:
+    """A user ``seed_keycloak --link-users`` linked to an existing account of the realm, over Postgres."""
+
+    async def test_a_profile_and_status_push_reaches_the_linked_account_and_creates_none(
+        self, db_session, environment, realm, user_id, linked_account
+    ):
+        provider = (
+            await db_session.execute(select(Provider).where(Provider.name == PROVIDER_NAME))
+        ).scalar_one_or_none()
+        if provider is None:
+            provider = Provider(name=PROVIDER_NAME, type=ProviderType.oidc, issuer_url=environment.issuer)
+            db_session.add(provider)
+        account = SeededAccount(
+            username=linked_account["username"],
+            external_sub=linked_account["id"],
+            email=linked_account["email"],
+            given_name="Seeded",
+            family_name="User",
+        )
+        user = linked_user(account, None, None)
+        user.id = user_id
+        db_session.add(user)
+        await db_session.flush()
+        db_session.add(
+            IdPLink(
+                user_id=user_id,
+                provider_id=provider.id,
+                external_sub=account.external_sub,
+                external_email=account.email,
+                metadata_={LINK_ORIGIN: LINKED_BY_BACKEND},
+            )
+        )
+        await db_session.flush()
+
+        async with httpx.AsyncClient(timeout=ADMIN_TIMEOUT_SECONDS) as http:
+            sync = KeycloakSyncAdapter(await connect_keycloak_admin(http), RepositoryKeycloakLinks(db_session))
+            profile = await sync.sync_user(
+                user_id=user_id,
+                data={"email": account.email, "status": "active", "given_name": "Renamed", "family_name": "User"},
+            )
+            status = await sync.sync_user(
+                user_id=user_id, data={"email": account.email, "status": "inactive", STATUS_CHANGED: True}
+            )
+
+        pushed = realm.get(f"/users/{account.external_sub}").json()
+        assert (profile, status) == (Ok(None), Ok(None))
+        # The status reached the seeded account; its email and names stay its own; no account under the id.
+        assert {key: pushed.get(key) for key in ("enabled", "email", "firstName")} == {
+            "enabled": False,
+            "email": account.email,
+            "firstName": None,
         }
         assert find_user(realm, user_id) is None
 

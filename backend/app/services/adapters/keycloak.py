@@ -51,10 +51,12 @@ Nothing ever maps a client role to a user or group.
 
 Every push is idempotent: each reads the state first and writes only what
 differs, and a repeat writes nothing. Every push but a delete reaches the
-Keycloak account the canonical user's ``keycloak`` sign-in link names
-(``KeycloakLinks.linked_subject``) unless it is a client's service account, and
-otherwise the account under the canonical id. No email or name is pushed to a
-linked account.
+Keycloak account the canonical user's ``keycloak`` link names when a sign-in or
+the backend made it (``KeycloakLinks.linked_subject``; the backend's links are
+the accounts the adapter created and those an operator's seed names) unless it
+is a client's service account, and otherwise the account under the canonical
+id. No email or name is pushed to an account whose username is not the
+canonical id: its email and names are the account's own.
 
 Every failure is ``Error(SyncError)`` with ``context["status"]``, the HTTP status
 or ``None``, ``context[UNANSWERED]`` when Keycloak gave no readable answer, and
@@ -129,7 +131,7 @@ class KeycloakLinks(Protocol):
     """The canonical side: the ``keycloak`` provider's IdP links and tenant links."""
 
     async def linked_subject(self, user_id: uuid.UUID) -> str | None:
-        """The Keycloak account id the user's ``keycloak`` link names, if a sign-in made it."""
+        """The Keycloak account id the user's ``keycloak`` link names, if a sign-in or the backend made it."""
         ...
 
     async def has_link(self, user_id: uuid.UUID) -> bool:
@@ -285,7 +287,7 @@ class KeycloakSyncAdapter(IdentityProviderAdapter):
     # --- lookups ------------------------------------------------------------------
 
     async def _account(self, user_id: uuid.UUID) -> dict | None:
-        """The canonical user's Keycloak account: the one their sign-in link names, else the one under the canonical id.
+        """The canonical user's Keycloak account: the one their followed link names, else the one under their id.
 
         A linked account that is a client's service account is not followed.
         """

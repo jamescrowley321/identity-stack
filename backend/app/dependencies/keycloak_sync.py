@@ -15,7 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logbook import logbook
-from app.models.identity.user import LINK_ORIGIN, LINKED_BY_BACKEND, IdPLink
+from app.models.identity.user import LINK_ORIGIN, LINKED_AT_SIGN_IN, LINKED_BY_BACKEND, IdPLink
 from app.repositories.base import RepositoryConflictError
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
@@ -37,6 +37,13 @@ logger = logbook(__name__)
 DATABASE_FAILURES = (SQLAlchemyError, OSError)
 
 T = TypeVar("T")
+
+# The link origins the adapter follows to a Keycloak account, as the Zitadel
+# adapter's: a sign-in's, and the backend's own (an account the adapter created,
+# or one an operator's seed names). An admin-made link is not followed: the admin
+# client may change any account of the realm, and that link names whatever
+# account the admin typed in.
+FOLLOWED_LINK_ORIGINS = frozenset({LINKED_AT_SIGN_IN, LINKED_BY_BACKEND})
 
 
 def failed(what: str, exc: BaseException) -> str:
@@ -73,7 +80,9 @@ class RepositoryKeycloakLinks(KeycloakLinks):
         return None if provider is None else provider.id
 
     async def linked_subject(self, user_id: uuid.UUID) -> str | None:
-        return await self._read("the IdP link read", lambda: self._idp_links.signed_in_sub_of(user_id, PROVIDER_NAME))
+        return await self._read(
+            "the IdP link read", lambda: self._idp_links.sub_made_by(user_id, PROVIDER_NAME, FOLLOWED_LINK_ORIGINS)
+        )
 
     async def has_link(self, user_id: uuid.UUID) -> bool:
         async def read() -> bool:

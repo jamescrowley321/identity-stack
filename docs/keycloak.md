@@ -194,9 +194,11 @@ show it, so alert on the log. The unit tests replay answers recorded from Keyclo
 
 The adapter creates users under the canonical user id (their username). A user who signed in
 through Keycloak first has their own account, linked to the canonical user by a `keycloak` IdP
-link whose subject is the account's id. The adapter follows only a link a sign-in made:
-just-in-time provisioning records it on the link (`metadata` `{"linked_by": "sign_in"}`), from the
-validated token's subject, and `POST /api/users/{id}/idp-links` refuses a link that sets that key
+link whose subject is the account's id. The adapter follows a link a sign-in or the backend made,
+as the Zitadel adapter does: just-in-time provisioning records `{"linked_by": "sign_in"}` on the
+link, from the validated token's subject; the adapter (for an account it created) and
+`make keycloak-seed` (`seed_keycloak --link-users`, for an existing account of the realm) record
+`{"linked_by": "backend"}`. `POST /api/users/{id}/idp-links` refuses a link that sets that key
 (422). A link a tenant admin made names whatever account the admin typed in, so the adapter never
 writes to it; nor to a client's service account (`service-account-*`, or one with a
 `serviceAccountClientId`), whatever link names it. Links made before this rule carry no origin and
@@ -204,9 +206,9 @@ are not followed either.
 
 Memberships (added and ended), group memberships, status changes and profile pushes reach the
 account the followed link names and, when there is none or Keycloak no longer has that account, the
-one under the canonical id. A linked account's email and names are never written, they are its
-owner's own, so a profile update of a linked user sends nothing; no second account is created for
-them. Deletes reach only the account under the canonical id.
+one under the canonical id. The email and names of an account whose username is not the canonical
+id are never written, they are its owner's own, so a profile update of such a user sends nothing;
+no second account is created for them. Deletes reach only the account under the canonical id.
 
 What Keycloak does not do, or the adapter does not take on:
 
@@ -389,7 +391,7 @@ operator gave it; deactivate it if it should not sign in again.
 |---|---|---|
 | A console change reaches the canonical model at the next poll, not at once: until then the backend authorizes from what it held. A disabled account's unexpired token is served for up to one `KEYCLOAK_PULL_INTERVAL_SECONDS` (10 s by default). | Cases 7 and 8 | None: the interval is the bound. An event-listener extension posting signed webhooks would remove the wait, at the cost of one more artifact to build and pin |
 | On a database with no canonical roles, the first reconciliation pass creates the roles from the API client's client roles but reads every role group in the same pass as no role, so each member gets the default `member`; the second pass assigns the groups' roles. | Suite set-up | Open |
-| The adapter follows a user's `keycloak` link only when a sign-in made it; for any other link it looks the account up by the canonical id as username. A user linked by `make keycloak-seed` (or an operator) to an account with another username is not found, so a push for that user creates a second account and Keycloak refuses it (409, same email). `make keycloak-seed` writes its links as the realm's state, so no push is pending for them; a later canonical change to such a user fails to push. | Seeded users | Open |
+| A user linked to an account under another username (a sign-in's link, or one `make keycloak-seed` wrote) gets its status, memberships and role groups pushed to that account, never its email or names, which are the account's own. A canonical delete reaches only the account under the canonical id. | [Which Keycloak account](#which-keycloak-account) | None for the profile: by design. Deletes: no route deletes a canonical user today |
 | Signing out ends the SPA's Keycloak session only. The user's other sessions (another browser, another client) stay. | Case 5 | None |
 | The organization a user picks at sign-in is in the token's `organization` claim and decides nothing after first sign-in: the tenant is the one `X-Tenant-ID` names. | Cases 1 and 3 | None: by design ([ADR-0011](adr/0011-keycloak-canonical-authorization.md)) |
 | Routes that send the tenant to Descope or read Descope's `tenants` claim answer a Keycloak principal 403, `GET /api/tenants` included. | `backend/tests/e2e/not_applicable.py` | Open: canonical routes for them ([identity-stack#590](https://github.com/jamescrowley321/identity-stack/issues/590)) |

@@ -37,7 +37,7 @@ def sessions(async_engine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
 
 
-async def failing_read(self, user_id: uuid.UUID, provider_name: str) -> str | None:
+async def failing_read(self, user_id: uuid.UUID, provider_name: str, *origins) -> str | None:
     """A read the database refuses: the request's transaction is left aborted, as a real failure leaves it."""
     await self._session.execute(text("SELECT * FROM no_such_table"))
     return None
@@ -84,7 +84,7 @@ async def test_a_deactivation_whose_idp_link_read_fails_answers_provider_sync_fa
 ):
     tenant, _role, users = members
     user = users[0]
-    monkeypatch.setattr(IdPLinkRepository, "signed_in_sub_of", failing_read)
+    monkeypatch.setattr(IdPLinkRepository, "sub_made_by", failing_read)
 
     async with sessions(async_engine)() as session:
         service = UserService(repository=UserRepository(session), adapter=adapter(session), publisher=AsyncMock())
@@ -104,7 +104,7 @@ async def test_restoring_memberships_whose_idp_link_reads_fail_logs_each_and_doe
     async_engine, members, monkeypatch, caplog
 ):
     tenant, role, users = members
-    monkeypatch.setattr(IdPLinkRepository, "signed_in_sub_of", failing_read)
+    monkeypatch.setattr(IdPLinkRepository, "sub_made_by", failing_read)
     caplog.set_level(logging.WARNING, logger="app.services.memberships")
 
     async with sessions(async_engine)() as session:
