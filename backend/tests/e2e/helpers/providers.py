@@ -398,6 +398,10 @@ class TwoTenantUserProvider(E2EProvider):
         (tenant,) = [tenant for tenant, held in self._linked.roles.items() if held == role]
         return tenant
 
+    def _tenant_name(self, key: str) -> str:
+        """The canonical tenant's name for fixture tenant ``key``: the seed names it after the key."""
+        return key
+
     @cached_property
     def _tenant_ids(self) -> dict[str, str]:
         """Canonical tenant id by fixture tenant key, from the linked user's memberships.
@@ -410,15 +414,16 @@ class TwoTenantUserProvider(E2EProvider):
         if self._memberships_missing is not None:
             pytest.fail(f"{self._memberships_missing} (found earlier in this run)")
         identity = self._identity(self._signed_in_token())
-        ids = {membership["tenant_name"]: membership["tenant_id"] for membership in identity["tenant_memberships"]}
-        missing = sorted({self._tenant_key(ADMIN), self._tenant_key(MEMBER)} - ids.keys())
+        by_name = {membership["tenant_name"]: membership["tenant_id"] for membership in identity["tenant_memberships"]}
+        keys = {self._tenant_key(ADMIN), self._tenant_key(MEMBER)}
+        missing = sorted(key for key in keys if self._tenant_name(key) not in by_name)
         if missing:
             self._memberships_missing = (
                 f"the linked user {self._linked.key}, both principals (signed in with scope {self._scope!r}), is not "
                 f"a member of {', '.join(missing)}: run `{self.seed_step}` first. GET {_IDENTITY} answered {identity}"
             )
             pytest.fail(self._memberships_missing)
-        return ids
+        return {key: by_name[self._tenant_name(key)] for key in keys}
 
     def _signed_in_token(self) -> str:
         """The linked user's token, signed in through the SPA's client (again when it is about to expire)."""
@@ -439,8 +444,9 @@ class TwoTenantUserProvider(E2EProvider):
         page.get_by_role("button", name="Sign In").click()
         self._sign_in_page(page)
 
-        name = self._tenant_key(principal)
-        tenant_id = self._tenant_ids[name]
+        key = self._tenant_key(principal)
+        tenant_id = self._tenant_ids[key]
+        name = self._tenant_name(key)
         switcher = page.locator("header").get_by_role("combobox")
         expect(switcher).to_be_visible()
         if switcher.inner_text() != name:
@@ -473,6 +479,12 @@ class KeycloakProvider(TwoTenantUserProvider):
 
     name = KEYCLOAK
     seed_step = "make keycloak-seed"
+
+    def _tenant_name(self, key: str) -> str:
+        """Reconciliation gives a linked tenant its organization's name, the fixture tenant's name."""
+        from tests.helpers.identity_fixture import IDENTITIES
+
+        return IDENTITIES.tenants[key].name
 
     @cached_property
     def _keycloak(self):

@@ -89,8 +89,16 @@ def _identity(api, token: str) -> dict:
     return response.json()
 
 
+# Reconciliation gives a linked tenant its organization's name: the fixture tenant's name.
+TENANT_KEYS = {tenant.name: key for key, tenant in IDENTITIES.tenants.items()}
+
+
 def _tenant_ids(identity: dict) -> dict[str, str]:
-    return {membership["tenant_name"]: membership["tenant_id"] for membership in identity["tenant_memberships"]}
+    """Canonical tenant id by fixture tenant key."""
+    return {
+        TENANT_KEYS.get(membership["tenant_name"], membership["tenant_name"]): membership["tenant_id"]
+        for membership in identity["tenant_memberships"]
+    }
 
 
 @pytest.fixture(scope="module")
@@ -178,10 +186,12 @@ def test_the_two_tenant_user_signs_in_switches_tenant_without_a_new_login_and_si
 
     page.on("request", _record)
     switcher = page.locator("header").get_by_role("combobox")
-    for name in (GLOBEX, ACME) if switcher.inner_text() == ACME else (ACME, GLOBEX):
+    names = {key: IDENTITIES.tenants[key].name for key in (ACME, GLOBEX)}
+    for key in (GLOBEX, ACME) if switcher.inner_text() == names[ACME] else (ACME, GLOBEX):
+        name = names[key]
 
-        def _names(request: Request, name=name) -> bool:
-            return "/api/" in request.url and request.headers.get("x-tenant-id") == tenant_ids[name]
+        def _names(request: Request, key=key) -> bool:
+            return "/api/" in request.url and request.headers.get("x-tenant-id") == tenant_ids[key]
 
         switcher.click()
         with page.expect_request(_names):
