@@ -62,19 +62,20 @@ def missing_internal_endpoint_secrets(provider: str, environment: Mapping[str, s
 # One sentence each, saying what about the provider makes the test inapplicable.
 
 DEFINITIONS_NEED_OPERATOR = (
-    "the role and permission definitions need operator from a canonical principal's sole membership "
+    "changing the role and permission definitions needs operator from a canonical principal's sole membership "
     "(require_definitions_role, #676), and the run's admin is the two-tenant fixture user, a tenant admin: "
-    "no fixture user of this provider is an operator (#707)"
+    "no fixture user of this provider is an operator (#710)"
 )
-DEFINITIONS_NOT_SYNCED = (
-    "the role and permission definitions serve the sync provider's principals (require_sync_provider_principal, "
-    "#676) and this run's backend syncs to Descope (#703); they also need operator, which no fixture user holds (#707)"
+NOT_THE_SYNC_PROVIDER = (
+    "the member, role and permission routes serve the sync provider's principals "
+    "(require_sync_provider_principal, #676, #677) and this run's backend syncs to Descope (SYNC_PROVIDER unset: "
+    "it holds no Zitadel write credential), so they answer its principals 403 (#709)"
 )
-MEMBERS_NOT_SYNCED = (
-    "the member routes serve the sync provider's principals (require_sync_provider_principal, #677) and this "
-    "run's backend syncs to Descope (SYNC_PROVIDER unset: it holds no Zitadel write credential), so they answer "
-    "its principals 403 (#703)"
+NO_SYNC_PROVIDER_PAGES = (
+    "this run's backend syncs to Descope, so its principals are no sync provider principals "
+    "(GET /api/capabilities) and the SPA has no Members or Roles page for them (#683, #709)"
 )
+DEFINITIONS_NOT_SYNCED = f"{NOT_THE_SYNC_PROVIDER}; changing the definitions also needs operator (#710)"
 DESCOPE_MANAGEMENT_API = "calls the Descope Management API itself; the run has no Descope project"
 DESCOPE_ACCESS_KEY = "is about a Descope access-key session, which no other provider has"
 ORY_PROVIDER = "proves the Ory provider, which only the Descope run's backend configures"
@@ -105,21 +106,18 @@ def _each(module: str, tests: list[str], reasons: dict[str, str]) -> dict[str, d
 NOT_APPLICABLE: dict[str, dict[str, str]] = {
     "test_ory_sso_e2e.py": {KEYCLOAK: ORY_PROVIDER, ZITADEL: ORY_PROVIDER},
     # Login, session and identity
-    # RBAC administration
+    # RBAC administration. A tenant admin lists the definitions (#707); changing them needs operator.
     **_each(
         "test_api_endpoints.py::TestAdminEndpoints",
-        [
-            "test_roles_list_responds",
-            "test_permissions_list_responds",
-        ],
-        DEFINITIONS,
+        ["test_roles_list_responds", "test_permissions_list_responds"],
+        {ZITADEL: NOT_THE_SYNC_PROVIDER},
     ),
     "test_identity_crud_e2e.py::TestPermissionCrudCanonical": DEFINITIONS,
     "test_identity_crud_e2e.py::TestRoleCrudCanonical": DEFINITIONS,
     # The member routes serve the sync provider's principals (#677): Keycloak's run
     # syncs to Keycloak and runs them; Zitadel's backend syncs to Descope.
-    "test_api_endpoints.py::TestAdminEndpoints::test_members_list_responds": {ZITADEL: MEMBERS_NOT_SYNCED},
-    "test_identity_crud_e2e.py::TestMemberCrud": {ZITADEL: MEMBERS_NOT_SYNCED},
+    "test_api_endpoints.py::TestAdminEndpoints::test_members_list_responds": {ZITADEL: NOT_THE_SYNC_PROVIDER},
+    "test_identity_crud_e2e.py::TestMemberCrud": {ZITADEL: NOT_THE_SYNC_PROVIDER},
     "test_identity_repository_api.py": DEFINITIONS,
     **_each(
         "test_rbac_api.py",
@@ -137,6 +135,10 @@ NOT_APPLICABLE: dict[str, dict[str, str]] = {
         _both(DESCOPE_MANAGEMENT_API),
     ),
     # Pages a capability gives (test_capability_pages.py checks each run sees exactly its own)
+    "test_identity_repository_ui.py::test_navigate_to_roles_page": {ZITADEL: NO_SYNC_PROVIDER_PAGES},
+    "test_identity_repository_ui.py::test_navigate_to_members_page": {ZITADEL: NO_SYNC_PROVIDER_PAGES},
+    "test_page_content.py::test_members_page_loads": {ZITADEL: NO_SYNC_PROVIDER_PAGES},
+    "test_page_content.py::test_roles_page_loads": {ZITADEL: NO_SYNC_PROVIDER_PAGES},
     "test_identity_repository_ui.py::test_navigate_to_settings_page": {ZITADEL: NO_CUSTOM_ATTRIBUTES},
     "test_authenticated_ui.py::test_navigate_to_settings": {ZITADEL: NO_CUSTOM_ATTRIBUTES},
     "test_page_content.py::test_tenant_settings_handles_no_tenant": {ZITADEL: NO_CUSTOM_ATTRIBUTES},

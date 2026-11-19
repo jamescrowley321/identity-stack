@@ -10,7 +10,8 @@ Descope, so each route says how it keeps one provider's ids from another:
 - ``SYNC_PROVIDER_TENANT_ROUTES`` and ``SYNC_PROVIDER_PROJECT_ROUTES``: the role
   assignment, member and role and permission definition routes, whose services
   push to the configured sync adapter, carry ``require_sync_provider_principal``.
-  The definitions belong to no tenant and are gated by ``require_definitions_role``.
+  The definitions belong to no tenant: changing them is gated by
+  ``require_definitions_role``, and a tenant's owner or admin lists them.
 - ``PER_PROVIDER_ROUTES``: ``/api/keys``, whose service the sync provider builds.
 - ``RELATIONSHIP_STORE_ROUTES``: the FGA and document routes, which
   ``capabilities.served`` gives only to the principals whose ids the store keys on.
@@ -20,10 +21,11 @@ Descope, so each route says how it keeps one provider's ids from another:
 - ``GLOBAL_ROLE_ROUTES``: state that belongs to no tenant and that Descope does not
   hold, gated by ``require_global_role``, which lets no caller pick the tenant.
 
-A machine credential's token is refused on the sync provider's routes and on
-``/api/keys`` (``MACHINE_REFUSED_ROUTES``). A new route that takes a tenant, is
-handed the Descope management adapter or is role-gated fails this file until it is
-put in a register.
+A machine credential's token is refused on every route that changes people's
+roles, memberships, credentials or relations (``MACHINE_REFUSED_ROUTES``), and every
+other write says why a machine may make it (``MACHINE_PERMITTED_WRITES``). A new
+route that takes a tenant, is handed the Descope management adapter, is role-gated
+or writes fails this file until it is put in a register.
 """
 
 import asyncio
@@ -167,9 +169,11 @@ DESCOPE_BACKED_ROUTES = DESCOPE_TENANT_ROUTES | DESCOPE_PROJECT_ROUTES
 # (method, path) of every route whose service pushes its writes to the configured sync
 # adapter (``SYNC_PROVIDER``): ``require_sync_provider_principal`` passes only that
 # provider's principals, whose tenant and user ids the adapter takes as its own. In a
-# Descope deployment that is exactly the Descope guard. The assignments take the
-# resolver's tenant ...
-SYNC_PROVIDER_TENANT_ROUTES: frozenset[tuple[str, str]] = frozenset(
+# Descope deployment that is exactly the Descope guard. The assignments, the members
+# and the definition lists (an owner, admin or operator of the tenant reads them, #707)
+# take the resolver's tenant ...
+DEFINITION_READ_ROUTES: frozenset[tuple[str, str]] = frozenset({("GET", "/api/roles"), ("GET", "/api/permissions")})
+SYNC_PROVIDER_TENANT_ROUTES: frozenset[tuple[str, str]] = DEFINITION_READ_ROUTES | frozenset(
     {
         ("POST", "/api/roles/assign"),
         ("POST", "/api/roles/remove"),
@@ -181,14 +185,12 @@ SYNC_PROVIDER_TENANT_ROUTES: frozenset[tuple[str, str]] = frozenset(
     }
 )
 
-# ... and the definitions belong to no tenant, so ``require_global_role`` gates them.
+# ... and changing the definitions, which belong to no tenant, is gated by ``require_global_role``.
 SYNC_PROVIDER_PROJECT_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
-        ("GET", "/api/roles"),
         ("POST", "/api/roles"),
         ("PUT", "/api/roles/{name}"),
         ("DELETE", "/api/roles/{name}"),
-        ("GET", "/api/permissions"),
         ("POST", "/api/permissions"),
         ("PUT", "/api/permissions/{name}"),
         ("DELETE", "/api/permissions/{name}"),
@@ -197,10 +199,49 @@ SYNC_PROVIDER_PROJECT_ROUTES: frozenset[tuple[str, str]] = frozenset(
 
 SYNC_PROVIDER_ROUTES = SYNC_PROVIDER_TENANT_ROUTES | SYNC_PROVIDER_PROJECT_ROUTES
 
+# (method, path) of every write that changes who holds a relation: the FGA relations and
+# schema, and a document's shares.
+RELATION_WRITE_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("PUT", "/api/fga/schema"),
+        ("POST", "/api/fga/relations"),
+        ("DELETE", "/api/fga/relations"),
+        ("POST", "/api/documents/{document_id}/share"),
+        ("DELETE", "/api/documents/{document_id}/share/{target_user_id}"),
+    }
+)
+# (method, path) of the writes that decide which provider account signs in as a person.
+IDP_LINK_WRITE_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {("POST", "/api/users/{user_id}/idp-links"), ("DELETE", "/api/users/{user_id}/idp-links/{link_id}")}
+)
+
 # (method, path) of every route a machine credential's token is refused on
-# (``refuse_machine_principal``): no credential manages credentials, people's roles,
-# the definitions or a tenant's members (#680, #683).
-MACHINE_REFUSED_ROUTES = PER_PROVIDER_ROUTES | SYNC_PROVIDER_ROUTES
+# (``refuse_machine_principal``): no credential manages credentials, people's roles or
+# sign-in links, the definitions, a tenant's members or anyone's relations (#680, #683).
+MACHINE_REFUSED_ROUTES = PER_PROVIDER_ROUTES | SYNC_PROVIDER_ROUTES | RELATION_WRITE_ROUTES | IDP_LINK_WRITE_ROUTES
+
+_NO_PRINCIPAL = "takes no principal: guarded by a shared secret, not a token"
+# (method, path) -> why a write a machine credential's token may reach changes no
+# person's roles, memberships, credentials or relations. Every other write is refused.
+MACHINE_PERMITTED_WRITES: dict[tuple[str, str], str] = {
+    ("POST", "/api/auth/logout"): "ends the caller's own session",
+    ("POST", "/api/validate-id-token"): "validates a token; writes nothing",
+    ("POST", "/api/fga/check"): "reads one relation; writes nothing",
+    ("POST", "/api/documents"): "creates a document of its tenant, owned by the caller",
+    ("PUT", "/api/documents/{document_id}"): "changes a document the caller may edit (require_fga), not who holds it",
+    ("DELETE", "/api/documents/{document_id}"): "deletes a document the caller may delete (require_fga)",
+    ("POST", "/api/tenants/{tenant_id}/resources"): "adds a resource row to a tenant it belongs to",
+    ("PATCH", "/api/tenants/current/settings"): "the tenant's custom attributes, not a person's grants",
+    ("PATCH", "/api/profile"): "the caller's own canonical user, which a machine token never resolves to",
+    ("PATCH", "/api/profile/attributes"): "the caller's own attributes at the sync provider",
+    ("POST", "/api/tenants"): "require_admin_role reads Descope claims only: a canonical machine is refused (#596)",
+    ("POST", "/api/providers"): "require_global_role('operator'), which no machine credential may hold",
+    ("PATCH", "/api/providers/{provider_id}"): "require_global_role('operator'), which no machine credential may hold",
+    ("POST", "/api/internal/reconciliation/run"): _NO_PRINCIPAL,
+    ("POST", "/api/internal/users/sync"): _NO_PRINCIPAL,
+    ("POST", "/api/internal/webhooks/descope"): _NO_PRINCIPAL,
+}
+_WRITES = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 # (method, path) -> what keeps another provider's subject from Descope on a route
 # that is handed the management adapter and carries no guard.
@@ -509,8 +550,19 @@ class TestTheRegisters:
     def test_the_sync_provider_guard_is_on_exactly_the_sync_provider_routes(self):
         assert _routes_depending_on(require_sync_provider_principal) == SYNC_PROVIDER_ROUTES
 
-    def test_machines_are_refused_on_exactly_the_credential_role_and_member_routes(self):
+    def test_machines_are_refused_on_exactly_the_credential_role_member_and_relation_routes(self):
         assert _routes_depending_on(refuse_machine_principal) == MACHINE_REFUSED_ROUTES
+
+    def test_every_write_a_machine_may_reach_says_why(self):
+        """A new write fails here until it refuses machines or says why a machine may make it."""
+        writes = {
+            (method, route.path)
+            for route in shipped_app.routes
+            if isinstance(route, APIRoute)
+            for method in route.methods & _WRITES
+        }
+
+        assert writes - MACHINE_REFUSED_ROUTES == set(MACHINE_PERMITTED_WRITES)
 
     def test_no_route_carries_both_guards(self):
         assert SYNC_PROVIDER_ROUTES & DESCOPE_BACKED_ROUTES == set()
@@ -862,6 +914,52 @@ class TestTheRoleRoutesServeTheSyncProvidersPrincipals:
         # Each request decided from the canonical model, never from the token.
         assert keycloak_sync.calls == [("keycloak", KEYCLOAK_USER["sub"])] * 2
 
+    @pytest.mark.parametrize(
+        ("roles", "tenant"),
+        [(SOLE_ADMIN, None), (SOLE_OWNER, TENANT_A), (MEMBER_OF_A_ADMIN_OF_B, TENANT_B)],
+        ids=["admin of its sole tenant", "owner naming its tenant", "admin of one of several naming it"],
+    )
+    def test_a_keycloak_tenant_admin_lists_the_definitions(
+        self, keycloak_sync, client, role_service, permission_service, roles, tenant
+    ):
+        """Listing changes nothing and shows only the global definitions, so the Roles page serves it (#707)."""
+        keycloak_sync.roles = roles
+        role_service.list_roles.return_value = Ok([{"id": ROLE_ID, "name": "member"}])
+        permission_service.list_permissions.return_value = Ok([{"id": RESOURCE_ID, "name": "documents.read"}])
+        headers = {**_bearer(KEYCLOAK_USER), **({"X-Tenant-ID": tenant} if tenant else {})}
+
+        answers = {path: client.get(path, headers=headers) for path in ("/api/roles", "/api/permissions")}
+
+        assert {path: (r.status_code, r.json()) for path, r in answers.items()} == {
+            "/api/roles": (200, {"roles": [{"id": ROLE_ID, "name": "member"}]}),
+            "/api/permissions": (200, {"permissions": [{"id": RESOURCE_ID, "name": "documents.read"}]}),
+        }
+        role_service.list_roles.assert_awaited_once_with()
+
+    @pytest.mark.parametrize(("method", "path"), sorted(DEFINITION_READ_ROUTES))
+    def test_a_keycloak_member_cannot_list_the_definitions(
+        self, keycloak_sync, client, role_service, permission_service, method, path
+    ):
+        keycloak_sync.roles = [{"tenant_id": TENANT_A, "role_name": "member", "permissions": []}]
+
+        response = client.request(method, path, headers={**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A})
+
+        assert (response.status_code, response.json()) == (403, NOT_GRANTED)
+        assert role_service.mock_calls == []
+        assert permission_service.mock_calls == []
+
+    @pytest.mark.parametrize(("method", "path"), sorted(DEFINITION_READ_ROUTES))
+    def test_a_keycloak_admin_of_one_tenant_cannot_list_them_naming_another(
+        self, keycloak_sync, client, role_service, permission_service, method, path
+    ):
+        keycloak_sync.roles = MEMBER_OF_A_ADMIN_OF_B
+
+        response = client.request(method, path, headers={**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A})
+
+        assert (response.status_code, response.json()) == (403, NOT_GRANTED)
+        assert role_service.mock_calls == []
+        assert permission_service.mock_calls == []
+
     def test_a_keycloak_operator_creates_a_role(self, keycloak_sync, client, role_service):
         keycloak_sync.roles = SOLE_OPERATOR
         role_service.create_role.return_value = Ok({"id": ROLE_ID, "name": "editor"})
@@ -1001,9 +1099,9 @@ class TestADescopeAdminChangesTheDefinitions:
     """Where Descope is synced, a Descope admin reaches every definition route from its claims, as before."""
 
     def test_every_definition_route_is_listed(self):
-        assert DEFINITION_CALLS.keys() == SYNC_PROVIDER_PROJECT_ROUTES
+        assert DEFINITION_CALLS.keys() == SYNC_PROVIDER_PROJECT_ROUTES | DEFINITION_READ_ROUTES
 
-    @pytest.mark.parametrize(("method", "path"), sorted(SYNC_PROVIDER_PROJECT_ROUTES))
+    @pytest.mark.parametrize(("method", "path"), sorted(SYNC_PROVIDER_PROJECT_ROUTES | DEFINITION_READ_ROUTES))
     def test_on_every_definition_route(self, client, store, role_service, permission_service, method, path):
         body, status, call = DEFINITION_CALLS[(method, path)]
         role_service.list_roles.return_value = Ok([DEFINITION])
@@ -1349,7 +1447,7 @@ class TestTheMemberRoutesServeTheSyncProvidersPrincipals:
 
 class TestTheSyncProviderGuard:
     def test_every_sync_adapter_names_its_principals(self):
-        assert identity.SYNC_PROVIDER_PRINCIPALS.keys() == identity.SYNC_ADAPTERS.keys()
+        assert identity.SYNC_PROVIDER_NAMES.keys() == identity.SYNC_ADAPTERS.keys()
 
     @pytest.mark.parametrize("state", [{}, {"claims": None}], ids=["no claims", "claims is None"])
     def test_a_request_with_no_claims_is_refused_by_the_guard_itself(self, state):

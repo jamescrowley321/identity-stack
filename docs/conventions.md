@@ -390,15 +390,20 @@ configured sync adapter (`SYNC_PROVIDER`) **MUST** depend on
 (`POST /api/roles/assign`, `/api/roles/remove`), the member routes (`GET /api/members`,
 `POST /api/members/invite`, `POST /api/members/{user_id}/deactivate` and `/activate`,
 `DELETE /api/members/{user_id}`) and the role and permission definition routes (`/api/roles`,
-`/api/roles/{name}`, `/api/permissions`, `/api/permissions/{name}`). The adapter takes the
+`/api/roles/{name}`, `/api/permissions`, `/api/permissions/{name}`; the two lists take the
+request's tenant and are in `SYNC_PROVIDER_TENANT_ROUTES`). The adapter takes the
 request's tenant id and the user ids as its provider's, so the guard refuses (403, `This route
 serves <provider> principals only`) every principal whose provider is not the sync provider,
 before the tenant is resolved and before anything is written. In a Descope deployment
 (`SYNC_PROVIDER=descope`, the default) it passes exactly the `descope_managed` principals
-`require_descope_principal` passes, with the same body (#676). Each of these routes **MUST** also
-depend on `app.dependencies.rbac.refuse_machine_principal` (below): no machine credential
-changes which people hold which roles, the definitions every tenant's grants read, or who
-belongs to a tenant (#683).
+`require_descope_principal` passes, with the same body (#676). Who is a principal of the sync
+provider **MUST** be decided by `identity.is_sync_provider_principal` alone: the guard calls it,
+and `capabilities.served` reports it as `sync_provider_principal` in `GET /api/capabilities`, by
+which the SPA shows the Members and Roles pages (`PAGE_REQUIREMENTS`), so no page the SPA shows
+calls a route that fences the caller out. Each of these routes **MUST** also depend on
+`app.dependencies.rbac.refuse_machine_principal` (below): no machine credential changes which
+people hold which roles, the definitions every tenant's grants read, or who belongs to a tenant
+(#683).
 
 - **Members.** The member routes take their members from
   `app.dependencies.identity.get_member_directory`: in a Descope deployment the Descope
@@ -413,12 +418,16 @@ belongs to a tenant (#683).
   a lock on the user's row (409 otherwise), and a user who is no member of the tenant reads the
   same whether or not it exists.
 - **Definitions.** The role and permission definitions belong to no tenant and every tenant's
-  grants read them, so their routes are gated by `app.dependencies.rbac.require_definitions_role`
+  grants read them, so the routes that change them are gated by
+  `app.dependencies.rbac.require_definitions_role`
   (`require_global_role("operator", claimed_roles=("owner", "admin"))`): a canonical principal
   **MUST** hold `operator` by its sole membership. A tenant `admin` is refused: its role is one
   tenant's, and with it the caller could delete the `owner` role, which ends that role in every
   tenant, or grant the `member` role a permission everywhere. A Descope principal is decided from
-  its claims and keeps `owner` or `admin`, as before.
+  its claims and keeps `owner` or `admin`, as before. Listing them (`GET /api/roles`,
+  `GET /api/permissions`) changes nothing and shows only the global definitions, so it is gated by
+  `require_role(*DEFINITION_READERS)` (`owner`, `admin` or `operator`) in the request's tenant: the
+  Roles page lists them to assign a role (#707).
 - **`operator` itself.** Assigning or removing `operator` through `POST /api/roles/assign` or
   `/api/roles/remove`, or inviting with it through `POST /api/members/invite`, **MUST** be
   refused (403, `RoleGrantRefusal.OPERATOR_GRANT`) unless the caller holds `operator` as
@@ -443,9 +452,14 @@ inactive, expired or deleted. It is never resolved as a user. A credential **MUS
 one role, only roles its creator holds in the tenant, and never `operator`
 (`ROLES_NOT_FOR_MACHINES` in `app/domain/credentials`): a credential has exactly one membership,
 so `require_global_role` would serve it every tenant's state. Such a token **MUST** be refused
-(`refuse_machine_principal`, 403 `MachinePrincipalRefused`) on the `/api/keys` routes, so no
-credential mints its successor, and on every route of the sync provider's registers above.
-`MACHINE_REFUSED_ROUTES` in `test_descope_backed_routes.py` lists them. A Descope access-key
+(`refuse_machine_principal`, 403 `MachinePrincipalRefused`) on every route that changes
+people's roles, memberships, credentials or relations: the `/api/keys` routes, so no credential
+mints its successor; every route of the sync provider's registers above; the relationship
+store's writes (`PUT /api/fga/schema`, `POST` and `DELETE /api/fga/relations`, a document's
+share and revoke), so no credential makes anyone a document's owner; and the IdP-link writes,
+which decide which account signs in as a person. `MACHINE_REFUSED_ROUTES` in
+`test_descope_backed_routes.py` lists them, and every other write of the application **MUST** be
+listed in `MACHINE_PERMITTED_WRITES` there with why a machine may make it. A Descope access-key
 session is not such a token: Descope has no `machine_client` reader (#699).
 
 **Capabilities.** A route that serves an optional capability of the sync adapter (`Capability`
@@ -488,8 +502,8 @@ answer (`store_error_response`).
 **State that belongs to no tenant.** A route over state that belongs to no tenant and that
 Descope does not hold **MUST** be gated by `app.dependencies.rbac.require_global_role`, not
 `require_role`, and be listed in `GLOBAL_ROLE_ROUTES`: `GET /api/users` (every tenant's users),
-`/api/providers`, `/api/sync/status` and `/api/events/recent`, and the role and permission
-definitions above (`require_definitions_role`). One role in one tenant opens all of that state,
+`/api/providers`, `/api/sync/status` and `/api/events/recent`, and the changes to the role and
+permission definitions above (`require_definitions_role`). One role in one tenant opens all of that state,
 so on these routes the request chooses nothing. A canonical principal is decided by their sole
 membership, and one with several memberships is refused, whether they send the `X-Tenant-ID`
 header, carry a `dct` claim on the token, or name no tenant at all. A Descope principal is
@@ -556,8 +570,8 @@ and to the tenant routes, which must not read them, `test_tenant_routes_canonica
 which serves each provider's principal its own tenants and resources and refuses another
 tenant's, `test_capabilities.py`, which holds each capability to its routes and its
 dependency first on each, `test_machine_principal.py`, which shows a machine token gets its
-credential's grants and nothing else and is refused on every `/api/keys`, role and member
-route, and `test_descope_backed_routes.py`, which walks every route
+credential's grants and nothing else and is refused on every `/api/keys`, role, member,
+relation-write and IdP-link-write route, and `test_descope_backed_routes.py`, which walks every route
 of the application against its registers, calls each guarded route as a canonical
 principal, and calls each `require_global_role` route as an operator of one of several
 tenants who names it). `test_keycloak_canonical_authorization.py` shows a Keycloak

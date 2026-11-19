@@ -81,8 +81,11 @@ reads and writes canonical services; a provider is reached only through the sync
 ids from another is in [conventions §18](conventions.md#18-one-resolver-decides-the-tenant-and-the-grants).
 
 - **Routes whose writes go to the sync provider** (role assignment, members, role and permission
-  definitions) serve the sync provider's principals only (`require_sync_provider_principal`). A
-  machine credential's token is refused on them and on `/api/keys`.
+  definitions) serve the sync provider's principals only (`require_sync_provider_principal`).
+  `GET /api/capabilities` reports `sync_provider_principal`, and the SPA shows the Members and
+  Roles pages only when it is true. A tenant's owner or admin lists the definitions; changing them
+  needs `operator`. A machine credential's token is refused on these routes, on `/api/keys`, and on
+  the relation, share and IdP-link writes.
 - **Capabilities.** A sync adapter declares the optional capabilities it implements (`Capability`
   in `adapters/base.py`). `GET /api/capabilities` reports the capabilities and the relationship
   store that serve the caller (`capabilities.served`), and the SPA shows a page only when its

@@ -28,7 +28,9 @@ or a `sub`. No route does so today; the Descope access-key builder calls it.
 permission definition and member routes write through services that push to the configured sync
 adapter (`SYNC_PROVIDER`), which takes the request's tenant and user ids as its own provider's.
 `require_sync_provider_principal` serves that provider's principals only. In a Descope deployment
-that is exactly the principals `require_descope_principal` passes.
+that is exactly the principals `require_descope_principal` passes. Who is such a principal is one
+decision, `identity.is_sync_provider_principal`: `GET /api/capabilities` reports it as
+`sync_provider_principal`, and the SPA shows the Members and Roles pages only when it is true.
 
 **Capabilities are declared.** A sync adapter declares a frozen set of `Capability`
 (`machine_credentials`, `custom_attributes`). `capabilities.served` decides what serves the caller:
@@ -57,11 +59,14 @@ Three defaults are pending the owner's answer (epic identity-stack#672, "Owner d
 
 **The authorization rules these routes follow:**
 
-- **The role and permission definitions need `operator` from a canonical principal**
+- **Changing the role and permission definitions needs `operator` from a canonical principal**
   (`require_definitions_role`): `operator` held by its sole membership, as on every route over state
   that belongs to no tenant. The definitions belong to no tenant and every tenant's grants read
   them, so a tenant `admin` could otherwise delete the `owner` role in every tenant or grant
   `member` a permission everywhere. A Descope principal keeps `owner` or `admin` from its claims.
+  **Listing them** (`GET /api/roles`, `GET /api/permissions`) changes nothing and shows only the
+  global definitions, so an `owner`, `admin` or `operator` of the request's tenant lists them
+  (`require_role`), as the Roles page needs to assign a role (identity-stack#707).
 - **Only an operator touches `operator`, for every provider, Descope included.** Assigning or
   removing `operator` (`/api/roles/assign`, `/api/roles/remove`), inviting with it
   (`/api/members/invite`), and creating, changing, renaming to or from, or deleting its definition
@@ -71,9 +76,13 @@ Three defaults are pending the owner's answer (epic identity-stack#672, "Owner d
   there, and nothing while it is inactive, expired or deleted. A credential needs at least one
   role, only roles its creator holds, and never `operator` (with one membership,
   `require_global_role` would serve it every tenant). A machine's token is refused
-  (`refuse_machine_principal`, 403 `MachinePrincipalRefused`) on `/api/keys`, so no credential
-  mints its successor; on the role assignment and definition routes; and on `/api/members/*`, so
-  no credential changes which people hold which roles or belong to its tenant (identity-stack#683).
+  (`refuse_machine_principal`, 403 `MachinePrincipalRefused`) on every route that changes
+  people's roles, memberships, credentials or relations: `/api/keys`, so no credential mints its
+  successor; the role assignment and definition routes and `/api/members/*`; the FGA relation and
+  schema writes and a document's share and revoke, so no credential makes anyone a document's
+  owner; and the IdP-link writes, which decide which account signs in as a person
+  (identity-stack#683). Every other write lists why a machine may make it
+  (`MACHINE_PERMITTED_WRITES` in `test_descope_backed_routes.py`).
 - **An invitation only creates an account.** The user and its memberships commit together, and
   an email any canonical user already has is refused (409, `MemberRefusal.ACCOUNT_EXISTS`)
   whichever tenant holds it. So an admin cannot enrol another tenant's account or learn that it
@@ -81,14 +90,13 @@ Three defaults are pending the owner's answer (epic identity-stack#672, "Owner d
 
 ## Consequences
 
-- A Keycloak or Zitadel admin uses the tenant, member, role, profile, access-key, FGA and document
-  pages when the deployment syncs to their provider. The shared e2e visits every page the SPA
-  shows for Descope, Keycloak and Zitadel, and fails on any 403 it does not list with a reason.
+- A Keycloak admin uses the tenant, member, role, profile, access-key, FGA and document pages in a
+  deployment that syncs to Keycloak: it lists the definitions and assigns roles in its tenant, and
+  changing a definition needs an operator. The shared e2e visits every page the SPA shows for
+  Descope, Keycloak and Zitadel, and fails on any 403.
 - A deployment serves the member and role routes to one provider's principals: the sync
-  provider's. A Zitadel principal in a deployment that syncs to Descope is refused 403 there, as in
-  CI's Zitadel job (identity-stack#703).
-- A canonical tenant admin who is not an operator cannot read the role and permission
-  definitions, though the SPA's Roles page reads them (identity-stack#707).
+  provider's. Any other principal is refused 403 there, and its SPA shows no Members or Roles page.
+  CI's Zitadel job is such a deployment: its backend syncs to Descope (identity-stack#709).
 - Descope access-key sessions are not machine principals under these rules: Descope has no
   `machine_client` reader, so such a session is served as its claims say (identity-stack#699).
 - An Ory or Keycloak deployment that adds FGA needs an OpenFGA server and the applied

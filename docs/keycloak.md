@@ -270,8 +270,9 @@ new ones to a deactivated or deleted client. A credential must carry at least on
 its creator holds in the tenant, and never `operator` (which would open every tenant's state to it
 through `require_global_role`); it expires at most 365 days ahead. A machine's own token is refused
 (403) on every `/api/keys` route, so no credential creates, renews or manages credentials, and on
-the role assignment, role and permission definition and member routes, so no credential changes
-which people hold which roles or belong to its tenant.
+the role assignment, role and permission definition and member routes, the FGA relation and schema
+writes, a document's share and revoke, and the IdP-link writes, so no credential changes which
+people hold which roles or relations, or belong to its tenant.
 
 | Limit | What happens |
 |---|---|
