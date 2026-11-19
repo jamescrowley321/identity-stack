@@ -118,7 +118,7 @@ def _machine_client(request: Request, claims: dict) -> str | None:
     return provider.machine_client(claims)
 
 
-MACHINE_PRINCIPAL_REFUSED = "A machine credential cannot manage machine credentials"
+MACHINE_PRINCIPAL_REFUSED = "A machine credential cannot manage credentials, roles or members"
 MACHINE_ROLES_REFUSED = "This machine credential holds no role it may use"
 
 
@@ -127,8 +127,10 @@ def refuse_machine_principal(request: Request) -> None:
 
     On ``/api/keys``: a credential holding ``owner`` or ``admin`` would otherwise
     mint its own successor before it expires, and so outlive its 365-day cap and
-    the membership of the person who created it, and manage its siblings. Which
-    tokens are a machine's is the provider's ``machine_client`` reader.
+    the membership of the person who created it, and manage its siblings. On the
+    role assignment, role and permission definition and member routes: it would
+    otherwise change which people hold which roles, or who belongs to its tenant.
+    Which tokens are a machine's is the provider's ``machine_client`` reader.
     """
     claims = getattr(request.state, "claims", None)
     if not isinstance(claims, dict):

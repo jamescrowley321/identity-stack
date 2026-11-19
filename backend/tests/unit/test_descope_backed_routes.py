@@ -1,35 +1,29 @@
-"""The routes that hand a tenant id or a subject to Descope serve Descope principals only.
+"""Every route that takes a tenant, or reaches a provider, is held to one register here (conventions §18).
 
-``get_tenant_id`` gives a principal from a canonical provider a canonical tenant
-id (conventions §18). The routes below pass their tenant id and the caller's
-``sub`` to Descope's Management API or its FGA store, where a canonical id names
-nothing, so ``require_descope_principal`` refuses every other provider's
-principal on them before anything is read.
+A route the SPA calls serves every provider (ADR-0012). ``get_tenant_id`` gives a
+principal of a canonical provider a canonical tenant id, which names nothing in
+Descope, so each route says how it keeps one provider's ids from another:
 
-Every tenant-scoped route is in exactly one of the two registers here. A new
-route that depends on ``get_tenant_id`` fails this file until it is put in one.
+- ``DESCOPE_TENANT_ROUTES`` and ``DESCOPE_PROJECT_ROUTES``: a route that hands the
+  tenant or the caller's ``sub`` to Descope carries ``require_descope_principal``.
+  None is left.
+- ``SYNC_PROVIDER_TENANT_ROUTES`` and ``SYNC_PROVIDER_PROJECT_ROUTES``: the role
+  assignment, member and role and permission definition routes, whose services
+  push to the configured sync adapter, carry ``require_sync_provider_principal``.
+  The definitions belong to no tenant and are gated by ``require_definitions_role``.
+- ``PER_PROVIDER_ROUTES``: ``/api/keys``, whose service the sync provider builds.
+- ``RELATIONSHIP_STORE_ROUTES``: the FGA and document routes, which
+  ``capabilities.served`` gives only to the principals whose ids the store keys on.
+- ``ADAPTER_CAPABILITY_ROUTES``: the routes of a sync adapter capability, which
+  ``served`` gives only to that provider's own principals.
+- ``PROVIDER_NEUTRAL_ROUTES``: routes that hand no tenant or user id to a provider.
+- ``GLOBAL_ROLE_ROUTES``: state that belongs to no tenant and that Descope does not
+  hold, gated by ``require_global_role``, which lets no caller pick the tenant.
 
-The FGA and document routes are not Descope's: they reach the deployment's
-relationship store, which ``capabilities.served`` gives only to the principals
-whose ids it holds (``RELATIONSHIP_STORE_ROUTES``).
-
-The role and permission routes are not Descope's: their services push every
-write to the configured sync adapter (``SYNC_PROVIDER``), so
-``require_sync_provider_principal`` serves that provider's principals, which in
-a Descope deployment are exactly the Descope guard's. The definitions belong to
-no tenant and are gated by ``require_global_role``.
-
-Every route that is handed the Descope management adapter carries the guard, or
-is listed with what keeps another provider's subject from reaching Descope. The
-routes of a sync adapter capability (the profile's custom attributes, the tenant
-settings) reach the provider only through ``served``, which serves an adapter's
-capability to that provider's own principals only: they are listed apart.
-
-The routes over state that belongs to no tenant and that Descope does not hold
-(every tenant's users, the provider records, the sync status) are gated by
-``require_global_role``, which lets no caller pick the tenant that answers with
-the ``X-Tenant-ID`` header. Every role-gated route is held to one of these
-shapes, so a new one has to choose.
+A machine credential's token is refused on the sync provider's routes and on
+``/api/keys`` (``MACHINE_REFUSED_ROUTES``). A new route that takes a tenant, is
+handed the Descope management adapter or is role-gated fails this file until it is
+put in a register.
 """
 
 import asyncio
@@ -70,6 +64,7 @@ from app.dependencies.rbac import (
     OPERATOR_ROLE,
     RoleGrantRefusal,
     get_rbac_session,
+    refuse_machine_principal,
     require_global_role,
     require_permission,
     require_role,
@@ -201,6 +196,11 @@ SYNC_PROVIDER_PROJECT_ROUTES: frozenset[tuple[str, str]] = frozenset(
 )
 
 SYNC_PROVIDER_ROUTES = SYNC_PROVIDER_TENANT_ROUTES | SYNC_PROVIDER_PROJECT_ROUTES
+
+# (method, path) of every route a machine credential's token is refused on
+# (``refuse_machine_principal``): no credential manages credentials, people's roles,
+# the definitions or a tenant's members (#680, #683).
+MACHINE_REFUSED_ROUTES = PER_PROVIDER_ROUTES | SYNC_PROVIDER_ROUTES
 
 # (method, path) -> what keeps another provider's subject from Descope on a route
 # that is handed the management adapter and carries no guard.
@@ -509,6 +509,9 @@ class TestTheRegisters:
     def test_the_sync_provider_guard_is_on_exactly_the_sync_provider_routes(self):
         assert _routes_depending_on(require_sync_provider_principal) == SYNC_PROVIDER_ROUTES
 
+    def test_machines_are_refused_on_exactly_the_credential_role_and_member_routes(self):
+        assert _routes_depending_on(refuse_machine_principal) == MACHINE_REFUSED_ROUTES
+
     def test_no_route_carries_both_guards(self):
         assert SYNC_PROVIDER_ROUTES & DESCOPE_BACKED_ROUTES == set()
 
@@ -725,8 +728,8 @@ class TestADescopePrincipalIsServed:
         descope_client.load_tenant.assert_awaited_once_with("t1")
 
 
-class TestRoleAssignmentIsDescopeBacked:
-    """``RoleService`` sends each assignment to Descope, so the two routes take Descope principals only."""
+class TestRoleAssignmentInADescopeDeployment:
+    """``RoleService`` sends each assignment to the sync adapter, here Descope's: its principals only."""
 
     @pytest.mark.parametrize("path", ["/api/roles/assign", "/api/roles/remove"])
     def test_an_ory_owner_of_the_tenant_is_refused_before_anything_is_read(self, client, store, descope_client, path):
@@ -751,8 +754,8 @@ class TestRoleAssignmentIsDescopeBacked:
         assert response.json() == {"detail": "Cannot manage roles for a different tenant"}
 
 
-class TestProjectWideStateIsDescopeBacked:
-    """Role and permission definitions and the FGA schema belong to no tenant and live in Descope."""
+class TestProjectWideStateInADescopeDeployment:
+    """Role and permission definitions and the FGA schema belong to no tenant; a Descope principal reaches them."""
 
     @pytest.mark.parametrize(("method", "path"), sorted(DESCOPE_PROJECT_ROUTES))
     def test_an_admin_of_one_of_several_tenants_is_refused(

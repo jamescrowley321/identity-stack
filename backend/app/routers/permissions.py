@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from app.dependencies.identity import get_permission_service
-from app.dependencies.rbac import require_definitions_role
+from app.dependencies.rbac import refuse_machine_principal, require_definitions_role
 from app.dependencies.sync_provider import require_sync_provider_principal
 from app.errors.identity import NotFound
 from app.errors.problem_detail import result_to_response
@@ -17,8 +17,11 @@ from app.services.permission import PermissionService
 # (conventions §18). The definitions belong to no tenant, so the routes are gated by
 # ``require_definitions_role``: a canonical principal needs ``operator`` by its sole
 # membership, never a tenant's ``admin``; a Descope principal keeps ``owner`` or
-# ``admin`` from its claims.
-router = APIRouter(tags=["Permissions"], dependencies=[Depends(require_sync_provider_principal)])
+# ``admin`` from its claims. No machine credential changes them (``refuse_machine_principal``).
+router = APIRouter(
+    tags=["Permissions"],
+    dependencies=[Depends(require_sync_provider_principal), Depends(refuse_machine_principal)],
+)
 
 
 class CreatePermissionRequest(BaseModel):

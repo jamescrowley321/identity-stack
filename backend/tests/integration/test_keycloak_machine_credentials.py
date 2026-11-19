@@ -35,7 +35,7 @@ from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.role import Role
 from app.models.identity.tenant import Tenant, TenantStatus
 from app.models.identity.user import IdPLink, User, UserStatus
-from app.routers import access_checks, accesskeys
+from app.routers import access_checks, accesskeys, permissions, roles, users
 from app.services.adapters.keycloak import CREDENTIAL_ATTRIBUTE, ORGANIZATION_ATTRIBUTE, TENANT_ATTRIBUTE
 from app.services.keycloak_admin import (
     ADMIN_CLIENT_ID_VARIABLE,
@@ -129,6 +129,8 @@ def client(db_session, admin_api, keycloak_token_source: KeycloakTokenSource) ->
     app.add_exception_handler(IdentityErrorRaised, identity_error_raised_handler)
     app.include_router(accesskeys.router, prefix="/api")
     app.include_router(access_checks.router, prefix="/api")
+    for router in (roles.router, permissions.router, users.router):
+        app.include_router(router, prefix="/api")
 
     async def _session():
         yield db_session
@@ -328,6 +330,48 @@ class TestAMachineManagesNoCredential:
         assert [response.status_code for response in (minted, listed, deleted)] == [403, 403, 403]
         assert {response.json()["detail"] for response in (minted, listed, deleted)} == {MACHINE_PRINCIPAL_REFUSED}
         assert _registered_client(keycloak_token_source, key["clientId"]) is not None
+
+
+class TestAMachineManagesNoRoleOrMember:
+    async def test_its_admin_token_changes_no_role_and_no_member(
+        self, client, credential, realm, db_session, keycloak_token_source
+    ):
+        """A credential holding admin in acme assigns no role, defines none and invites nobody (#683)."""
+        key = credential["key"]
+        token = _token(keycloak_token_source, key["clientId"], credential["cleartext"])
+        headers = _headers(token)
+        bob = (
+            (
+                await db_session.execute(
+                    select(User)
+                    .join(IdPLink, IdPLink.user_id == User.id)
+                    .where(IdPLink.provider_id == realm.acme.external_org_provider_id, IdPLink.external_sub == BOB.id)
+                )
+            )
+            .scalars()
+            .one()
+        )
+
+        answers = {
+            "assign": await client.post(
+                "/api/roles/assign",
+                json={"user_id": str(bob.id), "tenant_id": str(realm.acme.id), "role_names": ["owner"]},
+                headers=headers,
+            ),
+            "define": await client.post("/api/roles", json={"name": f"robot-{uuid.uuid4()}"}, headers=headers),
+            "permissions": await client.get("/api/permissions", headers=headers),
+            "members": await client.get("/api/members", headers=headers),
+            "invite": await client.post(
+                "/api/members/invite", json={"email": f"robot-{uuid.uuid4()}@acme.example"}, headers=headers
+            ),
+            "deactivate": await client.post(f"/api/members/{bob.id}/deactivate", headers=headers),
+        }
+
+        assert {name: (r.status_code, r.json()["detail"]) for name, r in answers.items()} == {
+            name: (403, MACHINE_PRINCIPAL_REFUSED) for name in answers
+        }
+        await db_session.refresh(bob)
+        assert bob.status == UserStatus.active
 
 
 class TestWhatACredentialMustNotCarry:

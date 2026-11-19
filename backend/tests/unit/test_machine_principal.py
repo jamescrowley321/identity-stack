@@ -201,6 +201,38 @@ KEY_ROUTES = [
 ]
 
 
+# The routes that change people's roles, the role and permission definitions, or a
+# tenant's members, with a body each would accept from an admin.
+ASSIGNMENT = {"user_id": str(uuid.UUID(int=9)), "tenant_id": str(ACME), "role_names": ["admin"]}
+ROLE_AND_MEMBER_ROUTES = [
+    ("POST", "/api/roles/assign", ASSIGNMENT),
+    ("POST", "/api/roles/remove", ASSIGNMENT),
+    ("GET", "/api/roles", None),
+    ("POST", "/api/roles", {"name": "robot-made", "permission_names": []}),
+    ("PUT", "/api/roles/member", {"description": "changed by a machine"}),
+    ("DELETE", "/api/roles/member", None),
+    ("GET", "/api/permissions", None),
+    ("POST", "/api/permissions", {"name": "robot:made"}),
+    ("PUT", "/api/permissions/documents:read", {"new_name": "documents:read"}),
+    ("DELETE", "/api/permissions/documents:read", None),
+    ("GET", "/api/members", None),
+    ("POST", "/api/members/invite", {"email": "new@acme.example", "role_names": ["admin"]}),
+    ("POST", f"/api/members/{uuid.UUID(int=9)}/deactivate", None),
+    ("POST", f"/api/members/{uuid.UUID(int=9)}/activate", None),
+    ("DELETE", f"/api/members/{uuid.UUID(int=9)}", None),
+]
+
+
+def _assert_refused_as_a_machine(response, stored) -> None:
+    assert (response.status_code, response.json()["type"], response.json()["detail"]) == (
+        403,
+        "/errors/forbidden",
+        MACHINE_PRINCIPAL_REFUSED,
+    )
+    # Refused before any credential was looked up.
+    assert stored.lookups == []
+
+
 class TestAMachineManagesNoCredential:
     """A credential holding admin would otherwise mint its own successor before it expires."""
 
@@ -215,10 +247,25 @@ class TestAMachineManagesNoCredential:
             headers={"Authorization": f"Bearer {_machine_token(op)}"},
         )
 
-        assert (response.status_code, response.json()["type"], response.json()["detail"]) == (
-            403,
-            "/errors/forbidden",
-            MACHINE_PRINCIPAL_REFUSED,
+        _assert_refused_as_a_machine(response, stored)
+
+
+class TestAMachineManagesNoRoleOrMember:
+    """A credential holding admin would otherwise assign people roles and invite or deactivate members (#683)."""
+
+    @pytest.mark.parametrize(
+        ("method", "path", "body"), ROLE_AND_MEMBER_ROUTES, ids=[f"{m} {p}" for m, p, _ in ROLE_AND_MEMBER_ROUTES]
+    )
+    def test_every_role_and_member_route_refuses_a_machine_token(
+        self, op, client, stored, monkeypatch, method, path, body
+    ):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+
+        response = client.request(
+            method,
+            path,
+            json=body,
+            headers={"Authorization": f"Bearer {_machine_token(op)}", TENANT_SELECTOR_HEADER: str(ACME)},
         )
-        # Refused before any credential was looked up.
-        assert stored.lookups == []
+
+        _assert_refused_as_a_machine(response, stored)

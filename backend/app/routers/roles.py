@@ -10,6 +10,7 @@ from app.dependencies.rbac import (
     OperatorGrantCheck,
     operator_definition_check,
     operator_grant_check,
+    refuse_machine_principal,
     require_definitions_role,
     require_role,
 )
@@ -27,10 +28,11 @@ from app.services.role import RoleService
 # §18). The definitions belong to no tenant, so their routes are gated by
 # ``require_definitions_role``: a canonical principal needs ``operator`` by its sole
 # membership, never a tenant's ``admin``; a Descope principal keeps ``owner`` or
-# ``admin`` from its claims. ``/roles/me`` writes nothing and
-# answers any principal the tenant resolver places.
+# ``admin`` from its claims. No machine credential changes roles or definitions
+# (``refuse_machine_principal``). ``/roles/me`` writes nothing and answers any
+# principal the tenant resolver places.
 router = APIRouter(tags=["Roles"])
-SYNC_PROVIDER_ONLY = [Depends(require_sync_provider_principal)]
+SYNC_PROVIDER_ONLY = [Depends(require_sync_provider_principal), Depends(refuse_machine_principal)]
 
 
 class RoleAssignmentRequest(BaseModel):

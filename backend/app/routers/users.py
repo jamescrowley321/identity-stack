@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
 
 from app.dependencies.identity import get_member_directory
-from app.dependencies.rbac import OperatorGrantCheck, operator_grant_check, require_role
+from app.dependencies.rbac import OperatorGrantCheck, operator_grant_check, refuse_machine_principal, require_role
 from app.dependencies.sync_provider import require_sync_provider_principal
 from app.dependencies.tenant import get_tenant_id
 from app.errors.identity import Conflict, Forbidden, IdentityError, ValidationError
@@ -16,8 +16,12 @@ from app.services.user import MemberStatus
 # The members live where the deployment syncs to (``get_member_directory``): in
 # Descope under Descope's ids, or in the canonical model, whose changes the sync
 # adapter pushes and takes the request's tenant and user ids as its provider's. So
-# the router serves the sync provider's principals only (conventions §18).
-router = APIRouter(tags=["Users"], dependencies=[Depends(require_sync_provider_principal)])
+# the router serves the sync provider's principals only (conventions §18), and
+# never a machine credential: machines do not change who belongs to a tenant.
+router = APIRouter(
+    tags=["Users"],
+    dependencies=[Depends(require_sync_provider_principal), Depends(refuse_machine_principal)],
+)
 
 
 class InviteUserRequest(BaseModel):
