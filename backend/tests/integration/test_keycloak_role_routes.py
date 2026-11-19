@@ -22,7 +22,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 from app.dependencies import identity, rbac
-from app.dependencies.rbac import get_rbac_session
+from app.dependencies.rbac import OPERATOR_ROLE, RoleGrantRefusal, get_rbac_session
 from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.providers import keycloak_config
@@ -145,6 +145,15 @@ async def _assign(db_session, user: User, tenant: Tenant, role_name: str) -> Non
     role = await _global_role(db_session, role_name)
     db_session.add(UserTenantRole(user_id=user.id, tenant_id=tenant.id, role_id=role.id))
     await db_session.flush()
+
+
+async def _holds(db_session, user: User, tenant: Tenant, role: Role) -> bool:
+    found = await db_session.execute(
+        select(UserTenantRole.role_id).where(
+            UserTenantRole.user_id == user.id, UserTenantRole.tenant_id == tenant.id, UserTenantRole.role_id == role.id
+        )
+    )
+    return found.first() is not None
 
 
 @pytest.fixture
@@ -290,6 +299,42 @@ class TestKeycloakOperatorsAndAdmins:
         )
         assert await db_session.get(Role, owner.id) is not None
         assert (_client_role(realm, name), _client_role(realm, f"{name}:x")) == (None, None)
+
+    async def test_only_an_operator_assigns_or_removes_operator(self, keycloak_deployment, client, db_session, account):
+        """``dave`` administers acme alone and may not make anyone an operator; ``frank``, operator and admin, may."""
+        provider = await _provider(db_session, keycloak_deployment.issuer)
+        acme = await _tenant(db_session, provider, "acme")
+        admin = await _signed_in(db_session, provider, keycloak_deployment, DAVE, acme, "admin")
+        operator = await _signed_in(db_session, provider, keycloak_deployment, FRANK, acme, OPERATOR_ROLE)
+        frank = (await db_session.execute(select(User).where(User.user_name == FRANK.username))).scalar_one()
+        await _assign(db_session, frank, acme, "admin")
+        member = await _linked_user(db_session, provider, account["id"], account["email"], account["username"])
+        await _assign(db_session, member, acme, "member")
+        dave = (await db_session.execute(select(User).where(User.user_name == DAVE.username))).scalar_one()
+        operator_role = await _global_role(db_session, OPERATOR_ROLE)
+
+        refused = {
+            f"{verb} {whom}": await client.post(
+                f"/api/roles/{verb}",
+                json={"user_id": str(user.id), "tenant_id": str(acme.id), "role_names": [OPERATOR_ROLE]},
+                headers=admin,
+            )
+            for verb in ("assign", "remove")
+            for whom, user in (("itself", dave), ("a member", member))
+        }
+        grant = {"user_id": str(member.id), "tenant_id": str(acme.id), "role_names": [OPERATOR_ROLE]}
+        assigned = await client.post("/api/roles/assign", json=grant, headers=operator)
+        held = await _holds(db_session, member, acme, operator_role)
+        removed = await client.post("/api/roles/remove", json=grant, headers=operator)
+
+        assert {what: (answer.status_code, answer.json()) for what, answer in refused.items()} == dict.fromkeys(
+            refused, (403, {"detail": RoleGrantRefusal.OPERATOR_GRANT})
+        )
+        answer = {"user_id": str(member.id), "role_names": [OPERATOR_ROLE]}
+        assert (assigned.status_code, assigned.json()) == (200, {"status": "roles_assigned", **answer})
+        assert held is True
+        assert (removed.status_code, removed.json()) == (200, {"status": "roles_removed", **answer})
+        assert await _holds(db_session, member, acme, operator_role) is False
 
     async def test_an_admin_of_one_of_two_tenants_cannot_change_the_definitions(
         self, keycloak_deployment, client, realm, db_session

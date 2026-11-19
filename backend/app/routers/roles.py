@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.dependencies.identity import get_role_service
-from app.dependencies.rbac import require_definitions_role, require_role
+from app.dependencies.rbac import OperatorGrantCheck, operator_grant_check, require_definitions_role, require_role
 from app.dependencies.sync_provider import require_sync_provider_principal
 from app.dependencies.tenant import get_tenant_access, get_tenant_id
 from app.dependencies.tenant_access import TenantAccess
@@ -73,13 +73,15 @@ async def assign_roles(
     body: RoleAssignmentRequest,
     current_tenant: str = Depends(get_tenant_id),
     admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    check_operator_grant: OperatorGrantCheck = Depends(operator_grant_check),
     role_service: RoleService = Depends(get_role_service),
 ):
-    """Assign roles to a user in a tenant. Requires owner or admin role."""
+    """Assign roles to a user in a tenant. Requires owner or admin role; operator to assign operator."""
     if body.tenant_id != current_tenant:
         raise HTTPException(status_code=403, detail="Cannot manage roles for a different tenant")
     if "owner" in body.role_names and "owner" not in admin_roles:
         raise HTTPException(status_code=403, detail="Only owners can assign the owner role")
+    await check_operator_grant(body.role_names)
 
     tenant_uuid = _parse_uuid(body.tenant_id, "tenant_id")
     user_uuid = _parse_uuid(body.user_id, "user_id")
@@ -115,13 +117,15 @@ async def remove_roles(
     body: RoleAssignmentRequest,
     current_tenant: str = Depends(get_tenant_id),
     admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    check_operator_grant: OperatorGrantCheck = Depends(operator_grant_check),
     role_service: RoleService = Depends(get_role_service),
 ):
-    """Remove roles from a user in a tenant. Requires owner or admin role."""
+    """Remove roles from a user in a tenant. Requires owner or admin role; operator to remove operator."""
     if body.tenant_id != current_tenant:
         raise HTTPException(status_code=403, detail="Cannot manage roles for a different tenant")
     if "owner" in body.role_names and "owner" not in admin_roles:
         raise HTTPException(status_code=403, detail="Only owners can remove the owner role")
+    await check_operator_grant(body.role_names)
 
     tenant_uuid = _parse_uuid(body.tenant_id, "tenant_id")
     user_uuid = _parse_uuid(body.user_id, "user_id")

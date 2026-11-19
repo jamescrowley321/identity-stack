@@ -56,7 +56,14 @@ from app.dependencies.identity import (
     get_sync_status_service,
     get_user_service,
 )
-from app.dependencies.rbac import get_rbac_session, require_global_role, require_permission, require_role
+from app.dependencies.rbac import (
+    OPERATOR_ROLE,
+    RoleGrantRefusal,
+    get_rbac_session,
+    require_global_role,
+    require_permission,
+    require_role,
+)
 from app.dependencies.sync_provider import NOT_A_SYNC_PROVIDER_PRINCIPAL, require_sync_provider_principal
 from app.dependencies.tenant import get_tenant_access, get_tenant_id
 from app.dependencies.tenant_access import SELECT_A_TENANT_FIRST
@@ -875,6 +882,111 @@ class TestADescopeAdminChangesTheDefinitions:
         assert (response.status_code, response.json()) == (status, DEFINITION_ANSWERS.get(call, DEFINITION))
         getattr(service, call).assert_awaited_once()
         assert store.calls == []
+
+
+OPERATOR_GRANT_REFUSED = {"detail": RoleGrantRefusal.OPERATOR_GRANT}
+OPERATOR_GRANT = {**ASSIGNMENT, "role_names": [OPERATOR_ROLE]}
+OPERATOR_GRANT_ANSWERS = {
+    path: {**answer, "role_names": [OPERATOR_ROLE]} for path, answer in ASSIGNMENT_ANSWERS.items()
+}
+ADMIN_AND_OPERATOR_OF_A = [
+    {"tenant_id": TENANT_A, "role_name": "admin", "permissions": []},
+    {"tenant_id": TENANT_A, "role_name": OPERATOR_ROLE, "permissions": []},
+]
+ADMIN_OF_A_OPERATOR_OF_B = [
+    {"tenant_id": TENANT_A, "role_name": "admin", "permissions": []},
+    {"tenant_id": TENANT_B, "role_name": OPERATOR_ROLE, "permissions": []},
+]
+ASSIGNMENT_PATHS = sorted(ASSIGNMENT_ANSWERS)
+
+
+def _descope_token_in_tenant_a(roles: list[str]) -> dict:
+    return {
+        "iss": DESCOPE_ISSUER,
+        "sub": "descope-tenant-a",
+        "dct": TENANT_A,
+        "tenants": {TENANT_A: {"roles": roles, "permissions": []}},
+    }
+
+
+class TestOnlyAnOperatorAssignsOrRemovesOperator:
+    """``operator`` opens every tenant's state: a tenant admin must not hand it out, to itself or anyone."""
+
+    @pytest.fixture
+    def keycloak_sync(self, monkeypatch, store):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        monkeypatch.setattr(rbac, "CANONICAL_RBAC_PROVIDERS", frozenset({"ory", "keycloak"}))
+        store.roles = SOLE_ADMIN
+        return store
+
+    @pytest.mark.parametrize("path", ASSIGNMENT_PATHS)
+    @pytest.mark.parametrize("user_id", [RESOURCE_ID, "canonical-user-1"], ids=["another member", "itself"])
+    def test_a_keycloak_admin_of_its_sole_tenant_is_refused(self, keycloak_sync, client, role_service, path, user_id):
+        body = {**OPERATOR_GRANT, "user_id": user_id}
+
+        response = client.post(path, json=body, headers={**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A})
+
+        assert (response.status_code, response.json()) == (403, OPERATOR_GRANT_REFUSED)
+        assert role_service.mock_calls == []
+
+    @pytest.mark.parametrize("path", ASSIGNMENT_PATHS)
+    def test_a_keycloak_admin_who_operates_another_tenant_is_refused(self, keycloak_sync, client, role_service, path):
+        """Operator is decided as ``require_global_role`` decides it: one of several memberships is not enough."""
+        keycloak_sync.roles = ADMIN_OF_A_OPERATOR_OF_B
+
+        response = client.post(path, json=OPERATOR_GRANT, headers={**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A})
+
+        assert (response.status_code, response.json()) == (403, OPERATOR_GRANT_REFUSED)
+        assert role_service.mock_calls == []
+
+    @pytest.mark.parametrize(
+        ("path", "service_call"),
+        [("/api/roles/assign", "assign_role_to_user"), ("/api/roles/remove", "unassign_role_from_user")],
+    )
+    def test_a_keycloak_operator_and_admin_of_its_sole_tenant_is_served(
+        self, keycloak_sync, client, role_service, path, service_call
+    ):
+        keycloak_sync.roles = ADMIN_AND_OPERATOR_OF_A
+        role_service.list_roles.return_value = Ok([{"id": ROLE_ID, "name": OPERATOR_ROLE}])
+        getattr(role_service, service_call).return_value = Ok({})
+
+        response = client.post(path, json=OPERATOR_GRANT, headers={**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A})
+
+        assert (response.status_code, response.json()) == (200, OPERATOR_GRANT_ANSWERS[path])
+        getattr(role_service, service_call).assert_awaited_once_with(
+            user_id=uuid.UUID(RESOURCE_ID), tenant_id=uuid.UUID(TENANT_A), role_id=uuid.UUID(ROLE_ID)
+        )
+
+    @pytest.mark.parametrize("path", ASSIGNMENT_PATHS)
+    def test_a_descope_admin_is_refused(self, client, role_service, path):
+        response = client.post(path, json=OPERATOR_GRANT, headers=_bearer(_descope_token_in_tenant_a(["admin"])))
+
+        assert (response.status_code, response.json()) == (403, OPERATOR_GRANT_REFUSED)
+        assert role_service.mock_calls == []
+
+    @pytest.mark.parametrize(
+        ("path", "service_call"),
+        [("/api/roles/assign", "assign_role_to_user"), ("/api/roles/remove", "unassign_role_from_user")],
+    )
+    def test_a_descope_admin_and_operator_is_served(self, client, store, role_service, path, service_call):
+        role_service.list_roles.return_value = Ok([{"id": ROLE_ID, "name": OPERATOR_ROLE}])
+        getattr(role_service, service_call).return_value = Ok({})
+        token = _descope_token_in_tenant_a(["admin", OPERATOR_ROLE])
+
+        response = client.post(path, json=OPERATOR_GRANT, headers=_bearer(token))
+
+        assert (response.status_code, response.json()) == (200, OPERATOR_GRANT_ANSWERS[path])
+        assert store.calls == []
+
+    @pytest.mark.parametrize("path", ASSIGNMENT_PATHS)
+    def test_another_role_needs_no_operator(self, keycloak_sync, client, role_service, path):
+        role_service.list_roles.return_value = Ok([{"id": ROLE_ID, "name": "member"}])
+        role_service.assign_role_to_user.return_value = Ok({})
+        role_service.unassign_role_from_user.return_value = Ok({})
+
+        response = client.post(path, json=ASSIGNMENT, headers={**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A})
+
+        assert (response.status_code, response.json()) == (200, ASSIGNMENT_ANSWERS[path])
 
 
 class TestTheSyncProviderGuard:

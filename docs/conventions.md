@@ -377,7 +377,11 @@ principal **MUST** hold `operator` by its sole membership, as on every other rou
 state that belongs to no tenant. A tenant `admin` is refused: its role is one tenant's,
 and with it the caller could delete the `owner` role, which ends that role in every
 tenant, or grant the `member` role a permission everywhere. A Descope principal is decided
-from its claims and keeps `owner` or `admin`, as before.
+from its claims and keeps `owner` or `admin`, as before. Assigning or removing `operator` through
+`POST /api/roles/assign` or `/api/roles/remove` **MUST** be refused (403,
+`RoleGrantRefusal.OPERATOR_GRANT`) unless the caller holds `operator` as
+`require_global_role` decides it (`app.dependencies.rbac.operator_grant_check`): the routes
+take `owner` or `admin` in one tenant, and `operator` opens every tenant's state.
 
 A route over state that belongs to the whole Descope project **MUST** carry the same guard
 and be listed in `DESCOPE_PROJECT_ROUTES` in that file: `GET` and `PUT /api/fga/schema`.

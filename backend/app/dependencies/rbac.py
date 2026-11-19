@@ -30,8 +30,9 @@ Every branch of the canonical path that cannot produce an unambiguous answer fai
 closed with 403. An authorization decision is never made on a guess.
 """
 
+import enum
 import inspect
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, HTTPException, Request
@@ -389,3 +390,45 @@ def require_global_role(*roles: str, claimed_roles: tuple[str, ...] | None = Non
 # state that belongs to no tenant, and a Descope principal keeps ``owner`` or
 # ``admin`` from its claims (conventions §18).
 require_definitions_role = require_global_role("operator", claimed_roles=("owner", "admin"))
+
+
+# The role that opens state belonging to no tenant (``require_global_role``).
+OPERATOR_ROLE = "operator"
+
+_require_global_operator = require_global_role(OPERATOR_ROLE)
+
+
+class RoleGrantRefusal(enum.StrEnum):
+    """Why a role assignment route refused to assign or remove a role."""
+
+    OPERATOR_GRANT = "Only operators can assign or remove the operator role"
+
+
+OperatorGrantCheck = Callable[[list[str]], Awaitable[None]]
+
+
+def operator_grant_check(
+    request: Request,
+    session: AsyncSession | None = Depends(get_rbac_session),
+) -> OperatorGrantCheck:
+    """Dependency: a check that refuses to assign or remove ``operator`` for a caller who is not one.
+
+    ``operator`` opens every tenant's state (conventions §18), while assigning
+    takes only ``owner`` or ``admin`` in one tenant: without this a tenant admin
+    could make itself, or anyone, an operator. The caller must hold ``operator``
+    as ``require_global_role`` decides it: a canonical principal by its sole
+    membership, a Descope principal from its claims. The check runs only when
+    the request names ``operator``, so other assignments read nothing more.
+    """
+
+    async def check(role_names: list[str]) -> None:
+        if OPERATOR_ROLE not in role_names:
+            return
+        try:
+            await _require_global_operator(request, session)
+        except HTTPException as refused:
+            if refused.status_code != 403:
+                raise
+            raise HTTPException(status_code=403, detail=RoleGrantRefusal.OPERATOR_GRANT) from refused
+
+    return check
