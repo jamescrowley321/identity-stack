@@ -72,9 +72,6 @@ TENANTS_CLAIM = (
     "the route reads Descope's tenants claim and serves Descope principals only (get_descope_claims): "
     "it answers this provider's principals 403; their tenants come from GET /api/identity"
 )
-ID_TOKEN_VALIDATION = (
-    "POST /api/validate-id-token validates against the Descope provider only: 503 for this provider (#636)"
-)
 TENANT_SETTINGS = (
     "the Tenant Settings page loads GET /api/tenants/current/settings, the Descope tenant's custom "
     "attributes, which serves Descope principals only (#590)"
@@ -97,8 +94,6 @@ NOT_APPLICABLE: dict[str, dict[str, str]] = {
     "test_ory_sso_e2e.py": {KEYCLOAK: ORY_PROVIDER, ZITADEL: ORY_PROVIDER},
     # Login, session and identity
     "test_api_authenticated.py::test_tenants_endpoint_lists_user_tenants": _both(TENANTS_CLAIM),
-    "test_api_authenticated.py::test_validate_id_token": _both(ID_TOKEN_VALIDATION),
-    "test_page_content.py::test_no_5xx_errors_on_dashboard": _both(ID_TOKEN_VALIDATION),
     "test_api_endpoints.py::TestAuthenticatedEndpoints::test_tenants_returns_200": _both(TENANTS_CLAIM),
     "test_async_db_migration.py::TestAsyncTenantEndpoints::test_list_tenants_returns_list": _both(TENANTS_CLAIM),
     "test_identity_crud_e2e.py::TestTenantOperations::test_list_tenants_returns_jwt_tenants": _both(TENANTS_CLAIM),
