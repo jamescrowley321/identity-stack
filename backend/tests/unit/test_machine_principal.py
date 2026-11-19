@@ -221,6 +221,18 @@ ROLE_AND_MEMBER_ROUTES = [
     ("POST", f"/api/members/{uuid.UUID(int=9)}/activate", None),
     ("DELETE", f"/api/members/{uuid.UUID(int=9)}", None),
 ]
+DOCUMENT = uuid.UUID(int=11)
+RELATION = {"resource_type": "document", "resource_id": str(DOCUMENT), "relation": "owner", "target": "bob"}
+# The writes that change who holds a relation, or which account signs in as a person.
+RELATION_AND_LINK_ROUTES = [
+    ("POST", "/api/fga/relations", RELATION),
+    ("DELETE", "/api/fga/relations", RELATION),
+    ("PUT", "/api/fga/schema", {"schema": "model\n  schema 1.1"}),
+    ("POST", f"/api/documents/{DOCUMENT}/share", {"user_id": str(uuid.UUID(int=9)), "relation": "editor"}),
+    ("DELETE", f"/api/documents/{DOCUMENT}/share/{uuid.UUID(int=9)}", None),
+    ("POST", f"/api/users/{uuid.UUID(int=9)}/idp-links", {"provider_id": str(uuid.UUID(int=3)), "external_sub": "x"}),
+    ("DELETE", f"/api/users/{uuid.UUID(int=9)}/idp-links/{uuid.UUID(int=4)}", None),
+]
 
 
 def _assert_refused_as_a_machine(response, stored) -> None:
@@ -257,6 +269,27 @@ class TestAMachineManagesNoRoleOrMember:
         ("method", "path", "body"), ROLE_AND_MEMBER_ROUTES, ids=[f"{m} {p}" for m, p, _ in ROLE_AND_MEMBER_ROUTES]
     )
     def test_every_role_and_member_route_refuses_a_machine_token(
+        self, op, client, stored, monkeypatch, method, path, body
+    ):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+
+        response = client.request(
+            method,
+            path,
+            json=body,
+            headers={"Authorization": f"Bearer {_machine_token(op)}", TENANT_SELECTOR_HEADER: str(ACME)},
+        )
+
+        _assert_refused_as_a_machine(response, stored)
+
+
+class TestAMachineChangesNoRelationOrLink:
+    """A credential holding admin would otherwise make any user a document's owner on OpenFGA (#683)."""
+
+    @pytest.mark.parametrize(
+        ("method", "path", "body"), RELATION_AND_LINK_ROUTES, ids=[f"{m} {p}" for m, p, _ in RELATION_AND_LINK_ROUTES]
+    )
+    def test_every_relation_and_link_write_refuses_a_machine_token(
         self, op, client, stored, monkeypatch, method, path, body
     ):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")

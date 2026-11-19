@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies.identity import get_idp_link_service
-from app.dependencies.rbac import require_role
+from app.dependencies.rbac import refuse_machine_principal, require_role
 from app.errors.identity import IdentityErrorRaised, NotFound
 from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
@@ -15,6 +15,8 @@ from app.repositories.assignment import UserTenantRoleRepository
 from app.services.idp_link import IdPLinkService
 
 router = APIRouter(tags=["IdP Links"])
+# A link decides which provider account signs in as a person, so no machine credential makes or removes one.
+NO_MACHINES = [Depends(refuse_machine_principal)]
 
 
 class CreateIdPLinkRequest(BaseModel):
@@ -100,7 +102,7 @@ async def list_user_idp_links(
     return result_to_response(result, request)
 
 
-@router.post("/users/{user_id}/idp-links")
+@router.post("/users/{user_id}/idp-links", dependencies=NO_MACHINES)
 @limiter.limit(RATE_LIMIT_AUTH)
 async def create_idp_link(
     request: Request,
@@ -123,7 +125,7 @@ async def create_idp_link(
     return result_to_response(result, request, status=201)
 
 
-@router.delete("/users/{user_id}/idp-links/{link_id}")
+@router.delete("/users/{user_id}/idp-links/{link_id}", dependencies=NO_MACHINES)
 @limiter.limit(RATE_LIMIT_AUTH)
 async def delete_idp_link(
     request: Request,

@@ -352,26 +352,45 @@ class TestAMachineManagesNoRoleOrMember:
             .one()
         )
 
+        robot = f"robot-{uuid.uuid4()}"
+        invited = f"{robot}@acme.example"
+
         answers = {
             "assign": await client.post(
                 "/api/roles/assign",
                 json={"user_id": str(bob.id), "tenant_id": str(realm.acme.id), "role_names": ["owner"]},
                 headers=headers,
             ),
-            "define": await client.post("/api/roles", json={"name": f"robot-{uuid.uuid4()}"}, headers=headers),
+            "define": await client.post("/api/roles", json={"name": robot}, headers=headers),
             "permissions": await client.get("/api/permissions", headers=headers),
             "members": await client.get("/api/members", headers=headers),
-            "invite": await client.post(
-                "/api/members/invite", json={"email": f"robot-{uuid.uuid4()}@acme.example"}, headers=headers
-            ),
+            "invite": await client.post("/api/members/invite", json={"email": invited}, headers=headers),
             "deactivate": await client.post(f"/api/members/{bob.id}/deactivate", headers=headers),
         }
 
         assert {name: (r.status_code, r.json()["detail"]) for name, r in answers.items()} == {
             name: (403, MACHINE_PRINCIPAL_REFUSED) for name in answers
         }
+        # Nothing was written behind the refusals.
         await db_session.refresh(bob)
-        assert bob.status == UserStatus.active
+        held = await db_session.execute(
+            select(UserTenantRole.tenant_id, Role.name)
+            .join(Role, Role.id == UserTenantRole.role_id)
+            .where(UserTenantRole.user_id == bob.id)
+        )
+        robot_roles = await db_session.execute(select(Role.name).where(Role.name.like("robot-%")))
+        invitees = await db_session.execute(select(User.id).where(User.email == invited))
+        assert (
+            bob.status,
+            sorted((str(tenant), name) for tenant, name in held.all()),
+            robot_roles.scalars().all(),
+            invitees.scalars().all(),
+        ) == (
+            UserStatus.active,
+            sorted((str(tenant.id), "admin") for tenant in (realm.acme, realm.globex)),
+            [],
+            [],
+        )
 
 
 class TestWhatACredentialMustNotCarry:

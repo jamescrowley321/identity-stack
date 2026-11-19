@@ -9,7 +9,7 @@ from app.dependencies.fga import (
     store_error_response,
 )
 from app.dependencies.identity import get_relationship_store, get_user_directory, relationship_store_registration
-from app.dependencies.rbac import require_role
+from app.dependencies.rbac import refuse_machine_principal, require_role
 from app.logbook import logbook
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.relationship_store import RelationshipStore, RelationshipStoreError
@@ -22,6 +22,8 @@ logger = logbook(__name__)
 # Descope's to Descope principals, OpenFGA's to principals authorized from the
 # canonical model. Everyone else gets 404 before anything is read.
 router = APIRouter(tags=["fga"], dependencies=[Depends(require_relationship_store)])
+# The writes change who holds which relation, so no machine credential makes them.
+NO_MACHINES = [Depends(refuse_machine_principal)]
 
 
 class UpdateSchemaRequest(BaseModel):
@@ -83,7 +85,7 @@ async def get_fga_schema(
         raise _failed(exc, "loading the FGA schema") from exc
 
 
-@router.put("/fga/schema")
+@router.put("/fga/schema", dependencies=NO_MACHINES)
 @limiter.limit(RATE_LIMIT_AUTH)
 async def update_fga_schema(
     request: Request,
@@ -112,7 +114,7 @@ async def update_fga_schema(
 # --- Relation endpoints (tenant-scoped via resource_id prefixing) ---
 
 
-@router.post("/fga/relations", status_code=201)
+@router.post("/fga/relations", status_code=201, dependencies=NO_MACHINES)
 @limiter.limit(RATE_LIMIT_AUTH)
 async def create_relation(
     request: Request,
@@ -138,7 +140,7 @@ async def create_relation(
         raise _failed(exc, "creating a relation") from exc
 
 
-@router.delete("/fga/relations")
+@router.delete("/fga/relations", dependencies=NO_MACHINES)
 @limiter.limit(RATE_LIMIT_AUTH)
 async def delete_relation(
     request: Request,

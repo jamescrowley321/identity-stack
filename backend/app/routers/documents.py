@@ -15,6 +15,7 @@ from app.dependencies.fga import (
     store_error_response,
 )
 from app.dependencies.identity import get_relationship_store, get_user_directory
+from app.dependencies.rbac import refuse_machine_principal
 from app.dependencies.tenant import get_tenant_id
 from app.logbook import logbook
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
@@ -34,6 +35,8 @@ logger = logbook(__name__)
 # id. The gate serves each store only to the principals whose ids it holds
 # (conventions §18); everyone else gets 404 before anything is read.
 router = APIRouter(tags=["documents"], dependencies=[Depends(require_relationship_store)])
+# A share grants a person a relation, so no machine credential shares or revokes.
+NO_MACHINES = [Depends(refuse_machine_principal)]
 
 # Conservative limit to avoid SQLite SQLITE_MAX_VARIABLE_NUMBER (999)
 _QUERY_BATCH_SIZE = 500
@@ -290,7 +293,7 @@ async def delete_document(
     return {"status": "deleted", "id": document_id}
 
 
-@router.post("/documents/{document_id}/share")
+@router.post("/documents/{document_id}/share", dependencies=NO_MACHINES)
 @limiter.limit(RATE_LIMIT_AUTH)
 async def share_document(
     request: Request,
@@ -340,7 +343,7 @@ async def share_document(
     }
 
 
-@router.delete("/documents/{document_id}/share/{target_user_id}")
+@router.delete("/documents/{document_id}/share/{target_user_id}", dependencies=NO_MACHINES)
 @limiter.limit(RATE_LIMIT_AUTH)
 async def revoke_share(
     request: Request,
