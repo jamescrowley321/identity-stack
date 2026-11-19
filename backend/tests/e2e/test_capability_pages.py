@@ -90,7 +90,7 @@ def _sidebar(page: Page):
 
 def _shown_links(page: Page) -> set[str]:
     sidebar = _sidebar(page)
-    expect(sidebar.get_by_role("link", name="Dashboard")).to_be_visible()
+    expect(sidebar.get_by_role("link", name="Dashboard", exact=True)).to_be_visible()
     return {text.strip() for text in sidebar.get_by_role("link").all_inner_texts()}
 
 
