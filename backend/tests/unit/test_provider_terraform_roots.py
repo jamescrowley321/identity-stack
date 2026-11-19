@@ -228,6 +228,9 @@ E2E_TARGETS = {"keycloak": "test-e2e-keycloak", "zitadel": "test-e2e-zitadel"}
 # The admin adapter's credential in backend_environment: it writes to the provider, and the e2e
 # backends do not sync to it.
 ADMIN_CREDENTIALS = {"keycloak": "KEYCLOAK_ADMIN_CLIENT_", "zitadel": "ZITADEL_ADMIN_TOKEN"}
+# The e2e backend that syncs with its provider, and so takes the admin credential:
+# the Keycloak suites exercise the push, the event pull and reconciliation.
+SYNCING_E2E_ROOTS = {"keycloak"}
 BACKEND_STEP = "Start backend"
 
 
@@ -285,19 +288,39 @@ def _sample_environment(root: str, output: str) -> dict[str, str]:
     return {key: f"value of {key}" for key in _map_keys(_block(_root_text(root), "output", output))}
 
 
-@pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
+@pytest.mark.parametrize("root", sorted(set(LOCAL_ROOTS) - SYNCING_E2E_ROOTS))
 def test_e2e_backend_reads_backend_environment_without_the_admin_credential(root: str) -> None:
     """The step's own jq filter, run over every backend_environment key, exports all but the admin credential."""
-    run = _step_run(_e2e_job(root), BACKEND_STEP)
-    filters = [text for text in re.findall(r"jq -er '([^']*)'", run) if "to_entries" in text]
     environment = _sample_environment(root, "backend_environment")
     expected = sorted(key for key in environment if not key.startswith(ADMIN_CREDENTIALS[root]))
 
+    assert sorted(environment) != expected, f"infra/{root} backend_environment has no admin credential to drop"
+    assert _exported_backend_environment(root, environment) == expected
+    assert _e2e_job_step_env(root).get("SYNC_PROVIDER", "descope") != root
+
+
+@pytest.mark.parametrize("root", sorted(SYNCING_E2E_ROOTS))
+def test_a_syncing_e2e_backend_reads_all_of_backend_environment(root: str) -> None:
+    """The step's own jq filter exports every backend_environment key, the admin credential included."""
+    environment = _sample_environment(root, "backend_environment")
+
+    assert any(key.startswith(ADMIN_CREDENTIALS[root]) for key in environment)
+    assert _exported_backend_environment(root, environment) == sorted(environment)
+    assert _e2e_job_step_env(root)["SYNC_PROVIDER"] == root
+
+
+def _exported_backend_environment(root: str, environment: dict[str, str]) -> list[str]:
+    run = _step_run(_e2e_job(root), BACKEND_STEP)
+    filters = [text for text in re.findall(r"jq -er '([^']*)'", run) if "to_entries" in text]
     assert f"terraform -chdir=infra/{root} output -json backend_environment" in run
     assert len(filters) == 1, f"{BACKEND_STEP} should export through one to_entries jq filter: {filters}"
-    assert sorted(environment) != expected, f"infra/{root} backend_environment has no admin credential to drop"
     exported = _jq(filters[0], environment, "-er")
-    assert sorted(line.split("=", 1)[0].removeprefix("export ") for line in exported) == expected
+    return sorted(line.split("=", 1)[0].removeprefix("export ") for line in exported)
+
+
+def _e2e_job_step_env(root: str) -> dict:
+    (step,) = [step for step in _e2e_job(root)["steps"] if step.get("name") == BACKEND_STEP]
+    return step.get("env", {})
 
 
 @pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))

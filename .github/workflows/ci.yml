@@ -526,9 +526,9 @@ jobs:
       - name: Start backend
         # The root's backend_environment, admin client included: the backend
         # syncs with the realm (SYNC_PROVIDER=keycloak), so it pushes canonical
-        # changes, polls the realm's events (every 2 seconds here, so a test
-        # waits for one console change briefly) and runs the reconciliation the
-        # suites start with. Canonical authorization and first login for
+        # changes, polls the realm's events (the tests that change the realm
+        # wait for the next poll) and runs the reconciliation the suites start
+        # with. The provider's settings all come from the root's outputs. Canonical authorization and first login for
         # keycloak. Descope is left unconfigured: these tests present Keycloak
         # tokens only. The log goes to a file: the backend outlives this step.
         run: |
@@ -548,7 +548,6 @@ jobs:
           CANONICAL_RBAC_PROVIDERS: keycloak
           JIT_ENABLED_PROVIDERS: keycloak
           SYNC_PROVIDER: keycloak
-          KEYCLOAK_PULL_INTERVAL_SECONDS: "2"
           # The limiter runs before token validation, so its key is the client
           # address, shared by every request in this job. At the 60/minute
           # default, the every-protected-route refusal test would get 429s

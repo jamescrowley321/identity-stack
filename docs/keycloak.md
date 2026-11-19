@@ -87,7 +87,7 @@ make keycloak-seed  # the provider row, the tenants' and the fixture users' link
 # DESCOPE_PROJECT_ID= DESCOPE_MANAGEMENT_KEY=, plus RATE_LIMIT_DEFAULT=2000/minute
 # RATE_LIMIT_AUTH=1000/minute: the suite's refused requests share one client address, and the
 # 60/minute default would answer some of them 429. KEYCLOAK_PULL_INTERVAL_SECONDS=2 makes the
-# tests that wait for a poll quicker (CI sets it). Set INTERNAL_IDENTITY_KEY,
+# tests that wait for a poll quicker (CI keeps the default, 10). Set INTERNAL_IDENTITY_KEY,
 # DESCOPE_WEBHOOK_SECRET and DESCOPE_FLOW_SYNC_SECRET to throwaway values, exported the same in
 # the shell that runs the suite: the suite runs reconciliation with the last one.
 
