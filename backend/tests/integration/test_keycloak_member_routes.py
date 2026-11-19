@@ -22,12 +22,13 @@ from sqlalchemy import select
 
 from app.dependencies import identity, rbac
 from app.dependencies.rbac import RoleGrantRefusal, get_rbac_session
+from app.errors.access import MemberActionRefusal
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.providers import keycloak_config
 from app.middleware.rate_limit import limiter
 from app.models.database import get_async_session
 from app.models.identity.assignment import UserTenantRole
-from app.models.identity.user import User
+from app.models.identity.user import User, UserStatus
 from app.routers import users
 from app.routers.users import SHARED_ACCOUNT_DETAIL
 from app.services.keycloak_admin import (
@@ -276,3 +277,20 @@ class TestKeycloakTenantAdminsManageMembers:
         assert (refused.status_code, refused.json()) == (403, {"detail": RoleGrantRefusal.OPERATOR_GRANT})
         assert (await db_session.execute(select(User).where(User.email == email))).scalar_one_or_none() is None
         assert realm.get("/users", params={"email": email, "exact": "true"}).json() == []
+
+    async def test_an_admin_of_its_sole_tenant_cannot_deactivate_the_owner(
+        self, keycloak_deployment, client, realm, db_session, account
+    ):
+        """``dave`` administers acme; acme's owner stays enabled, in the canonical model and in the realm."""
+        provider = await _provider(db_session, keycloak_deployment.issuer)
+        acme = await _tenant(db_session, provider, "acme")
+        admin = await _signed_in(db_session, provider, keycloak_deployment, DAVE, acme, "admin")
+        owner = await _linked_user(db_session, provider, account["id"], account["email"], account["username"])
+        await _assign(db_session, owner, acme, "owner")
+
+        refused = await client.post(f"/api/members/{owner.id}/deactivate", headers=admin)
+
+        assert (refused.status_code, refused.json()) == (403, {"detail": MemberActionRefusal.OWNER_REQUIRED})
+        await db_session.refresh(owner)
+        assert owner.status == UserStatus.active
+        assert realm.get(f"/users/{account['id']}").json()["enabled"] is True

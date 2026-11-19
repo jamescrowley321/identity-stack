@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 from expression import Error, Ok
 
+from app.domain import access
 from app.errors.identity import Conflict, Forbidden, NotFound, ValidationError
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.role import Role
@@ -310,6 +311,33 @@ class TestSetMemberStatus:
         changed = await deployment.members.set_member_status(str(uuid.uuid4()), str(TENANT), MemberStatus.INVITED)
 
         assert changed.is_error() and isinstance(changed.error, ValidationError)
+
+
+class TestTenantMember:
+    """The member as ``access.act_on_member`` reads it: its canonical id and its roles in this tenant only."""
+
+    async def test_a_member_comes_with_its_roles_in_this_tenant(self, deployment):
+        user = _user()
+        owner = Role(id=uuid.uuid4(), name="owner", description="", tenant_id=None)
+        operator = Role(id=uuid.uuid4(), name="operator", description="", tenant_id=None)
+        deployment.assignments.list_by_user_tenant.return_value = [
+            _assignment(user, TENANT, owner),
+            _assignment(user, TENANT, operator),
+        ]
+        deployment.roles.get.side_effect = {owner.id: owner, operator.id: operator}.get
+
+        found = await deployment.members.tenant_member(str(user.id).upper(), str(TENANT))
+
+        assert found == Ok(access.TenantMember(user_id=str(user.id), roles=frozenset({"owner", "operator"})))
+        deployment.assignments.list_by_user_tenant.assert_awaited_once_with(user.id, TENANT)
+
+    @pytest.mark.parametrize("user_id", [str(uuid.uuid4()), "not-a-uuid"], ids=["unknown or outsider", "not an id"])
+    async def test_a_user_the_tenant_does_not_have_holds_no_role(self, deployment, user_id):
+        deployment.assignments.list_by_user_tenant.return_value = []
+
+        found = await deployment.members.tenant_member(user_id, str(TENANT))
+
+        assert found == Ok(access.TenantMember(user_id=user_id, roles=frozenset()))
 
 
 class TestRemoveMember:

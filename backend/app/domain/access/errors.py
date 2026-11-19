@@ -81,3 +81,29 @@ class AssignmentNotFound(AccessError):
     user_id: uuid.UUID
     tenant_id: uuid.UUID
     role_id: uuid.UUID
+
+
+@dataclass(frozen=True)
+class NotATenantMember(AccessError):
+    """The user holds no role in the tenant: a role is assigned only to a member.
+
+    An unknown user and a user of another tenant are the same failure, so the
+    answer tells a caller nothing about users outside its tenant.
+    """
+
+    user_id: uuid.UUID
+    tenant_id: uuid.UUID
+
+
+@dataclass(frozen=True)
+class ActingOnSelf(AccessError):
+    """A caller deactivates or removes itself: it could not sign back in to undo it."""
+
+    user_id: str
+
+
+@dataclass(frozen=True)
+class OwnerRequired(AccessError):
+    """The member holds ``owner`` in the tenant: only an owner deactivates, activates or removes it."""
+
+    user_id: str

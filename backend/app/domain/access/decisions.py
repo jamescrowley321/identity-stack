@@ -15,6 +15,7 @@ from datetime import datetime
 from expression import Error, Ok, Result
 
 from app.domain.access.commands import (
+    ActOnMember,
     AssignRole,
     CreatePermission,
     CreateRole,
@@ -22,13 +23,16 @@ from app.domain.access.commands import (
     DeleteRole,
     MapNamedPermissions,
     MapPermission,
+    MemberAction,
     UnassignRole,
     UpdatePermission,
     UpdateRole,
 )
 from app.domain.access.errors import (
     AccessError,
+    ActingOnSelf,
     AssignmentNotFound,
+    OwnerRequired,
     PermissionNameNotFound,
     PermissionNameTaken,
     PermissionNotFound,
@@ -48,7 +52,15 @@ from app.domain.access.events import (
     RoleUnassigned,
     RoleUpdated,
 )
-from app.domain.access.values import Assignment, Permission, Role
+from app.domain.access.values import (
+    OPERATOR_ROLE,
+    OWNER_ROLE,
+    Assignment,
+    MemberClearance,
+    Permission,
+    Role,
+    TenantMember,
+)
 
 
 def create_role(
@@ -260,3 +272,25 @@ def delete_permission(
     if permission is None:
         return Error(PermissionNotFound(permission_id=command.permission_id))
     return Ok(PermissionDeleted(occurred_at=now, permission_id=permission.id, name=permission.name.value))
+
+
+# The actions a caller may not take on itself: it could not sign back in to undo them.
+_NOT_ON_SELF = frozenset({MemberAction.DEACTIVATE, MemberAction.REMOVE})
+
+
+def act_on_member(member: TenantMember, command: ActOnMember) -> Result[MemberClearance, AccessError]:
+    """Whether a tenant's ``owner`` or ``admin`` may deactivate, activate or remove ``member``.
+
+    Its ``owner`` only by an owner, and its ``operator`` only by an operator
+    (``OPERATOR_REQUIRED``, which the caller of this decides); never the caller
+    itself for a deactivation or a removal. A user the tenant does not have holds
+    no role here and is cleared, to be refused by the operation alike whether or
+    not it exists.
+    """
+    if command.action in _NOT_ON_SELF and command.caller_id is not None and command.caller_id == member.user_id:
+        return Error(ActingOnSelf(user_id=member.user_id))
+    if OWNER_ROLE in member.roles and OWNER_ROLE not in command.caller_roles:
+        return Error(OwnerRequired(user_id=member.user_id))
+    if OPERATOR_ROLE in member.roles:
+        return Ok(MemberClearance.OPERATOR_REQUIRED)
+    return Ok(MemberClearance.CLEARED)

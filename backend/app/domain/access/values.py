@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 
 from expression import Error, Ok, Result
 
@@ -73,3 +74,27 @@ class Assignment:
     role_id: uuid.UUID
     assigned_by: uuid.UUID | None
     assigned_at: datetime
+
+
+# The role that owns a tenant, and the one that opens state belonging to no tenant.
+OWNER_ROLE = "owner"
+OPERATOR_ROLE = "operator"
+
+
+@dataclass(frozen=True)
+class TenantMember:
+    """A user as one tenant holds it: its id as the deployment spells it, and its roles there.
+
+    ``roles`` is empty for a user the tenant does not have, known or not.
+    """
+
+    user_id: str
+    roles: frozenset[str]
+
+
+class MemberClearance(Enum):
+    """What an action on a member still needs once ``act_on_member`` has allowed it."""
+
+    CLEARED = "cleared"
+    # The member holds ``operator``: only an operator acts on it.
+    OPERATOR_REQUIRED = "operator_required"

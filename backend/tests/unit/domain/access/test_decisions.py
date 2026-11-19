@@ -391,3 +391,59 @@ def test_values_and_events_are_immutable():
         role.description = "changed"
     with pytest.raises(dataclasses.FrozenInstanceError):
         event.name = "changed"
+
+
+# --- act_on_member: a tenant admin's action on one of the tenant's members ---
+
+CALLER = "caller-1"
+TARGET = "member-1"
+ACTIONS = list(access.MemberAction)
+
+
+def _act(action: access.MemberAction, target_roles: set[str], caller_roles: set[str], caller_id: str | None = CALLER):
+    member = access.TenantMember(user_id=TARGET, roles=frozenset(target_roles))
+    command = access.ActOnMember(action=action, caller_id=caller_id, caller_roles=frozenset(caller_roles))
+    return access.act_on_member(member, command)
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+@pytest.mark.parametrize("target_roles", [set(), {"member"}, {"admin"}], ids=["no role here", "member", "admin"])
+def test_an_admin_acts_on_a_member_who_is_neither_owner_nor_operator(action, target_roles):
+    assert _act(action, target_roles, {"admin"}) == Ok(access.MemberClearance.CLEARED)
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_only_an_owner_acts_on_an_owner(action):
+    assert _act(action, {"owner"}, {"admin"}) == Error(access.OwnerRequired(user_id=TARGET))
+    assert _act(action, {"owner"}, {"owner"}) == Ok(access.MemberClearance.CLEARED)
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+@pytest.mark.parametrize("caller_roles", [{"admin"}, {"owner"}], ids=["admin", "owner"])
+def test_an_operator_needs_an_operator(action, caller_roles):
+    assert _act(action, {"operator", "member"}, caller_roles) == Ok(access.MemberClearance.OPERATOR_REQUIRED)
+
+
+def test_an_owner_and_operator_needs_an_owner_first():
+    assert _act(access.MemberAction.REMOVE, {"owner", "operator"}, {"admin"}) == Error(
+        access.OwnerRequired(user_id=TARGET)
+    )
+    assert _act(access.MemberAction.REMOVE, {"owner", "operator"}, {"owner"}) == Ok(
+        access.MemberClearance.OPERATOR_REQUIRED
+    )
+
+
+@pytest.mark.parametrize("action", [access.MemberAction.DEACTIVATE, access.MemberAction.REMOVE])
+@pytest.mark.parametrize("roles", [{"owner"}, {"admin"}], ids=["owner", "admin"])
+def test_a_caller_neither_deactivates_nor_removes_itself(action, roles):
+    assert _act(action, roles, roles, caller_id=TARGET) == Error(access.ActingOnSelf(user_id=TARGET))
+
+
+def test_a_caller_may_activate_itself():
+    assert _act(access.MemberAction.ACTIVATE, {"admin"}, {"admin"}, caller_id=TARGET) == Ok(
+        access.MemberClearance.CLEARED
+    )
+
+
+def test_a_caller_with_no_id_is_never_taken_for_the_member():
+    assert _act(access.MemberAction.REMOVE, {"member"}, {"admin"}, caller_id=None) == Ok(access.MemberClearance.CLEARED)
