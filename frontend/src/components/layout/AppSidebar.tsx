@@ -82,7 +82,7 @@ export function AppSidebar() {
   return (
     <Sidebar>
       <SidebarHeader className="border-b px-4 py-3">
-        <span className="text-lg font-semibold">Descope Starter</span>
+        <span className="text-lg font-semibold">Identity Stack</span>
       </SidebarHeader>
       <SidebarContent>
         {navSections.map((section) => {

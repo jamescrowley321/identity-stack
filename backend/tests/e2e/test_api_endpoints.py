@@ -30,7 +30,7 @@ class TestUnauthenticatedEndpoints:
         assert resp.status == 200
         body = resp.json()
         assert "paths" in body
-        assert body["info"]["title"] == "Descope SaaS Starter API"
+        assert body["info"]["title"] == "Identity Stack API"
 
     def test_docs_accessible(self, api_context: APIRequestContext, backend_url: str):
         resp = api_context.get(f"{backend_url}/docs")
