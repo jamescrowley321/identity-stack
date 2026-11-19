@@ -377,10 +377,12 @@ class TestPermissionsAndRoles:
         )
 
         renamed_permission = f"{permission_name}x"
-        assert await sync.sync_permission(
-            permission_id=permission_id, data={"name": renamed_permission, "previous_name": permission_name}
-        ) == Ok(None)
+        permission_rename = {"name": renamed_permission, "previous_name": permission_name}
+        assert await sync.sync_permission(permission_id=permission_id, data=permission_rename) == Ok(None)
         assert composites(realm, pushed_role) == [renamed_permission]
+        await repeat_writes_nothing(
+            realm, lambda: sync.sync_permission(permission_id=permission_id, data=permission_rename)
+        )
 
         emptied = {**role, "permission_names": []}
         assert await sync.sync_role(role_id=role_id, data=emptied) == Ok(None)
@@ -411,6 +413,7 @@ class TestPermissionsAndRoles:
         assert {name: group["members"] for name, group in groups(realm, organization).items()} == {
             f"{role_name}-renamed": [str(user_id)]
         }
+        await repeat_writes_nothing(realm, lambda: sync.sync_role(role_id=role_id, data=renamed))
 
         assert await sync.delete_role(role_id=role_id, data={"name": f"{role_name}-renamed", "tenant_id": None}) == Ok(
             None
@@ -711,6 +714,20 @@ class TestDeletingARole:
                 kept.name: [str(other_user_id)]
             }
             assert client_role(realm, ROLE_ATTRIBUTE, deleted.id) is None
+            # The pushes the delete made, repeated: the group, the client role and the membership are gone.
+            await repeat_writes_nothing(
+                realm, lambda: sync.delete_role(role_id=deleted.id, data={"name": deleted.name, "tenant_id": None})
+            )
+            await repeat_writes_nothing(
+                realm,
+                lambda: sync.delete_role_assignment(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    role_id=deleted.id,
+                    data={"role_name": deleted.name, LAST_ROLE_IN_TENANT: True},
+                ),
+            )
+            assert members(realm, organization) == [str(other_user_id)]
         finally:
             _cleanup_client_roles(realm, ROLE_ATTRIBUTE, deleted.id)
             _cleanup_client_roles(realm, ROLE_ATTRIBUTE, kept.id)
