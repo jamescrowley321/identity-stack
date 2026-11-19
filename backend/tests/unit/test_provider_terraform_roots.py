@@ -309,13 +309,26 @@ def test_a_syncing_e2e_backend_reads_all_of_backend_environment(root: str) -> No
     assert _e2e_job_step_env(root)["SYNC_PROVIDER"] == root
 
 
-def _exported_backend_environment(root: str, environment: dict[str, str]) -> list[str]:
+def _exported_backend_environment(root: str, environment: dict[str, str], prefix: str | None = None) -> list[str]:
+    """What the step's jq filter for ``root``'s settings (the one naming ``prefix``) exports from ``environment``."""
     run = _step_run(_e2e_job(root), BACKEND_STEP)
-    filters = [text for text in re.findall(r"jq -er '([^']*)'", run) if "to_entries" in text]
+    prefix = LOCAL_ROOTS[root] if prefix is None else prefix
+    filters = [text for text in re.findall(r"jq -er '([^']*)'", run) if "to_entries" in text and prefix in text]
     assert f"terraform -chdir=infra/{root} output -json backend_environment" in run
     assert len(filters) == 1, f"{BACKEND_STEP} should export through one to_entries jq filter: {filters}"
     exported = _jq(filters[0], environment, "-er")
     return sorted(line.split("=", 1)[0].removeprefix("export ") for line in exported)
+
+
+@pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
+def test_e2e_backend_reads_the_openfga_roots_backend_environment(root: str) -> None:
+    """Both e2e backends serve their principals FGA and documents from the applied infra/openfga."""
+    environment = _sample_environment("openfga", "backend_environment")
+    run = _step_run(_e2e_job(root), BACKEND_STEP)
+
+    assert "terraform -chdir=infra/openfga output -json backend_environment" in run
+    assert _exported_backend_environment(root, environment, prefix="OPENFGA_") == sorted(environment)
+    assert "RELATIONSHIP_STORE" in environment
 
 
 def _e2e_job_step_env(root: str) -> dict:

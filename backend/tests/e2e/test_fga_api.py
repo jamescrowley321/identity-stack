@@ -43,7 +43,7 @@ def test_relation_create_and_delete(admin_api_context: APIRequestContext, backen
         "resource_type": "document",
         "resource_id": resource_id,
         "relation": "owner",
-        "target": f"user:{unique_name('u')}",
+        "target": unique_name("u"),
     }
 
     # Create relation
@@ -176,7 +176,7 @@ def test_check_permission_validation(admin_api_context: APIRequestContext, backe
 def test_relation_lifecycle_with_permission_check(admin_api_context: APIRequestContext, backend_url: str):
     """Create relation → verify allowed → delete → verify denied (full lifecycle)."""
     resource_id = unique_name("lifecycle")
-    target = f"user:{unique_name('u')}"
+    target = unique_name("u")
     relation_body = {
         "resource_type": "document",
         "resource_id": resource_id,

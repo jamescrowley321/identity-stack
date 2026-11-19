@@ -36,6 +36,7 @@ describe("servedBy", () => {
     ["machineCredentialsOnly", [MACHINE_CREDENTIALS]],
     ["customAttributesOnly", [CUSTOM_ATTRIBUTES]],
     ["relationshipStoreOnly", [RELATIONSHIP_STORE]],
+    ["openfga", [RELATIONSHIP_STORE]],
   ] as [CapabilitySetName, Requirement[]][])("%s", (name, served) => {
     expect(REQUIREMENTS.filter((r) => servedBy(CAPABILITY_SETS[name], r))).toEqual(served);
   });

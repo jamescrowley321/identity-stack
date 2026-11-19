@@ -63,7 +63,7 @@ def missing_internal_endpoint_secrets(provider: str, environment: Mapping[str, s
 
 DESCOPE_ONLY_ROUTE = (
     "the route serves Descope principals only (require_descope_principal, #566): it reads or writes "
-    "Descope's roles, permissions, members, access keys, FGA or documents; canonical routes for "
+    "Descope's roles, permissions, members or access keys; canonical routes for "
     "other providers are #590"
 )
 DESCOPE_MANAGEMENT_API = "calls the Descope Management API itself; the run has no Descope project"
@@ -83,6 +83,15 @@ ORY_PROVIDER = "proves the Ory provider, which only the Descope run's backend co
 NO_CUSTOM_ATTRIBUTES = (
     "Descope's custom attributes serve Descope principals only, so this run's principals have no "
     "custom_attributes capability and the SPA no Tenant Settings page (#678)"
+)
+OPENFGA_MODEL_IN_TERRAFORM = (
+    "the run's relationship store is OpenFGA, whose authorization model infra/openfga holds: "
+    "PUT /api/fga/schema answers 409 there (#682)"
+)
+ONE_USER_RUN = (
+    "the run's admin and member are one user (the two-tenant fixture user), so the share target is the "
+    "document's owner and the share is refused 400; tests/unit/test_openfga_routes.py covers share and revoke "
+    "between canonical users"
 )
 NO_MACHINE_CREDENTIALS = (
     "Descope's access keys serve Descope principals only, so this run's principals have no "
@@ -155,50 +164,12 @@ NOT_APPLICABLE: dict[str, dict[str, str]] = {
     "test_identity_repository_ui.py::test_role_created_via_api_is_invisible_to_an_access_key_session": _both(
         DESCOPE_ACCESS_KEY
     ),
-    # Documents and FGA
-    "test_async_db_migration.py::TestAsyncDocumentCRUD": _both(DESCOPE_ONLY_ROUTE),
-    "test_async_db_migration.py::TestAsyncErrorResponses::test_invalid_document_id_format_returns_422": _both(
-        DESCOPE_ONLY_ROUTE
-    ),
-    **_each(
-        "test_async_db_migration.py::TestAsyncDocumentValidation",
-        ["test_create_document_empty_title_rejected", "test_create_document_missing_title_rejected"],
-        _both(DESCOPE_ONLY_ROUTE),
-    ),
+    # Documents and FGA: OpenFGA serves the run's principals (RELATIONSHIP_STORE=openfga, #682)
+    "test_fga_api.py::test_update_fga_schema": _both(OPENFGA_MODEL_IN_TERRAFORM),
     **_each(
         "test_documents_e2e.py",
-        [
-            "test_create_document_creates_fga_owner",
-            "test_owner_has_all_permissions",
-            "test_editor_has_view_and_edit_not_delete",
-            "test_viewer_has_view_only",
-            "test_document_get_allowed_for_owner",
-            "test_document_update_allowed_for_owner",
-            "test_permission_derivation_through_endpoints",
-            "test_document_fga_denies_without_relation",
-            "test_document_delete_cleans_fga_relations",
-            "test_list_documents_returns_authorized",
-            "test_list_documents_excludes_unauthorized",
-            "test_share_document_grants_access",
-            "test_revoke_share_denies_access",
-            "test_sequential_relation_revocation_no_stale_grants",
-        ],
-        _both(DESCOPE_ONLY_ROUTE),
-    ),
-    **_each(
-        "test_fga_api.py",
-        [
-            "test_get_fga_schema",
-            "test_relation_create_and_delete",
-            "test_list_relations_empty",
-            "test_check_permission_denied_for_nonexistent",
-            "test_create_relation_validation",
-            "test_list_relations_validation",
-            "test_check_permission_validation",
-            "test_relation_lifecycle_with_permission_check",
-            "test_update_fga_schema",
-        ],
-        _both(DESCOPE_ONLY_ROUTE),
+        ["test_share_document_grants_access", "test_revoke_share_denies_access"],
+        _both(ONE_USER_RUN),
     ),
 }
 

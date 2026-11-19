@@ -26,6 +26,7 @@ const GIVES: Record<CapabilitySetName, Record<(typeof GATED_PAGES)[number], bool
   machineCredentialsOnly: { "/keys": true, "/fga": false, "/settings": false },
   customAttributesOnly: { "/keys": false, "/fga": false, "/settings": true },
   relationshipStoreOnly: { "/keys": false, "/fga": true, "/settings": false },
+  openfga: { "/keys": false, "/fga": true, "/settings": false },
 };
 
 function landing(path: string): string {

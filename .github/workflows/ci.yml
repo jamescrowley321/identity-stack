@@ -99,12 +99,12 @@ jobs:
 
       - uses: ./.github/actions/setup-backend
 
-      - name: Start test stack (postgres + redis + hydra + keycloak)
+      - name: Start test stack (postgres + redis + hydra + keycloak + openfga)
         # The Keycloak issuer is a fixed *.localhost name; pin it to loopback
         # rather than depend on the runner's resolver.
         run: |
           echo "127.0.0.1 keycloak-test.localhost" | sudo tee -a /etc/hosts
-          docker compose -f docker-compose.test.yml --profile keycloak up -d --wait
+          docker compose -f docker-compose.test.yml --profile keycloak --profile openfga up -d --wait
 
       - name: Run integration tests
         # Deliberately unguarded. A step-level `if:` on a credential meant that an
@@ -125,6 +125,7 @@ jobs:
           DESCOPE_EXPIRED_TOKEN: ${{ secrets.DESCOPE_EXPIRED_TOKEN }}
           TEST_DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
           TEST_REDIS_URL: redis://localhost:16379/0
+          TEST_OPENFGA_URL: http://localhost:18380
 
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
@@ -144,7 +145,31 @@ jobs:
 
       - name: Stop test stack
         if: always()
-        run: docker compose -f docker-compose.test.yml --profile keycloak down -v
+        run: docker compose -f docker-compose.test.yml --profile keycloak --profile openfga down -v
+
+  openfga-terraform-check:
+    name: OpenFGA Terraform Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # No credential: the store and model are built in the openfga-test container,
+    # so this runs on every pull request, forks and Dependabot included.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.2"
+          terraform_wrapper: false
+
+      - name: Start openfga-test
+        run: make test-up-openfga
+
+      - name: Apply infra/openfga, check the second plan is empty and the model is model.json
+        run: make openfga-terraform-check
+
+      - name: Stop test stack
+        if: always()
+        run: make test-down
 
   keycloak-terraform-check:
     name: Keycloak Terraform Check
@@ -477,12 +502,21 @@ jobs:
       - name: Install frontend dependencies
         run: cd frontend && npm ci
 
-      - name: Start test stack (postgres + redis + hydra + keycloak)
+      - name: Start test stack (postgres + redis + hydra + keycloak + openfga)
         # The Keycloak issuer is a fixed *.localhost name; pin it to loopback
         # rather than depend on the runner's resolver.
         run: |
           echo "127.0.0.1 keycloak-test.localhost" | sudo tee -a /etc/hosts
           make test-up-keycloak
+          make test-up-openfga
+
+      - name: Apply infra/openfga
+        # The relationship store of a Keycloak deployment (RELATIONSHIP_STORE
+        # defaults to openfga for SYNC_PROVIDER=keycloak). Local state in
+        # infra/openfga, which the backend step reads the outputs from.
+        run: |
+          terraform -chdir=infra/openfga init -input=false
+          terraform -chdir=infra/openfga apply -auto-approve -input=false -var api_url=http://localhost:18380
 
       - name: Apply infra/keycloak
         # A realm beside the compose import, built by the root. Local state in
@@ -537,6 +571,10 @@ jobs:
           environment="$(terraform -chdir=infra/keycloak output -json backend_environment)"
           vars="$(printf '%s' "$environment" \
             | jq -er 'to_entries[] | if (.key | test("^KEYCLOAK_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
+          eval "$vars"
+          openfga="$(terraform -chdir=infra/openfga output -json backend_environment)"
+          vars="$(printf '%s' "$openfga" \
+            | jq -er 'to_entries[] | if (.key | test("^(RELATIONSHIP_STORE|OPENFGA_[A-Z_]+)$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
           eval "$vars"
           cd backend
           uvicorn app.main:app --host 127.0.0.1 --port 8000 > "$RUNNER_TEMP/backend.log" 2>&1 &
@@ -653,13 +691,21 @@ jobs:
       - name: Install frontend dependencies
         run: cd frontend && npm ci
 
-      - name: Start the local Zitadel and the test Postgres
+      - name: Start the local Zitadel, the test Postgres and OpenFGA
         # The issuer is a fixed *.localhost name; pin it to loopback rather than
         # depend on the runner's resolver.
         run: |
           echo "127.0.0.1 zitadel.localhost" | sudo tee -a /etc/hosts
           make zitadel-up
-          make test-up
+          make test-up-openfga
+
+      - name: Apply infra/openfga
+        # This backend syncs to Descope (SYNC_PROVIDER stays descope), so the
+        # root's backend_environment sets RELATIONSHIP_STORE=openfga itself: the
+        # FGA and document routes serve the Zitadel principals from OpenFGA.
+        run: |
+          terraform -chdir=infra/openfga init -input=false
+          terraform -chdir=infra/openfga apply -auto-approve -input=false -var api_url=http://localhost:18380
 
       - name: Apply infra/zitadel
         # Local state in infra/zitadel, which the later steps read the outputs from.
@@ -709,6 +755,9 @@ jobs:
           set -o pipefail
           vars="$(terraform -chdir=infra/zitadel output -json backend_environment \
             | jq -er 'to_entries[] | select(.key != "ZITADEL_ADMIN_TOKEN") | if (.key | test("^ZITADEL_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
+          eval "$vars"
+          vars="$(terraform -chdir=infra/openfga output -json backend_environment \
+            | jq -er 'to_entries[] | if (.key | test("^(RELATIONSHIP_STORE|OPENFGA_[A-Z_]+)$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
           eval "$vars"
           cd backend
           uvicorn app.main:app --host 127.0.0.1 --port 8000 > "$RUNNER_TEMP/backend.log" 2>&1 &
