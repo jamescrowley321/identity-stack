@@ -246,18 +246,13 @@ async def canonical_memberships(request: Request) -> CanonicalMemberships | None
         return await _canonical_memberships(request, claims, session)
 
 
-async def _tenant_access(
-    request: Request,
-    session: AsyncSession | None,
-    *,
-    request_selects: bool = True,
-) -> TenantAccess:
+async def _tenant_access(request: Request, session: AsyncSession | None) -> TenantAccess:
     """The request's tenant and the caller's grants in it. 401 with no claims."""
     claims = getattr(request.state, "claims", None)
     if claims is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     memberships = await _canonical_memberships(request, claims, session)
-    return resolve_tenant_access(request, claims, memberships, request_selects=request_selects)
+    return resolve_tenant_access(request, claims, memberships)
 
 
 def _holds_any(wanted: tuple[str, ...], held: Callable[[TenantAccess], list[str]]) -> Callable[[TenantAccess], bool]:
@@ -327,7 +322,7 @@ def require_permission(*permissions: str):
     return dependency
 
 
-def require_global_role(*roles: str):
+def require_global_role(*roles: str, claimed_roles: tuple[str, ...] | None = None):
     """Dependency factory for a route over state that belongs to no tenant.
 
     Every tenant's users, the provider records and the sync status are not one
@@ -339,17 +334,36 @@ def require_global_role(*roles: str):
     Descope principal is decided from its ``dct`` + ``tenants`` claims, as by
     ``require_role``.
 
+    ``claimed_roles``, when given, is what a principal decided from its token's
+    claims (Descope) must hold instead of ``roles``: the role and permission
+    definitions take ``owner`` or ``admin`` from a Descope token, as they always
+    have, and ``operator`` from the canonical model, where a tenant admin's role
+    is one tenant's and the definitions are every tenant's.
+
     Returns the user's role list for downstream use.
     """
-    holds = _holds_any(roles, _roles)
+    holds_canonical = _holds_any(roles, _roles)
+    holds_claimed = holds_canonical if claimed_roles is None else _holds_any(claimed_roles, _roles)
 
     async def dependency(
         request: Request,
         session: AsyncSession | None = Depends(get_rbac_session),
     ) -> list[str]:
-        access = await _tenant_access(request, session, request_selects=False)
+        claims = getattr(request.state, "claims", None)
+        if claims is None:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        memberships = await _canonical_memberships(request, claims, session)
+        access = resolve_tenant_access(request, claims, memberships, request_selects=False)
+        holds = holds_claimed if memberships is None else holds_canonical
         if not holds(access):
             raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
         return access.roles
 
     return dependency
+
+
+# The role and permission definitions belong to no tenant and every tenant's grants
+# read them: a canonical principal needs ``operator``, as on every other route over
+# state that belongs to no tenant, and a Descope principal keeps ``owner`` or
+# ``admin`` from its claims (conventions §18).
+require_definitions_role = require_global_role("operator", claimed_roles=("owner", "admin"))

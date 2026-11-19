@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.dependencies.identity import get_role_service
-from app.dependencies.rbac import require_global_role, require_role
+from app.dependencies.rbac import require_definitions_role, require_role
 from app.dependencies.sync_provider import require_sync_provider_principal
 from app.dependencies.tenant import get_tenant_access, get_tenant_id
 from app.dependencies.tenant_access import TenantAccess
@@ -19,8 +19,9 @@ from app.services.role import RoleService
 # adapter (``SYNC_PROVIDER``), which takes the request's tenant and user ids as that
 # provider's: every route but ``/roles/me`` serves its principals only (conventions
 # §18). The definitions belong to no tenant, so their routes are gated by
-# ``require_global_role``: an admin of one of several canonical tenants cannot name
-# that tenant to change them for every tenant. ``/roles/me`` writes nothing and
+# ``require_definitions_role``: a canonical principal needs ``operator`` by its sole
+# membership, never a tenant's ``admin``; a Descope principal keeps ``owner`` or
+# ``admin`` from its claims. ``/roles/me`` writes nothing and
 # answers any principal the tenant resolver places.
 router = APIRouter(tags=["Roles"])
 SYNC_PROVIDER_ONLY = [Depends(require_sync_provider_principal)]
@@ -155,10 +156,10 @@ async def remove_roles(
 @router.get("/roles", dependencies=SYNC_PROVIDER_ONLY)
 async def list_roles(
     request: Request,
-    _admin_roles: list[str] = Depends(require_global_role("owner", "admin")),
+    _roles: list[str] = Depends(require_definitions_role),
     role_service: RoleService = Depends(get_role_service),
 ):
-    """List all role definitions. Requires owner or admin role."""
+    """List all role definitions. Requires operator (canonical) or owner/admin (Descope claims)."""
     result = await role_service.list_roles()
     if result.is_ok():
         result = Ok({"roles": result.ok})
@@ -170,10 +171,10 @@ async def list_roles(
 async def create_role(
     request: Request,
     body: CreateRoleRequest,
-    _admin_roles: list[str] = Depends(require_global_role("owner", "admin")),
+    _roles: list[str] = Depends(require_definitions_role),
     role_service: RoleService = Depends(get_role_service),
 ):
-    """Create a new role definition. Requires owner or admin role."""
+    """Create a new role definition. Requires operator (canonical) or owner/admin (Descope claims)."""
     result = await role_service.create_role(
         name=body.name,
         description=body.description,
@@ -188,10 +189,10 @@ async def update_role(
     request: Request,
     name: str,
     body: UpdateRoleRequest,
-    _admin_roles: list[str] = Depends(require_global_role("owner", "admin")),
+    _roles: list[str] = Depends(require_definitions_role),
     role_service: RoleService = Depends(get_role_service),
 ):
-    """Update a role definition. Requires owner or admin role."""
+    """Update a role definition. Requires operator (canonical) or owner/admin (Descope claims)."""
     # Resolve role name to canonical ID
     roles_result = await role_service.list_roles()
     if roles_result.is_error():
@@ -214,10 +215,10 @@ async def update_role(
 async def delete_role(
     request: Request,
     name: str,
-    _admin_roles: list[str] = Depends(require_global_role("owner", "admin")),
+    _roles: list[str] = Depends(require_definitions_role),
     role_service: RoleService = Depends(get_role_service),
 ):
-    """Delete a role definition. Requires owner or admin role."""
+    """Delete a role definition. Requires operator (canonical) or owner/admin (Descope claims)."""
     # Resolve role name to canonical ID
     roles_result = await role_service.list_roles()
     if roles_result.is_error():

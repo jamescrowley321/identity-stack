@@ -57,7 +57,7 @@ from app.dependencies.identity import (
     get_user_service,
 )
 from app.dependencies.rbac import get_rbac_session, require_global_role, require_permission, require_role
-from app.dependencies.sync_provider import require_sync_provider_principal
+from app.dependencies.sync_provider import NOT_A_SYNC_PROVIDER_PRINCIPAL, require_sync_provider_principal
 from app.dependencies.tenant import get_tenant_access, get_tenant_id
 from app.dependencies.tenant_access import SELECT_A_TENANT_FIRST
 from app.main import app as shipped_app
@@ -88,7 +88,7 @@ ORY_SUB = "ory-subject-1"
 REFUSED = {"detail": "This route serves Descope principals only"}
 NO_TENANT = {"detail": "No tenant context"}
 NOT_GRANTED = {"detail": "Insufficient permissions"}
-KEYCLOAK_ONLY = {"detail": "This route serves Keycloak principals only"}
+KEYCLOAK_ONLY = {"detail": NOT_A_SYNC_PROVIDER_PRINCIPAL.format(provider="Keycloak")}
 
 # (method, path) of every route that hands the tenant or the subject to Descope.
 DESCOPE_TENANT_ROUTES: frozenset[tuple[str, str]] = frozenset(
@@ -291,9 +291,9 @@ DESCOPE_ADMIN = {
     "dct": "t1",
     "tenants": {"t1": {"roles": ["admin"], "permissions": []}},
 }
-KEYCLOAK_ADMIN = {
+KEYCLOAK_USER = {
     "iss": KEYCLOAK_ISSUER,
-    "sub": "keycloak-admin",
+    "sub": "keycloak-user",
     "aud": KEYCLOAK_AUDIENCE,
     "azp": KEYCLOAK_SPA,
     "typ": "Bearer",
@@ -662,6 +662,10 @@ class TestProjectWideStateIsDescopeBacked:
 
 ROLE_ID = "44444444-4444-4444-4444-444444444444"
 ASSIGNMENT = {"user_id": RESOURCE_ID, "tenant_id": TENANT_A, "role_names": ["member"]}
+ASSIGNMENT_ANSWERS = {
+    "/api/roles/assign": {"status": "roles_assigned", "user_id": RESOURCE_ID, "role_names": ["member"]},
+    "/api/roles/remove": {"status": "roles_removed", "user_id": RESOURCE_ID, "role_names": ["member"]},
+}
 
 
 class TestTheRoleRoutesServeTheSyncProvidersPrincipals:
@@ -698,12 +702,13 @@ class TestTheRoleRoutesServeTheSyncProvidersPrincipals:
         assert role_service.mock_calls == []
         assert permission_service.mock_calls == []
 
-    def test_a_keycloak_admin_lists_the_definitions(self, keycloak_sync, client, role_service, permission_service):
+    def test_a_keycloak_operator_lists_the_definitions(self, keycloak_sync, client, role_service, permission_service):
+        keycloak_sync.roles = SOLE_OPERATOR
         role_service.list_roles.return_value = Ok([{"id": ROLE_ID, "name": "member"}])
         permission_service.list_permissions.return_value = Ok([{"id": RESOURCE_ID, "name": "documents.read"}])
 
-        roles = client.get("/api/roles", headers=_bearer(KEYCLOAK_ADMIN))
-        permissions = client.get("/api/permissions", headers=_bearer(KEYCLOAK_ADMIN))
+        roles = client.get("/api/roles", headers=_bearer(KEYCLOAK_USER))
+        permissions = client.get("/api/permissions", headers=_bearer(KEYCLOAK_USER))
 
         assert (roles.status_code, roles.json()) == (200, {"roles": [{"id": ROLE_ID, "name": "member"}]})
         assert (permissions.status_code, permissions.json()) == (
@@ -711,12 +716,13 @@ class TestTheRoleRoutesServeTheSyncProvidersPrincipals:
             {"permissions": [{"id": RESOURCE_ID, "name": "documents.read"}]},
         )
         # Each request decided from the canonical model, never from the token.
-        assert keycloak_sync.calls == [("keycloak", KEYCLOAK_ADMIN["sub"])] * 2
+        assert keycloak_sync.calls == [("keycloak", KEYCLOAK_USER["sub"])] * 2
 
-    def test_a_keycloak_admin_creates_a_role(self, keycloak_sync, client, role_service):
+    def test_a_keycloak_operator_creates_a_role(self, keycloak_sync, client, role_service):
+        keycloak_sync.roles = SOLE_OPERATOR
         role_service.create_role.return_value = Ok({"id": ROLE_ID, "name": "editor"})
 
-        response = client.post("/api/roles", json={"name": "editor"}, headers=_bearer(KEYCLOAK_ADMIN))
+        response = client.post("/api/roles", json={"name": "editor"}, headers=_bearer(KEYCLOAK_USER))
 
         assert (response.status_code, response.json()) == (201, {"id": ROLE_ID, "name": "editor"})
         role_service.create_role.assert_awaited_once_with(name="editor", description="", permission_names=None)
@@ -731,12 +737,36 @@ class TestTheRoleRoutesServeTheSyncProvidersPrincipals:
         role_service.list_roles.return_value = Ok([{"id": ROLE_ID, "name": "member"}])
         getattr(role_service, service_call).return_value = Ok({})
 
-        response = client.post(path, json=ASSIGNMENT, headers={**_bearer(KEYCLOAK_ADMIN), "X-Tenant-ID": TENANT_A})
+        response = client.post(path, json=ASSIGNMENT, headers={**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A})
 
-        assert response.status_code == 200
+        assert (response.status_code, response.json()) == (200, ASSIGNMENT_ANSWERS[path])
         getattr(role_service, service_call).assert_awaited_once_with(
             user_id=uuid.UUID(RESOURCE_ID), tenant_id=uuid.UUID(TENANT_A), role_id=uuid.UUID(ROLE_ID)
         )
+
+    @pytest.mark.parametrize(("method", "path"), sorted(SYNC_PROVIDER_PROJECT_ROUTES))
+    def test_a_keycloak_admin_of_its_sole_tenant_cannot_change_the_definitions(
+        self, keycloak_sync, client, role_service, permission_service, method, path
+    ):
+        """A tenant admin's role is one tenant's; the definitions are every tenant's, so they need ``operator``."""
+        response = client.request(method, _url(path), headers={**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A})
+
+        assert (response.status_code, response.json()) == (403, NOT_GRANTED)
+        assert role_service.mock_calls == []
+        assert permission_service.mock_calls == []
+
+    @pytest.mark.parametrize(("method", "path"), sorted(SYNC_PROVIDER_PROJECT_ROUTES))
+    def test_a_keycloak_operator_of_one_of_several_tenants_cannot_change_the_definitions(
+        self, keycloak_sync, client, role_service, permission_service, method, path
+    ):
+        """Naming the tenant the caller operates in does not open state that belongs to no tenant."""
+        keycloak_sync.roles = MEMBER_OF_A_OPERATOR_OF_B
+
+        response = client.request(method, _url(path), headers={**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_B})
+
+        assert (response.status_code, response.json()) == (403, NO_TENANT)
+        assert role_service.mock_calls == []
+        assert permission_service.mock_calls == []
 
     @pytest.mark.parametrize(("method", "path"), sorted(SYNC_PROVIDER_PROJECT_ROUTES))
     def test_a_keycloak_admin_of_one_of_several_tenants_cannot_change_the_definitions(
@@ -745,7 +775,7 @@ class TestTheRoleRoutesServeTheSyncProvidersPrincipals:
         """The definitions belong to no tenant: naming the tenant the caller administers does not open them."""
         keycloak_sync.roles = MEMBER_OF_A_ADMIN_OF_B
 
-        response = client.request(method, _url(path), headers={**_bearer(KEYCLOAK_ADMIN), "X-Tenant-ID": TENANT_B})
+        response = client.request(method, _url(path), headers={**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_B})
 
         assert (response.status_code, response.json()) == (403, NO_TENANT)
         assert role_service.mock_calls == []
@@ -759,10 +789,10 @@ class TestTheRoleRoutesServeTheSyncProvidersPrincipals:
         response = client.post(
             "/api/roles/assign",
             json={**ASSIGNMENT, "tenant_id": TENANT_B},
-            headers={**_bearer(KEYCLOAK_ADMIN), "X-Tenant-ID": TENANT_B},
+            headers={**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_B},
         )
 
-        assert response.status_code == 200
+        assert (response.status_code, response.json()) == (200, ASSIGNMENT_ANSWERS["/api/roles/assign"])
         role_service.assign_role_to_user.assert_awaited_once_with(
             user_id=uuid.UUID(RESOURCE_ID), tenant_id=uuid.UUID(TENANT_B), role_id=uuid.UUID(ROLE_ID)
         )
@@ -770,7 +800,7 @@ class TestTheRoleRoutesServeTheSyncProvidersPrincipals:
     def test_a_keycloak_member_reads_its_canonical_roles(self, keycloak_sync, client):
         keycloak_sync.roles = [{"tenant_id": TENANT_A, "role_name": "member", "permissions": ["documents.read"]}]
 
-        response = client.get("/api/roles/me", headers=_bearer(KEYCLOAK_ADMIN))
+        response = client.get("/api/roles/me", headers=_bearer(KEYCLOAK_USER))
 
         assert (response.status_code, response.json()) == (
             200,
@@ -802,7 +832,10 @@ class TestTheSyncProviderGuard:
         with pytest.raises(HTTPException) as refused:
             require_sync_provider_principal(request)
 
-        assert (refused.value.status_code, refused.value.detail) == (403, "This route serves unknown principals only")
+        assert (refused.value.status_code, refused.value.detail) == (
+            403,
+            NOT_A_SYNC_PROVIDER_PRINCIPAL.format(provider="unknown"),
+        )
 
     def test_a_descope_principal_passes_where_descope_is_synced(self):
         request = _hand_built_request(claims=DESCOPE_ADMIN, provider=descope_config(DESCOPE_PROJECT))

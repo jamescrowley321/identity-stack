@@ -1,4 +1,4 @@
-"""The role and permission routes for a Keycloak admin, against ``keycloak-test`` and the test Postgres.
+"""The role and permission routes for Keycloak operators and admins, against ``keycloak-test`` and the test Postgres.
 
 A deployment that syncs to Keycloak (``SYNC_PROVIDER=keycloak``) and authorizes
 Keycloak principals from the canonical model. Tokens are the realm's own, through
@@ -44,11 +44,12 @@ from app.services.keycloak_admin import (
     connect_keycloak_admin,
 )
 from tests.helpers.identity_fixture import IDENTITIES
-from tests.helpers.keycloak import ACME_SCOPE, BOB, DAVE, KeycloakTokenSource
+from tests.helpers.keycloak import ACME_SCOPE, BOB, DAVE, FRANK, KeycloakTokenSource
 from tests.helpers.keycloak_model import ADMIN_CLIENT_ID, ADMIN_CLIENT_SECRET, API_AUDIENCE, SPA_CLIENT_ID
 from tests.integration.test_keycloak_sync_adapter import client_roles, composites, find_organization, groups, members
 
 NO_TENANT = {"detail": "No tenant context"}
+NOT_GRANTED = {"detail": "Insufficient permissions"}
 
 
 @pytest.fixture
@@ -180,39 +181,48 @@ def _bearer(token: str, tenant: Tenant) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}", TENANT_SELECTOR_HEADER: str(tenant.id)}
 
 
-class TestAKeycloakAdmin:
-    async def test_manages_roles_and_permissions_and_each_change_reaches_keycloak(
+async def _signed_in(db_session, provider: Provider, deployment, user, tenant: Tenant, role_name: str) -> dict:
+    """``user``'s canonical row with ``role_name`` in ``tenant`` alone, and the headers of its SPA access token."""
+    canonical = await _linked_user(db_session, provider, user.id, IDENTITIES.users[user.username].email, user.username)
+    await _assign(db_session, canonical, tenant, role_name)
+    return _bearer(deployment.login(user, client_id=SPA_CLIENT_ID, scope=ACME_SCOPE).access_token, tenant)
+
+
+class TestKeycloakOperatorsAndAdmins:
+    """An operator changes the definitions; a tenant admin assigns in its tenant. Each change reaches Keycloak."""
+
+    async def test_manage_roles_and_permissions_and_each_change_reaches_keycloak(
         self, keycloak_deployment, client, realm, db_session, account
     ):
         provider = await _provider(db_session, keycloak_deployment.issuer)
         acme = await _tenant(db_session, provider, "acme")
-        dave = await _linked_user(db_session, provider, DAVE.id, IDENTITIES.users[DAVE.username].email, DAVE.username)
-        await _assign(db_session, dave, acme, "admin")
+        # ``frank`` operates the deployment from acme; ``dave`` administers acme alone.
+        operator = await _signed_in(db_session, provider, keycloak_deployment, FRANK, acme, "operator")
+        admin = await _signed_in(db_session, provider, keycloak_deployment, DAVE, acme, "admin")
         # The member already belongs to acme: a role is assigned to a member of the tenant.
         member = await _linked_user(db_session, provider, account["id"], account["email"], account["username"])
         await _assign(db_session, member, acme, "member")
-        headers = _bearer(keycloak_deployment.login(DAVE, client_id=SPA_CLIENT_ID, scope=ACME_SCOPE).access_token, acme)
         suffix = uuid.uuid4().hex[:8]
         permission, renamed_permission, role = f"rr{suffix}:read", f"rr{suffix}:write", f"rr-{suffix}"
         organization = find_organization(realm, "acme")
         try:
-            created_permission = await client.post("/api/permissions", json={"name": permission}, headers=headers)
+            created_permission = await client.post("/api/permissions", json={"name": permission}, headers=operator)
             assert created_permission.status_code == 201, created_permission.text
             assert _client_role(realm, permission) is not None
 
             created_role = await client.post(
-                "/api/roles", json={"name": role, "permission_names": [permission]}, headers=headers
+                "/api/roles", json={"name": role, "permission_names": [permission]}, headers=operator
             )
             assert created_role.status_code == 201, created_role.text
             assert composites(realm, _client_role(realm, role)) == [permission]
 
-            listed_roles = await client.get("/api/roles", headers=headers)
-            listed_permissions = await client.get("/api/permissions", headers=headers)
+            listed_roles = await client.get("/api/roles", headers=operator)
+            listed_permissions = await client.get("/api/permissions", headers=operator)
             assert role in {entry["name"] for entry in listed_roles.json()["roles"]}
             assert permission in {entry["name"] for entry in listed_permissions.json()["permissions"]}
 
             updated_permission = await client.put(
-                f"/api/permissions/{permission}", json={"new_name": renamed_permission}, headers=headers
+                f"/api/permissions/{permission}", json={"new_name": renamed_permission}, headers=operator
             )
             assert updated_permission.status_code == 200, updated_permission.text
             assert (_client_role(realm, permission), composites(realm, _client_role(realm, role))) == (
@@ -220,34 +230,68 @@ class TestAKeycloakAdmin:
                 [renamed_permission],
             )
 
-            updated_role = await client.put(f"/api/roles/{role}", json={"description": "Changed"}, headers=headers)
+            updated_role = await client.put(f"/api/roles/{role}", json={"description": "Changed"}, headers=operator)
             assert updated_role.status_code == 200, updated_role.text
             assert _client_role(realm, role)["description"] == "Changed"
 
             assignment = {"user_id": str(member.id), "tenant_id": str(acme.id), "role_names": [role]}
-            assigned = await client.post("/api/roles/assign", json=assignment, headers=headers)
-            assert assigned.status_code == 200, assigned.text
+            assigned = await client.post("/api/roles/assign", json=assignment, headers=admin)
+            assert (assigned.status_code, assigned.json()) == (
+                200,
+                {"status": "roles_assigned", "user_id": str(member.id), "role_names": [role]},
+            )
             assert account["username"] in members(realm, organization)
             assert groups(realm, organization)[role]["members"] == [account["username"]]
 
-            removed = await client.post("/api/roles/remove", json=assignment, headers=headers)
-            assert removed.status_code == 200, removed.text
+            removed = await client.post("/api/roles/remove", json=assignment, headers=admin)
+            assert (removed.status_code, removed.json()) == (
+                200,
+                {"status": "roles_removed", "user_id": str(member.id), "role_names": [role]},
+            )
             # The member keeps the tenant through its other role: only the role's group is left.
             assert account["username"] in members(realm, organization)
             assert groups(realm, organization)[role]["members"] == []
 
-            deleted_role = await client.delete(f"/api/roles/{role}", headers=headers)
+            deleted_role = await client.delete(f"/api/roles/{role}", headers=operator)
             assert deleted_role.status_code == 200, deleted_role.text
             assert (_client_role(realm, role), role in groups(realm, organization)) == (None, False)
 
-            deleted_permission = await client.delete(f"/api/permissions/{renamed_permission}", headers=headers)
+            deleted_permission = await client.delete(f"/api/permissions/{renamed_permission}", headers=operator)
             assert deleted_permission.status_code == 200, deleted_permission.text
             assert _client_role(realm, renamed_permission) is None
         finally:
             _remove_groups(realm, organization, [role])
             _remove_client_roles(realm, [role, permission, renamed_permission])
 
-    async def test_of_one_of_two_tenants_cannot_change_the_definitions(
+    async def test_an_admin_of_its_sole_tenant_cannot_change_the_definitions(
+        self, keycloak_deployment, client, realm, db_session
+    ):
+        """``dave`` administers acme alone: its admin role is one tenant's, the definitions every tenant's."""
+        provider = await _provider(db_session, keycloak_deployment.issuer)
+        acme = await _tenant(db_session, provider, "acme")
+        admin = await _signed_in(db_session, provider, keycloak_deployment, DAVE, acme, "admin")
+        owner = await _global_role(db_session, "owner")
+        name = f"rr-{uuid.uuid4().hex[:8]}"
+        try:
+            refusals = {
+                "list roles": await client.get("/api/roles", headers=admin),
+                "create role": await client.post("/api/roles", json={"name": name}, headers=admin),
+                "grant the member role a permission": await client.put(
+                    "/api/roles/member", json={"permission_names": ["settings:manage"]}, headers=admin
+                ),
+                "delete the owner role": await client.delete("/api/roles/owner", headers=admin),
+                "create permission": await client.post("/api/permissions", json={"name": f"{name}:x"}, headers=admin),
+            }
+        finally:
+            _remove_client_roles(realm, [name, f"{name}:x"])
+
+        assert {what: (answer.status_code, answer.json()) for what, answer in refusals.items()} == dict.fromkeys(
+            refusals, (403, NOT_GRANTED)
+        )
+        assert await db_session.get(Role, owner.id) is not None
+        assert (_client_role(realm, name), _client_role(realm, f"{name}:x")) == (None, None)
+
+    async def test_an_admin_of_one_of_two_tenants_cannot_change_the_definitions(
         self, keycloak_deployment, client, realm, db_session
     ):
         """``bob`` administers acme and views globex: the definitions are every tenant's, so he is refused them."""

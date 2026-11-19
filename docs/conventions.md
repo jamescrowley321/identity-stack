@@ -370,10 +370,14 @@ through whichever adapter the deployment configures, so the routes are not Desco
 fencing them on the caller's provider refused a Keycloak or Zitadel admin in a deployment
 that syncs to Keycloak or Zitadel. In a Descope deployment (`SYNC_PROVIDER=descope`, the
 default) the guard passes exactly the `descope_managed` principals `require_descope_principal`
-passes, with the same body. The definitions belong to no tenant, so their routes are gated
-by `require_global_role`: a canonical admin of one of several tenants cannot name that
-tenant to change every tenant's definitions; a Descope principal is decided from its
-claims, as before.
+passes, with the same body. The definitions belong to no tenant and every tenant's grants read
+them, so their routes are gated by `app.dependencies.rbac.require_definitions_role`
+(`require_global_role("operator", claimed_roles=("owner", "admin"))`): a canonical
+principal **MUST** hold `operator` by its sole membership, as on every other route over
+state that belongs to no tenant. A tenant `admin` is refused: its role is one tenant's,
+and with it the caller could delete the `owner` role, which ends that role in every
+tenant, or grant the `member` role a permission everywhere. A Descope principal is decided
+from its claims and keeps `owner` or `admin`, as before.
 
 A route over state that belongs to the whole Descope project **MUST** carry the same guard
 and be listed in `DESCOPE_PROJECT_ROUTES` in that file: `GET` and `PUT /api/fga/schema`.
@@ -383,7 +387,7 @@ an admin of any one of several tenants would reach them by naming that tenant.
 A route over state that belongs to no tenant and that Descope does not hold **MUST** be
 gated by `app.dependencies.rbac.require_global_role`, not `require_role`: `GET /api/users`
 (every tenant's users), `/api/providers`, `/api/sync/status` and `/api/events/recent`, and
-likewise the role and permission definitions above. One
+the role and permission definitions above (`require_definitions_role`). One
 role in one tenant opens all of that state, so on these routes the request chooses
 nothing. A canonical principal is decided by their sole membership, and one with several
 memberships is refused, whether they send the `X-Tenant-ID` header, carry a `dct` claim
