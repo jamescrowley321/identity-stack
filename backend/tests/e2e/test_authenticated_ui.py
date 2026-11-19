@@ -53,7 +53,7 @@ def test_navigate_to_settings(auth_page: Page):
     """Navigate to tenant settings page via sidebar."""
     auth_page.get_by_role("link", name="Tenant Settings").click()
     auth_page.wait_for_url("**/settings**")
-    expect(auth_page.get_by_text("Tenant Settings")).to_be_visible()
+    expect(auth_page.get_by_role("heading", name="Tenant Settings", level=1)).to_be_visible()
 
 
 def test_dashboard_tabs(auth_page: Page):
