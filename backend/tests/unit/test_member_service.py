@@ -94,6 +94,8 @@ class TestListMembers:
                         "name": "Alice Smith",
                         "status": MemberStatus.ENABLED,
                         "roleNames": ["admin", "member"],
+                        "created_at": alice.created_at.isoformat(),
+                        "updated_at": alice.updated_at.isoformat(),
                     },
                     {
                         "userId": str(bob.id),
@@ -101,6 +103,8 @@ class TestListMembers:
                         "name": "bob",
                         "status": MemberStatus.DISABLED,
                         "roleNames": ["viewer"],
+                        "created_at": bob.created_at.isoformat(),
+                        "updated_at": bob.updated_at.isoformat(),
                     },
                 ]
             }

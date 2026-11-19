@@ -66,6 +66,11 @@ DESCOPE_ONLY_ROUTE = (
     "Descope's roles, permissions, members, access keys, FGA or documents; canonical routes for "
     "other providers are #590"
 )
+MEMBERS_NOT_SYNCED = (
+    "the member routes serve the sync provider's principals (require_sync_provider_principal, #677) and this "
+    "run's backend syncs to Descope (SYNC_PROVIDER unset: it holds no Zitadel write credential), so they answer "
+    "its principals 403"
+)
 DESCOPE_MANAGEMENT_API = "calls the Descope Management API itself; the run has no Descope project"
 DESCOPE_ACCESS_KEY = "is about a Descope access-key session, which no other provider has"
 TENANTS_CLAIM = (
@@ -115,14 +120,16 @@ NOT_APPLICABLE: dict[str, dict[str, str]] = {
         [
             "test_roles_list_responds",
             "test_permissions_list_responds",
-            "test_members_list_responds",
             "test_keys_list_responds",
         ],
         _both(DESCOPE_ONLY_ROUTE),
     ),
     "test_identity_crud_e2e.py::TestPermissionCrudCanonical": _both(DESCOPE_ONLY_ROUTE),
     "test_identity_crud_e2e.py::TestRoleCrudCanonical": _both(DESCOPE_ONLY_ROUTE),
-    "test_identity_crud_e2e.py::TestMemberCrud": _both(DESCOPE_ONLY_ROUTE),
+    # The member routes serve the sync provider's principals (#677): Keycloak's run
+    # syncs to Keycloak and runs them; Zitadel's backend syncs to Descope.
+    "test_api_endpoints.py::TestAdminEndpoints::test_members_list_responds": {ZITADEL: MEMBERS_NOT_SYNCED},
+    "test_identity_crud_e2e.py::TestMemberCrud": {ZITADEL: MEMBERS_NOT_SYNCED},
     "test_identity_repository_api.py": _both(DESCOPE_ONLY_ROUTE),
     **_each(
         "test_rbac_api.py",

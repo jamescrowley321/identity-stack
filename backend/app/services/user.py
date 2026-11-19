@@ -496,4 +496,6 @@ def _member(user: User) -> dict:
         "name": name or user.user_name,
         "status": _MEMBER_STATUS[user.status],
         "roleNames": [],
+        "created_at": user.created_at.isoformat(),
+        "updated_at": user.updated_at.isoformat(),
     }

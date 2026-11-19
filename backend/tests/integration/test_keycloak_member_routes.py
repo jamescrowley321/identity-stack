@@ -149,6 +149,8 @@ class TestKeycloakTenantAdminsManageMembers:
             "name": email,
             "status": "enabled",
             "roleNames": ["member"],
+            "created_at": canonical.created_at.isoformat(),
+            "updated_at": canonical.updated_at.isoformat(),
         }
 
         again = await client.post("/api/members/invite", json={"email": email}, headers=admin)
