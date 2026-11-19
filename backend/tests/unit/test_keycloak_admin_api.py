@@ -1,5 +1,7 @@
 """KeycloakAdminApi settings and the startup credential check, against recorded answers."""
 
+import base64
+import logging
 from urllib.parse import urlsplit
 
 import httpx
@@ -27,6 +29,7 @@ from tests.helpers.keycloak_admin_recorded import (
     KEYCLOAK_USER_ID,
     ORGANIZATION_ID,
     RECORDED,
+    RECORDED_TOKEN,
     ROLE_CHECK,
     TOKEN_PATH,
     RecordedAdminApi,
@@ -46,6 +49,8 @@ ROLE_KEYCLOAK_ID = next(
 )
 # The answers of the startup check before it reads the service account's roles.
 BEFORE_ROLES = ROLE_CHECK[: ROLE_CHECK.index("service_account_roles")]
+# The admin client's credential as the grant sends it.
+BASIC = "Basic " + base64.b64encode(f"{ADMIN_CLIENT_ID}:{ADMIN_CLIENT_SECRET}".encode()).decode()
 
 
 def set_settings(monkeypatch, **overrides: str | None) -> None:
@@ -475,3 +480,67 @@ class TestClientRegistration:
             await api.api().unregister_client("identity-stack-machine-1", "rat")
 
         assert refused.value.status == 500
+
+
+@pytest.mark.anyio
+class TestTheCredential:
+    """The secret goes only to the grant, by Basic auth; the token is reused; neither reaches the logs."""
+
+    async def test_the_grant_carries_the_client_credentials_by_basic_auth(self):
+        api = RecordedAdminApi(["token_wrong_secret"])
+
+        with pytest.raises(KeycloakAdminError):
+            await api.api().check_credentials()
+
+        assert (api.sent[0].authorization, api.sent[0].body) == (BASIC, None)
+
+    async def test_the_token_is_kept_between_calls(self):
+        api = RecordedAdminApi(["token", "organization_find_none", "organization_find_none"])
+        connected = api.api()
+
+        await connected.find_organization(ORGANIZATION_ID)
+        await connected.find_organization(ORGANIZATION_ID)
+
+        assert [call for call in api.calls() if call == ("POST", TOKEN_PATH)] == [("POST", TOKEN_PATH)]
+        assert {sent.authorization for sent in api.sent[1:]} == {f"Bearer {RECORDED_TOKEN}"}
+
+    async def test_neither_the_secret_nor_the_token_is_logged(self, caplog):
+        caplog.set_level(logging.DEBUG)
+        api = RecordedAdminApi(
+            [
+                # A token the Admin API refuses twice.
+                "token",
+                "admin_api_bad_token",
+                "token",
+                "admin_api_bad_token",
+                # A refused grant, no answer from the grant, and a grant answer that is not JSON.
+                "token_wrong_secret",
+                httpx.ConnectError("connection refused"),
+                httpx.Response(200, text="not json"),
+                # No answer from the Admin API, then a refusal of a call.
+                "token",
+                httpx.ConnectError("connection refused"),
+                "token",
+                httpx.Response(500, json={"error": "unknown_error"}),
+            ]
+        )
+
+        for _ in range(6):
+            connected = api.api()
+            with pytest.raises(KeycloakAdminError):
+                await connected.check_credentials()
+
+        organizations = "/organizations"
+        assert [record.getMessage() for record in caplog.records if record.name == keycloak_admin.logger.name] == [
+            f"keycloak admin: GET {organizations} answered 401; asking once more with a new token",
+            f"keycloak admin: GET {organizations} answered 401 again",
+            "keycloak admin: the service-account grant answered 401",
+            "keycloak admin: no answer from the grant endpoint (ConnectError)",
+            "keycloak admin: the grant endpoint answered something that is not JSON",
+            f"keycloak admin: GET {organizations} did not answer (ConnectError)",
+            f'keycloak admin: GET {organizations} answered 500: {{"error":"unknown_error"}}',
+        ]
+        logged = caplog.text
+        for secret in (ADMIN_CLIENT_SECRET, RECORDED_TOKEN, BASIC):
+            assert secret not in logged
+            assert secret not in repr(connected)

@@ -72,6 +72,16 @@ NOT_FOUND_AFTER = httpx.Response(404, json={"errorMessage": "Organization not fo
 ONE_ORGANIZATION = httpx.Response(200, json=[{"id": ORGANIZATION_ID, "alias": TENANT_ID, "name": "Recorded Co"}])
 
 
+def renamed_client_roles(old: str, new: str) -> httpx.Response:
+    """The API client's roles as Keycloak answers them once ``old`` was renamed ``new``."""
+    return httpx.Response(
+        200,
+        json=[
+            {**role, "name": new} if role["name"] == old else role for role in RECORDED["client_roles_created"]["body"]
+        ],
+    )
+
+
 def adapter(api: RecordedAdminApi, links: Links | None = None) -> KeycloakSyncAdapter:
     return KeycloakSyncAdapter(api.api(), Links() if links is None else links)
 
@@ -314,6 +324,17 @@ class TestPermissions:
             {"name": "recorded:view", "description": "Recorded", "attributes": {PERMISSION_ATTRIBUTE: [PERMISSION_ID]}},
         )
 
+    async def test_a_repeated_rename_writes_nothing(self):
+        """The repeat still carries previous_name; the client role is found by its id, already renamed."""
+        api = RecordedAdminApi(["token", "api_client_find", renamed_client_roles("recorded:read", "recorded:view")])
+
+        result = await adapter(api).sync_permission(
+            permission_id=PERMISSION,
+            data={**PERMISSION_DATA, "name": "recorded:view", "previous_name": "recorded:read"},
+        )
+
+        assert (result, writes(api)) == (Ok(None), [])
+
     async def test_a_realm_client_role_of_that_name_without_an_id_is_stamped(self):
         """The realm import's permissions carry no canonical id: the first push adopts them."""
         api = RecordedAdminApi(["token", "api_client_find", "client_roles", NO_CONTENT])
@@ -436,6 +457,16 @@ class TestRoles:
             ),
         ]
 
+    async def test_a_repeated_rename_writes_nothing(self):
+        """The repeat still carries previous_name; the client role is found by its id, already renamed."""
+        api = RecordedAdminApi(["token", "api_client_find", renamed_client_roles("recorded-role", "renamed-role")])
+
+        result = await adapter(api).sync_role(
+            role_id=ROLE, data={**ROLE_DATA, "name": "renamed-role", "previous_name": "recorded-role"}
+        )
+
+        assert (result, writes(api)) == (Ok(None), [])
+
     async def test_a_rename_of_an_unstamped_client_role_stamps_it_first(self):
         """A rename that fails part way is found by the role's id on the next push, with no previous_name."""
         imported = CLIENT_ROLES["admin"]
@@ -477,6 +508,15 @@ class TestRoles:
                 ("DELETE", admin_path(f"/roles-by-id/{ROLE_CLIENT_ROLE['id']}")),
             ],
         )
+
+    async def test_a_repeated_delete_finds_nothing_to_delete(self):
+        api = RecordedAdminApi(
+            ["token", "api_client_find", "client_roles", ONE_ORGANIZATION, "organization_groups_none"]
+        )
+
+        result = await adapter(api).delete_role(role_id=ROLE, data={"name": "recorded-role", "tenant_id": None})
+
+        assert (result, writes(api)) == (Ok(None), [])
 
 
 class TestRoleAssignments:
