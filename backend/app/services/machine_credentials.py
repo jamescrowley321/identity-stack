@@ -138,7 +138,7 @@ def _ref(credential: credentials.MachineCredential, registration_token: str = ""
 
 
 def _provider_error(operation: str, error: SyncError) -> ProviderError:
-    logger.warning("machine credentials: %s failed in the provider: %s", operation, error.message)
+    logger.warning("machine clients: %s failed in the provider: %s", operation, error.message)
     return ProviderError(message=f"The identity provider refused {operation}", context=error.context)
 
 
@@ -220,7 +220,7 @@ class CanonicalMachineCredentials(MachineCredentials):
         undone = await self._push.delete_machine_client(client=_ref(credential, client.registration_token))
         if undone.is_error():
             logger.error(
-                "machine credentials: the client %s of a credential that was not stored is left in the provider",
+                "machine clients: the client %s, whose row could not be stored, is left in the provider",
                 client.client_id,
             )
 
@@ -246,9 +246,7 @@ class CanonicalMachineCredentials(MachineCredentials):
             await self._repository.commit()
             pushed = await self._push.set_machine_client_enabled(client=_ref(found.ok), enabled=active)
             if pushed.is_error():
-                logger.warning(
-                    "machine credentials: the provider did not take status %s: %s", status, pushed.error.message
-                )
+                logger.warning("machine clients: the provider did not take status %s: %s", status, pushed.error.message)
                 return Error(
                     SyncFailed(
                         message="The credential's status is changed here, but not yet in the identity provider",
