@@ -10,11 +10,13 @@ import pytest_asyncio
 from sqlalchemy import delete, select
 
 from app.models.identity.assignment import UserTenantRole
+from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.role import Permission, Role, RolePermission
 from app.models.identity.sync_ledger import PendingPush
 from app.models.identity.tenant import Tenant, TenantStatus
 from app.models.identity.user import User, UserStatus
 from app.repositories.sync_ledger import PendingPushRepository
+from scripts.seed_keycloak import link_organizations_in
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -129,3 +131,29 @@ async def test_a_tenant_delete_keeps_its_organization_link(db_session, ledger):
     await db_session.flush()
 
     assert (await _marks(db_session))[("tenant", str(tenant_id))][1]["external_org_id"] == "acme-org"
+
+
+async def test_the_keycloak_seed_links_tenants_as_the_providers_state(db_session, ledger):
+    """Linking a tenant to an organization Keycloak already holds marks nothing: a push would overwrite it."""
+    suffix = uuid.uuid4().hex[:10]
+    provider = Provider(
+        name=f"keycloak-ledger-{suffix}",
+        type=ProviderType.oidc,
+        issuer_url=f"http://ledger-{suffix}.localhost/realms/r",
+        base_url=f"http://ledger-{suffix}.localhost/realms/r",
+    )
+    existing = Tenant(name=f"Existing {suffix}", domains=[], status=TenantStatus.active)
+    db_session.add_all([provider, existing])
+    await db_session.flush()
+    await db_session.execute(delete(PendingPush))
+    await ledger.provider_writes(False)
+
+    await link_organizations_in(
+        db_session,
+        provider_id=provider.id,
+        organizations={existing.name: f"existing-{suffix}", f"Created {suffix}": f"created-{suffix}"},
+    )
+
+    linked = (await db_session.execute(select(Tenant).where(Tenant.external_org_provider_id == provider.id))).scalars()
+    assert sorted(tenant.external_org_id for tenant in linked) == [f"created-{suffix}", f"existing-{suffix}"]
+    assert await _marks(db_session) == {}

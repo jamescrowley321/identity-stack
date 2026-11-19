@@ -15,9 +15,11 @@ when missing, and sets ``external_org_id`` to the alias on an existing tenant
 that is linked to nothing. It refuses, writing nothing, a tenant linked to
 another organization or for another provider, an unlinked tenant that has
 ``domains``, an alias another tenant holds, and a tenant that is not active.
-It writes no ``domains``: a first login is admitted only for an email in its
-tenant's domains, so until an operator writes them only users linked
-beforehand sign in, as with ``scripts/seed_zitadel.py``.
+The links are the provider's state (nothing is marked for reconciliation to
+push): the organizations already exist, and pushing the tenants back would
+overwrite their names and domains. The seed writes no ``domains``; the next
+reconciliation pass takes each linked organization's name, domains and status
+into its tenant, and a first login is admitted for an email in those domains.
 
 With ``--link-users`` the seed instead reads a JSON object of username to
 account (``external_sub``, the Keycloak user id, and ``email``, ``given_name``,
@@ -57,6 +59,7 @@ import sys
 import uuid as uuid_mod
 from dataclasses import dataclass
 
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
 from app.models.database import get_session_factory
@@ -225,20 +228,35 @@ def link_tenant(tenant: Tenant | None, name: str, alias: str, provider_id: uuid_
 async def link_organizations(*, provider_id: uuid_mod.UUID, organizations: dict[str, str], dry_run: bool) -> None:
     """Link each tenant to its organization alias in one transaction: a refusal, or a dry run, writes nothing."""
     async with get_session_factory()() as session:
-        for name, alias in sorted(organizations.items()):
-            holders = (
-                await session.execute(select(Tenant.name).where(Tenant.external_org_id == alias, Tenant.name != name))
-            ).scalars()
-            holder = holders.first()
-            if holder is not None:
-                raise OrganizationLinkConflict(f"organization {alias!r} is already linked to tenant {holder!r}")
-            tenant = (await session.execute(select(Tenant).where(Tenant.name == name))).scalars().first()
-            session.add(link_tenant(tenant, name, alias, provider_id))
-            print(f"  [{'dry-run' if dry_run else 'linked'}] tenant {name!r} to organization {alias!r}")
+        await link_organizations_in(session, provider_id=provider_id, organizations=organizations, dry_run=dry_run)
         if dry_run:
             await session.rollback()
         else:
             await session.commit()
+
+
+async def link_organizations_in(
+    session: AsyncSession, *, provider_id: uuid_mod.UUID, organizations: dict[str, str], dry_run: bool = False
+) -> None:
+    """Link each tenant to its organization alias in ``session``, which the caller commits or rolls back.
+
+    The organizations exist in Keycloak already, so the links are the provider's
+    state (``provider_writes``): nothing is marked for a reconciliation pass to
+    push, which would overwrite the organization with the tenant, and the next
+    pass takes the organization's name, domains and status into the tenant.
+    """
+    await PendingPushRepository(session).provider_writes(True)
+    for name, alias in sorted(organizations.items()):
+        holders = (
+            await session.execute(select(Tenant.name).where(Tenant.external_org_id == alias, Tenant.name != name))
+        ).scalars()
+        holder = holders.first()
+        if holder is not None:
+            raise OrganizationLinkConflict(f"organization {alias!r} is already linked to tenant {holder!r}")
+        tenant = (await session.execute(select(Tenant).where(Tenant.name == name))).scalars().first()
+        session.add(link_tenant(tenant, name, alias, provider_id))
+        await session.flush()
+        print(f"  [{'dry-run' if dry_run else 'linked'}] tenant {name!r} to organization {alias!r}")
 
 
 def _require_env(key: str) -> str:
