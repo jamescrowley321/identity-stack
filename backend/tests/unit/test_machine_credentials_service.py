@@ -42,6 +42,7 @@ REFUSED = SyncError(message="refused", operation="op", context={"status": 403})
 class FakeRepository:
     roles: dict[str, uuid.UUID] = field(default_factory=lambda: {"admin": ADMIN_ROLE})
     rows: dict[uuid.UUID, tuple[credentials.MachineCredential, str]] = field(default_factory=dict)
+    role_ids: dict[uuid.UUID, tuple[uuid.UUID, ...]] = field(default_factory=dict)
     conflict: bool = False
     commits: int = 0
     rollbacks: int = 0
@@ -53,6 +54,7 @@ class FakeRepository:
         if self.conflict:
             raise RepositoryConflictError("taken")
         self.rows[credential.id] = (credential, registration_token)
+        self.role_ids[credential.id] = role_ids
 
     async def get(self, tenant_id, credential_id, *, provider):
         found = self.rows.get(credential_id)
@@ -144,6 +146,16 @@ class TestCreate:
             CLIENT.registration_token,
         )
         assert repository.commits == 1
+
+    async def test_a_role_named_twice_is_linked_once(self):
+        """One role link per role: a repeat would hit the link's key and undo the new client."""
+        repository, push = FakeRepository(), FakePush()
+
+        result = await _create(_service(repository, push), role_names=["admin", "admin"])
+
+        assert result.ok["key"]["roleNames"] == ["admin"]
+        assert list(repository.role_ids.values()) == [(ADMIN_ROLE,)]
+        assert [call[0] for call in push.calls] == ["create"]
 
     async def test_a_role_the_caller_lacks_is_refused_before_the_provider(self):
         repository, push = FakeRepository(), FakePush()

@@ -39,6 +39,20 @@ def expiry(expire_time: int | None, *, now: int) -> Result[int, CredentialError]
     return Ok(expire_time)
 
 
+def holdable_roles(role_names: tuple[str, ...]) -> Result[tuple[str, ...], CredentialError]:
+    """Roles a machine credential may hold at all: at least one, none of ``ROLES_NOT_FOR_MACHINES``.
+
+    Checked when a credential is created and again on every request it makes: a role
+    renamed or deleted since (inbound sync, the role routes) changes what it holds.
+    """
+    if not role_names:
+        return Error(RolesMissing())
+    refused = tuple(sorted(set(role_names) & ROLES_NOT_FOR_MACHINES))
+    if refused:
+        return Error(RolesNotForMachines(roles=refused))
+    return Ok(tuple(dict.fromkeys(role_names)))
+
+
 def grantable_roles(requested: tuple[str, ...], *, held: frozenset[str]) -> Result[tuple[str, ...], CredentialError]:
     """The roles a new credential may carry: at least one, none of ``ROLES_NOT_FOR_MACHINES``, and only
     roles its creator holds in the tenant.
@@ -46,15 +60,14 @@ def grantable_roles(requested: tuple[str, ...], *, held: frozenset[str]) -> Resu
     There is no role hierarchy, and authorization gates on role names, so "a lesser
     role" cannot be decided: containment is the rule, and it covers ``owner``.
     """
-    if not requested:
-        return Error(RolesMissing())
-    refused = tuple(sorted(set(requested) & ROLES_NOT_FOR_MACHINES))
-    if refused:
-        return Error(RolesNotForMachines(roles=refused))
+    holdable = holdable_roles(requested)
+    if holdable.is_error():
+        return holdable
     escalated = tuple(sorted(set(requested) - held))
     if escalated:
         return Error(RolesNotHeld(roles=escalated))
-    return Ok(tuple(dict.fromkeys(requested)))
+    # Each role once: the credential's role links are one per role.
+    return Ok(holdable.ok)
 
 
 def known_roles(requested: tuple[str, ...], *, found: frozenset[str]) -> Result[tuple[str, ...], CredentialError]:

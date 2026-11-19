@@ -4,7 +4,7 @@ Other layers import this package, not its modules. The glossary is in
 docs/adr/0008-layered-architecture-with-a-functional-domain-core.md.
 """
 
-from app.domain.credentials.decisions import expiry, grantable_roles, in_force, known_roles
+from app.domain.credentials.decisions import expiry, grantable_roles, holdable_roles, in_force, known_roles
 from app.domain.credentials.errors import (
     CredentialError,
     CredentialNotFound,
@@ -39,6 +39,7 @@ __all__ = [
     "RolesNotHeld",
     "expiry",
     "grantable_roles",
+    "holdable_roles",
     "in_force",
     "known_roles",
 ]

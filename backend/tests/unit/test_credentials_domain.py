@@ -60,6 +60,19 @@ class TestRoles:
             credentials.RolesNotHeld(roles=("billing", "owner"))
         )
 
+    @pytest.mark.parametrize(
+        ("roles", "expected"),
+        [
+            ((), Error(credentials.RolesMissing())),
+            (("operator",), Error(credentials.RolesNotForMachines(roles=("operator",)))),
+            (("admin", "operator"), Error(credentials.RolesNotForMachines(roles=("operator",)))),
+            (("admin", "member", "admin"), Ok(("admin", "member"))),
+        ],
+        ids=["none", "operator", "operator beside admin", "admin and member, admin twice"],
+    )
+    def test_what_a_credential_may_hold_at_all(self, roles, expected):
+        assert credentials.holdable_roles(roles) == expected
+
     def test_no_role_is_refused(self):
         assert credentials.grantable_roles((), held=frozenset({"admin"})) == Error(credentials.RolesMissing())
 

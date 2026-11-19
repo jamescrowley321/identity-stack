@@ -23,7 +23,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 from app.dependencies import identity, rbac
-from app.dependencies.rbac import MACHINE_PRINCIPAL_REFUSED, get_rbac_session
+from app.dependencies.rbac import MACHINE_PRINCIPAL_REFUSED, MACHINE_ROLES_REFUSED, get_rbac_session
 from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER
 from app.errors.identity import IdentityErrorRaised
 from app.errors.problem_detail import identity_error_raised_handler
@@ -351,3 +351,51 @@ class TestWhatACredentialMustNotCarry:
 
         assert (response.status_code, response.json()["detail"]) == expected
         assert registered == []
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def own_role_credential(client, realm, db_session, keycloak_token_source) -> AsyncIterator[tuple[Role, dict]]:
+    """A credential of acme holding acme's own role, which bob holds too: changing it touches no one else."""
+    bob = (await db_session.execute(select(User).where(User.user_name == BOB.username))).scalars().one()
+    role = Role(name=f"robot-{uuid.uuid4()}", tenant_id=realm.acme.id)
+    db_session.add(role)
+    await db_session.flush()
+    db_session.add(UserTenantRole(user_id=bob.id, tenant_id=realm.acme.id, role_id=role.id))
+    await db_session.flush()
+    response = await client.post(
+        KEYS,
+        json={"name": "own role", "expire_time": int(time.time()) + DAY, "role_names": [role.name]},
+        headers=_headers(realm.bob_token, realm.acme),
+    )
+    assert response.status_code == 200, response.text
+    created = response.json()
+    try:
+        yield role, created
+    finally:
+        await client.delete(f"{KEYS}/{created['key']['id']}", headers=_headers(realm.bob_token, realm.acme))
+
+
+class TestRolesChangedAfterCreate:
+    """What a credential holds is checked on each request, not only when it was made."""
+
+    async def test_its_role_renamed_operator_is_refused(
+        self, client, own_role_credential, db_session, keycloak_token_source
+    ):
+        role, created = own_role_credential
+        token = _token(keycloak_token_source, created["key"]["clientId"], created["cleartext"])
+        role.name = "operator"
+        await db_session.flush()
+
+        global_route = await client.get("/api/access-checks/viewer-role", headers=_headers(token))
+
+        assert (global_route.status_code, global_route.json()["detail"]) == (403, MACHINE_ROLES_REFUSED)
+
+    async def test_every_role_deleted_is_refused(self, client, own_role_credential, db_session, keycloak_token_source):
+        role, created = own_role_credential
+        token = _token(keycloak_token_source, created["key"]["clientId"], created["cleartext"])
+        await db_session.delete(role)
+        await db_session.flush()
+
+        response = await client.get("/api/access-checks/viewer-role", headers=_headers(token))
+
+        assert (response.status_code, response.json()["detail"]) == (403, MACHINE_ROLES_REFUSED)

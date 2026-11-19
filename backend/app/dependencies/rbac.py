@@ -112,6 +112,7 @@ def _machine_client(request: Request, claims: dict) -> str | None:
 
 
 MACHINE_PRINCIPAL_REFUSED = "A machine credential cannot manage machine credentials"
+MACHINE_ROLES_REFUSED = "This machine credential holds no role it may use"
 
 
 def refuse_machine_principal(request: Request) -> None:
@@ -148,6 +149,11 @@ async def _load_machine_memberships(
         raise HTTPException(status_code=403, detail=NO_TENANT_CONTEXT)
     tenant_id = str(credential.tenant_id)
     grants = await repository.permissions(credential.id)
+    if credentials.holdable_roles(tuple(grants)).is_error():
+        # A role deleted or renamed since the credential was made: it holds none, or one no
+        # machine may hold (``operator``). Either would serve it more than it was given.
+        logger.warning("canonical role resolution refused a machine credential's current roles (sub=%r)", sub)
+        raise IdentityErrorRaised(MachinePrincipalRefused(message=MACHINE_ROLES_REFUSED))
     return CanonicalMemberships(
         grants=tuple(
             CanonicalGrant(tenant_id=tenant_id, role_name=role_name, permissions=permissions)

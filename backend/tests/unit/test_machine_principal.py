@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.dependencies import identity, rbac
-from app.dependencies.rbac import MACHINE_PRINCIPAL_REFUSED, get_rbac_session
+from app.dependencies.rbac import MACHINE_PRINCIPAL_REFUSED, MACHINE_ROLES_REFUSED, get_rbac_session
 from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER
 from app.domain import credentials
 from app.main import app as shipped_app
@@ -147,13 +147,23 @@ class TestAMachineTokenIsItsCredential:
 
         assert (response.status_code, response.json()) == (403, NO_TENANT)
 
-    def test_a_credential_with_no_role_is_in_its_tenant_and_holds_nothing(self, op, client, stored, monkeypatch):
-        monkeypatch.setattr(_Credentials, "grants", {})
+    @pytest.mark.parametrize(
+        "grants",
+        [{}, {"operator": ("billing:manage",)}, {"admin": ("settings:manage",), "operator": ()}],
+        ids=["every role deleted since", "its role renamed operator", "operator beside admin"],
+    )
+    @pytest.mark.parametrize("path", [ADMIN_ROLE, SETTINGS_MANAGE, "/api/sync/status"])
+    def test_roles_it_may_no_longer_hold_grant_nothing(self, op, client, stored, monkeypatch, grants, path):
+        """Checked on each request: a role renamed or deleted after create changes what it holds."""
+        monkeypatch.setattr(_Credentials, "grants", grants)
 
-        response = _get(client, SETTINGS_MANAGE, _machine_token(op))
+        response = _get(client, path, _machine_token(op))
 
-        assert response.status_code == 403
-        assert response.json() != NO_TENANT
+        assert (response.status_code, response.json()["type"], response.json()["detail"]) == (
+            403,
+            "/errors/forbidden",
+            MACHINE_ROLES_REFUSED,
+        )
 
 
 class TestARefusedCredential:
