@@ -28,7 +28,7 @@ EXPECTED = {
         "relationship_store": RelationshipStoreKind.DESCOPE,
     },
     # Keycloak's machine credentials are canonical: Keycloak clients the backend
-    # registers (#680), which serve every principal.
+    # registers (#680), which serve every principal authorized from the canonical model.
     KEYCLOAK: {"capabilities": [Capability.MACHINE_CREDENTIALS], "relationship_store": RelationshipStoreKind.NONE},
     ZITADEL: NOTHING,
 }

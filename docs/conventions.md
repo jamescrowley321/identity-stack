@@ -375,7 +375,9 @@ on that capability's dependency in `app/dependencies/capabilities.py` as its fir
 dependency, before the guard. What serves the caller is decided by one function,
 `capabilities.served`: the sync adapter's capabilities and the relationship store, except
 that Descope's (its adapter's capabilities, its FGA store) serve only a principal of a
-`descope_managed` provider, being keyed on Descope's ids. A caller not served answers 404
+`descope_managed` provider, being keyed on Descope's ids, and any other adapter's (Keycloak's
+canonical machine credentials) serve only a principal authorized from the canonical model
+(`rbac.is_canonical_principal`), being keyed on canonical ids. A caller not served answers 404
 (`CapabilityMissing`), not the guard's 403: the route is not there for them.
 `GET /api/capabilities` reports `served`, and the SPA shows a page only when it is there.
 

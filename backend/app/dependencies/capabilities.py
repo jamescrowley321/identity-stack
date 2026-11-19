@@ -16,6 +16,7 @@ from fastapi import HTTPException, Request
 
 from app.dependencies import identity
 from app.dependencies.descope import is_descope_principal
+from app.dependencies.rbac import is_canonical_principal
 from app.errors.identity import CapabilityMissing, IdentityErrorRaised
 from app.services.adapters.base import Capability
 from app.services.adapters.descope import DescopeSyncAdapter
@@ -36,13 +37,19 @@ def served(request: Request) -> Served:
 
     Descope's capabilities and its FGA store are keyed on Descope's own tenant and
     user ids, so they serve only a principal of a ``descope_managed`` provider
-    (conventions §18): any other principal is served neither.
+    (conventions §18): any other principal is served neither. Any other adapter's
+    capabilities are kept in or keyed on the canonical model, so they serve only a
+    principal authorized from it (``rbac.is_canonical_principal``): a Descope
+    principal's ``dct`` naming a canonical tenant's id grants it nothing there.
     """
     if getattr(request.state, "claims", None) is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     descope_principal = is_descope_principal(request)
     capabilities = identity.sync_capabilities()
-    if identity.SYNC_ADAPTERS[identity.SYNC_PROVIDER].adapter is DescopeSyncAdapter and not descope_principal:
+    if identity.SYNC_ADAPTERS[identity.SYNC_PROVIDER].adapter is DescopeSyncAdapter:
+        if not descope_principal:
+            capabilities = frozenset()
+    elif not is_canonical_principal(request):
         capabilities = frozenset()
     store = identity.relationship_store_kind()
     if store is RelationshipStoreKind.DESCOPE and not descope_principal:

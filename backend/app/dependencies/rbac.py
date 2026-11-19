@@ -163,6 +163,11 @@ async def _load_machine_memberships(
     )
 
 
+def is_canonical_principal(request: Request) -> bool:
+    """Whether the request's principal is authorized from the canonical model (``CANONICAL_RBAC_PROVIDERS``)."""
+    return _principal_provider(request) in CANONICAL_RBAC_PROVIDERS
+
+
 async def _load_canonical_memberships(
     request: Request,
     claims: dict,
