@@ -247,6 +247,22 @@ async def link_organizations_in(
     """
     await PendingPushRepository(session).provider_writes(True)
     for name, alias in sorted(organizations.items()):
+        # Already linked: a reconciliation pass may have renamed it after its organization since.
+        linked = (
+            (
+                await session.execute(
+                    select(Tenant).where(
+                        Tenant.external_org_id == alias, Tenant.external_org_provider_id == provider_id
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if linked is not None:
+            link_tenant(linked, linked.name, alias, provider_id)
+            print(f"  [skip] tenant {linked.name!r} is already linked to organization {alias!r}")
+            continue
         holders = (
             await session.execute(select(Tenant.name).where(Tenant.external_org_id == alias, Tenant.name != name))
         ).scalars()
