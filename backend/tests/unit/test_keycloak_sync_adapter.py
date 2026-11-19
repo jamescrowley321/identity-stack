@@ -813,8 +813,24 @@ class TestCustomAttributes:
 
         assert await adapter(api).tenant_attributes(tenant=TENANT_ID) == Ok(None)
 
-    async def test_a_tenant_attribute_write_sends_the_organization_back_whole(self):
-        api = RecordedAdminApi(["token", ONE_ORGANIZATION, httpx.Response(200, json=self.ORGANIZATION), NO_CONTENT])
+    @pytest.mark.parametrize(
+        "stored",
+        ["NaN", "Infinity", "-Infinity", "1e400", "[" * 100_000 + "]" * 100_000, '{"a": 1}', "9" * 5000],
+        ids=["nan", "infinity", "minus-infinity", "overflow", "deeply-nested", "object", "too-many-digits"],
+    )
+    async def test_an_attribute_no_json_value_can_carry_is_its_text(self, stored):
+        """Set outside the app, it must not break the read: the API cannot answer it as JSON."""
+        account = {**self.ACCOUNT, "attributes": {"set_outside": [stored]}}
+        api = RecordedAdminApi(["token", httpx.Response(200, json=account)])
+
+        result = await adapter(api).user_attributes(subject=KEYCLOAK_USER_ID)
+
+        assert result == Ok({"set_outside": stored})
+
+    async def test_a_tenant_attribute_write_sends_the_organization_back_but_its_domains(self):
+        """Keycloak keeps the domains a PUT leaves out; it resets ``enabled``, so that goes back as read."""
+        organization = {**self.ORGANIZATION, "description": "Set by the realm admin", "redirectUrl": None}
+        api = RecordedAdminApi(["token", ONE_ORGANIZATION, httpx.Response(200, json=organization), NO_CONTENT])
 
         result = await adapter(api, Links(aliases={TENANT: TENANT_ID})).set_tenant_attributes(
             tenant=TENANT_ID, attributes={"plan_tier": "enterprise", "max_members": None}
@@ -822,7 +838,12 @@ class TestCustomAttributes:
 
         assert result == Ok(None)
         assert sent_to(api, "PUT", ORGANIZATION).body == {
-            **self.ORGANIZATION,
+            "id": ORGANIZATION_ID,
+            "alias": TENANT_ID,
+            "name": "Recorded Co",
+            "enabled": True,
+            "description": "Set by the realm admin",
+            "redirectUrl": None,
             "attributes": {"plan_tier": ['"enterprise"']},
         }
 
