@@ -30,8 +30,9 @@ Every branch of the canonical path that cannot produce an unambiguous answer fai
 closed with 403. An authorization decision is never made on a guess.
 """
 
+import enum
 import inspect
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, HTTPException, Request
@@ -47,6 +48,7 @@ from app.dependencies.tenant_access import (
 )
 from app.knobs import knob_set
 from app.logbook import logbook
+from app.middleware.providers import ProviderTokenConfig
 from app.models.database import get_session_factory
 from app.models.identity.user import UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
@@ -88,6 +90,12 @@ async def get_rbac_session() -> AsyncIterator[AsyncSession | None]:
         return
     async with factory() as session:
         yield session
+
+
+def _is_descope_principal(request: Request) -> bool:
+    """Whether a middleware recorded a ``descope_managed`` provider for the request's claims."""
+    provider = getattr(request.state, "provider", None)
+    return isinstance(provider, ProviderTokenConfig) and provider.descope_managed
 
 
 def _principal_provider(request: Request) -> str:
@@ -249,18 +257,13 @@ async def canonical_memberships(request: Request) -> CanonicalMemberships | None
         return await _canonical_memberships(request, claims, session)
 
 
-async def _tenant_access(
-    request: Request,
-    session: AsyncSession | None,
-    *,
-    request_selects: bool = True,
-) -> TenantAccess:
+async def _tenant_access(request: Request, session: AsyncSession | None) -> TenantAccess:
     """The request's tenant and the caller's grants in it. 401 with no claims."""
     claims = getattr(request.state, "claims", None)
     if claims is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     memberships = await _canonical_memberships(request, claims, session)
-    return resolve_tenant_access(request, claims, memberships, request_selects=request_selects)
+    return resolve_tenant_access(request, claims, memberships)
 
 
 def _holds_any(wanted: tuple[str, ...], held: Callable[[TenantAccess], list[str]]) -> Callable[[TenantAccess], bool]:
@@ -330,7 +333,7 @@ def require_permission(*permissions: str):
     return dependency
 
 
-def require_global_role(*roles: str):
+def require_global_role(*roles: str, claimed_roles: tuple[str, ...] | None = None):
     """Dependency factory for a route over state that belongs to no tenant.
 
     Every tenant's users, the provider records and the sync status are not one
@@ -342,17 +345,114 @@ def require_global_role(*roles: str):
     Descope principal is decided from its ``dct`` + ``tenants`` claims, as by
     ``require_role``.
 
+    ``claimed_roles``, when given, is what a Descope principal (a recorded
+    ``descope_managed`` provider) must hold instead of ``roles``: the role and
+    permission definitions take ``owner`` or ``admin`` from a Descope token, as
+    they always have, and ``operator`` from the canonical model, where a tenant
+    admin's role is one tenant's and the definitions are every tenant's. Any
+    other principal decided from its claims (an unrecorded provider, another
+    provider's extractor) is refused: its claims are not Descope's.
+
     Returns the user's role list for downstream use.
     """
-    holds = _holds_any(roles, _roles)
+    holds_canonical = _holds_any(roles, _roles)
+    holds_claimed = holds_canonical if claimed_roles is None else _holds_any(claimed_roles, _roles)
 
     async def dependency(
         request: Request,
         session: AsyncSession | None = Depends(get_rbac_session),
     ) -> list[str]:
-        access = await _tenant_access(request, session, request_selects=False)
+        claims = getattr(request.state, "claims", None)
+        if claims is None:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        memberships = await _canonical_memberships(request, claims, session)
+        access = resolve_tenant_access(request, claims, memberships, request_selects=False)
+        if memberships is not None:
+            holds = holds_canonical
+        elif claimed_roles is None:
+            holds = holds_claimed
+        elif _is_descope_principal(request):
+            holds = holds_claimed
+        else:
+            logger.warning(
+                "refused: provider=%s sub=%r holds claims that are not Descope's on a route that reads "
+                "only Descope's claimed roles",
+                _principal_provider(request) or "unrecorded",
+                claims.get("sub") if isinstance(claims, dict) else None,
+            )
+            raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
         if not holds(access):
             raise HTTPException(status_code=403, detail=INSUFFICIENT_PERMISSIONS)
         return access.roles
 
     return dependency
+
+
+# The role and permission definitions belong to no tenant and every tenant's grants
+# read them: a canonical principal needs ``operator``, as on every other route over
+# state that belongs to no tenant, and a Descope principal keeps ``owner`` or
+# ``admin`` from its claims (conventions §18).
+require_definitions_role = require_global_role("operator", claimed_roles=("owner", "admin"))
+
+
+# The role that opens state belonging to no tenant (``require_global_role``).
+OPERATOR_ROLE = "operator"
+
+_require_global_operator = require_global_role(OPERATOR_ROLE)
+
+
+class RoleGrantRefusal(enum.StrEnum):
+    """Why a role assignment route refused to assign or remove a role."""
+
+    OPERATOR_GRANT = "Only operators can assign or remove the operator role"
+    OPERATOR_DEFINITION = "Only operators can create, change or delete the operator role"
+
+
+OperatorGrantCheck = Callable[[list[str]], Awaitable[None]]
+
+
+def _operator_check(request: Request, session: AsyncSession | None, refusal: RoleGrantRefusal) -> OperatorGrantCheck:
+    """A check that refuses (403, ``refusal``) when the names include ``operator`` and the caller is not one.
+
+    The caller must hold ``operator`` as ``require_global_role`` decides it: a
+    canonical principal by its sole membership, a Descope principal from its
+    claims. The check reads nothing when the names do not include ``operator``.
+    """
+
+    async def check(role_names: list[str]) -> None:
+        if OPERATOR_ROLE not in role_names:
+            return
+        try:
+            await _require_global_operator(request, session)
+        except HTTPException as refused:
+            if refused.status_code != 403:
+                raise
+            raise HTTPException(status_code=403, detail=refusal) from refused
+
+    return check
+
+
+def operator_grant_check(
+    request: Request,
+    session: AsyncSession | None = Depends(get_rbac_session),
+) -> OperatorGrantCheck:
+    """Dependency: a check that refuses to assign or remove ``operator`` for a caller who is not one.
+
+    ``operator`` opens every tenant's state (conventions §18), while assigning
+    takes only ``owner`` or ``admin`` in one tenant: without this a tenant admin
+    could make itself, or anyone, an operator.
+    """
+    return _operator_check(request, session, RoleGrantRefusal.OPERATOR_GRANT)
+
+
+def operator_definition_check(
+    request: Request,
+    session: AsyncSession | None = Depends(get_rbac_session),
+) -> OperatorGrantCheck:
+    """Dependency: a check that refuses to create, change, rename or delete the ``operator`` role for a non-operator.
+
+    A Descope ``owner`` or ``admin`` passes ``require_definitions_role``: without
+    this it could delete ``operator`` (ending it for every operator) or change
+    what it grants, or rename another role to or from it.
+    """
+    return _operator_check(request, session, RoleGrantRefusal.OPERATOR_DEFINITION)

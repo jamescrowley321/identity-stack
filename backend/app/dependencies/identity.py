@@ -16,18 +16,21 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from fastapi import Depends, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import State
 
+from app.dependencies.descope import require_descope_management
 from app.dependencies.keycloak_reconciliation import build_keycloak_reconciliation
 from app.dependencies.keycloak_sync import build_keycloak_sync_adapter
 from app.dependencies.zitadel_sync import build_zitadel_sync_adapter
 from app.errors.identity import Conflict, IdentityErrorRaised
 from app.knobs import knob
 from app.logbook import logbook
+from app.middleware.providers import KEYCLOAK_PROVIDER_NAME, ZITADEL_PROVIDER_NAME, ProviderTokenConfig
 from app.models.database import get_async_session, get_engine
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
@@ -44,6 +47,7 @@ from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
 from app.services.idp_link import IdPLinkService
 from app.services.inbound_sync import InboundSyncService
+from app.services.members import MemberDirectory, MemberService
 from app.services.permission import PermissionService
 from app.services.provider import ProviderService
 from app.services.reconciliation import ProviderReconciliation, ReconciliationService
@@ -106,6 +110,33 @@ SYNC_ADAPTERS: dict[str, Callable[[State, AsyncSession], IdentityProviderAdapter
 }
 
 
+@dataclass(frozen=True)
+class SyncProviderPrincipal:
+    """Whose principals a sync provider's adapter takes the tenant and the user ids of.
+
+    ``name`` is the provider's registration name (``ProviderTokenConfig.name``),
+    which the refusal of ``require_sync_provider_principal`` names.
+    """
+
+    name: str
+    is_principal: Callable[[ProviderTokenConfig], bool]
+
+
+# One entry per key of SYNC_ADAPTERS: which principals the canonical services may
+# push writes for (``app.dependencies.sync_provider``). Descope's are the
+# ``descope_managed`` ones, as ``require_descope_principal`` reads them; the others
+# are their registration's.
+SYNC_PROVIDER_PRINCIPALS: dict[str, SyncProviderPrincipal] = {
+    "descope": SyncProviderPrincipal(name="Descope", is_principal=lambda provider: provider.descope_managed),
+    "keycloak": SyncProviderPrincipal(
+        name=KEYCLOAK_PROVIDER_NAME, is_principal=lambda provider: provider.name == KEYCLOAK_PROVIDER_NAME
+    ),
+    "zitadel": SyncProviderPrincipal(
+        name=ZITADEL_PROVIDER_NAME, is_principal=lambda provider: provider.name == ZITADEL_PROVIDER_NAME
+    ),
+}
+
+
 # Reconciliation runs one pass per configured provider: the provider the canonical
 # model is pushed to (SYNC_PROVIDER), when it has a reader. A provider with none
 # (Ory, Zitadel) is refused.
@@ -158,6 +189,25 @@ async def get_role_service(
         assignment_repository=assignment_repository,
         adapter=adapter,
         publisher=request.app.state.cache_publisher,
+    )
+
+
+async def get_member_directory(
+    request: Request,
+    session: AsyncSession = Depends(get_async_session),
+) -> MemberDirectory:
+    """The tenant members the ``/api/members`` routes read and change, by ``SYNC_PROVIDER``.
+
+    Descope (the default): the Descope management adapter, which keeps members in
+    Descope under the Descope tenant and user ids its principals carry (503 until
+    the client is built). Every other provider: ``MemberService`` over the
+    canonical users and memberships, pushed through the provider's sync adapter.
+    """
+    if SYNC_PROVIDER == "descope":
+        return require_descope_management(request)
+    return MemberService(
+        users=await get_user_service(request, session),
+        roles=await get_role_service(request, session),
     )
 
 

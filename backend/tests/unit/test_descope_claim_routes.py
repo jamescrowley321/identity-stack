@@ -1,11 +1,12 @@
 """The routes that read Descope's ``tenants`` or top-level ``roles`` claim serve Descope principals only.
 
-``GET /api/roles/me`` reads the ``tenants`` claim (``get_tenant_claims``), and
-``POST /api/tenants`` the top-level ``roles`` claim (``require_admin_role``). A
+``POST /api/tenants`` reads the top-level ``roles`` claim (``require_admin_role``). A
 Keycloak, Ory or Zitadel principal is authorized from the canonical model, so
 those claims on its token are refused with 403, whatever they say: a provider
 mapper that put them there would otherwise grant membership of any tenant, or
-an admin role (identity-stack#596). A Descope principal is served as before.
+an admin role (identity-stack#596). ``GET /api/roles/me`` reads no claim: it
+answers the tenant resolver's grants, so a canonical principal gets its canonical
+role there, never the forged one. A Descope principal is served as before.
 
 ``GET /api/tenants`` and the ``/api/tenants/{tenant_id}/resources`` routes take
 the caller's tenants from ``get_tenant_memberships`` (#673): a canonical
@@ -30,7 +31,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.dependencies import rbac
-from app.dependencies.descope import NOT_A_DESCOPE_PRINCIPAL
 from app.dependencies.identity import get_tenant_service
 from app.dependencies.rbac import get_rbac_session
 from app.dependencies.tenant import DESCOPE_CLAIMS_ONLY
@@ -71,10 +71,7 @@ FORGED = {
     "dct": TENANT,
 }
 REFUSED = {"detail": DESCOPE_CLAIMS_ONLY}
-# ``GET /api/roles/me`` sits on the roles router, which ``require_descope_principal``
-# guards before the claim is read: the same refusal, with that guard's own body.
 ROUTES = [
-    ("GET", "/api/roles/me", None, {"detail": NOT_A_DESCOPE_PRINCIPAL}),
     ("POST", "/api/tenants", {"name": "Forged"}, REFUSED),
 ]
 
@@ -194,6 +191,16 @@ class TestForgedTenantsClaimsOnTheTenantRoutesAreNotRead:
 
         assert (response.status_code, response.json()) == (403, {"detail": NOT_A_MEMBER})
         session.add.assert_not_called()
+
+
+@pytest.mark.parametrize("provider", sorted(CANONICAL))
+def test_a_canonical_principal_reads_its_canonical_roles_not_the_forged_ones(client, provider):
+    response = _call(client, "GET", "/api/roles/me", None, _canonical_token(provider))
+
+    assert (response.status_code, response.json()) == (
+        200,
+        {"tenant_id": TENANT, "roles": ["owner"], "permissions": ["settings:manage"]},
+    )
 
 
 class TestADescopePrincipalIsServedAsBefore:

@@ -1,7 +1,8 @@
 """Every tenant-scoped route declares its authorization (docs/conventions.md §15).
 
 A route is *tenant-scoped* when its dependency tree contains ``get_tenant_id``,
-``get_tenant_claims`` or ``get_tenant_memberships``. Such a route MUST also depend on ``require_role``,
+``get_tenant_access``, ``get_tenant_claims`` or ``get_tenant_memberships``. Such a route MUST also depend on
+``require_role``,
 ``require_permission`` or ``require_fga``, unless it is listed in
 ``MEMBER_ROUTES`` below: routes any member of the caller's tenant may call, where
 tenant membership *is* the authorization decision.
@@ -21,9 +22,9 @@ from fastapi.routing import APIRoute
 
 from app.dependencies.fga import require_fga
 from app.dependencies.rbac import require_permission, require_role
-from app.dependencies.tenant import get_tenant_claims, get_tenant_id, get_tenant_memberships
+from app.dependencies.tenant import get_tenant_access, get_tenant_claims, get_tenant_id, get_tenant_memberships
 
-TENANT_DEPENDENCIES = (get_tenant_id, get_tenant_claims, get_tenant_memberships)
+TENANT_DEPENDENCIES = (get_tenant_id, get_tenant_access, get_tenant_claims, get_tenant_memberships)
 AUTHORIZATION_FACTORIES = (require_role, require_permission, require_fga)
 
 # (method, path) -> why tenant membership alone authorizes the route.
@@ -32,7 +33,7 @@ MEMBER_ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/api/tenants/current"): "reads the caller's current tenant",
     ("GET", "/api/tenants/{tenant_id}/resources"): "_verify_tenant_membership checks the path tenant",
     ("POST", "/api/tenants/{tenant_id}/resources"): "_verify_tenant_membership checks the path tenant",
-    ("GET", "/api/roles/me"): "reads the caller's own roles",
+    ("GET", "/api/roles/me"): "reads the caller's own roles in the resolver's tenant",
     ("GET", "/api/tenants/current/settings"): "any member may read settings; PATCH requires admin/owner",
     ("POST", "/api/documents"): "any member may create a document; the creator becomes its FGA owner",
     ("GET", "/api/documents"): "lists only the documents FGA reports the caller can view",

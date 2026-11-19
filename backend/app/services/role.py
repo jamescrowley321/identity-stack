@@ -16,7 +16,7 @@ from opentelemetry import trace
 
 from app.domain import access
 from app.errors.access import identity_error
-from app.errors.identity import Conflict, Forbidden, IdentityError
+from app.errors.identity import Conflict, Forbidden, IdentityError, ValidationError
 from app.logbook import logbook
 from app.repositories.assignment import UserTenantRoleRepository, assignment_from_row, assignment_to_row
 from app.repositories.base import RepositoryConflictError
@@ -52,6 +52,7 @@ _INVALIDATIONS: dict[type[access.AccessEvent], str] = {
 # a role in the tenant. The first membership comes from sign-in provisioning, as
 # #592 has it for every provider.
 NOT_A_MEMBER_OF_THE_TENANT = "The user is not a member of the tenant: a role is assigned only to a member"
+NO_ROLES_TO_ENROL = "A member is given at least one role"
 
 
 def _now() -> datetime:
@@ -310,6 +311,83 @@ class RoleService:
                     "assigned_at": assignment.assigned_at.isoformat() if assignment.assigned_at else None,
                 }
             )
+
+    async def assignable_roles(
+        self, *, tenant_id: uuid.UUID, role_names: list[str]
+    ) -> Result[list[uuid.UUID], IdentityError]:
+        """The id of each named role assignable in the tenant: the tenant's own of that name, else the global one.
+
+        ``ValidationError`` for a name the tenant has no role of; nothing is written.
+        """
+        with tracer.start_as_current_span("RoleService.assignable_roles") as span:
+            span.set_attribute("tenant.id", str(tenant_id))
+            if not role_names:
+                return Error(ValidationError(message=NO_ROLES_TO_ENROL))
+            role_ids: list[uuid.UUID] = []
+            for name in dict.fromkeys(role_names):
+                row = await self._repository.get_by_name(name, tenant_id) or await self._repository.get_by_name(name)
+                if row is None:
+                    return Error(ValidationError(message=f"Role '{name}' not found"))
+                role_ids.append(row.id)
+            return Ok(role_ids)
+
+    async def stage_member_roles(
+        self, *, user_id: uuid.UUID, tenant_id: uuid.UUID, role_ids: list[uuid.UUID]
+    ) -> Result[list[access.RoleAssigned], IdentityError]:
+        """Write the new member's assignments in the caller's transaction, without committing or pushing.
+
+        For an invitation (``UserService.create_member``), whose user and roles
+        commit together or not at all: on an ``Error`` the caller rolls back. Each
+        returned event is pushed after the commit by ``push_member_roles``.
+        """
+        with tracer.start_as_current_span("RoleService.stage_member_roles") as span:
+            span.set_attribute("user.id", str(user_id))
+            span.set_attribute("tenant.id", str(tenant_id))
+            if not role_ids:
+                return Error(ValidationError(message=NO_ROLES_TO_ENROL))
+            staged: list[access.RoleAssigned] = []
+            for role_id in role_ids:
+                row = await self._repository.get(role_id)
+                held = None if row is None else await self._assignment_repository.get(user_id, tenant_id, role_id)
+                decision = access.assign_role(
+                    None if row is None else role_from_row(row),
+                    None if held is None else assignment_from_row(held),
+                    access.AssignRole(user_id=user_id, tenant_id=tenant_id, role_id=role_id, assigned_by=None),
+                    now=_now(),
+                )
+                if decision.is_error():
+                    return Error(identity_error(decision.error))
+                decided, assigned = decision.ok
+                try:
+                    await self._assignment_repository.create(assignment_to_row(decided))
+                except RepositoryConflictError:
+                    return Error(
+                        identity_error(
+                            access.RoleAlreadyAssigned(user_id=user_id, tenant_id=tenant_id, role_id=role_id)
+                        )
+                    )
+                staged.append(assigned)
+            return Ok(staged)
+
+    async def push_member_roles(self, assigned: list[access.RoleAssigned]) -> Result[bool, IdentityError]:
+        """After the commit: invalidate and push each staged assignment (Keycloak: organization member and group).
+
+        ``Ok(True)`` when every push succeeded; a failed one is logged and makes it ``Ok(False)``.
+        """
+        with tracer.start_as_current_span("RoleService.push_member_roles") as span:
+            span.set_attribute("assignments.count", len(assigned))
+            every_pushed = True
+            for event in assigned:
+                await self._invalidate(event, event.role_id, event.tenant_id)
+                pushed = await self._adapter.sync_role_assignment(
+                    user_id=event.user_id,
+                    tenant_id=event.tenant_id,
+                    role_id=event.role_id,
+                    data={"role_name": event.role_name},
+                )
+                self._log_sync_failure(pushed, event.role_id, "push_member_roles")
+                every_pushed = every_pushed and pushed.is_ok()
+            return Ok(every_pushed)
 
     async def list_roles(
         self,

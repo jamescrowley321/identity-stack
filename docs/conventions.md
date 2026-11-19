@@ -257,8 +257,8 @@ raise `IdentityErrorRaised(<IdentityError>)`, which the app renders through
 
 ### 15. Every tenant-scoped route declares its authorization
 
-A route is tenant-scoped when it depends on `get_tenant_id`, `get_tenant_claims` or
-`get_tenant_memberships`. Every
+A route is tenant-scoped when it depends on `get_tenant_id`, `get_tenant_access`, `get_tenant_claims`
+or `get_tenant_memberships`. Every
 tenant-scoped route **MUST** also depend on `require_role`, `require_permission` or
 `require_fga`. See [ADR-0003](adr/0003-authorization-as-route-dependencies.md).
 
@@ -277,8 +277,9 @@ tenant-scoped route **MUST** also depend on `require_role`, `require_permission`
 
 Code in `app/routers/` **MUST NOT** read `request.state.claims` or
 `request.state.principal`. It takes them from the dependencies in `app/dependencies/`:
-`get_claims`, `get_current_user`, `get_tenant_id`, `get_tenant_claims` and
-`get_tenant_memberships`. In particular, a
+`get_claims`, `get_current_user`, `get_tenant_id`, `get_tenant_access` (the tenant with the
+caller's roles and permissions in it), `get_tenant_claims` and `get_tenant_memberships`. In
+particular, a
 handler **MUST NOT** read the `dct` claim to find its tenant. It takes the tenant from
 `get_tenant_id`.
 
@@ -305,7 +306,7 @@ belong to, a non-active canonical user and a malformed `dct`. An error from the 
 
 ### 18. One resolver decides the tenant and the grants
 
-`get_tenant_id`, `require_role`, `require_global_role` and `require_permission` **MUST** take the request's tenant
+`get_tenant_id`, `get_tenant_access`, `require_role`, `require_global_role` and `require_permission` **MUST** take the request's tenant
 and the caller's roles and permissions from
 `app.dependencies.tenant_access.resolve_tenant_access`. A dependency **MUST NOT** read a
 tenant, role or permission claim itself. The resolver takes its sources in this order:
@@ -350,27 +351,71 @@ caller. A request with no claims gets 401 from the guard itself (§17). A route 
 handed the management adapter (`get_descope_management`) **MUST** carry the guard or be
 listed, with what keeps another provider's subject from Descope, in the same test's
 `UNGUARDED_ADAPTER_ROUTES`. Every route that depends on `get_tenant_id` **MUST** be listed in
-`backend/tests/unit/test_descope_backed_routes.py`, either in `DESCOPE_TENANT_ROUTES` or,
-with its reason, in `PROVIDER_NEUTRAL_ROUTES`. Adding a route to the second register is a
-reviewed decision, and a route whose service mirrors its writes to Descope through a sync
-adapter is Descope-backed: `POST /api/roles/assign` and `/api/roles/remove` are, because
-`RoleService` sends each assignment to Descope. The second register holds the two
-`/api/access-checks` routes, which answer the resolver's tenant to a holder of
-`documents:read` or `settings:manage` and depend on nothing but the resolver, and
+`backend/tests/unit/test_descope_backed_routes.py`, in `DESCOPE_TENANT_ROUTES`, in
+`SYNC_PROVIDER_TENANT_ROUTES` or, with its reason, in `PROVIDER_NEUTRAL_ROUTES`, and so must
+every route that depends on `get_tenant_access`. Adding a route to the last register is a
+reviewed decision. It holds the two `/api/access-checks` routes, which answer the
+resolver's tenant to a holder of `documents:read` or `settings:manage` and depend on
+nothing but the resolver, and `GET /api/roles/me`, which answers the caller's own roles
+and permissions in the resolver's tenant (`get_tenant_access`): a Descope principal's
+from its claims, a canonical principal's from the canonical model. It also holds
 `GET /api/tenants/current`, which reads a canonical principal's tenant from the canonical
 model and loads only a Descope principal's tenant (its `dct`) from Descope; it refuses any
 other principal (403) (#673).
 
+A route whose service pushes its writes to the configured sync adapter (`SYNC_PROVIDER`)
+**MUST** depend on `app.dependencies.sync_provider.require_sync_provider_principal` and be
+listed in `SYNC_PROVIDER_TENANT_ROUTES` or `SYNC_PROVIDER_PROJECT_ROUTES` in the same test
+file: the role assignment routes (`POST /api/roles/assign`, `/api/roles/remove`), the
+member routes (`GET /api/members`, `POST /api/members/invite`,
+`POST /api/members/{user_id}/deactivate` and `/activate`, `DELETE /api/members/{user_id}`)
+and the role and permission definition routes (`/api/roles`, `/api/roles/{name}`,
+`/api/permissions`, `/api/permissions/{name}`). The adapter takes the request's tenant id
+and the user ids as its provider's, so the guard refuses (403, `This route serves
+<provider> principals only`) every principal whose provider is not the sync provider,
+before the tenant is resolved and before anything is written. These routes left the
+Descope registers (#676): `RoleService` and `PermissionService` write to Postgres and push
+through whichever adapter the deployment configures, so the routes are not Descope's, and
+fencing them on the caller's provider refused a Keycloak or Zitadel admin in a deployment
+that syncs to Keycloak or Zitadel. The member routes left them too (#677): they take their
+members from `app.dependencies.identity.get_member_directory`, which in a Descope deployment
+is the Descope management adapter, as before, and otherwise `MemberService` over the
+canonical users and memberships, whose changes the sync adapter pushes (Keycloak:
+organization membership and the role's organization group). They stay
+`require_role("owner", "admin")` in the request's tenant. An invitation **MUST** only
+create: the user and its memberships commit together, and an email any canonical user
+already has, in any case, is refused (409, `MemberRefusal.ACCOUNT_EXISTS`) whatever tenant holds it, so
+an admin can neither enrol another tenant's account nor learn about it. A member's status
+is the account's (the model keeps no status per membership), so it is set only for a user
+whose sole tenant is the request's, under a lock on the user's row (409 otherwise), and a user who is no member of the tenant reads
+the same whether or not it exists. In a Descope deployment (`SYNC_PROVIDER=descope`, the
+default) the guard passes exactly the `descope_managed` principals `require_descope_principal`
+passes, with the same body. The definitions belong to no tenant and every tenant's grants read
+them, so their routes are gated by `app.dependencies.rbac.require_definitions_role`
+(`require_global_role("operator", claimed_roles=("owner", "admin"))`): a canonical
+principal **MUST** hold `operator` by its sole membership, as on every other route over
+state that belongs to no tenant. A tenant `admin` is refused: its role is one tenant's,
+and with it the caller could delete the `owner` role, which ends that role in every
+tenant, or grant the `member` role a permission everywhere. A Descope principal is decided
+from its claims and keeps `owner` or `admin`, as before. Assigning or removing `operator` through
+`POST /api/roles/assign` or `/api/roles/remove`, or inviting with it through
+`POST /api/members/invite`, **MUST** be refused (403,
+`RoleGrantRefusal.OPERATOR_GRANT`) unless the caller holds `operator` as
+`require_global_role` decides it (`app.dependencies.rbac.operator_grant_check`): the routes
+take `owner` or `admin` in one tenant, and `operator` opens every tenant's state. Creating, changing, renaming to or from, or deleting the
+`operator` role definition **MUST** be refused the same way (`RoleGrantRefusal.OPERATOR_DEFINITION`,
+`operator_definition_check`): a Descope `owner` or `admin` passes `require_definitions_role`
+and could otherwise strip `operator` from every operator.
+
 A route over state that belongs to the whole Descope project **MUST** carry the same guard
-and be listed in `DESCOPE_PROJECT_ROUTES` in that file: the role and permission definition
-routes (`/api/roles`, `/api/roles/{name}`, `/api/permissions`, `/api/permissions/{name}`),
-whose services mirror each change to Descope, and `GET` and `PUT /api/fga/schema`.
+and be listed in `DESCOPE_PROJECT_ROUTES` in that file: `GET` and `PUT /api/fga/schema`.
 `require_role` answers for one tenant, so without the guard a canonical principal who is
 an admin of any one of several tenants would reach them by naming that tenant.
 
 A route over state that belongs to no tenant and that Descope does not hold **MUST** be
 gated by `app.dependencies.rbac.require_global_role`, not `require_role`: `GET /api/users`
-(every tenant's users), `/api/providers`, `/api/sync/status` and `/api/events/recent`. One
+(every tenant's users), `/api/providers`, `/api/sync/status` and `/api/events/recent`, and
+the role and permission definitions above (`require_definitions_role`). One
 role in one tenant opens all of that state, so on these routes the request chooses
 nothing. A canonical principal is decided by their sole membership, and one with several
 memberships is refused, whether they send the `X-Tenant-ID` header, carry a `dct` claim
@@ -405,7 +450,7 @@ configuration at startup (`refuse_canonical_descope_managed`).
   the `tenants` claim through `get_tenant_claims`. A Descope principal's tenant ids are
   Descope's, which name no canonical tenant, so its memberships are its claim (#673).
 - Exception: `get_tenant_claims` returns the Descope `tenants` claim as it is, for
-  `get_tenant_memberships` and `GET /api/roles/me`. It reads the claim
+  `get_tenant_memberships`. It reads the claim
   through `get_descope_claims`, which refuses (403, `DESCOPE_CLAIMS_ONLY`) every principal
   whose provider is not `descope_managed`, whatever its token carries: a provider mapper
   that put a `tenants` claim on Ory, Zitadel or Keycloak tokens would otherwise grant
@@ -420,8 +465,8 @@ configuration at startup (`refuse_canonical_descope_managed`).
   the guard.
 - Exception: `GET /api/tenants` takes no tenant from `get_tenant_id` and carries no guard:
   it lists the caller's own memberships from `get_tenant_memberships` (#673).
-- Exception: the role and permission definitions and the FGA schema belong to no tenant
-  and are gated by `require_role`, which answers for one tenant. A Descope principal who
+- Exception: the FGA schema belongs to no tenant and is gated by `require_role`, which
+  answers for one tenant. A Descope principal who
   holds the role in their current tenant is served there, as before the resolver (#593).
 - Exception: the `/api/users/{user_id}/idp-links` routes are gated by `require_role` and
   take no tenant from `get_tenant_id`. `_require_user_in_tenant` reads `dct` itself and

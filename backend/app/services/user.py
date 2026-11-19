@@ -7,12 +7,15 @@ OTel spans on every method. Sync failure → log warning, still return Ok.
 
 from __future__ import annotations
 
+import enum
 import uuid
+from collections.abc import Awaitable, Callable
+from typing import TypeVar
 
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
-from app.errors.identity import Conflict, Forbidden, IdentityError, NotFound
+from app.errors.identity import Conflict, Forbidden, IdentityError, NotFound, ValidationError
 from app.logbook import logbook
 from app.models.identity.user import User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
@@ -32,6 +35,42 @@ from app.services.memberships import restore_memberships
 
 logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
+
+T = TypeVar("T")
+
+
+class MemberStatus(enum.StrEnum):
+    """A tenant member's status as the members API names it (the SPA's vocabulary, Descope's)."""
+
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+    INVITED = "invited"
+
+
+# The canonical user's status, as a member's: a provisioned user has not signed in yet.
+_MEMBER_STATUS: dict[UserStatus, MemberStatus] = {
+    UserStatus.active: MemberStatus.ENABLED,
+    UserStatus.inactive: MemberStatus.DISABLED,
+    UserStatus.provisioned: MemberStatus.INVITED,
+}
+
+# The status a member may be set to, as the canonical user's.
+_SETTABLE_STATUS: dict[MemberStatus, UserStatus] = {
+    MemberStatus.ENABLED: UserStatus.active,
+    MemberStatus.DISABLED: UserStatus.inactive,
+}
+
+
+class MemberRefusal(enum.StrEnum):
+    """Why a member operation was refused: an ``IdentityError``'s message."""
+
+    # A user id that names no member of the tenant, whether or not the user exists.
+    NOT_IN_TENANT = "Member not found in tenant"
+    # The canonical status is the account's, not one membership's (as Descope's is, #581).
+    IN_ANOTHER_TENANT = "Member also belongs to another tenant"
+    # An invitation creates the account: it never enrols one that exists, which
+    # another tenant may hold, nor tells whose it is (as Descope's invite refuses).
+    ACCOUNT_EXISTS = "An account with this email already exists"
 
 
 class UserService:
@@ -341,6 +380,104 @@ class UserService:
 
             return Ok(payload)
 
+    async def list_members(self, *, tenant_id: uuid.UUID) -> Result[list[dict], IdentityError]:
+        """The tenant's members, each with its roles there, in the members API's shape."""
+        with tracer.start_as_current_span("UserService.list_members") as span:
+            span.set_attribute("tenant.id", str(tenant_id))
+            members: dict[uuid.UUID, dict] = {}
+            for user, role_name in await self._repository.list_tenant_members(tenant_id):
+                member = members.setdefault(user.id, _member(user))
+                member["roleNames"].append(role_name)
+            span.set_attribute("members.count", len(members))
+            return Ok(list(members.values()))
+
+    async def create_member(
+        self,
+        *,
+        tenant_id: uuid.UUID,
+        email: str,
+        stage_memberships: Callable[[uuid.UUID], Awaitable[Result[T, IdentityError]]],
+    ) -> Result[tuple[dict, T], IdentityError]:
+        """Create the user with ``email`` and its memberships in one transaction, then push the user.
+
+        ``stage_memberships`` writes the new user's role assignments in the same
+        transaction without committing (``RoleService.stage_member_roles``); its
+        ``Ok`` value is returned beside the member for the caller to push after
+        the commit. The member carries ``PROVIDER_SYNC`` when the user's push
+        failed. An account whose email is ``email`` in any case is ``Conflict``
+        (``MemberRefusal.ACCOUNT_EXISTS``), whichever tenant holds it; the new
+        one is stored lower case. On any ``Error`` nothing is committed.
+        """
+        with tracer.start_as_current_span("UserService.create_member") as span:
+            span.set_attribute("tenant.id", str(tenant_id))
+            # Stored as one spelling, and compared ignoring case: ``Bob@x.com`` is
+            # the account ``bob@x.com`` already names, whatever case it was stored in.
+            email = email.strip().lower()
+            if await self._repository.email_taken(email):
+                return Error(Conflict(message=MemberRefusal.ACCOUNT_EXISTS))
+            try:
+                user = await self._repository.create(User(email=email, user_name=email))
+            except RepositoryConflictError:
+                await self._repository.rollback()
+                return Error(Conflict(message=MemberRefusal.ACCOUNT_EXISTS))
+            staged = await stage_memberships(user.id)
+            if staged.is_error():
+                await self._repository.rollback()
+                return Error(staged.error)
+            member = {"userId": str(user.id), "email": user.email}
+            sync_data = {"email": user.email, "status": user.status.value, CREATED_IN_TENANT: str(tenant_id)}
+            user_id = user.id
+            try:
+                await self._repository.commit()
+            except Exception:
+                logger.exception("Commit failed for create_member %s", user_id)
+                await self._repository.rollback()
+                return Error(Conflict(message="Failed to persist user"))
+
+            await self._publisher.publish(
+                entity_type="user", entity_id=user_id, operation="create", tenant_id=tenant_id
+            )
+            pushed = await self._adapter.sync_user(user_id=user_id, data=sync_data)
+            self._log_sync_failure(pushed, user_id, "create")
+            if pushed.is_error():
+                member[PROVIDER_SYNC] = PROVIDER_SYNC_FAILED
+            return Ok((member, staged.ok))
+
+    async def set_member_status(
+        self, *, tenant_id: uuid.UUID, user_id: uuid.UUID, status: MemberStatus
+    ) -> Result[dict, IdentityError]:
+        """Enable or disable a member whose only tenant is ``tenant_id``, and push the change.
+
+        The status is the canonical account's, which every tenant of the user
+        reads, so a member who also belongs to another tenant is ``Conflict``:
+        this tenant alone cannot decide it. A user who is no member of the tenant
+        is ``Forbidden``, the same answer whether or not the user exists.
+        """
+        with tracer.start_as_current_span("UserService.set_member_status") as span:
+            span.set_attribute("tenant.id", str(tenant_id))
+            span.set_attribute("user.id", str(user_id))
+            wanted = _SETTABLE_STATUS.get(status)
+            if wanted is None:
+                return Error(ValidationError(message=f"A member's status is set to one of {list(_SETTABLE_STATUS)}"))
+            if self._assignment_repository is None:
+                return Error(NotFound(message="Assignment repository not configured"))
+            # The user's row is held until the status commits: an assignment of the
+            # user in another tenant waits on it (its foreign key), so the user
+            # cannot join one between the check and the write.
+            await self._repository.lock(user_id)
+            tenants = {row.tenant_id for row in await self._assignment_repository.list_by_user(user_id)}
+            refusal = None
+            if tenant_id not in tenants:
+                refusal = Forbidden(message=MemberRefusal.NOT_IN_TENANT)
+            elif tenants != {tenant_id}:
+                refusal = Conflict(message=MemberRefusal.IN_ANOTHER_TENANT)
+            if refusal is not None:
+                await self._repository.rollback()
+                return Error(refusal)
+            if wanted is UserStatus.inactive:
+                return await self.deactivate_user(tenant_id=tenant_id, user_id=user_id)
+            return await self.activate_user(tenant_id=tenant_id, user_id=user_id)
+
     async def search_users(
         self,
         *,
@@ -402,3 +539,15 @@ class UserService:
                 operation,
                 result.error.message,
             )
+
+
+def _member(user: User) -> dict:
+    """A canonical user as a tenant member, before its roles are added."""
+    name = " ".join(part for part in (user.given_name, user.family_name) if part)
+    return {
+        "userId": str(user.id),
+        "email": user.email,
+        "name": name or user.user_name,
+        "status": _MEMBER_STATUS[user.status],
+        "roleNames": [],
+    }

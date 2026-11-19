@@ -6,6 +6,7 @@ from app.dependencies.rbac import canonical_memberships
 from app.dependencies.tenant_access import (
     SELECT_A_TENANT_FIRST,
     CanonicalMemberships,
+    TenantAccess,
     TenantMembership,
     canonical_tenant_memberships,
     resolve_tenant_access,
@@ -39,6 +40,22 @@ def get_tenant_id(
         raise HTTPException(status_code=401, detail="Not authenticated")
     access = resolve_tenant_access(request, claims, memberships, no_tenant_detail=SELECT_A_TENANT_FIRST)
     return access.tenant_id
+
+
+def get_tenant_access(
+    request: Request,
+    memberships: Annotated[CanonicalMemberships | None, Depends(canonical_memberships)] = None,
+) -> TenantAccess:
+    """The request's tenant and the caller's roles and permissions in it, from the tenant resolver (§18).
+
+    As ``get_tenant_id``, with the grants: a Descope principal's from its ``dct``
+    and ``tenants`` claims, a canonical provider's from its canonical memberships.
+    Raises 401 without claims, and 403 if the request has no single tenant.
+    """
+    claims = getattr(request.state, "claims", None)
+    if claims is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return resolve_tenant_access(request, claims, memberships, no_tenant_detail=SELECT_A_TENANT_FIRST)
 
 
 def get_descope_claims(request: Request) -> dict:
