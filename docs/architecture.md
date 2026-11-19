@@ -67,7 +67,8 @@ token's one alias (for the `keycloak` provider), as `member`, with the email and
 the access token. No claim, two aliases, an alias no tenant names, or a missing or
 unverified email provisions nothing (403, or 400 for the email). The email rules of an
 organization-placed first login apply, as for Zitadel ([security.md](security.md)).
-`make keycloak-seed` links the fixture tenants to the realm's aliases.
+`make keycloak-seed` links the fixture tenants to the realm's aliases and the fixture users to
+their accounts.
 
 The backend refuses to start with a half-configured Keycloak provider: see the `KEYCLOAK_*`
 rows of [environment-variables.md](environment-variables.md).

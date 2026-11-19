@@ -150,8 +150,10 @@ KEYCLOAK_ADMIN_CLIENT_SECRET=local-only-admin-client   # local fixture value
 Register the provider row once, and link canonical tenants to the realm's organizations, so
 that a first sign-in is provisioned: `cd backend && DATABASE_URL=... KEYCLOAK_ISSUER_URL=...
 python -m scripts.seed_keycloak` registers the row, and `make keycloak-seed` does that and links
-`acme` and `globex` (`tenants.external_org_id` set to each organization's alias) for a realm
-built by `infra/keycloak`.
+`acme` and `globex` (`tenants.external_org_id` set to each organization's alias) and the fixture
+users who hold a role in them (`idp_links` to their Keycloak accounts) for a realm built by
+`infra/keycloak`. Their roles come in with a reconciliation pass
+([keycloak.md](keycloak.md#reconciliation)).
 
 The backend refuses to start with only part of this set. See
 [environment-variables.md](environment-variables.md) for each variable and

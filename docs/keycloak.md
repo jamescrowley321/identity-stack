@@ -16,36 +16,44 @@ users, clients and organizations are listed in
 
 | Run | What it proves | CI job |
 |---|---|---|
-| `backend/tests/e2e_keycloak/` | The shipped SPA and backend against the realm `infra/keycloak/` builds in `keycloak-test`, configured from the root's outputs, driven from Chromium. No credential. | `E2E Tests (Keycloak)`, every pull request |
-| `backend/tests/e2e/` with `E2E_PROVIDER=keycloak` | The shared UI and API suite ([local-development.md](local-development.md#end-to-end-suites)) against the same stack: `alice` (member, `member-app`) and `dave` (tenant admin of `acme`, `tenant-admin-app`). The tests that do not apply to Keycloak are listed with the reason in `backend/tests/e2e/not_applicable.py` | `E2E Tests (Keycloak)`, every pull request |
-| `backend/tests/integration/test_keycloak_*.py` against the import | Token validation, organizations and client roles, `GET /api/identity` and the organization lookup, in-process; every write of the [admin adapter](#admin-adapter) and its startup credential check | `Integration Tests` |
-| The same tests against the Terraform-built realm (`make keycloak-terraform-integration`) | `infra/keycloak/` builds a realm the backend accepts the same way: generated user ids, passwords and directory and admin secrets, same results | `Integration Tests` |
-| `make keycloak-terraform-check` | Every user, client, role, organization, member and marker of the import is in the Terraform root and the other way round, and both realms issue tokens of the same shape | `Keycloak Terraform Check`, every pull request |
+| `backend/tests/e2e_keycloak/` | The shipped SPA and backend against the realm `infra/keycloak/` builds in `keycloak-test`, configured from the root's outputs, driven from Chromium, with the backend syncing to the realm (`SYNC_PROVIDER=keycloak`, the [event pull](#event-pull) on). No credential. | `E2E Tests (Keycloak)`, every pull request |
+| `backend/tests/e2e/` with `E2E_PROVIDER=keycloak` | The shared UI and API suite ([local-development.md](local-development.md#end-to-end-suites)) against the same stack. Both principals are `bob`, signed in through `identity-stack-spa`: the admin acts in `acme`, where he is `admin`, the member in `globex`, where he is `viewer`, each naming its tenant in `X-Tenant-ID`, as the Zitadel run does. The tests that do not apply to Keycloak are listed with the reason in `backend/tests/e2e/not_applicable.py` | `E2E Tests (Keycloak)`, every pull request |
+| `backend/tests/integration/test_keycloak_*.py` against the import | Token binding, first sign-in and canonical authorization in-process; every push of the [admin adapter](#admin-adapter) and its startup credential check; the [event pull](#event-pull) and [reconciliation](#reconciliation) against the realm | `Integration Tests` |
+| The same tests against the Terraform-built realm (`make keycloak-terraform-integration`) | `infra/keycloak/` builds a realm the backend accepts the same way: generated user ids, passwords and admin secret, same results | `Integration Tests` |
+| `make keycloak-terraform-check` | Every user, client, client role, organization, role group and member of the import is in the Terraform root and the other way round, and both realms issue tokens of the same shape | `Keycloak Terraform Check`, every pull request |
 
-The end-to-end suite asks for each of these, in order:
+Both suites start by bringing the canonical model to the realm's state. `make keycloak-seed` links
+the canonical tenants to the realm's organizations and the fixture users who hold a role in them
+to their Keycloak accounts (`idp_links`), and assigns no role. The suites' session set-up
+(`backend/tests/e2e_keycloak/realm.py`) then runs [reconciliation](#reconciliation) passes until
+one applies nothing: the first takes the API client's permissions and roles and the members' role
+groups in, and the second the role groups whose roles the first created (see
+[Limits found](#limits-found)). A pass that fails, or passes that keep changing something, fail the
+run.
 
-1. `bob`, a member of `acme` and `globex`, signs in from the SPA through `member-app` for `acme`.
-2. `GET /api/identity` returns him, the token's tenant `acme` with the permissions it grants
-   there (`documents:read`) and both organizations as memberships.
-3. `GET /api/access-checks/documents-read` answers in `acme`;
-   `GET /api/access-checks/settings-manage` is refused (403): a `member` token has no
-   `settings:manage`.
-4. He switches to `globex` in the tenant switch. Keycloak answers the new authorize request on
-   the live session with redirects only, never a page of its own, so no login form appears.
-   The new token names `globex`, keeps the session id, and the API answers in `globex`.
-5. He signs out from the user menu. Keycloak no longer lists the session, the SPA holds no
-   token, and Sign In shows Keycloak's login form.
-6. `carol`, who holds no client role, gets a token with no `aud`. Every route in the backend's
-   OpenAPI document that needs a token answers 401 with the one rejection body.
-7. `bob` through `tenant-admin-app` is refused `settings:manage` and `GET /api/identity` (403)
-   for `acme` and for `globex`, because he belongs to two organizations. `dave`, tenant admin
-   of `acme` alone, is allowed there.
-8. `alice`, outside `globex`, asks for it on her live session. Keycloak shows the password
-   page and then issues a token with no `organization` claim: the API answers it 403. Her
-   `acme` token with `X-Tenant-ID: globex` is still answered in `acme`.
-9. `alice`, who holds `documents:read` and `documents:write`, is added to `globex` for the
-   test: in both organizations `GET /api/identity` lists only `documents:read`. `erin`, whose
-   one role is `documents:write`, is granted nothing.
+The Keycloak suite asks for each of these:
+
+1. `bob`, admin of `acme` and viewer of `globex`, signs in from the SPA with the plain
+   `organization` scope. Keycloak asks for his username, then which organization (he is in two),
+   then his password. The access token names the SPA as `azp`, the API in `aud` and the
+   organization he picked, and carries no `resource_access`.
+2. `GET /api/identity` returns him, his `keycloak` link and both tenants.
+3. With the same token, `GET /api/access-checks/settings-manage` answers in `acme` and is refused
+   (403) in `globex`, where `GET /api/access-checks/documents-read` answers: the grants are the
+   ones Postgres holds in the tenant `X-Tenant-ID` names.
+4. He switches tenant in the SPA's switcher, to the other tenant and back. The next API calls
+   name the chosen tenant, no request goes to Keycloak, and the SPA holds the same token.
+5. He signs out from the user menu. Keycloak no longer lists the session, the SPA holds no token,
+   and Sign In shows Keycloak's login form.
+6. `bob` through `identity-stack-other`, a client whose tokens lack the API audience: every route
+   in the backend's OpenAPI document that needs a token answers 401 with the one rejection body.
+7. `frank`, admin of `acme` only, is added in Keycloak to `globex` and its `admin` group. After the
+   next poll he holds `settings:manage` in both tenants with the same token. Taken out of `globex`
+   again, he is refused there after the next poll and still served in `acme`.
+8. `erin`'s account is disabled in Keycloak. After the next poll her unexpired token is refused
+   (403, `No tenant context`: a deactivated user holds no tenant) and `GET /api/identity` shows her
+   `inactive`; enabled again, she is served again after the next poll.
+9. `alice`, a member of `acme` only, naming `globex` in `X-Tenant-ID`, is refused there (403).
 
 A missing `keycloak-test`, backend or SPA fails every test of the suite; it never skips.
 
@@ -70,19 +78,20 @@ KEYCLOAK_USER=admin KEYCLOAK_PASSWORD=admin terraform -chdir=infra/keycloak appl
   -var issuer_url=http://keycloak-test.localhost:18180/realms/identity-stack-terraform
 make keycloak-env   # the backend/.env and frontend/.env lines
 
-cd backend
 export DATABASE_URL=postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
-python -m alembic upgrade head
-KEYCLOAK_ISSUER_URL=<KEYCLOAK_ISSUER_URL above> python -m scripts.seed_keycloak
-# then start the backend on :8000 with the backend lines (the KEYCLOAK_ADMIN_CLIENT_* pair is
-# needed only with SYNC_PROVIDER=keycloak), DESCOPE_PROJECT_ID= DESCOPE_MANAGEMENT_KEY= and
-# JIT_ENABLED_PROVIDERS=keycloak, plus RATE_LIMIT_DEFAULT=2000/minute RATE_LIMIT_AUTH=1000/minute:
-# the suite's refused requests share one client address, and the 60/minute default would
-# answer some of them 429
-# and INTERNAL_IDENTITY_KEY, DESCOPE_WEBHOOK_SECRET and DESCOPE_FLOW_SYNC_SECRET set to throwaway
-# values, exported the same in the shell that runs the suite
+(cd backend && python -m alembic upgrade head)
+make keycloak-seed  # the provider row, the tenants' and the fixture users' links
+# then start the backend on :8000 (from backend/) with every backend line, the
+# KEYCLOAK_ADMIN_CLIENT_* pair included, and SYNC_PROVIDER=keycloak (the suites need the event
+# pull and reconciliation), CANONICAL_RBAC_PROVIDERS=keycloak, JIT_ENABLED_PROVIDERS=keycloak,
+# DESCOPE_PROJECT_ID= DESCOPE_MANAGEMENT_KEY=, plus RATE_LIMIT_DEFAULT=2000/minute
+# RATE_LIMIT_AUTH=1000/minute: the suite's refused requests share one client address, and the
+# 60/minute default would answer some of them 429. KEYCLOAK_PULL_INTERVAL_SECONDS=2 makes the
+# tests that wait for a poll quicker (CI sets it). Set INTERNAL_IDENTITY_KEY,
+# DESCOPE_WEBHOOK_SECRET and DESCOPE_FLOW_SYNC_SECRET to throwaway values, exported the same in
+# the shell that runs the suite: the suite runs reconciliation with the last one.
 
-cd ../frontend
+cd frontend
 # the frontend lines of `make keycloak-env` (the plain organization scope; the tenant is
 # switched in the app)
 export VITE_OIDC_AUTHORITY=... VITE_OIDC_CLIENT_ID=... VITE_OIDC_REDIRECT_URI=... VITE_OIDC_SCOPE=...
@@ -92,6 +101,10 @@ npx vite preview --port 3000 --strictPort
 make test-e2e-keycloak   # from the repository root; the shared suite, then backend/tests/e2e_keycloak/;
                          # reads the realm, user ids and passwords from the outputs
 ```
+
+The suites change the realm only for the length of a test (an organization membership, an
+account's `enabled`) and put it back; a run that is killed mid-test can leave such a change, which
+`make test-down && make test-up-keycloak` and a new apply clear.
 
 `E2E_BACKEND_URL` points the suite's API calls at another backend address; the SPA's own `/api`
 calls go through the preview server's proxy to `localhost:8000`. The CI job
@@ -374,13 +387,11 @@ operator gave it; deactivate it if it should not sign in again.
 
 | Limit | Where it shows | Follow-up |
 |---|---|---|
-| An organization-bound type is refused to anyone in two organizations, in both (decision 10). `bob` cannot administer either organization. | Scope 7 | By design |
-| A portable type carries only the read permissions listed for it. A write permission a user holds on `member` is never granted. | Scope 9 | By design |
-| Only `settings:manage` of the `tenant-admin` permissions has a route that checks it. `members:invite` and `members:remove` are in the realm and in tokens and are gated nowhere yet. | Scope 7 | Open: the [admin adapter](#admin-adapter) pushes memberships from the canonical model, and no route checks these permissions |
-| Keycloak does not refuse an authorize request for an organization the user is not in. It issues a token without the `organization` claim, so the backend refuses that token (403), not Keycloak. | Scope 8 | None: the backend refuses |
-| A user removed from an organization keeps a portable token's permissions until it expires (300 s with realm defaults). Keycloak refuses the next refresh. An organization-bound token is checked against the directory on every request. | [`keycloak/fixtures/README.md`](../keycloak/fixtures/README.md#leaving-an-organization-while-holding-a-token-for-it) | Recorded (decision 13) |
-| Signing out ends the SPA's Keycloak session only. The user's other sessions (another browser, another app client) stay. | Scope 5 | None |
-| A silent token renewal can bring back a token for another organization than the one shown. | SPA | [identity-stack#602](https://github.com/jamescrowley321/identity-stack/issues/602) |
-| Routes that send the tenant to Descope, parse it as a canonical tenant id or gate by role answer a Keycloak principal 403, `GET /api/tenants` included. | [architecture.md](architecture.md#keycloak-principals) | Open: the [admin adapter](#admin-adapter) changes no route |
+| A console change reaches the canonical model at the next poll, not at once: until then the backend authorizes from what it held. A disabled account's unexpired token is served for up to one `KEYCLOAK_PULL_INTERVAL_SECONDS` (10 s by default). | Cases 7 and 8 | None: the interval is the bound. An event-listener extension posting signed webhooks would remove the wait, at the cost of one more artifact to build and pin |
+| On a database with no canonical roles, the first reconciliation pass creates the roles from the API client's client roles but reads every role group in the same pass as no role, so each member gets the default `member`; the second pass assigns the groups' roles. | Suite set-up | Open |
+| The adapter follows a user's `keycloak` link only when a sign-in made it; for any other link it looks the account up by the canonical id as username. A user linked by `make keycloak-seed` (or an operator) to an account with another username is not found, so a push for that user creates a second account and Keycloak refuses it (409, same email). `make keycloak-seed` writes its links as the realm's state, so no push is pending for them; a later canonical change to such a user fails to push. | Seeded users | Open |
+| Signing out ends the SPA's Keycloak session only. The user's other sessions (another browser, another client) stay. | Case 5 | None |
+| The organization a user picks at sign-in is in the token's `organization` claim and decides nothing after first sign-in: the tenant is the one `X-Tenant-ID` names. | Cases 1 and 3 | None: by design ([ADR-0011](adr/0011-keycloak-canonical-authorization.md)) |
+| Routes that send the tenant to Descope or read Descope's `tenants` claim answer a Keycloak principal 403, `GET /api/tenants` included. | `backend/tests/e2e/not_applicable.py` | Open: canonical routes for them ([identity-stack#590](https://github.com/jamescrowley321/identity-stack/issues/590)) |
 | The realm registers one SPA origin, `http://localhost:3000`, so the Keycloak end-to-end suite runs in a job of its own, apart from the Descope one that serves its SPA there. | CI | None |
 | Keycloak sets its session cookies `Secure` on the plain-HTTP origin. Chromium keeps them for a `*.localhost` host; other clients may not, and the login form then answers 400. | Every browser login | None: local and CI only |
