@@ -13,7 +13,9 @@ listed with the bare user id.
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,6 +38,12 @@ tracer = trace.get_tracer(__name__)
 OPENFGA_TIMEOUT_SECONDS = 10.0
 # The largest page OpenFGA's Read API serves.
 _READ_PAGE_SIZE = 100
+# OpenFGA's default OPENFGA_MAX_CHECKS_PER_BATCH_CHECK: the most checks one BatchCheck takes.
+_BATCH_CHECK_SIZE = 50
+# BatchChecks one listing has in flight at once.
+_BATCH_CHECK_CONCURRENCY = 6
+# The longest one listing may take, all its BatchChecks together.
+OBJECTS_DEADLINE_SECONDS = 30.0
 SUBJECT_TYPE = "user"
 
 MODEL_IN_TERRAFORM = "The OpenFGA authorization model is managed by Terraform (infra/openfga); change it there"
@@ -274,24 +282,66 @@ class OpenFgaRelationshipStore:
             if not isinstance(token, str) or not token:
                 return found
 
-    async def objects(self, tenant_id: str, object_type: str, relation: str, subject: str) -> list[str]:
+    async def objects(
+        self, tenant_id: str, object_type: str, relation: str, subject: str, *, candidates: Sequence[str]
+    ) -> list[str]:
+        """Each candidate checked with BatchCheck.
+
+        Not ListObjects: it stops at OPENFGA_LIST_OBJECTS_MAX_RESULTS (1000) results or
+        OPENFGA_LIST_OBJECTS_DEADLINE (3 s) and answers the partial list as if it were whole.
+        A check OpenFGA does not answer, or a listing past ``OBJECTS_DEADLINE_SECONDS``, fails the call.
+        """
         with tracer.start_as_current_span(
             "OpenFgaRelationshipStore.objects", record_exception=False, set_status_on_exception=False
         ):
-            data = await self._api.call(
-                "POST",
-                "/list-objects",
-                {
-                    "authorization_model_id": self._model_id,
-                    "type": object_type,
-                    "relation": relation,
-                    "user": _subject(subject),
-                },
-            )
-            # OpenFGA answers for every tenant: keep this tenant's.
-            prefix = f"{object_type}:{tenant_id}/"
-            return [
-                name[len(prefix) :]
-                for name in data.get("objects") or []
-                if isinstance(name, str) and name.startswith(prefix) and len(name) > len(prefix)
-            ]
+            batches = [candidates[i : i + _BATCH_CHECK_SIZE] for i in range(0, len(candidates), _BATCH_CHECK_SIZE)]
+            gate = asyncio.Semaphore(_BATCH_CHECK_CONCURRENCY)
+
+            async def held_in(batch: Sequence[str]) -> list[str]:
+                async with gate:
+                    return await self._batch_check(tenant_id, object_type, relation, subject, batch)
+
+            try:
+                async with asyncio.timeout(OBJECTS_DEADLINE_SECONDS):
+                    found = await asyncio.gather(*(held_in(batch) for batch in batches))
+            except TimeoutError as exc:
+                raise RelationshipStoreError(
+                    RelationshipStoreErrorKind.UNAVAILABLE,
+                    "OpenFGA did not answer every check in time",
+                    f"{len(candidates)} {object_type} checks past {OBJECTS_DEADLINE_SECONDS} s",
+                ) from exc
+            return [object_id for batch in found for object_id in batch]
+
+    async def _batch_check(
+        self, tenant_id: str, object_type: str, relation: str, subject: str, batch: Sequence[str]
+    ) -> list[str]:
+        """The ids in ``batch`` (at most ``_BATCH_CHECK_SIZE``) on which ``subject`` holds ``relation``."""
+        data = await self._api.call(
+            "POST",
+            "/batch-check",
+            {
+                "authorization_model_id": self._model_id,
+                "checks": [
+                    {
+                        "tuple_key": _tuple(tenant_id, object_type, object_id, relation, subject),
+                        "correlation_id": str(index),
+                    }
+                    for index, object_id in enumerate(batch)
+                ],
+            },
+        )
+        results = data.get("result")
+        if not isinstance(results, dict):
+            results = {}
+        held: list[str] = []
+        for index, object_id in enumerate(batch):
+            result = results.get(str(index))
+            if not isinstance(result, dict) or "error" in result:
+                raise RelationshipStoreError(
+                    RelationshipStoreErrorKind.UNAVAILABLE,
+                    "OpenFGA did not answer every check",
+                    f"{_object(object_type, tenant_id, object_id)}: {repr(result)[:200]}",
+                )
+            if result.get("allowed") is True:
+                held.append(object_id)
+        return held

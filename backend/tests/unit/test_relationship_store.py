@@ -1,6 +1,7 @@
 """The relationship stores: selection, startup, the Descope and OpenFGA stores, their user directories and errors."""
 
 import ast
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -16,6 +17,7 @@ from app.dependencies import identity
 from app.dependencies.capabilities import served
 from app.dependencies.fga import store_error_response
 from app.middleware.providers import descope_config, ory_config
+from app.services import openfga
 from app.services.adapters.descope import DescopeSyncAdapter
 from app.services.adapters.keycloak import KeycloakSyncAdapter
 from app.services.adapters.noop import NoOpSyncAdapter
@@ -414,7 +416,8 @@ class TestDescopeStore:
             {"resource": None},
             "junk",
         ]
-        assert await DescopeRelationshipStore(client).objects("t1", "document", "can_view", "u1") == ["d1"]
+        store = DescopeRelationshipStore(client)
+        assert await store.objects("t1", "document", "can_view", "u1", candidates=["d0", "d1", "d2"]) == ["d1"]
 
     async def test_relations_are_typed(self, client):
         client.list_all_relations.return_value = [
@@ -572,13 +575,97 @@ class TestOpenFgaStore:
         ]
         assert [body["tuple_key"] for body in bodies] == [{"object": "document:t1/d1"}] * 2
 
-    async def test_objects_are_the_tenants_own_ids(self):
-        def answer(_request: httpx.Request) -> httpx.Response:
+    async def test_objects_are_the_candidates_batch_checked_in_pages(self):
+        """Every candidate is checked, 50 to a BatchCheck: no ListObjects cap can drop one."""
+        candidates = [f"d{n}" for n in range(120)]
+        bodies: list[dict] = []
+
+        def answer(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            bodies.append((request.url.path, body))
+            # Allow the even-numbered documents.
             return httpx.Response(
-                200, json={"objects": ["document:t1/d1", "document:t2/d2", "document:t1/", "folder:t1/f"]}
+                200,
+                json={
+                    "result": {
+                        check["correlation_id"]: {"allowed": int(check["tuple_key"]["object"].split("/d")[1]) % 2 == 0}
+                        for check in body["checks"]
+                    }
+                },
             )
 
-        assert await _openfga(answer).objects("t1", "document", "can_view", "u1") == ["d1"]
+        held = await _openfga(answer).objects("t1", "document", "can_view", "u1", candidates=candidates)
+
+        assert held == [f"d{n}" for n in range(0, 120, 2)]
+        assert [path for path, _ in bodies] == ["/stores/store-1/batch-check"] * 3
+        checked = [check["tuple_key"] for _, body in bodies for check in body["checks"]]
+        assert checked == [
+            {"user": "user:u1", "relation": "can_view", "object": f"document:t1/d{n}"} for n in range(120)
+        ]
+        assert [len(body["checks"]) for _, body in bodies] == [50, 50, 20]
+        assert {body["authorization_model_id"] for _, body in bodies} == {"model-1"}
+
+    async def test_batch_checks_run_concurrently_up_to_the_cap(self):
+        in_flight = 0
+        peak = 0
+
+        async def answer(request: httpx.Request) -> httpx.Response:
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.01)
+            in_flight -= 1
+            checks = json.loads(request.content)["checks"]
+            return httpx.Response(200, json={"result": {c["correlation_id"]: {"allowed": True} for c in checks}})
+
+        candidates = [f"d{n}" for n in range(openfga._BATCH_CHECK_SIZE * openfga._BATCH_CHECK_CONCURRENCY * 3)]
+        held = await _openfga(answer).objects("t1", "document", "can_view", "u1", candidates=candidates)
+
+        assert held == candidates
+        assert peak == openfga._BATCH_CHECK_CONCURRENCY
+
+    async def test_a_listing_past_the_deadline_fails(self, monkeypatch):
+        monkeypatch.setattr(openfga, "OBJECTS_DEADLINE_SECONDS", 0.05)
+
+        async def answer(_request: httpx.Request) -> httpx.Response:
+            await asyncio.Event().wait()
+            raise AssertionError("never answered")
+
+        with pytest.raises(RelationshipStoreError) as caught:
+            await _openfga(answer).objects("t1", "document", "can_view", "u1", candidates=["d0"])
+
+        assert (caught.value.kind, caught.value.detail) == (
+            RelationshipStoreErrorKind.UNAVAILABLE,
+            "OpenFGA did not answer every check in time",
+        )
+        assert store_error_response(caught.value).status_code == 502
+
+    async def test_no_candidates_asks_nothing(self):
+        def answer(_request: httpx.Request) -> httpx.Response:
+            raise AssertionError("no call expected")
+
+        assert await _openfga(answer).objects("t1", "document", "can_view", "u1", candidates=[]) == []
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            {"0": {"allowed": True}, "1": {"error": {"input_error": "validation_error", "message": "x"}}},
+            {"0": {"allowed": True}},
+            {},
+        ],
+        ids=["a-check-errs", "a-check-is-missing", "no-result"],
+    )
+    async def test_a_check_left_unanswered_fails_the_list(self, result):
+        def answer(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"result": result} if result else {})
+
+        with pytest.raises(RelationshipStoreError) as caught:
+            await _openfga(answer).objects("t1", "document", "can_view", "u1", candidates=["d0", "d1"])
+
+        assert (caught.value.kind, caught.value.detail) == (
+            RelationshipStoreErrorKind.UNAVAILABLE,
+            "OpenFGA did not answer every check",
+        )
 
     async def test_the_schema_is_read_only(self):
         with pytest.raises(RelationshipStoreError) as caught:

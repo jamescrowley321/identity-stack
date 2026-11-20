@@ -21,7 +21,7 @@ from __future__ import annotations
 import enum
 import json
 from abc import abstractmethod
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol
@@ -155,8 +155,14 @@ class RelationshipStore(Protocol):
         ...
 
     @abstractmethod
-    async def objects(self, tenant_id: str, object_type: str, relation: str, subject: str) -> list[str]:
-        """The ids of the tenant's objects on which ``subject`` holds ``relation``."""
+    async def objects(
+        self, tenant_id: str, object_type: str, relation: str, subject: str, *, candidates: Sequence[str]
+    ) -> list[str]:
+        """Those of ``candidates`` (the ids of the tenant's objects) on which ``subject`` holds ``relation``.
+
+        The candidates come from the caller's own records, so the answer is every
+        one of them the subject holds the relation on, never a store's truncated list.
+        """
         ...
 
 
@@ -277,7 +283,9 @@ class DescopeRelationshipStore:
             found = await self._client.list_all_relations(object_type, _prefix_resource_id(tenant_id, object_id))
             return _relations(found)
 
-    async def objects(self, tenant_id: str, object_type: str, relation: str, subject: str) -> list[str]:
+    async def objects(
+        self, tenant_id: str, object_type: str, relation: str, subject: str, *, candidates: Sequence[str]
+    ) -> list[str]:
         with (
             tracer.start_as_current_span(
                 "DescopeRelationshipStore.objects", record_exception=False, set_status_on_exception=False
@@ -291,7 +299,8 @@ class DescopeRelationshipStore:
                 for r in await self._client.list_user_resources(object_type, relation, subject) or []
                 if isinstance(r, dict) and isinstance(r.get("resource"), str)
             ]
-            return [key[len(prefix) :] for key in keys if key.startswith(prefix)]
+            held = {key[len(prefix) :] for key in keys if key.startswith(prefix)}
+            return [object_id for object_id in candidates if object_id in held]
 
 
 def _relations(found: list | None) -> list[Relation]:
