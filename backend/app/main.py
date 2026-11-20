@@ -19,6 +19,7 @@ from app.middleware.factory import configure_middleware
 from app.middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from app.models.database import get_engine
 from app.outbound import OutboundClient, outbound_client
+from app.repositories.registration_tokens import RegistrationTokenKeysNotConfigured, registration_token_cipher
 from app.routers import (
     access_checks,
     accesskeys,
@@ -113,6 +114,10 @@ async def _start_sync_provider(app: FastAPI) -> OutboundClient | None:
     try:
         app.state.keycloak_pull = keycloak_pull_settings()
     except KeycloakPullNotConfigured as exc:
+        raise RuntimeError(f"SYNC_PROVIDER is keycloak but {exc}") from exc
+    try:
+        registration_token_cipher()
+    except RegistrationTokenKeysNotConfigured as exc:
         raise RuntimeError(f"SYNC_PROVIDER is keycloak but {exc}") from exc
     http = outbound_client(timeout=KEYCLOAK_ADMIN_TIMEOUT_SECONDS)
     try:

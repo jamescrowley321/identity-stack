@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import httpx
 import pytest
 import pytest_asyncio
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
@@ -35,6 +36,7 @@ from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.role import Role
 from app.models.identity.tenant import Tenant, TenantStatus
 from app.models.identity.user import IdPLink, User, UserStatus
+from app.repositories.registration_tokens import KEYS_VARIABLE as REGISTRATION_TOKEN_KEYS_VARIABLE
 from app.routers import access_checks, accesskeys, permissions, roles, users
 from app.services.adapters.keycloak import CREDENTIAL_ATTRIBUTE, ORGANIZATION_ATTRIBUTE, TENANT_ATTRIBUTE
 from app.services.keycloak_admin import (
@@ -66,6 +68,7 @@ def canonical_keycloak(monkeypatch, keycloak_token_source: KeycloakTokenSource) 
     monkeypatch.setenv(ADMIN_CLIENT_ID_VARIABLE, ADMIN_CLIENT_ID)
     monkeypatch.setenv(ADMIN_CREDENTIAL_VARIABLE, ADMIN_CLIENT_SECRET)
     monkeypatch.setenv(API_CLIENT_VARIABLE, API_AUDIENCE)
+    monkeypatch.setenv(REGISTRATION_TOKEN_KEYS_VARIABLE, Fernet.generate_key().decode())
 
 
 @pytest_asyncio.fixture(loop_scope="session")
