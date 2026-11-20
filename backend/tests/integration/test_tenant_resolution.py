@@ -370,7 +370,7 @@ async def test_a_suspended_tenant_is_served_to_none_of_its_members(db_session, o
 
     assert (unselected.status_code, unselected.json()) == (200, {"tenant_id": active})
     for refused in (selected, admin, resources):
-        assert (refused.status_code, refused.json()) == (403, {"detail": TenantRefusal.SUSPENDED})
+        assert (refused.status_code, refused.json()) == (403, {"detail": TenantRefusal.NOT_ACTIVE})
     assert [entry["id"] for entry in listed.json()["tenants"]] == [active]
 
 

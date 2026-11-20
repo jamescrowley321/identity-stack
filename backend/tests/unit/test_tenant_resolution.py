@@ -302,7 +302,7 @@ class TestGetTenantIdFailsClosedOnTheCanonicalPath:
         assert response.json() == {"detail": "Token missing subject"}
 
 
-SUSPENDED = {"detail": TenantRefusal.SUSPENDED}
+NOT_ACTIVE = {"detail": TenantRefusal.NOT_ACTIVE}
 
 
 class TestASuspendedTenantIsServedToNoMember:
@@ -314,7 +314,7 @@ class TestASuspendedTenantIsServedToNoMember:
 
         response = _get(client, path, _ory())
 
-        assert (response.status_code, response.json()) == (403, SUSPENDED)
+        assert (response.status_code, response.json()) == (403, NOT_ACTIVE)
 
     @pytest.mark.parametrize("path", ["/tenant", "/roles", "/admin", "/permissions"])
     def test_selecting_a_suspended_tenant_is_refused(self, client, store, path):
@@ -326,7 +326,7 @@ class TestASuspendedTenantIsServedToNoMember:
 
         response = _get(client, path, _ory(), selector=TENANT_B)
 
-        assert (response.status_code, response.json()) == (403, SUSPENDED)
+        assert (response.status_code, response.json()) == (403, NOT_ACTIVE)
 
     def test_an_active_membership_beside_a_suspended_one_is_the_sole_one(self, client, store):
         store.holds((TENANT_A, "member", []), (TENANT_B, "admin", []), tenant_status={TENANT_B: "suspended"})
@@ -341,7 +341,7 @@ class TestASuspendedTenantIsServedToNoMember:
 
         response = _get(client, "/admin", _ory(), selector=TENANT_A)
 
-        assert (response.status_code, response.json()) == (403, SUSPENDED)
+        assert (response.status_code, response.json()) == (403, NOT_ACTIVE)
 
     def test_the_membership_list_leaves_it_out(self, client, store):
         store.holds((TENANT_A, "member", []), (TENANT_B, "admin", []), tenant_status={TENANT_B: "suspended"})

@@ -300,7 +300,7 @@ class TestASuspendedCanonicalTenant:
     def test_it_is_not_the_current_tenant(self, client, stubs, provider):
         response = client.get("/api/tenants/current", headers=_headers(provider, GLOBEX))
 
-        assert (response.status_code, response.json()) == (403, {"detail": TenantRefusal.SUSPENDED})
+        assert (response.status_code, response.json()) == (403, {"detail": TenantRefusal.NOT_ACTIVE})
         stubs.tenant_service.get_tenant.assert_not_awaited()
 
     def test_the_active_tenant_is_current_without_a_selection(self, client, provider):
@@ -311,7 +311,7 @@ class TestASuspendedCanonicalTenant:
     def test_its_resources_are_not_read(self, client, stubs, provider):
         response = client.get(f"/api/tenants/{GLOBEX}/resources", headers=_headers(provider, GLOBEX))
 
-        assert (response.status_code, response.json()) == (403, {"detail": TenantRefusal.SUSPENDED})
+        assert (response.status_code, response.json()) == (403, {"detail": TenantRefusal.NOT_ACTIVE})
         stubs.session.execute.assert_not_awaited()
 
     def test_no_resource_is_created_in_it(self, client, stubs, provider):
@@ -319,7 +319,7 @@ class TestASuspendedCanonicalTenant:
             f"/api/tenants/{GLOBEX}/resources", headers=_headers(provider, GLOBEX), json={"name": "Plans"}
         )
 
-        assert (response.status_code, response.json()) == (403, {"detail": TenantRefusal.SUSPENDED})
+        assert (response.status_code, response.json()) == (403, {"detail": TenantRefusal.NOT_ACTIVE})
         stubs.session.add.assert_not_called()
 
 

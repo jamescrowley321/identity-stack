@@ -17,7 +17,7 @@ chooses nothing: a caller with several memberships is refused, whatever the
 header or a ``dct`` claim on the token names.
 
 A canonical tenant that is not active (``suspended``) is served to no member: a
-request for it is refused (403, ``TenantRefusal.SUSPENDED``), it is no sole
+request for it is refused (403, ``TenantRefusal.NOT_ACTIVE``), it is no sole
 membership, and ``canonical_tenant_memberships`` does not list it. On a route
 whose state belongs to no tenant the membership still counts, since that state
 is not the suspended tenant's: an operator keeps the operator role.
@@ -50,7 +50,9 @@ SELECT_A_TENANT_FIRST = "No tenant context — select a tenant first"
 class TenantRefusal(enum.StrEnum):
     """Why the resolver refused a tenant the caller belongs to."""
 
-    SUSPENDED = "This tenant is suspended"
+    # Suspended, deleted, or a status that was not read or is unknown: the answer
+    # does not say which.
+    NOT_ACTIVE = "This tenant is not active"
 
 
 @dataclass(frozen=True)
@@ -314,7 +316,7 @@ def resolve_tenant_access(
     tenant: there neither the ``X-Tenant-ID`` header nor a ``dct`` claim may
     choose among several memberships. Raises 403 with ``no_tenant_detail`` on
     every branch that does not end at exactly one tenant, and with
-    ``TenantRefusal.SUSPENDED`` when ``request_selects`` is on and that tenant is
+    ``TenantRefusal.NOT_ACTIVE`` when ``request_selects`` is on and that tenant is
     not active.
     """
     if memberships is None:
@@ -331,7 +333,7 @@ def resolve_tenant_access(
             "tenant resolution refused: provider=%s sub=%r asked for a tenant that is not active",
             *_caller(request, claims),
         )
-        raise HTTPException(status_code=403, detail=TenantRefusal.SUSPENDED)
+        raise HTTPException(status_code=403, detail=TenantRefusal.NOT_ACTIVE)
     grants = [grant for grant in memberships.grants if grant.tenant_id == tenant_id]
     return TenantAccess(
         tenant_id=tenant_id,

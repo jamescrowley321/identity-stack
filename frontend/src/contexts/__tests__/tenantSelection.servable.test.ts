@@ -11,6 +11,10 @@ describe("servableMemberships (#689)", () => {
     expect(servableMemberships(memberships).map((m) => m.tenant_id)).toEqual(["tenant-active"]);
   });
 
+  it("leaves out a membership whose status is missing", () => {
+    expect(servableMemberships([{ tenant_id: "tenant-unknown" }])).toEqual([]);
+  });
+
   it("never starts the selector on a suspended tenant, selected or named by the sign-in", () => {
     expect(initialTenantId(servableMemberships(memberships), "tenant-suspended", "acme")).toBe("tenant-active");
   });

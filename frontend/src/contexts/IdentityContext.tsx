@@ -37,8 +37,8 @@ export interface CanonicalTenantMembership {
   tenant_name: string;
   /** The tenant's organization at the caller's provider; `null` (or absent) when it has none there. */
   external_org_id?: string | null;
-  /** The tenant's canonical status (`active`, `suspended`); absent from an older payload. */
-  status?: string;
+  /** The tenant's canonical status (`active`, `suspended`); only an active tenant is offered. */
+  status: string;
 }
 
 export interface CanonicalLinkedIdp {

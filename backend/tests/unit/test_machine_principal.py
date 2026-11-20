@@ -205,7 +205,7 @@ class TestARefusedCredential:
 
         response = _get(client, ADMIN_ROLE, _machine_token(op), tenant=tenant)
 
-        assert (response.status_code, response.json()) == (403, {"detail": TenantRefusal.SUSPENDED})
+        assert (response.status_code, response.json()) == (403, {"detail": TenantRefusal.NOT_ACTIVE})
 
     def test_a_persons_subject_on_a_machine_clients_token_grants_nothing(self, op, client, stored):
         """A user signing in through a machine client (were its flows ever switched on) is no person here."""

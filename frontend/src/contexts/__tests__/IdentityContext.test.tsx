@@ -31,8 +31,8 @@ const oryIdentity: CanonicalIdentity = {
   },
   roles: [{ tenant_id: "t1", role_name: "admin", permissions: ["docs.read"] }],
   tenant_memberships: [
-    { tenant_id: "t1", tenant_name: "Acme" },
-    { tenant_id: "t2", tenant_name: "Beta" },
+    { tenant_id: "t1", tenant_name: "Acme", status: "active" },
+    { tenant_id: "t2", tenant_name: "Beta", status: "active" },
   ],
   linked_idps: [{ provider_name: "ory", external_sub: "ory|abc" }],
 };
