@@ -7,6 +7,14 @@ client's secret. The upgrade seals every stored token with the first key of
 opens them again. With no stored token neither needs the key; with one, an unset
 or invalid key stops the migration rather than leave a token in plain text.
 
+Both directions are safe to repeat. The upgrade leaves a value that already opens
+under a configured key as it is: a backend of this revision may have sealed it
+while the database was still at 010 (a new image started before ``alembic
+upgrade``), or the revision was stamped back and run again. The downgrade leaves
+a value that opens under no configured key as it is, rather than stop: it was
+never sealed (a plain-text token) or was sealed under a key no longer listed,
+and the 010 code answers such a token's 401 by deactivating the credential.
+
 The key parsing is repeated here, not imported from ``app``, so this revision
 keeps running whatever later happens to the application module.
 """
@@ -16,7 +24,7 @@ from typing import Union
 
 import sqlalchemy as sa
 from alembic import op
-from cryptography.fernet import Fernet, MultiFernet
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 # revision identifiers, used by Alembic.
 revision: str = "011_seal_registration_tokens"
@@ -39,7 +47,20 @@ def _fernet() -> MultiFernet:
         raise RuntimeError(f"{KEYS_VARIABLE} holds a value that is not a Fernet key") from exc
 
 
+def _opened(fernet: MultiFernet, value: str) -> str | None:
+    """The value opened, or ``None`` when it opens under no configured key."""
+    try:
+        return fernet.decrypt(value.encode()).decode()
+    except InvalidToken:
+        return None
+
+
+def _seal(fernet: MultiFernet, value: str) -> str | None:
+    return None if _opened(fernet, value) is not None else fernet.encrypt(value.encode()).decode()
+
+
 def _rewrite(transform) -> None:
+    """Set each stored token to ``transform(fernet, token)``; a ``None`` leaves that row as it is."""
     connection = op.get_bind()
     rows = connection.execute(
         sa.select(_tokens.c.id, _tokens.c.registration_token).where(_tokens.c.registration_token != "")
@@ -48,16 +69,14 @@ def _rewrite(transform) -> None:
         return
     fernet = _fernet()
     for row_id, token in rows:
-        connection.execute(
-            sa.update(_tokens)
-            .where(_tokens.c.id == row_id)
-            .values(registration_token=transform(fernet, token.encode()).decode())
-        )
+        rewritten = transform(fernet, token)
+        if rewritten is not None:
+            connection.execute(sa.update(_tokens).where(_tokens.c.id == row_id).values(registration_token=rewritten))
 
 
 def upgrade() -> None:
-    _rewrite(lambda fernet, token: fernet.encrypt(token))
+    _rewrite(_seal)
 
 
 def downgrade() -> None:
-    _rewrite(lambda fernet, token: fernet.decrypt(token))
+    _rewrite(_opened)
