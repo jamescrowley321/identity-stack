@@ -54,7 +54,9 @@ Every push is idempotent: each reads the state first and writes only what
 differs, and a repeat writes nothing. A push that reads an organization and sends
 it back (``sync_tenant``, ``set_tenant_attributes``) holds the organization's lock
 (``KeycloakLinks.organization_lock``) from the read to the write, so a suspension
-or a domain change another push makes in between is not undone. A realm admin's
+or a domain change another push makes in between is not undone. Its Keycloak calls
+under the lock have a total deadline (``ORGANIZATION_HOLD_SECONDS``), which the
+lock's wait outlasts; a push past it is an unanswered ``SyncError``. A realm admin's
 change in Keycloak takes no lock: one landing between such a read and its write
 can still be undone. Every push but a delete reaches the
 Keycloak account the canonical user's ``keycloak`` link names when a sign-in or
@@ -81,8 +83,9 @@ import math
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
-from typing import ClassVar, Protocol
+from typing import ClassVar, Protocol, TypeVar
 
+import anyio
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
@@ -103,7 +106,12 @@ from app.services.adapters.base import (
     SyncError,
     TenantAttributes,
 )
-from app.services.keycloak_admin import KeycloakAdminApi, KeycloakAdminError
+from app.services.keycloak_admin import (
+    ADMIN_TIMEOUT_SECONDS,
+    KeycloakAdminApi,
+    KeycloakAdminError,
+    KeycloakAdminUnavailable,
+)
 
 tracer = trace.get_tracer(__name__)
 
@@ -128,6 +136,15 @@ _AUDIENCE_MAPPER = "oidc-audience-mapper"
 # A Keycloak client's service account (``service-account-<client id>``): a client
 # signs in with it, no person does, so an IdP link naming one is not followed.
 SERVICE_ACCOUNT_PREFIX = "service-account-"
+
+T = TypeVar("T")
+
+# The total deadline of the Keycloak calls a push makes holding an organization's lock:
+# at most three (find, read, write), each given the admin client's timeout. httpx's
+# timeout bounds each phase of a call, not the call, so without this a holder could
+# keep the lock past the wait of the push queued behind it (``ORGANIZATION_LOCK_TIMEOUT_MS``
+# in ``app.dependencies.keycloak_sync`` is this plus a margin).
+ORGANIZATION_HOLD_SECONDS = 3 * ADMIN_TIMEOUT_SECONDS
 
 # Canonical user status -> Keycloak ``enabled``.
 _ENABLED: dict[str, bool] = {"active": True, "provisioned": True, "inactive": False}
@@ -503,7 +520,8 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush, Custom
             if linked is None and await self._links.linked_elsewhere(tenant_id):
                 raise _Refused(Refusal.TENANT_LINKED_ELSEWHERE)
             alias = linked or str(tenant_id)
-            async with self._links.organization_lock(alias):
+
+            async def write() -> None:
                 organization = await self._api.find_organization(alias)
                 if organization is None:
                     representation = {"name": name, "alias": alias}
@@ -514,6 +532,8 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush, Custom
                     await self._api.create_organization(representation)
                 else:
                     await self._update_organization(organization, wanted)
+
+            await self._locked(alias, write)
             if linked is None:
                 await self._links.link_organization(tenant_id, alias)
 
@@ -556,9 +576,24 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush, Custom
 
     # --- custom attributes (CustomAttributes) ---------------------------------------
 
-    async def _full_organization(self, tenant: str) -> dict | None:
-        """The tenant's organization with its attributes, which a search by alias leaves out."""
-        organization = await self._organization(uuid.UUID(_tenant_uuid(tenant)))
+    async def _locked(self, alias: str, body: Callable[[], Awaitable[T]]) -> T:
+        """Run ``body`` holding the organization's lock, its Keycloak calls within ``ORGANIZATION_HOLD_SECONDS``.
+
+        Past the deadline the body is cancelled and the push is ``KeycloakAdminUnavailable``
+        (unanswered: a write it was making may have landed).
+        """
+        async with self._links.organization_lock(alias):
+            try:
+                with anyio.fail_after(ORGANIZATION_HOLD_SECONDS):
+                    return await body()
+            except TimeoutError as exc:
+                raise KeycloakAdminUnavailable(
+                    f"Keycloak did not finish the organization's write within {ORGANIZATION_HOLD_SECONDS:g} s"
+                ) from exc
+
+    async def _full_organization(self, alias: str) -> dict | None:
+        """The organization ``alias`` with its attributes, which a search by alias leaves out."""
+        organization = await self._api.find_organization(alias)
         return None if organization is None else await self._api.get_organization(organization["id"])
 
     async def user_attributes(self, *, subject: str) -> Result[dict[str, AttributeValue], SyncError]:
@@ -591,7 +626,7 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush, Custom
         found: list[TenantAttributes] = []
 
         async def read() -> None:
-            organization = await self._full_organization(tenant)
+            organization = await self._full_organization(await self._alias(uuid.UUID(_tenant_uuid(tenant))))
             if organization is not None:
                 found.append(TenantAttributes(organization.get("name") or "", _custom_attributes(organization)))
 
@@ -604,11 +639,13 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush, Custom
         self, *, tenant: str, attributes: dict[str, AttributeValue]
     ) -> Result[None, SyncError]:
         async def push() -> None:
+            # One alias read: the lock and the organization written are the same one.
             alias = await self._alias(uuid.UUID(_tenant_uuid(tenant)))
+
             # Locked from the read to the write: ``enabled`` goes back as read, so another
             # push's suspension in between would otherwise be undone.
-            async with self._links.organization_lock(alias):
-                organization = await self._full_organization(tenant)
+            async def write() -> None:
+                organization = await self._full_organization(alias)
                 if organization is None:
                     raise _Refused(Refusal.NO_ORGANIZATION)
                 # Keycloak keeps the domains a PUT leaves out, but resets ``enabled`` and the
@@ -618,6 +655,8 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush, Custom
                 await self._api.update_organization(
                     organization["id"], {**sent, "attributes": _attribute_values(attributes, held)}
                 )
+
+            await self._locked(alias, write)
 
         with tracer.start_as_current_span("keycloak.set_tenant_attributes"):
             return await _run("set_tenant_attributes", {"tenant_id": tenant}, push)
