@@ -1,6 +1,7 @@
 """The relationship stores: selection, startup, the Descope and OpenFGA stores, their user directories and errors."""
 
 import ast
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -16,6 +17,7 @@ from app.dependencies import identity
 from app.dependencies.capabilities import served
 from app.dependencies.fga import store_error_response
 from app.middleware.providers import descope_config, ory_config
+from app.services import openfga
 from app.services.adapters.descope import DescopeSyncAdapter
 from app.services.adapters.keycloak import KeycloakSyncAdapter
 from app.services.adapters.noop import NoOpSyncAdapter
@@ -602,6 +604,41 @@ class TestOpenFgaStore:
         ]
         assert [len(body["checks"]) for _, body in bodies] == [50, 50, 20]
         assert {body["authorization_model_id"] for _, body in bodies} == {"model-1"}
+
+    async def test_batch_checks_run_concurrently_up_to_the_cap(self):
+        in_flight = 0
+        peak = 0
+
+        async def answer(request: httpx.Request) -> httpx.Response:
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.01)
+            in_flight -= 1
+            checks = json.loads(request.content)["checks"]
+            return httpx.Response(200, json={"result": {c["correlation_id"]: {"allowed": True} for c in checks}})
+
+        candidates = [f"d{n}" for n in range(openfga._BATCH_CHECK_SIZE * openfga._BATCH_CHECK_CONCURRENCY * 3)]
+        held = await _openfga(answer).objects("t1", "document", "can_view", "u1", candidates=candidates)
+
+        assert held == candidates
+        assert peak == openfga._BATCH_CHECK_CONCURRENCY
+
+    async def test_a_listing_past_the_deadline_fails(self, monkeypatch):
+        monkeypatch.setattr(openfga, "OBJECTS_DEADLINE_SECONDS", 0.05)
+
+        async def answer(_request: httpx.Request) -> httpx.Response:
+            await asyncio.Event().wait()
+            raise AssertionError("never answered")
+
+        with pytest.raises(RelationshipStoreError) as caught:
+            await _openfga(answer).objects("t1", "document", "can_view", "u1", candidates=["d0"])
+
+        assert (caught.value.kind, caught.value.detail) == (
+            RelationshipStoreErrorKind.UNAVAILABLE,
+            "OpenFGA did not answer every check in time",
+        )
+        assert store_error_response(caught.value).status_code == 502
 
     async def test_no_candidates_asks_nothing(self):
         def answer(_request: httpx.Request) -> httpx.Response:
