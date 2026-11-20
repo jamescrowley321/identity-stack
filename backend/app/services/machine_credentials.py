@@ -281,8 +281,7 @@ class CanonicalMachineCredentials(MachineCredentials):
                 await self._repository.set_status(found.ok.id, credentials.CredentialStatus.INACTIVE)
                 await self._repository.commit()
                 logger.warning(
-                    "machine clients: credential %s deactivated; its registration token opens under no key in "
-                    "KEYCLOAK_REGISTRATION_TOKEN_KEYS, so a realm admin must remove client %s",
+                    "machine clients: %s deactivated; a realm admin must remove client %s (#698)",
                     found.ok.id,
                     found.ok.client_id,
                 )
