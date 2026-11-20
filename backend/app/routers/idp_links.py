@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies.identity import get_idp_link_service
 from app.dependencies.rbac import refuse_machine_principal, require_role
+from app.dependencies.tenant import get_canonical_tenant_id
 from app.errors.identity import IdentityErrorRaised, NotFound
 from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
@@ -49,38 +50,26 @@ _NOT_IN_TENANT = "User not found in tenant"
 
 async def _require_user_in_tenant(
     user_uuid: uuid.UUID,
-    request: Request,
+    tenant_id: str | None,
     session: AsyncSession,
 ) -> None:
-    """Verify the target user belongs to the caller's tenant, or refuse the request.
+    """Verify the target user belongs to the caller's canonical tenant, or refuse the request.
 
-    Raises ``IdentityErrorRaised(NotFound)`` when they do not — 404 rather than
-    403, so the reply does not leak whether the user exists. The central handler
-    renders it through ``result_to_response``, so the body is the same RFC 9457
-    Problem Detail every other error in this router produces.
+    ``tenant_id`` is ``get_canonical_tenant_id``'s answer: the tenant resolver's
+    tenant for a principal authorized from the canonical model, ``None`` for any
+    other. A Descope principal's ``dct`` is Descope's own tenant id, which names
+    no canonical tenant even when it is spelled as one of their UUIDs, so it is
+    refused here and never compared with ``user_tenant_roles`` (#722).
 
-    This raises rather than returning a response on purpose. The previous version
-    handed back a ``Response | None`` that each caller had to test and propagate,
-    which is fail-open by construction: a new route that calls the guard and
-    ignores its return value silently loses IdP-link tenant isolation, with no
-    type error and no failing test. There is now no return value to drop.
+    Raises ``IdentityErrorRaised(NotFound)`` when the user is not in the tenant,
+    or the caller has no canonical tenant: 404 rather than 403, so the reply does
+    not leak whether the user exists. It raises rather than returning a response,
+    so a route that calls it cannot drop the refusal.
     """
-    claims = getattr(request.state, "claims", None)
-    tenant_id = claims.get("dct") if claims else None
-    if not tenant_id:
+    if tenant_id is None:
         raise IdentityErrorRaised(NotFound(message=_NOT_IN_TENANT))
-    # `dct` is the IdP's own opaque tenant id — a Descope tenant id looks like
-    # "T3Bj8QOcyflY8V0bvSu1eEoHmjk6" — while user_tenant_roles.tenant_id is a
-    # canonical UUID foreign key. A `dct` that is not a UUID therefore cannot
-    # match any assignment row, which is a 404 (this user is not in the caller's
-    # tenant), not a server error. Coercing it unguarded raised ValueError out of
-    # the handler and surfaced to the client as a 500.
-    try:
-        tenant_uuid = uuid.UUID(tenant_id)
-    except (AttributeError, TypeError, ValueError):
-        raise IdentityErrorRaised(NotFound(message=_NOT_IN_TENANT)) from None
     assignment_repo = UserTenantRoleRepository(session)
-    assignments = await assignment_repo.list_by_user_tenant(user_uuid, tenant_uuid)
+    assignments = await assignment_repo.list_by_user_tenant(user_uuid, uuid.UUID(tenant_id))
     if not assignments:
         raise IdentityErrorRaised(NotFound(message=_NOT_IN_TENANT))
 
@@ -90,12 +79,13 @@ async def list_user_idp_links(
     request: Request,
     user_id: str,
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    tenant_id: str | None = Depends(get_canonical_tenant_id),
     idp_link_service: IdPLinkService = Depends(get_idp_link_service),
     session: AsyncSession = Depends(get_async_session),
 ):
     """List all IdP links for a user."""
     user_uuid = _parse_uuid(user_id, "user_id")
-    await _require_user_in_tenant(user_uuid, request, session)
+    await _require_user_in_tenant(user_uuid, tenant_id, session)
     result = await idp_link_service.get_user_idp_links(user_id=user_uuid)
     if result.is_ok():
         result = Ok({"idp_links": result.ok})
@@ -109,12 +99,13 @@ async def create_idp_link(
     user_id: str,
     body: CreateIdPLinkRequest,
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    tenant_id: str | None = Depends(get_canonical_tenant_id),
     idp_link_service: IdPLinkService = Depends(get_idp_link_service),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Create an IdP link between a user and an external identity."""
     user_uuid = _parse_uuid(user_id, "user_id")
-    await _require_user_in_tenant(user_uuid, request, session)
+    await _require_user_in_tenant(user_uuid, tenant_id, session)
     result = await idp_link_service.create_idp_link(
         user_id=user_uuid,
         provider_id=body.provider_id,
@@ -132,12 +123,13 @@ async def delete_idp_link(
     user_id: str,
     link_id: str,
     _admin_roles: list[str] = Depends(require_role("owner", "admin")),
+    tenant_id: str | None = Depends(get_canonical_tenant_id),
     idp_link_service: IdPLinkService = Depends(get_idp_link_service),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Delete an IdP link."""
     user_uuid = _parse_uuid(user_id, "user_id")
-    await _require_user_in_tenant(user_uuid, request, session)
+    await _require_user_in_tenant(user_uuid, tenant_id, session)
     link_uuid = _parse_uuid(link_id, "link_id")
     result = await idp_link_service.delete_idp_link(link_id=link_uuid, user_id=user_uuid)
     if result.is_ok():

@@ -6,6 +6,10 @@ Tests cover:
 - Happy paths: list links, create link (201), delete link (204)
 - Error handling: NotFound → 404, Conflict → 409
 - Input validation: invalid UUID → 422, empty external_sub rejected, metadata limits
+
+The caller's tenant is ``get_canonical_tenant_id``'s, overridden here with a
+canonical tenant; how the resolver gives it to each provider's principal, and
+refuses a Descope principal, is ``test_idp_links_canonical.py``'s (#722).
 """
 
 import uuid
@@ -13,10 +17,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from expression import Error, Ok
-from fastapi import Depends, Request
+from fastapi import Depends
 from httpx import ASGITransport, AsyncClient
 
 from app.dependencies.identity import get_idp_link_service
+from app.dependencies.tenant import get_canonical_tenant_id
 from app.errors.identity import Conflict, NotFound
 from app.main import app
 from app.models.database import get_async_session
@@ -53,14 +58,23 @@ def _override_services(mock_idp_link_service, mock_session):
     app.dependency_overrides.pop(get_async_session, None)
 
 
+TENANT_ID = "51c5957b-684a-453f-8ab1-8f239999c4d8"
+
+
+@pytest.fixture(autouse=True)
+def _canonical_tenant():
+    """The tenant resolver's canonical tenant for the caller (tests of a Descope principal drop it)."""
+    app.dependency_overrides[get_canonical_tenant_id] = lambda: TENANT_ID
+    yield
+    app.dependency_overrides.pop(get_canonical_tenant_id, None)
+
+
 @pytest.fixture
 async def client():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
 
-
-TENANT_ID = "51c5957b-684a-453f-8ab1-8f239999c4d8"
 
 ADMIN_CLAIMS = {
     "sub": "admin1",
@@ -437,13 +451,10 @@ async def test_create_link_metadata_too_many_keys_rejected(mock_validate, client
     assert response.status_code == 422
 
 
-# --- Non-UUID tenant ids (real Descope `dct` claims) ---
+# --- A Descope principal has no canonical tenant (#722) ---
 
-# Descope issues opaque tenant ids like "T3Bj8QOcyflY8V0bvSu1eEoHmjk6", not UUIDs.
-# Every claim fixture above uses a UUID-shaped `dct`, so the router's
-# `uuid.UUID(tenant_id)` coercion looked safe under unit test while raising
-# ValueError against a real Descope token — surfacing as a 500 rather than the
-# documented 404. These three cases pin the real-world shape.
+# Descope issues opaque tenant ids like "T3Bj8QOcyflY8V0bvSu1eEoHmjk6". Whatever
+# its `dct`, it names no canonical tenant, so the guard answers 404, never 500.
 
 DESCOPE_TENANT_ID = "T3Bj8QOcyflY8V0bvSu1eEoHmjk6"
 
@@ -459,6 +470,7 @@ DESCOPE_ADMIN_CLAIMS = {
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_list_links_non_uuid_tenant_returns_404_not_500(mock_validate, client):
+    app.dependency_overrides.pop(get_canonical_tenant_id)
     """A Descope-shaped `dct` cannot match a canonical UUID FK → 404, never 500."""
     mock_validate.return_value = DESCOPE_ADMIN_CLAIMS
     response = await client.get(f"/api/users/{USER_ID}/idp-links", headers=AUTH_HEADER)
@@ -471,6 +483,7 @@ async def test_list_links_non_uuid_tenant_returns_404_not_500(mock_validate, cli
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_create_link_non_uuid_tenant_returns_404_not_500(mock_validate, client):
+    app.dependency_overrides.pop(get_canonical_tenant_id)
     """Create under a Descope-shaped `dct` → 404, never 500."""
     mock_validate.return_value = DESCOPE_ADMIN_CLAIMS
     response = await client.post(
@@ -487,6 +500,7 @@ async def test_create_link_non_uuid_tenant_returns_404_not_500(mock_validate, cl
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_delete_link_non_uuid_tenant_returns_404_not_500(mock_validate, client):
+    app.dependency_overrides.pop(get_canonical_tenant_id)
     """Delete under a Descope-shaped `dct` → 404, never 500."""
     mock_validate.return_value = DESCOPE_ADMIN_CLAIMS
     response = await client.delete(
@@ -515,11 +529,8 @@ async def test_guard_raises_rather_than_returning_a_response():
     from app.errors.identity import NotFound as NotFoundError
     from app.routers.idp_links import _require_user_in_tenant
 
-    request = MagicMock()
-    request.state.claims = {"dct": "not-a-uuid"}
-
     with pytest.raises(IdentityErrorRaised) as exc_info:
-        await _require_user_in_tenant(uuid.UUID(USER_ID), request, AsyncMock())
+        await _require_user_in_tenant(uuid.UUID(USER_ID), None, AsyncMock())
 
     assert isinstance(exc_info.value.error, NotFoundError)
 
@@ -529,10 +540,8 @@ async def test_guard_returns_none_when_the_check_passes():
     """The success path must stay falsy-but-unused, not a response to propagate."""
     from app.routers.idp_links import _require_user_in_tenant
 
-    request = MagicMock()
-    request.state.claims = {"dct": str(uuid.uuid4())}
     with _mock_tenant_check_pass():
-        assert await _require_user_in_tenant(uuid.UUID(USER_ID), request, AsyncMock()) is None
+        assert await _require_user_in_tenant(uuid.UUID(USER_ID), TENANT_ID, AsyncMock()) is None
 
 
 @pytest.mark.anyio
@@ -549,8 +558,8 @@ async def test_a_route_that_ignores_the_guard_still_refuses(mock_validate, clien
     from app.routers.idp_links import _require_user_in_tenant
 
     @app.get("/api/__test_forgetful_route/{user_id}")
-    async def _forgetful(request: Request, user_id: str, session=Depends(get_async_session)):
-        await _require_user_in_tenant(uuid.UUID(user_id), request, session)
+    async def _forgetful(user_id: str, tenant_id=Depends(get_canonical_tenant_id), session=Depends(get_async_session)):
+        await _require_user_in_tenant(uuid.UUID(user_id), tenant_id, session)
         return {"leaked": "tenant isolation bypassed"}
 
     app.add_exception_handler(IdentityErrorRaised, identity_error_raised_handler)

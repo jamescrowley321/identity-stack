@@ -18,6 +18,9 @@ Descope, so each route says how it keeps one provider's ids from another:
 - ``ADAPTER_CAPABILITY_ROUTES``: the routes of a sync adapter capability, which
   ``served`` gives only to that provider's own principals.
 - ``PROVIDER_NEUTRAL_ROUTES``: routes that hand no tenant or user id to a provider.
+- ``CANONICAL_TENANT_ROUTES``: the IdP-link routes, which take the resolver's tenant
+  only when it is a canonical tenant id (``get_canonical_tenant_id``) and refuse any
+  other principal, a Descope one among them (#722).
 - ``GLOBAL_ROLE_ROUTES``: state that belongs to no tenant and that Descope does not
   hold, gated by ``require_global_role``, which lets no caller pick the tenant.
 
@@ -72,7 +75,7 @@ from app.dependencies.rbac import (
     require_role,
 )
 from app.dependencies.sync_provider import NOT_A_SYNC_PROVIDER_PRINCIPAL, require_sync_provider_principal
-from app.dependencies.tenant import get_tenant_access, get_tenant_id
+from app.dependencies.tenant import get_canonical_tenant_id, get_tenant_access, get_tenant_id
 from app.dependencies.tenant_access import SELECT_A_TENANT_FIRST
 from app.domain import access
 from app.errors.access import MemberActionRefusal
@@ -294,6 +297,18 @@ PROVIDER_NEUTRAL_ROUTES: dict[tuple[str, str], str] = {
 }
 
 
+# (method, path) of every route that holds its target to the caller's canonical tenant
+# (``get_canonical_tenant_id``): canonical rows only, handed to no provider. A Descope
+# principal's ``dct`` names no canonical tenant, so it is refused (404) (#722).
+CANONICAL_TENANT_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("GET", "/api/users/{user_id}/idp-links"),
+        ("POST", "/api/users/{user_id}/idp-links"),
+        ("DELETE", "/api/users/{user_id}/idp-links/{link_id}"),
+    }
+)
+
+
 # (method, path) of every route over state that belongs to no tenant and is not
 # Descope's: one role in one tenant opens all of it, so the request picks nothing.
 GLOBAL_ROLE_ROUTES: frozenset[tuple[str, str]] = frozenset(
@@ -311,11 +326,6 @@ GLOBAL_ROLE_ROUTES: frozenset[tuple[str, str]] = frozenset(
 # (method, path) -> why a route gated by ``require_role`` or ``require_permission``
 # takes no tenant from ``get_tenant_id`` and carries no guard.
 SELF_SCOPED_ROLE_ROUTES: dict[tuple[str, str], str] = {
-    ("GET", "/api/users/{user_id}/idp-links"): "_require_user_in_tenant holds the user to the token's dct (#590)",
-    ("POST", "/api/users/{user_id}/idp-links"): "_require_user_in_tenant holds the user to the token's dct (#590)",
-    ("DELETE", "/api/users/{user_id}/idp-links/{link_id}"): (
-        "_require_user_in_tenant holds the user to the token's dct (#590)"
-    ),
     ("GET", "/api/access-checks/admin-role"): (
         "answers back the roles require_role resolved in the request's tenant: the handler calls no provider "
         "and reads no table"
@@ -554,7 +564,11 @@ class TestTheRegisters:
             | PER_PROVIDER_ROUTES
             | RELATIONSHIP_STORE_TENANT_ROUTES
             | ADAPTER_CAPABILITY_TENANT_ROUTES
+            | CANONICAL_TENANT_ROUTES
         )
+
+    def test_the_canonical_tenant_is_taken_on_exactly_the_canonical_tenant_routes(self):
+        assert _routes_depending_on(get_canonical_tenant_id) == CANONICAL_TENANT_ROUTES
 
     def test_the_sync_provider_guard_is_on_exactly_the_sync_provider_routes(self):
         assert _routes_depending_on(require_sync_provider_principal) == SYNC_PROVIDER_ROUTES
@@ -623,6 +637,9 @@ class TestTheRegisters:
         other_registers = DESCOPE_BACKED_ROUTES | SYNC_PROVIDER_ROUTES | set(PROVIDER_NEUTRAL_ROUTES)
         assert PER_PROVIDER_ROUTES & other_registers == set()
         assert (other_registers | PER_PROVIDER_ROUTES) & set(ADAPTER_CAPABILITY_ROUTES) == set()
+        assert (
+            other_registers | PER_PROVIDER_ROUTES | set(ADAPTER_CAPABILITY_ROUTES) | RELATIONSHIP_STORE_ROUTES
+        ) & CANONICAL_TENANT_ROUTES == set()
 
 
 class TestDescopesAccessKeysServeDescopePrincipalsOnly:

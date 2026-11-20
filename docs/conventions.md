@@ -290,8 +290,6 @@ handler **MUST NOT** read the `dct` claim to find its tenant. It takes the tenan
 - Exception: `routers/protected.py::canonical_identity`, which checks principal, identity
   and claims together for one 401, and hands the request's provider to first-login
   provisioning.
-- Exception: `routers/idp_links.py::_require_user_in_tenant`, a raising guard that answers
-  404 rather than 401/403 so it does not reveal whether a user exists.
 
 *Enforcement:* test (`test_router_code_does_not_read_request_state`).
 
@@ -357,6 +355,7 @@ application against them:
 | `RELATIONSHIP_STORE_ROUTES` | `/api/fga/*`, `/api/documents*` | `capabilities.served` |
 | `ADAPTER_CAPABILITY_ROUTES` | The profile's custom attributes, the tenant settings | `capabilities.served` |
 | `PROVIDER_NEUTRAL_ROUTES` | `GET /api/tenants/current`, `GET /api/roles/me`, the two `/api/access-checks` permission routes | Nothing behind them hands an id to a provider |
+| `CANONICAL_TENANT_ROUTES` | `/api/users/{user_id}/idp-links` | `get_canonical_tenant_id`: only a canonical tenant id, else refused |
 
 Adding a route to `PROVIDER_NEUTRAL_ROUTES` is a reviewed decision, with its reason.
 `GET /api/roles/me` answers the caller's own roles and permissions in the resolver's tenant: a
@@ -571,9 +570,14 @@ configuration at startup (`refuse_canonical_descope_managed`).
   answers for one tenant. On OpenFGA the schema is read-only: `infra/openfga` holds the model,
   and `PUT /api/fga/schema` answers 409. A Descope principal who
   holds the role in their current tenant is served there, as before the resolver (#593).
-- Exception: the `/api/users/{user_id}/idp-links` routes are gated by `require_role` and
-  take no tenant from `get_tenant_id`. `_require_user_in_tenant` reads `dct` itself and
-  answers 404 without one (#590).
+- The `/api/users/{user_id}/idp-links` routes are gated by `require_role("owner", "admin")`
+  and hold the target user to the caller's tenant through
+  `app.dependencies.tenant.get_canonical_tenant_id`: the resolver's tenant for a principal of
+  a provider in `CANONICAL_RBAC_PROVIDERS`, and `None` for any other. A Descope principal's
+  `dct` is Descope's own tenant id and names no canonical tenant, even when it is spelled as
+  one's UUID, so `_require_user_in_tenant` refuses it, and a target user with no membership in
+  the canonical tenant, with the same 404 (`User not found in tenant`), which does not reveal
+  whether the user exists (#590, #722). The writes also refuse a machine credential (below).
 
 *Enforcement:* review, plus tests (`test_tenant_resolution.py`, `test_rbac_dependencies.py`,
 `test_tenant_dependencies.py`, `test_descope_claim_routes.py`, which sends Keycloak, Ory
