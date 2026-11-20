@@ -580,7 +580,7 @@ async def get_reconciliation_service(
 # Descope client. A Zitadel or Ory reader is one more entry.
 RECONCILIATION_PASSES: dict[str, Callable[[State, AsyncSession, Callable], ProviderReconciliation]] = {
     "keycloak": lambda state, session, lock: build_keycloak_reconciliation(
-        state.keycloak_admin, session, lock, hold_reconciliation_pass
+        state.keycloak_admin, session, lock, hold_reconciliation_pass, state.cache_publisher
     ),
 }
 

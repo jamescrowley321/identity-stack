@@ -19,6 +19,7 @@ from app.errors.identity import Conflict, NotFound, ProviderError
 from app.services import keycloak_reconciliation as reconciliation_module
 from app.services.adapters.base import LAST_ROLE_IN_TENANT, STATUS_CHANGED, SyncError
 from app.services.adapters.keycloak import ROLE_ATTRIBUTE, Refusal
+from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.identity_provisioning import DEFAULT_ROLE_NAME
 from app.services.inbound_sync import RECONCILIATION_SOURCE
 from app.services.keycloak_admin import KeycloakAdminUnavailable
@@ -232,6 +233,7 @@ def _pass(
     events=None,
     links=None,
     hold_pass=None,
+    publisher=None,
 ):
     providers = AsyncMock()
     providers.get_by_name.return_value = SimpleNamespace(id=PROVIDER_ID) if provider else None
@@ -248,6 +250,7 @@ def _pass(
         pull_state=AsyncMock(),
         providers=providers,
         events=events or AsyncMock(),
+        publisher=publisher,
     )
 
 
@@ -313,6 +316,37 @@ class TestNotYetDelivered:
         session.rollback.assert_awaited()
         # Nothing of the first half commits; the pending tenant is still pushed.
         adapter.sync_tenant.assert_awaited_once()
+
+    async def test_a_push_after_a_conflicting_first_half_invalidates_the_identity_cache(self):
+        """The tenant push may link the tenant to its organization: the failed pass still announces it."""
+        tenant = _tenant()
+        ledger = FakeLedger(later={("tenant", str(tenant.id)): 9})
+        ledger_marks_first = ledger.list_all
+
+        async def first_read_sees_nothing():
+            ledger.list_all = ledger_marks_first
+            return []
+
+        ledger.list_all = first_read_sees_nothing
+        api = FakeApi(organizations_=[{"id": "o1", "alias": "acme", "name": "Renamed", "enabled": True}])
+        inbound = RecordingInbound({TenantUpdated: ("tenant", str(tenant.id))})
+        adapter = AsyncMock()
+        adapter.sync_tenant.return_value = Ok(None)
+        publisher = AsyncMock(spec=CacheInvalidationPublisher)
+
+        result = await _pass(
+            api=api,
+            state=FakeState(tenants_=[tenant]),
+            ledger=ledger,
+            inbound=inbound,
+            adapter=adapter,
+            publisher=publisher,
+        ).reconcile()
+
+        assert isinstance(result.error, Conflict)
+        assert ledger.cleared == [("tenant", str(tenant.id), 9)]
+        publisher.publish_batch.assert_awaited_once()
+        assert publisher.publish_batch.await_args.kwargs["operation"] == "reconcile"
 
     async def test_a_change_to_an_unmarked_entity_is_applied(self):
         tenant = _tenant()

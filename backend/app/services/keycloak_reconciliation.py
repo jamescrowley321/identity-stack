@@ -63,6 +63,7 @@ from app.services.adapters.keycloak import (
     Refusal,
     role_client_name,
 )
+from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.identity_provisioning import DEFAULT_ROLE_NAME
 from app.services.inbound_sync import RECONCILIATION_SOURCE, InboundSyncService
 from app.services.keycloak_admin import KeycloakAdminApi, KeycloakAdminError
@@ -167,8 +168,10 @@ class KeycloakReconciliation:
         pull_state: KeycloakPullStateRepository,
         providers: ProviderRepository,
         events: SyncEventRepository,
+        publisher: CacheInvalidationPublisher | None = None,
     ) -> None:
         self._session = session
+        self._publisher = CacheInvalidationPublisher() if publisher is None else publisher
         self._acquire_lock = acquire_lock
         self._hold_pass = hold_pass
         self._api = api
@@ -255,6 +258,10 @@ class KeycloakReconciliation:
             span.set_attribute(f"reconciliation.{key}", value)
         if pulled.is_error():
             span.set_attribute("reconciliation.status", "conflict")
+            if stats["applied"] + stats["pushed"] > 0:
+                # ReconciliationService announces only a pass that succeeds; a push may have
+                # committed a tenant's organization link (external_org_id).
+                await self._publisher.publish_batch(operation="reconcile", stats=stats)
             return Error(pulled.error)
         logger.info("Keycloak reconciliation completed: %s", stats)
         return Ok(PassOutcome(stats=stats, changes=stats["applied"] + stats["pushed"]))
