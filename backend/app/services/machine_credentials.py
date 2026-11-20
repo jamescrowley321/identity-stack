@@ -33,6 +33,7 @@ from app.errors.identity import Conflict, IdentityError, NotFound, ProviderError
 from app.logbook import logbook
 from app.repositories.base import RepositoryConflictError
 from app.repositories.machine_credential import MachineCredentialRepository
+from app.repositories.registration_tokens import RegistrationTokenUnreadable
 from app.services.adapters.base import MachineClient, MachineClientRef, MachineCredentialPush, SyncError
 from app.services.descope_management import DescopeManagementAdapter
 
@@ -135,6 +136,13 @@ def _ref(credential: credentials.MachineCredential, registration_token: str = ""
         subject=credential.subject,
         registration_token=registration_token,
     )
+
+
+# The answer to a delete whose stored registration token opens under no configured key.
+UNREADABLE_REGISTRATION_TOKEN = ProviderError(
+    message="The machine client's registration token opens under no configured key: the credential is "
+    "deactivated, and a realm admin must remove its client"
+)
 
 
 def _provider_error(operation: str, error: SyncError) -> ProviderError:
@@ -259,13 +267,26 @@ class CanonicalMachineCredentials(MachineCredentials):
         """The provider's client first, with the stored registration token, then the row.
 
         When the provider refuses, the credential is deactivated instead and kept,
-        so its tokens are refused and the delete can be asked again.
+        so its tokens are refused and the delete can be asked again. When the stored
+        token opens under no configured key (#698), the credential is deactivated and
+        kept too: only a realm admin can remove its client then.
         """
         with tracer.start_as_current_span("CanonicalMachineCredentials.delete"):
             found = await self._find(tenant_id, credential_id)
             if found.is_error():
                 return Error(found.error)
-            token = await self._repository.registration_token(found.ok.id)
+            try:
+                token = await self._repository.registration_token(found.ok.id)
+            except RegistrationTokenUnreadable:
+                await self._repository.set_status(found.ok.id, credentials.CredentialStatus.INACTIVE)
+                await self._repository.commit()
+                logger.warning(
+                    "machine clients: credential %s deactivated; its registration token opens under no key in "
+                    "KEYCLOAK_REGISTRATION_TOKEN_KEYS, so a realm admin must remove client %s",
+                    found.ok.id,
+                    found.ok.client_id,
+                )
+                return Error(UNREADABLE_REGISTRATION_TOKEN)
             pushed = await self._push.delete_machine_client(client=_ref(found.ok, token))
             if pushed.is_error():
                 await self._repository.set_status(found.ok.id, credentials.CredentialStatus.INACTIVE)

@@ -6,11 +6,13 @@ import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
+from expression import Error
 
 from app.domain import credentials
 from app.models.identity.machine_credential import MachineCredentialRow
@@ -22,6 +24,8 @@ from app.repositories.registration_tokens import (
     RegistrationTokenKeysNotConfigured,
     RegistrationTokenUnreadable,
 )
+from app.services.adapters.base import MachineCredentialPush
+from app.services.machine_credentials import UNREADABLE_REGISTRATION_TOKEN, CanonicalMachineCredentials
 
 pytestmark = pytest.mark.asyncio
 
@@ -83,6 +87,27 @@ class TestRepository:
         with pytest.raises(RegistrationTokenUnreadable):
             await MachineCredentialRepository(db_session, cipher=other).registration_token(credential.id)
 
+    async def test_a_delete_under_another_key_deactivates_the_credential_and_calls_no_provider(self, db_session):
+        """#698: sealed under key A, read under key B: the credential's tokens are refused, not a 500."""
+        credential = _credential((await _tenant(db_session)).id)
+        await MachineCredentialRepository(db_session, cipher=CIPHER).create(
+            credential, role_ids=(), registration_token=TOKEN
+        )
+        push = AsyncMock(spec=MachineCredentialPush)
+        other = RegistrationTokenCipher([Fernet.generate_key().decode()])
+        service = CanonicalMachineCredentials(
+            provider="keycloak", repository=MachineCredentialRepository(db_session, cipher=other), push=push
+        )
+
+        result = await service.delete(tenant_id=str(credential.tenant_id), credential_id=str(credential.id))
+
+        assert result == Error(UNREADABLE_REGISTRATION_TOKEN)
+        stored = await MachineCredentialRepository(db_session).get(
+            credential.tenant_id, credential.id, provider="keycloak"
+        )
+        assert stored.status is credentials.CredentialStatus.INACTIVE
+        assert push.mock_calls == []
+
     async def test_without_a_cipher_no_token_is_written_or_read(self, db_session):
         credential = _credential((await _tenant(db_session)).id)
         repository = MachineCredentialRepository(db_session)
@@ -111,7 +136,9 @@ class TestMigration:
     """
 
     @pytest_asyncio.fixture(loop_scope="session")
-    async def plain_text_row(self, async_engine, postgres_url):
+    async def plain_text_row(self, request, async_engine, postgres_url):
+        """A row of 010 holding ``TOKEN``, or the stored value an indirect parameter gives."""
+        stored_value = getattr(request, "param", TOKEN)
         credential_id = uuid.uuid4()
         tenant_id = uuid.uuid4()
         async with async_engine.begin() as conn:
@@ -124,7 +151,7 @@ class TestMigration:
                 client_id=f"machine-{credential_id}",
                 subject=f"sub-{credential_id}",
                 external_id=f"kc-{credential_id}",
-                registration_token=TOKEN,
+                registration_token=stored_value,
                 expires_at=datetime.now(timezone.utc) + timedelta(days=1),
             )
             values = {column.name: getattr(row, column.name) for column in MachineCredentialRow.__table__.columns}
@@ -164,3 +191,25 @@ class TestMigration:
         assert refused.returncode != 0
         assert KEYS_VARIABLE in refused.stderr
         assert await self._token(async_engine, plain_text_row) == TOKEN
+
+    SEALED = CIPHER.seal(TOKEN)
+    SEALED_UNDER_ANOTHER_KEY = RegistrationTokenCipher([Fernet.generate_key().decode()]).seal(TOKEN)
+
+    @pytest.mark.parametrize("plain_text_row", [SEALED], indirect=True)
+    async def test_the_upgrade_leaves_an_already_sealed_token_as_it_is(
+        self, async_engine, postgres_url, plain_text_row
+    ):
+        """A backend of this revision sealed it while the database was still at 010: it is not sealed twice."""
+        upgraded = _alembic(postgres_url, "upgrade", "head", key=KEY)
+
+        assert upgraded.returncode == 0, upgraded.stderr
+        assert await self._token(async_engine, plain_text_row) == self.SEALED
+
+    @pytest.mark.parametrize("plain_text_row", [SEALED_UNDER_ANOTHER_KEY], indirect=True)
+    async def test_the_downgrade_leaves_a_token_no_key_opens_as_it_is(self, async_engine, postgres_url, plain_text_row):
+        assert _alembic(postgres_url, "stamp", "head", key=None).returncode == 0
+
+        downgraded = _alembic(postgres_url, "downgrade", BEFORE_SEALING, key=KEY)
+
+        assert downgraded.returncode == 0, downgraded.stderr
+        assert await self._token(async_engine, plain_text_row) == self.SEALED_UNDER_ANOTHER_KEY

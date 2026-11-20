@@ -15,8 +15,10 @@ from expression import Error, Ok
 from app.domain import credentials
 from app.errors.identity import Conflict, GrantRefused, NotFound, ProviderError, SyncFailed, ValidationError
 from app.repositories.base import RepositoryConflictError
+from app.repositories.registration_tokens import RegistrationTokenUnreadable
 from app.services.adapters.base import MachineClient, MachineClientRef, MachineCredentialPush, SyncError
 from app.services.machine_credentials import (
+    UNREADABLE_REGISTRATION_TOKEN,
     CanonicalMachineCredentials,
     DescopeAccessKeys,
     MachineCredentialService,
@@ -69,7 +71,11 @@ class FakeRepository:
         credential, token = self.rows[credential_id]
         self.rows[credential_id] = (replace(credential, status=status), token)
 
+    unreadable_token: bool = False
+
     async def registration_token(self, credential_id):
+        if self.unreadable_token:
+            raise RegistrationTokenUnreadable("opens under no key")
         return self.rows[credential_id][1]
 
     async def delete(self, credential_id):
@@ -278,6 +284,20 @@ class TestStatusAndDelete:
         assert result == Ok({"status": "deleted", "key_id": key})
         assert repository.rows == {}
         assert [(call[0], call[1].registration_token) for call in push.calls] == [("delete", CLIENT.registration_token)]
+
+    async def test_a_delete_whose_token_opens_under_no_key_deactivates_and_keeps_the_credential(self):
+        """#698: the client cannot be deleted without its token, so its tokens are refused instead."""
+        repository, push = FakeRepository(), FakePush()
+        key = await _stored(repository, push)
+        repository.unreadable_token = True
+        commits = repository.commits
+
+        result = await _service(repository, push).delete(tenant_id=str(TENANT), credential_id=key)
+
+        assert result == Error(UNREADABLE_REGISTRATION_TOKEN)
+        assert repository.rows[uuid.UUID(key)][0].status is credentials.CredentialStatus.INACTIVE
+        assert repository.commits == commits + 1
+        assert push.calls == []
 
     async def test_a_delete_the_provider_refuses_deactivates_and_keeps_the_credential(self):
         repository, push = FakeRepository(), FakePush()
