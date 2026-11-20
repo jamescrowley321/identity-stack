@@ -46,8 +46,8 @@ const bob: CanonicalIdentity = {
     { tenant_id: "tenant-globex", role_name: "member", permissions: [] },
   ],
   tenant_memberships: [
-    { tenant_id: "tenant-acme", tenant_name: "Acme", external_org_id: "acme" },
-    { tenant_id: "tenant-globex", tenant_name: "Globex", external_org_id: "globex" },
+    { tenant_id: "tenant-acme", tenant_name: "Acme", external_org_id: "acme", status: "active" },
+    { tenant_id: "tenant-globex", tenant_name: "Globex", external_org_id: "globex", status: "active" },
   ],
   linked_idps: [{ provider_name: "keycloak", external_sub: SUBJECT }],
 };

@@ -34,8 +34,8 @@ const oryIdentity: CanonicalIdentity = {
     { tenant_id: "t2", role_name: "viewer", permissions: ["docs.read"] },
   ],
   tenant_memberships: [
-    { tenant_id: "t1", tenant_name: "Acme" },
-    { tenant_id: "t2", tenant_name: "Beta" },
+    { tenant_id: "t1", tenant_name: "Acme", status: "active" },
+    { tenant_id: "t2", tenant_name: "Beta", status: "active" },
   ],
   linked_idps: [{ provider_name: "ory", external_sub: "ory|abc123" }],
 };
@@ -60,8 +60,8 @@ const descopeIdentity: CanonicalIdentity = {
     { tenant_id: "t2", role_name: "viewer", permissions: ["docs.read"] },
   ],
   tenant_memberships: [
-    { tenant_id: "t1", tenant_name: "Acme" },
-    { tenant_id: "t2", tenant_name: "Beta" },
+    { tenant_id: "t1", tenant_name: "Acme", status: "active" },
+    { tenant_id: "t2", tenant_name: "Beta", status: "active" },
   ],
   linked_idps: [{ provider_name: "descope", external_sub: "descope|xyz789" }],
 };
@@ -133,7 +133,7 @@ describe("useTenants", () => {
     mockUseIdentityContext.mockReturnValue({
       identity: {
         ...oryIdentity,
-        tenant_memberships: [{ tenant_id: "t1", tenant_name: "" }],
+        tenant_memberships: [{ tenant_id: "t1", tenant_name: "", status: "active" }],
         roles: [{ tenant_id: "t1", role_name: "admin", permissions: [] }],
       },
       currentTenantId: "t1",
@@ -146,7 +146,7 @@ describe("useTenants", () => {
     mockUseIdentityContext.mockReturnValue({
       identity: {
         ...oryIdentity,
-        tenant_memberships: [{ tenant_id: "t3", tenant_name: "Gamma" }],
+        tenant_memberships: [{ tenant_id: "t3", tenant_name: "Gamma", status: "active" }],
         roles: [],
       },
       currentTenantId: "t3",
@@ -188,7 +188,7 @@ describe("useTenants", () => {
     mockUseIdentityContext.mockReturnValue({
       identity: {
         ...oryIdentity,
-        tenant_memberships: [{ tenant_id: "t1", tenant_name: "Acme" }],
+        tenant_memberships: [{ tenant_id: "t1", tenant_name: "Acme", status: "active" }],
         roles: [{ tenant_id: "t1", role_name: "admin" }],
       } as unknown as CanonicalIdentity,
       currentTenantId: "t1",
@@ -209,7 +209,7 @@ describe("useTenants", () => {
     mockUseIdentityContext.mockReturnValue({
       identity: {
         ...oryIdentity,
-        tenant_memberships: [{ tenant_id: "t1", tenant_name: "Acme" }],
+        tenant_memberships: [{ tenant_id: "t1", tenant_name: "Acme", status: "active" }],
         roles: [
           { tenant_id: "t1", role_name: "admin", permissions: ["docs.read"] },
           { tenant_id: "orphan", role_name: "owner", permissions: ["all"] },

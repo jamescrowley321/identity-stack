@@ -330,7 +330,7 @@ tenant, role or permission claim itself. The resolver takes its sources in this 
 3. **The caller's sole canonical membership**, when the request selects nothing.
 
 A canonical tenant whose status is not `active` (`suspended`) **MUST NOT** be served to its
-members: the resolver refuses a request for it (403, `TenantRefusal.SUSPENDED`), it is no
+members: the resolver refuses a request for it (403, `TenantRefusal.NOT_ACTIVE`), it is no
 sole membership, `get_tenant_memberships` and the SPA's selector leave it out, and the
 `/api/tenants/{tenant_id}/resources` routes refuse it the same way (#689). A tenant whose
 status was not read is not served either. On a route whose state belongs to no tenant

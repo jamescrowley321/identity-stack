@@ -18,8 +18,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "011_tenant_resource_id_space"
-down_revision: Union[str, None] = "010_machine_credentials"
+revision: str = "012_tenant_resource_id_space"
+down_revision: Union[str, None] = "011_seal_registration_tokens"
 branch_labels: Union[str, None] = None
 depends_on: Union[str, None] = None
 

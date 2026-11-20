@@ -34,13 +34,13 @@ function identity(memberships: CanonicalIdentity["tenant_memberships"]): Canonic
 }
 
 const keycloakBob = identity([
-  { tenant_id: "tenant-acme", tenant_name: "Acme", external_org_id: "acme" },
-  { tenant_id: "tenant-globex", tenant_name: "Globex", external_org_id: "globex" },
+  { tenant_id: "tenant-acme", tenant_name: "Acme", external_org_id: "acme", status: "active" },
+  { tenant_id: "tenant-globex", tenant_name: "Globex", external_org_id: "globex", status: "active" },
 ]);
 
 const zitadelBob = identity([
-  { tenant_id: "tenant-acme", tenant_name: "Acme", external_org_id: "300000000000000001" },
-  { tenant_id: "tenant-globex", tenant_name: "Globex", external_org_id: "300000000000000002" },
+  { tenant_id: "tenant-acme", tenant_name: "Acme", external_org_id: "300000000000000001", status: "active" },
+  { tenant_id: "tenant-globex", tenant_name: "Globex", external_org_id: "300000000000000002", status: "active" },
 ]);
 
 function base64url(value: unknown): string {
@@ -130,8 +130,8 @@ describe("the tenant a sign-in opens", () => {
     expect(
       await activeTenant(
         identity([
-          { tenant_id: "tenant-acme", tenant_name: "Acme", external_org_id: null },
-          { tenant_id: "tenant-globex", tenant_name: "Globex", external_org_id: null },
+          { tenant_id: "tenant-acme", tenant_name: "Acme", external_org_id: null, status: "active" },
+          { tenant_id: "tenant-globex", tenant_name: "Globex", external_org_id: null, status: "active" },
         ]),
       ),
     ).toBe("tenant-acme");
@@ -142,8 +142,8 @@ describe("the tenant a sign-in opens", () => {
     expect(
       await activeTenant(
         identity([
-          { tenant_id: "tenant-acme", tenant_name: "Acme" },
-          { tenant_id: "tenant-globex", tenant_name: "Globex" },
+          { tenant_id: "tenant-acme", tenant_name: "Acme", status: "active" },
+          { tenant_id: "tenant-globex", tenant_name: "Globex", status: "active" },
         ]),
       ),
     ).toBe("tenant-acme");
