@@ -14,13 +14,14 @@ AC-4.3.1: get_identity_resolution_service() for identity resolution with Redis c
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 
 from fastapi import Depends, Request
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from starlette.datastructures import State
 
 from app.dependencies.descope import (
@@ -89,45 +90,71 @@ _RECONCILIATION_PASS_LOCK_ID = 73_82_69_67_80  # "RECONP"
 _PENDING_PUSH_LOCK_ID = 80_85_83_72  # "PUSH"
 
 
-_WAIT_FOR_LOCK = text("SELECT pg_advisory_lock(:lock_id)")
 _TRY_LOCK = text("SELECT pg_try_advisory_lock(:lock_id)")
+_UNLOCK = text("SELECT pg_advisory_unlock(:lock_id)")
+# How long a pass waits for a push retry turn in progress before it answers 409.
+PASS_WAITS_FOR_PUSH_SECONDS = 10.0
+_LOCK_POLL_SECONDS = 0.1
+
+
+async def _take_lock(connection: AsyncConnection, lock_id: int, wait_seconds: float) -> bool:
+    """Try the session lock until it is taken or ``wait_seconds`` have passed (``0``: once)."""
+    deadline = asyncio.get_running_loop().time() + wait_seconds
+    while True:
+        taken = bool((await connection.execute(_TRY_LOCK, {"lock_id": lock_id})).scalar())
+        await connection.commit()
+        if taken:
+            return True
+        if asyncio.get_running_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(_LOCK_POLL_SECONDS)
 
 
 @asynccontextmanager
-async def _session_locks(take: list[tuple[int, bool]]) -> AsyncIterator[bool]:
-    """Take each ``(lock id, wait)`` in turn on a connection of its own; ``False`` when a lock not waited for is held.
+async def _session_locks(take: list[tuple[int, float]]) -> AsyncIterator[bool]:
+    """Take each ``(lock id, seconds to wait)`` in turn on a connection of its own; ``False`` when one is not taken.
 
     Session-level locks survive the holder's commits. The connection is dropped,
-    not returned to the pool, if an unlock fails, so no lock outlives its holder.
+    not returned to the pool, when taking or releasing a lock fails or is
+    cancelled: closing it frees every lock its session holds, so none outlives
+    its holder.
     """
     async with get_engine().connect() as connection:
         held: list[int] = []
         try:
-            for lock_id, wait in take:
-                result = await connection.execute(_WAIT_FOR_LOCK if wait else _TRY_LOCK, {"lock_id": lock_id})
-                await connection.commit()
-                if not wait and not result.scalar():
+            for lock_id, wait_seconds in take:
+                if not await _take_lock(connection, lock_id, wait_seconds):
                     break
                 held.append(lock_id)
+        except BaseException:
+            await connection.invalidate()
+            raise
+        try:
             yield len(held) == len(take)
         finally:
             try:
                 for lock_id in reversed(held):
-                    await connection.execute(text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": lock_id})
+                    await connection.execute(_UNLOCK, {"lock_id": lock_id})
                 await connection.commit()
-            except Exception:
+            except BaseException as exc:
                 logger.warning("Reconciliation: a session lock could not be released; dropping its connection")
                 await connection.invalidate()
+                if not isinstance(exc, Exception):
+                    raise
 
 
 def hold_reconciliation_pass() -> AbstractAsyncContextManager[bool]:
-    """Hold the pass lock for the whole pass, ``False`` when another pass holds it; then wait for a push retry."""
-    return _session_locks([(_RECONCILIATION_PASS_LOCK_ID, False), (_PENDING_PUSH_LOCK_ID, True)])
+    """Hold the pass lock for the whole pass, then the pending-push lock; ``False`` when either is not taken.
+
+    ``False`` at once while another pass runs, and after ``PASS_WAITS_FOR_PUSH_SECONDS``
+    while a push retry turn still pushes.
+    """
+    return _session_locks([(_RECONCILIATION_PASS_LOCK_ID, 0.0), (_PENDING_PUSH_LOCK_ID, PASS_WAITS_FOR_PUSH_SECONDS)])
 
 
 def hold_push_retry() -> AbstractAsyncContextManager[bool]:
     """Hold the pending-push lock for one push retry; ``False`` while a pass or another retry pushes."""
-    return _session_locks([(_PENDING_PUSH_LOCK_ID, False)])
+    return _session_locks([(_PENDING_PUSH_LOCK_ID, 0.0)])
 
 
 logger = logbook(__name__)

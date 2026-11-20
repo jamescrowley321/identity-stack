@@ -11,6 +11,7 @@ every organization, account and client role it makes is new and removed
 afterwards whatever the outcome.
 """
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
@@ -154,8 +155,12 @@ class Pass:
         return result.ok["providers"][KEYCLOAK]["stats"]
 
     async def retry(self) -> None:
-        """One turn of the push retry loop ``main.lifespan`` runs (``run_keycloak_push_retry``)."""
-        await retry_keycloak_pushes(self.api, self.session, self.hold_pass)
+        """One turn of the push retry loop ``main.lifespan`` runs (``run_keycloak_push_retry``).
+
+        With an interval of 1 ms, so the marks this test just wrote are due.
+        """
+        await asyncio.sleep(0.01)
+        await retry_keycloak_pushes(self.api, self.session, self.hold_pass, 0.001)
 
 
 @pytest_asyncio.fixture(loop_scope="session")

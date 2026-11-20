@@ -1,5 +1,6 @@
 """Which sync adapter the services get, how startup opens it, and what leaving a tenant sends it."""
 
+import asyncio
 import uuid
 from unittest.mock import AsyncMock
 
@@ -1078,6 +1079,48 @@ class TestLifespan:
 
         assert sync_http.is_closed
         assert engine.disposed
+
+    async def test_the_push_retry_runs_on_the_push_lock_while_serving_and_is_cancelled_on_shutdown(
+        self, monkeypatch, started
+    ):
+        set_settings(monkeypatch)
+        monkeypatch.setenv("KEYCLOAK_PULL_EVENTS", "false")
+        monkeypatch.setenv("KEYCLOAK_PUSH_RETRY_INTERVAL_SECONDS", "7")
+        self.build_into(monkeypatch, started, RecordedAdminApi(["token", *ROLE_CHECK]))
+        runs: list[tuple] = []
+        cancelled: list[bool] = []
+
+        async def push_retry(api, interval, hold):
+            runs.append((api, interval, hold))
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+        monkeypatch.setattr(main, "run_keycloak_push_retry", push_retry)
+        app = FastAPI()
+
+        async with main.lifespan(app):
+            await asyncio.sleep(0)
+            assert runs == [(app.state.keycloak_admin, 7.0, identity.hold_push_retry)]
+            assert cancelled == []
+
+        assert cancelled == [True]
+
+    async def test_no_push_retry_runs_without_keycloak(self, monkeypatch, started):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "descope")
+        runs: list[tuple] = []
+
+        async def push_retry(*args):
+            runs.append(args)
+
+        monkeypatch.setattr(main, "run_keycloak_push_retry", push_retry)
+
+        async with main.lifespan(FastAPI()):
+            await asyncio.sleep(0)
+
+        assert runs == []
 
     async def test_a_working_admin_secret_serves_and_closes_on_shutdown(self, monkeypatch, started):
         set_settings(monkeypatch)
