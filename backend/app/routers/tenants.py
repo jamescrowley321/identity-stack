@@ -66,11 +66,11 @@ def _resource_tenant_space(
     tenant is a canonical tenant and a Descope principal's a Descope tenant, and
     resources are read and written in that space only (#690): a Descope tenant
     whose custom id is a canonical tenant's UUID names none of its resources.
-    403 when the caller is no member, and ``TenantRefusal.SUSPENDED`` for its
+    403 when the caller is no member, and ``TenantRefusal.NOT_ACTIVE`` for its
     canonical tenant that is not active (#689), as the tenant resolver answers.
     """
     if canonical is not None and tenant_id in canonical.tenant_ids - canonical.servable_tenant_ids:
-        raise HTTPException(status_code=403, detail=TenantRefusal.SUSPENDED)
+        raise HTTPException(status_code=403, detail=TenantRefusal.NOT_ACTIVE)
     if tenant_id not in memberships:
         raise HTTPException(status_code=403, detail=NOT_A_MEMBER)
     return TenantIdSpace.descope if canonical is None else TenantIdSpace.canonical

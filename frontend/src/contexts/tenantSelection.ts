@@ -80,7 +80,7 @@ export function signInOrganization(
   return claimedOrganization(profile ?? {}) ?? claimedOrganization(accessTokenClaims(accessToken));
 }
 
-/** A membership as the selector reads it: `external_org_id` and `status` are absent from an older payload. */
+/** A membership as the selector reads it: `external_org_id` is absent from an older payload. */
 export interface SelectableMembership {
   tenant_id: string;
   external_org_id?: string | null;
@@ -92,12 +92,11 @@ export const ACTIVE_TENANT_STATUS = "active";
 
 /**
  * The memberships the selector offers: a tenant whose status is not active
- * (`suspended`) is served to no member, so it is not offered (#689). A payload
- * without a status predates it and is offered as before; the API refuses the
- * tenant either way.
+ * (`suspended`) is served to no member, so it is not offered (#689). A membership
+ * without a status is not offered either: the API serves it to no one.
  */
 export function servableMemberships<T extends SelectableMembership>(memberships: T[]): T[] {
-  return memberships.filter((m) => m.status === undefined || m.status === ACTIVE_TENANT_STATUS);
+  return memberships.filter((m) => m.status === ACTIVE_TENANT_STATUS);
 }
 
 /**
