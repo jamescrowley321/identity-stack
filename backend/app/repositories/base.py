@@ -82,3 +82,8 @@ class BaseRepository[T]:
     async def rollback(self) -> None:
         """Roll back the current transaction."""
         await self._session.rollback()
+
+    async def transaction_has_written(self) -> bool:
+        """Whether the current transaction has written anything: Postgres assigns it an id at its first write."""
+        written = await self._session.execute(sa.select(sa.func.pg_current_xact_id_if_assigned().is_not(None)))
+        return bool(written.scalar_one())
