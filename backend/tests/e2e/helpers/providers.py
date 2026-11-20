@@ -11,11 +11,12 @@ The two principals:
 - ``MEMBER``: signed in, with no admin role in the tenant it acts in;
 - ``ADMIN``: owner or admin of the tenant it acts in.
 
-Descope keeps what the suite did before (``helpers/auth.py``): a
-client-credentials token for the member, a test user's session for the admin
-(an access-key session is a machine, refused the admin routes: #699), tokens
-injected into the SPA's session storage, the same local skips and the same CI
-credential check. Keycloak and Zitadel need no credential beyond what
+Descope keeps what the suite did before (``helpers/auth.py``), with both
+principals people: each signs in as a new test user, a ``viewer`` of the test
+tenant for the member and an owner+admin for the admin (an access-key or
+client-credentials token is a machine, refused the admin routes before any role
+is read: #699), tokens injected into the SPA's session storage, the same local
+skips and the same CI credential check. Keycloak and Zitadel need no credential beyond what
 their applied Terraform root outputs: both principals are the fixture's
 two-tenant user, signed in through the SPA's client and the provider's own
 forms, naming the tenant it acts in by ``X-Tenant-ID``. They fail the run, never
@@ -266,10 +267,6 @@ class DescopeProvider(E2EProvider):
     def _has_mgmt_key(self) -> bool:
         return bool(os.environ.get("DESCOPE_MANAGEMENT_KEY"))
 
-    @property
-    def _has_client_creds(self) -> bool:
-        return bool(os.environ.get("DESCOPE_CLIENT_ID") and os.environ.get("DESCOPE_CLIENT_SECRET"))
-
     def check_ready(self, request: pytest.FixtureRequest) -> None:
         """In CI, a missing credential fails the run instead of skipping the suite."""
         if not os.environ.get("CI"):
@@ -316,18 +313,12 @@ class DescopeProvider(E2EProvider):
         return self._tokens.get(principal, lambda: self._new_token(principal))
 
     def _new_token(self, principal: str) -> str:
-        from tests.e2e.helpers.auth import get_admin_user_session_token, get_oidc_access_token
+        """A new test user's session, holding owner+admin (``ADMIN``) or viewer (``MEMBER``) in the tenant."""
+        from tests.e2e.helpers.auth import ADMIN_ROLES, MEMBER_ROLES, get_user_session_token
 
-        if principal == ADMIN:
-            # A test user holding owner+admin in the tenant, signed in: a person, whose
-            # session carries the tenants claim require_role() reads.
-            if not self._has_mgmt_key:
-                pytest.skip("DESCOPE_MANAGEMENT_KEY not set")
-            return get_admin_user_session_token()
-        # Client credentials: an OIDC-compatible token with no tenant claims.
-        if not self._has_client_creds:
-            pytest.skip("DESCOPE_CLIENT_ID/DESCOPE_CLIENT_SECRET not set")
-        return get_oidc_access_token()
+        if not self._has_mgmt_key:
+            pytest.skip("DESCOPE_MANAGEMENT_KEY not set")
+        return get_user_session_token(ADMIN_ROLES if principal == ADMIN else MEMBER_ROLES)
 
     def signed_in_context(self, browser: Browser, principal: str, request: pytest.FixtureRequest) -> BrowserContext:
         """The principal's token injected into sessionStorage before first paint."""

@@ -109,6 +109,8 @@ Three defaults are pending the owner's answer (epic identity-stack#672, "Owner d
   CI's Zitadel job is such a deployment: its backend syncs to Descope (identity-stack#709).
 - Descope access-key sessions are machine principals under these rules: Descope's `machine_client`
   reader takes a session that names no authentication method (`amr`) for an access key's, so it
-  is refused where a machine credential is (identity-stack#699).
+  is refused where a machine credential is (identity-stack#699). The Descope project must
+  never enable an access-key JWT template without first changing that reader: a template puts
+  the claims a key holder sends at exchange at the root of the session, `amr` among them.
 - An Ory or Keycloak deployment that adds FGA needs an OpenFGA server and the applied
   `infra/openfga` root, and starts with no relations.

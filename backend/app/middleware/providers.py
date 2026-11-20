@@ -206,6 +206,11 @@ def descope_access_key(claims: dict) -> str | None:
     and none on an access key's. Fails closed: a Descope token without one is
     taken for a machine's, whatever else it carries. A subject that is not a
     non-empty string is still a machine's, named by the empty string.
+
+    Sound only while the project has no access-key JWT template: a template puts
+    the key's claims, and the claims its holder sends at exchange, at the root
+    of the session, so a holder could send ``amr`` and pass for a person. Never
+    enable one without first changing this classifier (docs/security.md).
     """
     for name in DESCOPE_AUTHENTICATION_METHODS_CLAIMS:
         methods = claims.get(name)

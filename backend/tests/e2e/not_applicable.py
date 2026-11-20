@@ -78,6 +78,7 @@ NO_SYNC_PROVIDER_PAGES = (
 DEFINITIONS_NOT_SYNCED = f"{NOT_THE_SYNC_PROVIDER}; changing the definitions also needs operator (#710)"
 DESCOPE_MANAGEMENT_API = "calls the Descope Management API itself; the run has no Descope project"
 DESCOPE_ACCESS_KEY = "is about a Descope access-key session, which no other provider has"
+DESCOPE_OIDC_SESSION = "signs a Descope test user in through Descope's hosted OIDC flow, which no other provider has"
 NO_CANONICAL_IDENTITY = (
     "is about the Descope admin, a test user with no canonical identity; this provider's admin is a "
     "seeded canonical user"
@@ -153,6 +154,7 @@ NOT_APPLICABLE: dict[str, dict[str, str]] = {
         NO_CANONICAL_IDENTITY
     ),
     "test_descope_access_key.py": _both(DESCOPE_ACCESS_KEY),
+    "test_descope_oidc_session.py": _both(DESCOPE_OIDC_SESSION),
     # Documents and FGA run for every provider: OpenFGA serves the canonical runs' principals (#682).
 }
 

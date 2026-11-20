@@ -17,7 +17,7 @@ import uuid
 import pytest
 from playwright.sync_api import APIRequestContext
 
-from tests.e2e.helpers.api import unique_name
+from tests.e2e.helpers.api import assert_refused_for_role, unique_name
 from tests.e2e.helpers.auth import cleanup_test_user
 from tests.e2e.helpers.providers import MEMBER
 from tests.e2e.not_applicable import DESCOPE, descope_credentials_missing, selected_provider
@@ -63,26 +63,26 @@ class TestMemberAuthEnforcement:
 
     def test_nonadmin_list_members(self, auth_api_context: APIRequestContext, backend_url: str):
         resp = auth_api_context.get(f"{backend_url}/api/members")
-        assert resp.status == 403
+        assert_refused_for_role(resp)
 
     def test_nonadmin_invite_member(self, auth_api_context: APIRequestContext, backend_url: str):
         resp = auth_api_context.post(
             f"{backend_url}/api/members/invite",
             data={"email": "nobody@test.example.com"},
         )
-        assert resp.status == 403
+        assert_refused_for_role(resp)
 
     def test_nonadmin_deactivate_member(self, auth_api_context: APIRequestContext, backend_url: str):
         resp = auth_api_context.post(f"{backend_url}/api/members/{self.DUMMY_UUID}/deactivate")
-        assert resp.status == 403
+        assert_refused_for_role(resp)
 
     def test_nonadmin_activate_member(self, auth_api_context: APIRequestContext, backend_url: str):
         resp = auth_api_context.post(f"{backend_url}/api/members/{self.DUMMY_UUID}/activate")
-        assert resp.status == 403
+        assert_refused_for_role(resp)
 
     def test_nonadmin_remove_member(self, auth_api_context: APIRequestContext, backend_url: str):
         resp = auth_api_context.delete(f"{backend_url}/api/members/{self.DUMMY_UUID}")
-        assert resp.status == 403
+        assert_refused_for_role(resp)
 
 
 class TestRoleAuthEnforcement:
@@ -112,25 +112,25 @@ class TestRoleAuthEnforcement:
 
     def test_nonadmin_list_roles(self, auth_api_context: APIRequestContext, backend_url: str):
         resp = auth_api_context.get(f"{backend_url}/api/roles")
-        assert resp.status == 403
+        assert_refused_for_role(resp)
 
     def test_nonadmin_create_role(self, auth_api_context: APIRequestContext, backend_url: str):
         resp = auth_api_context.post(
             f"{backend_url}/api/roles",
             data={"name": "test", "description": "test"},
         )
-        assert resp.status == 403
+        assert_refused_for_role(resp)
 
     def test_nonadmin_update_role(self, auth_api_context: APIRequestContext, backend_url: str):
         resp = auth_api_context.put(
             f"{backend_url}/api/roles/nonexistent",
             data={"new_name": "test"},
         )
-        assert resp.status == 403
+        assert_refused_for_role(resp)
 
     def test_nonadmin_delete_role(self, auth_api_context: APIRequestContext, backend_url: str):
         resp = auth_api_context.delete(f"{backend_url}/api/roles/nonexistent")
-        assert resp.status == 403
+        assert_refused_for_role(resp)
 
 
 class TestPermissionAuthEnforcement:
@@ -160,25 +160,25 @@ class TestPermissionAuthEnforcement:
 
     def test_nonadmin_list_permissions(self, auth_api_context: APIRequestContext, backend_url: str):
         resp = auth_api_context.get(f"{backend_url}/api/permissions")
-        assert resp.status == 403
+        assert_refused_for_role(resp)
 
     def test_nonadmin_create_permission(self, auth_api_context: APIRequestContext, backend_url: str):
         resp = auth_api_context.post(
             f"{backend_url}/api/permissions",
             data={"name": "test", "description": "test"},
         )
-        assert resp.status == 403
+        assert_refused_for_role(resp)
 
     def test_nonadmin_update_permission(self, auth_api_context: APIRequestContext, backend_url: str):
         resp = auth_api_context.put(
             f"{backend_url}/api/permissions/nonexistent",
             data={"new_name": "test"},
         )
-        assert resp.status == 403
+        assert_refused_for_role(resp)
 
     def test_nonadmin_delete_permission(self, auth_api_context: APIRequestContext, backend_url: str):
         resp = auth_api_context.delete(f"{backend_url}/api/permissions/nonexistent")
-        assert resp.status == 403
+        assert_refused_for_role(resp)
 
 
 class TestTenantAuthEnforcement:
@@ -210,15 +210,12 @@ class TestTenantAuthEnforcement:
     def test_nonadmin_get_current_tenant(self, auth_api_context: APIRequestContext, backend_url: str, e2e_provider):
         """GET /tenants/current serves the member the tenant the resolver chooses (conventions §18).
 
-        A Descope member's OIDC token carries no ``dct``, so it has no tenant: 403.
-        A Keycloak or Zitadel member is served the tenant its ``X-Tenant-ID`` selects (#673).
+        A Descope member is a test user of one tenant, its ``dct`` (#699); a Keycloak or
+        Zitadel member is served the tenant its ``X-Tenant-ID`` selects (#673).
         """
         resp = auth_api_context.get(f"{backend_url}/api/tenants/current")
-        if e2e_provider.name == DESCOPE:
-            assert resp.status == 403
-            return
-        assert resp.status == 200
-        selected = e2e_provider.headers(MEMBER)["X-Tenant-ID"]
+        assert resp.status == 200, resp.text()
+        selected = e2e_provider.headers(MEMBER).get("X-Tenant-ID") or os.environ["E2E_TEST_TENANT_ID"]
         assert (resp.json()["tenant_id"], resp.json()["tenant"]["id"]) == (selected, selected)
 
 

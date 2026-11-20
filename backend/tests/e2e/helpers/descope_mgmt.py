@@ -32,11 +32,10 @@ def _mgmt_url(path: str) -> str:
 # Login-id prefixes for users the E2E suite creates as fixtures. Anything
 # matching these is disposable by construction — the suffix is a random uuid4
 # fragment, so a surviving one can only be litter from an earlier run.
-LEAKED_USER_PREFIXES = ("e2e-invite-", "e2e-lifecycle-", "e2e-admin-")
-
-# Login-id prefix of the owner+admin test user the run signs in as
-# (``auth.get_admin_user_session_token``): one per sign-in, swept with the rest.
-ADMIN_USER_PREFIX = "e2e-admin-"
+# Login-id prefix of the test users the run signs in as (``auth.create_test_user``):
+# one per sign-in, swept with the rest.
+SIGN_IN_USER_PREFIX = "e2e-signin-"
+LEAKED_USER_PREFIXES = ("e2e-invite-", "e2e-lifecycle-", SIGN_IN_USER_PREFIX)
 
 # Name prefix for the throwaway owner+admin key `get_admin_session_token` mints
 # once per session. The suffix is a uuid4 fragment, so a survivor can only be
@@ -206,6 +205,32 @@ def sweep_leaked_e2e_access_keys() -> int:
     return removed
 
 
+# Descope's user search answers at most this many users a page; the sweep reads
+# pages until one comes back short, up to the cap.
+_USER_SEARCH_PAGE_SIZE = 500
+_USER_SEARCH_MAX_PAGES = 20
+
+
+def _leaked_users(users: Iterable[dict]) -> dict[str, str]:
+    """``{userId: loginId}`` of the users carrying a leaked prefix, never ``E2E_TEST_EMAIL``.
+
+    The batch endpoint keys on userIds, not loginIds: a user with no userId in the
+    search payload cannot be batched and is left for the next run rather than
+    being counted as removed.
+    """
+    leaked = {}
+    for user in users:
+        login_ids = user.get("loginIds") or []
+        if not login_ids or login_ids[0] == E2E_TEST_EMAIL:
+            continue
+        if not login_ids[0].startswith(LEAKED_USER_PREFIXES):
+            continue
+        user_id = user.get("userId") or ""
+        if user_id:
+            leaked[user_id] = login_ids[0]
+    return leaked
+
+
 def sweep_leaked_e2e_users() -> int:
     """Delete users left behind by earlier E2E runs. Returns the count removed.
 
@@ -223,30 +248,27 @@ def sweep_leaked_e2e_users() -> int:
         return 0
 
     with httpx.Client(timeout=30) as client:
-        response = client.post(
-            _mgmt_url("/v2/mgmt/user/search"),
-            headers=_auth_header(),
-            # The admin principal is a test user, which a search leaves out unless asked.
-            json={"limit": 500, "page": 0, "withTestUser": True},
-        )
-        if response.status_code != HTTPStatus.OK:
-            print(f"[E2E] user sweep: search returned {response.status_code}, skipping")
-            return 0
+        leaked: dict[str, str] = {}
+        for page in range(_USER_SEARCH_MAX_PAGES):
+            response = client.post(
+                _mgmt_url("/v2/mgmt/user/search"),
+                headers=_auth_header(),
+                # The sign-in users are test users, which a search leaves out unless asked.
+                json={"limit": _USER_SEARCH_PAGE_SIZE, "page": page, "withTestUser": True},
+            )
+            if response.status_code != HTTPStatus.OK:
+                print(f"[E2E] user sweep: search page {page} returned {response.status_code}, sweeping what was found")
+                break
+            users = response.json().get("users", [])
+            leaked.update(_leaked_users(users))
+            if len(users) < _USER_SEARCH_PAGE_SIZE:
+                break
+        else:
+            print(f"[E2E] user sweep: stopped after {_USER_SEARCH_MAX_PAGES} pages; the rest waits for the next run")
 
-        # The batch endpoint keys on userIds, not loginIds — a user with no
-        # userId in the search payload cannot be batched and is left for the
-        # next run rather than being counted as removed.
-        user_ids = []
-        for user in response.json().get("users", []):
-            login_ids = user.get("loginIds") or []
-            if not login_ids or login_ids[0] == E2E_TEST_EMAIL:
-                continue
-            if not login_ids[0].startswith(LEAKED_USER_PREFIXES):
-                continue
-            user_id = user.get("userId") or ""
-            if user_id:
-                user_ids.append(user_id)
-
+        if leaked:
+            print(f"[E2E] user sweep: deleting {sorted(leaked.values())}")
+        user_ids = list(leaked)
         removed = _delete_in_batches(
             client,
             kind="user",

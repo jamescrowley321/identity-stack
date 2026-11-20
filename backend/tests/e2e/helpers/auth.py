@@ -20,7 +20,6 @@ from playwright.sync_api import BrowserContext
 # unit-tested without importing playwright. Re-exported here because conftest and
 # the E2E suite import them from this module.
 from tests.e2e.helpers.descope_mgmt import (  # noqa: F401 - re-exported for callers
-    ADMIN_USER_PREFIX,
     DESCOPE_BASE_URL,
     DESCOPE_MANAGEMENT_KEY,
     DESCOPE_PROJECT_ID,
@@ -28,6 +27,7 @@ from tests.e2e.helpers.descope_mgmt import (  # noqa: F401 - re-exported for cal
     E2E_TEST_TENANT_ID,
     LEAKED_ACCESS_KEY_PREFIX,
     LEAKED_USER_PREFIXES,
+    SIGN_IN_USER_PREFIX,
     _auth_header,
     _mgmt_url,
     sweep_leaked_e2e_access_keys,
@@ -174,15 +174,17 @@ def create_authenticated_context(browser, frontend_url: str, access_token: str) 
     return context
 
 
-def get_admin_user_session_token(tenant_id: str = "") -> str:
-    """A Descope USER session of a new owner+admin of the test tenant: the run's ``ADMIN``.
+# The roles of the run's two Descope principals in the test tenant: ``ADMIN`` and ``MEMBER``.
+ADMIN_ROLES = ("owner", "admin")
+MEMBER_ROLES = ("viewer",)
 
-    An access-key session is a machine, which the backend refuses on ``/api/keys``
-    and the role and member routes (#699), so the admin is a person. Each call
-    creates a test user (``ADMIN_USER_PREFIX``, swept with the run's other users)
-    holding owner and admin in the tenant and nothing else, so the session's one
-    tenant is its ``dct``, and signs it in with a test OTP. A new user per sign-in:
-    another run's sweep may delete an earlier one, which a re-sign-in would trip on.
+
+def create_test_user(role_names: tuple[str, ...], tenant_id: str = "") -> str:
+    """A new Descope test user holding ``role_names`` in the test tenant and nothing else. Returns its login id.
+
+    Its one tenant is a session's ``dct``. The login id carries ``SIGN_IN_USER_PREFIX``,
+    so the run's user sweep removes it. A new user per sign-in: another run's sweep
+    may delete an earlier one, which a re-sign-in would trip on.
     """
     import uuid
 
@@ -192,8 +194,7 @@ def get_admin_user_session_token(tenant_id: str = "") -> str:
     if not tenant_id:
         raise RuntimeError("E2E_TEST_TENANT_ID must be set")
     domain = E2E_TEST_EMAIL.rpartition("@")[2] or "example.com"
-    login_id = f"{ADMIN_USER_PREFIX}{uuid.uuid4().hex[:8]}@{domain}"
-
+    login_id = f"{SIGN_IN_USER_PREFIX}{uuid.uuid4().hex[:8]}@{domain}"
     with httpx.Client(timeout=30) as client:
         created = client.post(
             _mgmt_url("/v1/mgmt/user/create/test"),
@@ -201,30 +202,52 @@ def get_admin_user_session_token(tenant_id: str = "") -> str:
             json={
                 "loginId": login_id,
                 "email": login_id,
-                "name": "E2E Admin",
+                "name": "E2E Sign-in",
                 "verifiedEmail": True,
-                "userTenants": [{"tenantId": tenant_id, "roleNames": ["owner", "admin"]}],
+                "userTenants": [{"tenantId": tenant_id, "roleNames": list(role_names)}],
             },
         )
-        if created.status_code != HTTPStatus.OK:
-            raise RuntimeError(f"Creating the admin test user failed: HTTP {created.status_code} {created.text[:200]}")
+    if created.status_code != HTTPStatus.OK:
+        raise RuntimeError(f"Creating a test user failed: HTTP {created.status_code} {created.text[:200]}")
+    return login_id
+
+
+def otp_for_test_user(login_id: str) -> str:
+    """A one-time code a test user signs in with, by email OTP (Descope sends no message to a test user)."""
+    with httpx.Client(timeout=30) as client:
         otp = client.post(
             _mgmt_url("/v1/mgmt/tests/generate/otp"),
             headers=_auth_header(),
             json={"loginId": login_id, "deliveryMethod": "email"},
         )
-        if otp.status_code != HTTPStatus.OK:
-            raise RuntimeError(f"Generating the admin's OTP failed: HTTP {otp.status_code} {otp.text[:200]}")
+    if otp.status_code != HTTPStatus.OK:
+        raise RuntimeError(f"Generating a test user's OTP failed: HTTP {otp.status_code} {otp.text[:200]}")
+    code = otp.json().get("code", "")
+    if not code:
+        raise RuntimeError("Generating a test user's OTP returned no code")
+    return code
+
+
+def get_user_session_token(role_names: tuple[str, ...]) -> str:
+    """A Descope USER session of a new test user holding ``role_names`` in the test tenant.
+
+    The run's ``ADMIN`` (``ADMIN_ROLES``) and ``MEMBER`` (``MEMBER_ROLES``) are people:
+    an access-key session is a machine, which the backend refuses on ``/api/keys``
+    and the role and member routes before any role is read (#699).
+    """
+    login_id = create_test_user(role_names)
+    code = otp_for_test_user(login_id)
+    with httpx.Client(timeout=30) as client:
         verified = client.post(
             f"{DESCOPE_BASE_URL}/v1/auth/otp/verify/email",
             headers={"Authorization": f"Bearer {DESCOPE_PROJECT_ID}"},
-            json={"loginId": login_id, "code": otp.json().get("code", "")},
+            json={"loginId": login_id, "code": code},
         )
-        if verified.status_code != HTTPStatus.OK:
-            raise RuntimeError(f"Verifying the admin's OTP failed: HTTP {verified.status_code} {verified.text[:200]}")
+    if verified.status_code != HTTPStatus.OK:
+        raise RuntimeError(f"Verifying a test user's OTP failed: HTTP {verified.status_code} {verified.text[:200]}")
     token = verified.json().get("sessionJwt", "")
     if not token:
-        raise RuntimeError("Verifying the admin's OTP returned no sessionJwt")
+        raise RuntimeError("Verifying a test user's OTP returned no sessionJwt")
     return token
 
 
