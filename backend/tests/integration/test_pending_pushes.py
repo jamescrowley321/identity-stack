@@ -157,3 +157,37 @@ async def test_the_keycloak_seed_links_tenants_as_the_providers_state(db_session
     linked = (await db_session.execute(select(Tenant).where(Tenant.external_org_provider_id == provider.id))).scalars()
     assert sorted(tenant.external_org_id for tenant in linked) == [f"created-{suffix}", f"existing-{suffix}"]
     assert await _marks(db_session) == {}
+
+
+async def test_the_keycloak_seed_runs_again_after_reconciliation_renamed_its_tenants(db_session, ledger):
+    """A second seed finds a tenant by its link after a pass renamed it after its organization ("acme" to "Acme")."""
+    suffix = uuid.uuid4().hex[:10]
+    provider = Provider(
+        name=f"keycloak-reseed-{suffix}",
+        type=ProviderType.oidc,
+        issuer_url=f"http://reseed-{suffix}.localhost/realms/r",
+        base_url=f"http://reseed-{suffix}.localhost/realms/r",
+    )
+    db_session.add(provider)
+    await db_session.flush()
+    await db_session.execute(delete(PendingPush))
+    await ledger.provider_writes(False)
+    seeded = f"acme-{suffix}"
+    organizations = {seeded: f"acme-org-{suffix}"}
+
+    await link_organizations_in(db_session, provider_id=provider.id, organizations=organizations)
+    tenant = (
+        (await db_session.execute(select(Tenant).where(Tenant.external_org_provider_id == provider.id))).scalars().one()
+    )
+    tenant.name = f"Acme-{suffix}"
+    await db_session.flush()
+    await link_organizations_in(db_session, provider_id=provider.id, organizations=organizations)
+
+    linked = (
+        await db_session.execute(
+            select(Tenant.id, Tenant.name, Tenant.external_org_id).where(Tenant.external_org_provider_id == provider.id)
+        )
+    ).all()
+    assert [tuple(row) for row in linked] == [(tenant.id, f"Acme-{suffix}", f"acme-org-{suffix}")]
+    assert (await db_session.execute(select(Tenant.id).where(Tenant.name == seeded))).all() == []
+    assert await _marks(db_session) == {}

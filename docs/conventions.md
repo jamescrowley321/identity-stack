@@ -416,7 +416,17 @@ people hold which roles, the definitions every tenant's grants read, or who belo
   tenant's account nor learn about it. A member's status is the account's (the model keeps no
   status per membership), so it is set only for a user whose sole tenant is the request's, under
   a lock on the user's row (409 otherwise), and a user who is no member of the tenant reads the
-  same whether or not it exists.
+  same whether or not it exists. Deactivating, activating and removing a member **MUST** first
+  pass `access.act_on_member` over the member's roles in the tenant, read from the same directory
+  (Descope's `userTenants` or the canonical assignments): a member holding `owner` only by an
+  owner (403, `MemberActionRefusal.OWNER_REQUIRED`), one holding `operator` only by an operator
+  (`operator_grant_check`), and never the caller itself for a deactivation or a removal (403,
+  `MemberActionRefusal.ACTING_ON_SELF`), since a deactivated user cannot sign back in to undo it.
+- **Role assignment.** `POST /api/roles/assign` **MUST** give a role only to a user who already
+  holds one in the request's tenant, whatever the adapter (403, `access.NotATenantMember`), with
+  the same answer for an unknown user and another tenant's: otherwise a tenant admin could pull
+  another tenant's user, an operator among them, into theirs (#693). The first membership comes
+  from sign-in provisioning or an invitation.
 - **Definitions.** The role and permission definitions belong to no tenant and every tenant's
   grants read them, so the routes that change them are gated by
   `app.dependencies.rbac.require_definitions_role`
@@ -471,7 +481,9 @@ sync adapter's capabilities serve only a principal of the sync provider (its reg
 `own_principal` in `SYNC_ADAPTERS`; for Descope, a `descope_managed` provider), because a
 capability takes the caller's `sub` and the request's tenant as that provider's own ids. The
 exception is an adapter's `canonical_capabilities`, kept in the canonical model and taking none
-of the provider's ids, which serve every principal: Keycloak's machine credentials (#680). Each
+of the provider's ids, which serve every principal authorized from the canonical model
+(`rbac.is_canonical_principal`) and never a Descope principal, whose `dct` may name a canonical
+tenant's id: Keycloak's machine credentials (#680). Each
 relationship store serves only the principals whose ids it keys on (below). A caller not served
 answers 404 (`CapabilityMissing`), not the guard's 403: the route is not there for them.
 `GET /api/capabilities` reports `served`, and the SPA shows a page only when it is there. A route

@@ -192,7 +192,8 @@ class IdentityProviderAdapter(ABC):
 
     # The declared capabilities kept in the canonical model rather than at the
     # provider: they take none of the caller's provider ids, so they serve every
-    # principal, not only the provider's own (``app.dependencies.capabilities.served``).
+    # principal authorized from the canonical model, not only the provider's own
+    # (``app.dependencies.capabilities.served``).
     # Keycloak's machine credentials are canonical rows the adapter pushes as clients.
     canonical_capabilities: ClassVar[frozenset[Capability]] = frozenset()
 

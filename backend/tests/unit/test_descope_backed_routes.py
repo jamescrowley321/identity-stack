@@ -38,7 +38,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from expression import Ok
+from expression import Error, Ok
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
@@ -74,7 +74,9 @@ from app.dependencies.rbac import (
 from app.dependencies.sync_provider import NOT_A_SYNC_PROVIDER_PRINCIPAL, require_sync_provider_principal
 from app.dependencies.tenant import get_tenant_access, get_tenant_id
 from app.dependencies.tenant_access import SELECT_A_TENANT_FIRST
-from app.errors.identity import IdentityErrorRaised
+from app.domain import access
+from app.errors.access import MemberActionRefusal
+from app.errors.identity import IdentityErrorRaised, ProviderError
 from app.errors.problem_detail import identity_error_raised_handler
 from app.main import app as shipped_app
 from app.middleware.claims import GatewayClaimsMiddleware
@@ -1332,6 +1334,15 @@ MEMBER_ROUTE_ANSWERS = {
     ("DELETE", "/api/members/{user_id}"): {"status": "removed", "user_id": MEMBER_ID},
 }
 
+# route name: (method, path, the directory call it makes) for the actions on one member.
+MEMBER_ACTIONS = {
+    "deactivate": ("POST", "/api/members/{user_id}/deactivate", "set_member_status"),
+    "activate": ("POST", "/api/members/{user_id}/activate", "set_member_status"),
+    "remove": ("DELETE", "/api/members/{user_id}", "remove_member"),
+}
+# The canonical user id ``_CanonicalStore`` resolves every caller to.
+CANONICAL_CALLER = "canonical-user-1"
+
 
 class TestTheMemberRoutesServeTheSyncProvidersPrincipals:
     """Where Keycloak is synced, its tenant admins manage the tenant's canonical members (#677)."""
@@ -1350,6 +1361,7 @@ class TestTheMemberRoutesServeTheSyncProvidersPrincipals:
         directory.invite_member.return_value = Ok({"status": "invited"})
         directory.set_member_status.return_value = Ok({})
         directory.remove_member.return_value = Ok({"status": "removed", "user_id": MEMBER_ID})
+        directory.tenant_member.return_value = Ok(access.TenantMember(user_id=MEMBER_ID, roles=frozenset({"member"})))
         client.app.dependency_overrides[get_member_directory] = lambda: directory
         return directory
 
@@ -1446,6 +1458,85 @@ class TestTheMemberRoutesServeTheSyncProvidersPrincipals:
             200,
             {"status": "deactivated", "user_id": MEMBER_ID, "provider_sync": "failed"},
         )
+
+    @pytest.mark.parametrize("route", sorted(MEMBER_ACTIONS))
+    def test_a_keycloak_admin_cannot_act_on_the_owner(self, keycloak_sync, client, members, route):
+        members.tenant_member.return_value = Ok(access.TenantMember(user_id=MEMBER_ID, roles=frozenset({"owner"})))
+        method, path, call = MEMBER_ACTIONS[route]
+
+        response = self._call(client, method, path, {**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A})
+
+        assert (response.status_code, response.json()) == (403, {"detail": MemberActionRefusal.OWNER_REQUIRED})
+        members.tenant_member.assert_awaited_once_with(MEMBER_ID, TENANT_A)
+        getattr(members, call).assert_not_awaited()
+
+    @pytest.mark.parametrize("route", sorted(MEMBER_ACTIONS))
+    def test_a_keycloak_owner_acts_on_another_owner(self, keycloak_sync, client, members, route):
+        keycloak_sync.roles = SOLE_OWNER
+        members.tenant_member.return_value = Ok(access.TenantMember(user_id=MEMBER_ID, roles=frozenset({"owner"})))
+        method, path, call = MEMBER_ACTIONS[route]
+
+        response = self._call(client, method, path, {**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A})
+
+        assert (response.status_code, response.json()) == (200, MEMBER_ROUTE_ANSWERS[(method, path)])
+        getattr(members, call).assert_awaited_once()
+
+    @pytest.mark.parametrize("route", sorted(MEMBER_ACTIONS))
+    @pytest.mark.parametrize(
+        "roles", [SOLE_ADMIN, ADMIN_OF_A_OPERATOR_OF_B], ids=["admin of its sole tenant", "operator of another"]
+    )
+    def test_a_keycloak_admin_cannot_act_on_an_operator(self, keycloak_sync, client, members, route, roles):
+        keycloak_sync.roles = roles
+        members.tenant_member.return_value = Ok(
+            access.TenantMember(user_id=MEMBER_ID, roles=frozenset({OPERATOR_ROLE}))
+        )
+        method, path, call = MEMBER_ACTIONS[route]
+
+        response = self._call(client, method, path, {**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A})
+
+        assert (response.status_code, response.json()) == (403, OPERATOR_GRANT_REFUSED)
+        getattr(members, call).assert_not_awaited()
+
+    @pytest.mark.parametrize("route", sorted(MEMBER_ACTIONS))
+    def test_a_keycloak_operator_and_admin_acts_on_an_operator(self, keycloak_sync, client, members, route):
+        keycloak_sync.roles = ADMIN_AND_OPERATOR_OF_A
+        members.tenant_member.return_value = Ok(
+            access.TenantMember(user_id=MEMBER_ID, roles=frozenset({OPERATOR_ROLE}))
+        )
+        method, path, call = MEMBER_ACTIONS[route]
+
+        response = self._call(client, method, path, {**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A})
+
+        assert (response.status_code, response.json()) == (200, MEMBER_ROUTE_ANSWERS[(method, path)])
+        getattr(members, call).assert_awaited_once()
+
+    @pytest.mark.parametrize("route", ["deactivate", "remove"])
+    def test_a_keycloak_admin_neither_deactivates_nor_removes_itself(self, keycloak_sync, client, members, route):
+        """The caller is the store's canonical user: it could not sign back in to undo it."""
+        members.tenant_member.return_value = Ok(
+            access.TenantMember(user_id=CANONICAL_CALLER, roles=frozenset({"admin"}))
+        )
+        method, path, call = MEMBER_ACTIONS[route]
+
+        response = client.request(
+            method,
+            path.replace("{user_id}", CANONICAL_CALLER),
+            headers={**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A},
+        )
+
+        assert (response.status_code, response.json()) == (403, {"detail": MemberActionRefusal.ACTING_ON_SELF})
+        members.tenant_member.assert_awaited_once_with(CANONICAL_CALLER, TENANT_A)
+        getattr(members, call).assert_not_awaited()
+
+    def test_a_failed_member_lookup_changes_nothing(self, keycloak_sync, client, members):
+        members.tenant_member.return_value = Error(ProviderError(message="down"))
+
+        response = client.delete(
+            f"/api/members/{MEMBER_ID}", headers={**_bearer(KEYCLOAK_USER), "X-Tenant-ID": TENANT_A}
+        )
+
+        assert (response.status_code, response.json()) == (502, {"detail": "Failed to remove member"})
+        members.remove_member.assert_not_awaited()
 
     def test_the_directory_is_the_canonical_one_where_keycloak_is_synced(self, monkeypatch):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")

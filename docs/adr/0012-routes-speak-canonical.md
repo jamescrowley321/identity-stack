@@ -35,8 +35,9 @@ decision, `identity.is_sync_provider_principal`: `GET /api/capabilities` reports
 **Capabilities are declared.** A sync adapter declares a frozen set of `Capability`
 (`machine_credentials`, `custom_attributes`). `capabilities.served` decides what serves the caller:
 an adapter's capabilities serve only its own provider's principals, except its
-`canonical_capabilities`, which take no provider id and serve everyone (Keycloak's machine
-credentials). `GET /api/capabilities` reports the result and the relationship store, and the SPA
+`canonical_capabilities`, which take no provider id and serve every principal authorized from the
+canonical model (Keycloak's machine credentials), never a Descope principal: a Descope `dct` that
+names a canonical tenant's id grants nothing there. `GET /api/capabilities` reports the result and the relationship store, and the SPA
 shows a page only when its capability is there. A route for a capability that does not serve the
 caller answers 404 (`CapabilityMissing`), never a provider's 403.
 
@@ -83,6 +84,15 @@ Three defaults are pending the owner's answer (epic identity-stack#672, "Owner d
   owner; and the IdP-link writes, which decide which account signs in as a person
   (identity-stack#683). Every other write lists why a machine may make it
   (`MACHINE_PERMITTED_WRITES` in `test_descope_backed_routes.py`).
+- **A member is acted on only by one who outranks or matches it.** Deactivating, activating or
+  removing a member who holds `owner` in the tenant needs the caller to be an owner (403,
+  `MemberActionRefusal.OWNER_REQUIRED`); one who holds `operator` needs an operator
+  (`operator_grant_check`). No caller deactivates or removes itself (403,
+  `MemberActionRefusal.ACTING_ON_SELF`): a deactivated user cannot sign back in to undo it.
+- **A role is assigned only to a member of the tenant**, on every adapter (403,
+  `access.NotATenantMember`), with the same answer for an unknown user and another tenant's.
+  Otherwise a tenant admin could pull another tenant's user, an operator among them, into theirs
+  (identity-stack#693).
 - **An invitation only creates an account.** The user and its memberships commit together, and
   an email any canonical user already has is refused (409, `MemberRefusal.ACCOUNT_EXISTS`)
   whichever tenant holds it. So an admin cannot enrol another tenant's account or learn that it

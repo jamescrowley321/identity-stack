@@ -411,6 +411,31 @@ class TestCustomAttributes:
             TenantAttributes(f"Renamed {tenant_id}", {"max_members": 25})
         )
 
+    async def test_an_attribute_write_keeps_a_suspension_and_a_domain_the_realm_admin_made(
+        self, sync, realm, monkeypatch, tenant_id
+    ):
+        """A suspension made before the write, and a domain added between its read and its PUT, stay."""
+        await sync.sync_tenant(tenant_id=tenant_id, data={"name": f"Attr {tenant_id}"})
+        organization = find_organization(realm, tenant_id)
+        realm.put(f"/organizations/{organization['id']}", json={**organization, "enabled": False}).raise_for_status()
+        domain = f"{tenant_id.hex}.test"
+        read = sync._api.get_organization
+
+        async def read_then_add_a_domain(organization_id: str) -> dict | None:
+            found = await read(organization_id)
+            held = realm.get(f"/organizations/{organization_id}").raise_for_status().json()
+            realm.put(
+                f"/organizations/{organization_id}", json={**held, "domains": [{"name": domain}]}
+            ).raise_for_status()
+            return found
+
+        monkeypatch.setattr(sync._api, "get_organization", read_then_add_a_domain)
+
+        assert await sync.set_tenant_attributes(tenant=str(tenant_id), attributes={"plan_tier": "pro"}) == Ok(None)
+        organization = find_organization(realm, tenant_id)
+        domains = [entry["name"] for entry in organization["domains"]]
+        assert (domains, organization["enabled"]) == ([domain], False)
+
     async def test_a_tenant_without_an_organization_has_no_attributes(self, sync, tenant_id):
         assert await sync.tenant_attributes(tenant=str(tenant_id)) == Ok(None)
 
@@ -486,10 +511,12 @@ class TestPermissionsAndRoles:
         )
 
         renamed_permission = f"{permission_name}x"
-        assert await sync.sync_permission(
-            permission_id=permission_id, data={"name": renamed_permission, "previous_name": permission_name}
-        ) == Ok(None)
+        permission_rename = {"name": renamed_permission, "previous_name": permission_name}
+        assert await sync.sync_permission(permission_id=permission_id, data=permission_rename) == Ok(None)
         assert composites(realm, pushed_role) == [renamed_permission]
+        await repeat_writes_nothing(
+            realm, lambda: sync.sync_permission(permission_id=permission_id, data=permission_rename)
+        )
 
         emptied = {**role, "permission_names": []}
         assert await sync.sync_role(role_id=role_id, data=emptied) == Ok(None)
@@ -520,6 +547,7 @@ class TestPermissionsAndRoles:
         assert {name: group["members"] for name, group in groups(realm, organization).items()} == {
             f"{role_name}-renamed": [str(user_id)]
         }
+        await repeat_writes_nothing(realm, lambda: sync.sync_role(role_id=role_id, data=renamed))
 
         assert await sync.delete_role(role_id=role_id, data={"name": f"{role_name}-renamed", "tenant_id": None}) == Ok(
             None
@@ -820,6 +848,20 @@ class TestDeletingARole:
                 kept.name: [str(other_user_id)]
             }
             assert client_role(realm, ROLE_ATTRIBUTE, deleted.id) is None
+            # The pushes the delete made, repeated: the group, the client role and the membership are gone.
+            await repeat_writes_nothing(
+                realm, lambda: sync.delete_role(role_id=deleted.id, data={"name": deleted.name, "tenant_id": None})
+            )
+            await repeat_writes_nothing(
+                realm,
+                lambda: sync.delete_role_assignment(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    role_id=deleted.id,
+                    data={"role_name": deleted.name, LAST_ROLE_IN_TENANT: True},
+                ),
+            )
+            assert members(realm, organization) == [str(other_user_id)]
         finally:
             _cleanup_client_roles(realm, ROLE_ATTRIBUTE, deleted.id)
             _cleanup_client_roles(realm, ROLE_ATTRIBUTE, kept.id)

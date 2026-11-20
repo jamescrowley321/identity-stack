@@ -94,7 +94,7 @@ ids from another is in [conventions §18](conventions.md#18-one-resolver-decides
 
   | Capability | Pages | Descope | Keycloak | Zitadel |
   |---|---|---|---|---|
-  | `machine_credentials` | Access Keys (`/api/keys`) | Access keys, for Descope principals | Service-account clients, kept in the canonical model: every principal ([keycloak.md](keycloak.md#machine-credentials)) | — |
+  | `machine_credentials` | Access Keys (`/api/keys`) | Access keys, for Descope principals | Service-account clients, kept in the canonical model: every canonical principal, no Descope principal ([keycloak.md](keycloak.md#machine-credentials)) | — |
   | `custom_attributes` | Tenant Settings; the profile's attributes | User and tenant custom attributes, for Descope principals | User and organization attributes, for Keycloak principals | — (Zitadel metadata: #703) |
 
 - **The relationship store** (`RELATIONSHIP_STORE`, `backend/app/services/relationship_store.py`)

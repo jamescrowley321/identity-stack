@@ -16,6 +16,7 @@ from fastapi import Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import identity
+from app.dependencies.rbac import is_canonical_principal
 from app.errors.identity import CapabilityMissing, IdentityErrorRaised
 from app.logbook import logbook
 from app.models.database import get_async_session
@@ -45,18 +46,22 @@ def served(request: Request) -> Served:
     An adapter's capabilities take the caller's ``sub`` and tenant as its own
     provider's ids, so they serve only that provider's principals
     (``identity.is_sync_provider_principal``; for Descope, a ``descope_managed``
-    provider's, conventions §18): any other principal is served only the adapter's
-    ``canonical_capabilities``, which take none of its provider ids. Each store says
-    whom it serves (``identity.RELATIONSHIP_STORES``): Descope's FGA store is keyed on
-    Descope's ids, so it serves only a Descope principal; OpenFGA is keyed on canonical
-    ids, so it serves only a principal authorized from the canonical model.
+    provider's, conventions §18). Any other principal is served only the adapter's
+    ``canonical_capabilities``, which are kept in and keyed on the canonical model, and
+    only when it is authorized from that model (``rbac.is_canonical_principal``): a
+    Descope principal's ``dct`` naming a canonical tenant's id grants it nothing there.
+    Each store says whom it serves (``identity.RELATIONSHIP_STORES``): Descope's FGA
+    store is keyed on Descope's ids, so it serves only a Descope principal; OpenFGA is
+    keyed on canonical ids, so it serves only a principal authorized from the canonical
+    model.
     """
     if getattr(request.state, "claims", None) is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     capabilities = identity.sync_capabilities()
     sync_provider_principal = identity.is_sync_provider_principal(request)
     if not sync_provider_principal:
-        capabilities = capabilities & identity.SYNC_ADAPTERS[identity.SYNC_PROVIDER].adapter.canonical_capabilities
+        canonical = identity.SYNC_ADAPTERS[identity.SYNC_PROVIDER].adapter.canonical_capabilities
+        capabilities = capabilities & canonical if is_canonical_principal(request) else frozenset()
     store = identity.relationship_store_kind()
     registration = identity.RELATIONSHIP_STORES.get(store)
     if registration is None or not registration.serves(request):
