@@ -44,6 +44,7 @@ from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.machine_credential import MachineCredentialRepository
 from app.repositories.permission import PermissionRepository
 from app.repositories.provider import ProviderRepository
+from app.repositories.registration_tokens import registration_token_cipher
 from app.repositories.role import RoleRepository
 from app.repositories.sync_event import SyncEventRepository
 from app.repositories.sync_ledger import PendingPushRepository, ReconciliationRunRepository
@@ -133,12 +134,17 @@ def _descope_access_keys(request: Request, _session: AsyncSession | None) -> Mac
 
 
 def _keycloak_machine_credentials(request: Request, session: AsyncSession | None) -> MachineCredentials:
-    """Canonical machine credentials, each a Keycloak client the sync adapter keeps."""
+    """Canonical machine credentials, each a Keycloak client the sync adapter keeps.
+
+    Their registration tokens are sealed under ``KEYCLOAK_REGISTRATION_TOKEN_KEYS``
+    (#698); without it this raises ``RegistrationTokenKeysNotConfigured`` (startup
+    already refuses to run without it).
+    """
     if session is None:
         raise RuntimeError("machine credentials of a canonical provider need DATABASE_URL")
     return CanonicalMachineCredentials(
         provider="keycloak",
-        repository=MachineCredentialRepository(session),
+        repository=MachineCredentialRepository(session, cipher=registration_token_cipher()),
         push=build_keycloak_sync_adapter(request.app.state.keycloak_admin, session),
     )
 

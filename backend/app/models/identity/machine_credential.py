@@ -5,7 +5,9 @@ service account): ``client_id`` is what the machine authenticates as, ``subject`
 the ``sub`` of its tokens and ``external_id`` the provider's own id. The roles it
 holds in its tenant are its ``machine_credential_roles``. The provider's secret is
 never stored; ``registration_token`` is the provider's token for managing (deleting)
-that one client, and is never returned by the API or logged.
+that one client, sealed under ``KEYCLOAK_REGISTRATION_TOKEN_KEYS``
+(``app.repositories.registration_tokens``, #698), and is never returned by the API
+or logged.
 """
 
 import enum
