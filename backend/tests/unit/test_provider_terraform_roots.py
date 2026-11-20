@@ -32,13 +32,14 @@ KNOB_READERS = frozenset({"knob", "knob_flag", "knob_set", "required_knob"})
 # Settings the backend reads for a root's provider that the root does not set: tuning
 # knobs with a default, which an operator sets only to change it.
 NOT_FROM_THE_ROOT = {
-    # The event pull's tuning, read with defaults; the root emits what names the realm and its clients.
-    # The registration-token key is the backend's own secret, not a realm setting: kept out of the
-    # root's state and generated per deployment (#698).
+    # The event pull's and the push retry's tuning, read with defaults; the root emits what names the realm
+    # and its clients. The registration-token key is the backend's own secret, not a realm setting: kept out
+    # of the root's state and generated per deployment (#698).
     "keycloak": {
         "KEYCLOAK_PULL_EVENTS",
         "KEYCLOAK_PULL_INTERVAL_SECONDS",
         "KEYCLOAK_PULL_PAGE_SIZE",
+        "KEYCLOAK_PUSH_RETRY_INTERVAL_SECONDS",
         "KEYCLOAK_REGISTRATION_TOKEN_KEYS",
     },
     "zitadel": {"ZITADEL_ADMIN_TIMEOUT_SECONDS", "ZITADEL_POST_LOGOUT_REDIRECT_URI"},

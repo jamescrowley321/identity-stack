@@ -15,7 +15,7 @@ AC-4.3.1: get_identity_resolution_service() for identity resolution with Redis c
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 
 from fastapi import Depends, Request
@@ -86,36 +86,46 @@ from app.services.user import UserService
 _RECONCILIATION_LOCK_ID = 73_82_69_67  # "RECON" in digits
 # ... and the session lock a pass that commits more than once holds from start to end.
 _RECONCILIATION_PASS_LOCK_ID = 73_82_69_67_80  # "RECONP"
+# ... and the session lock held while pending pushes are pushed: by a pass, or by the push retry.
+_PENDING_PUSH_LOCK_ID = 80_85_83_72  # "PUSH"
 
 
 @asynccontextmanager
-async def hold_reconciliation_pass() -> AsyncIterator[bool]:
-    """Hold the pass lock on a connection of its own for the whole pass; ``False`` when another pass holds it.
+async def _session_locks(take: list[tuple[int, bool]]) -> AsyncIterator[bool]:
+    """Take each ``(lock id, wait)`` in turn on a connection of its own; ``False`` when a lock not waited for is held.
 
-    A session-level lock survives the pass's commits. The connection is dropped,
-    not returned to the pool, if the unlock fails, so the lock never outlives the pass.
+    Session-level locks survive the holder's commits. The connection is dropped,
+    not returned to the pool, if an unlock fails, so no lock outlives its holder.
     """
     async with get_engine().connect() as connection:
-        held = bool(
-            (
-                await connection.execute(
-                    text("SELECT pg_try_advisory_lock(:lock_id)"), {"lock_id": _RECONCILIATION_PASS_LOCK_ID}
-                )
-            ).scalar()
-        )
-        await connection.commit()
+        held: list[int] = []
         try:
-            yield held
+            for lock_id, wait in take:
+                function = "pg_advisory_lock" if wait else "pg_try_advisory_lock"
+                result = await connection.execute(text(f"SELECT {function}(:lock_id)"), {"lock_id": lock_id})
+                await connection.commit()
+                if not wait and not result.scalar():
+                    break
+                held.append(lock_id)
+            yield len(held) == len(take)
         finally:
-            if held:
-                try:
-                    await connection.execute(
-                        text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": _RECONCILIATION_PASS_LOCK_ID}
-                    )
-                    await connection.commit()
-                except Exception:
-                    logger.warning("Reconciliation: the pass lock could not be released; dropping its connection")
-                    await connection.invalidate()
+            try:
+                for lock_id in reversed(held):
+                    await connection.execute(text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": lock_id})
+                await connection.commit()
+            except Exception:
+                logger.warning("Reconciliation: a session lock could not be released; dropping its connection")
+                await connection.invalidate()
+
+
+def hold_reconciliation_pass() -> AbstractAsyncContextManager[bool]:
+    """Hold the pass lock for the whole pass, ``False`` when another pass holds it; then wait for a push retry."""
+    return _session_locks([(_RECONCILIATION_PASS_LOCK_ID, False), (_PENDING_PUSH_LOCK_ID, True)])
+
+
+def hold_push_retry() -> AbstractAsyncContextManager[bool]:
+    """Hold the pending-push lock for one push retry; ``False`` while a pass or another retry pushes."""
+    return _session_locks([(_PENDING_PUSH_LOCK_ID, False)])
 
 
 logger = logbook(__name__)

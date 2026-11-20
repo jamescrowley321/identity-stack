@@ -4,7 +4,7 @@
 `keycloak-test` container, realm `identity-stack` imported from
 [`keycloak/realm/identity-stack-realm.json`](../../../../keycloak/realm/identity-stack-realm.json),
 to the admin adapter's service account `identity-stack-admin` (secret `local-only-admin-client`,
-a local fixture). Taken on 2026-11-18 by `record.py` in this directory, run from `backend/` with
+a local fixture). Taken on 2026-11-19 by `record.py` in this directory, run from `backend/` with
 `keycloak-test` up and freshly created:
 
 ```bash
@@ -25,7 +25,8 @@ given the member and emptied, the member's organizations, and refusals: a wrong 
 client, a token the Admin API does not accept, a taken name, email, domain, role name and group
 name, an API client the service account cannot see, and the answers for objects already there or
 already gone (among them the generic 404 Keycloak gives a membership that is not there, and the
-same 404 for the organizations of a user the realm lacks).
+same 404 for a route that does not match, for removing a user the realm lacks from an organization,
+and for the organizations of a user the realm lacks; a missing organization's own 404).
 
 `tests/helpers/keycloak_admin_recorded.py` replays them, one answer per request, for
 `tests/unit/test_keycloak_sync_adapter.py` and `tests/unit/test_keycloak_admin_api.py`.

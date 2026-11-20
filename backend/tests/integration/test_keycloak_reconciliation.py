@@ -22,7 +22,7 @@ import pytest_asyncio
 from sqlalchemy import delete, select, text
 
 from app.dependencies.identity import _RECONCILIATION_LOCK_ID, _RECONCILIATION_PASS_LOCK_ID
-from app.dependencies.keycloak_reconciliation import build_keycloak_reconciliation
+from app.dependencies.keycloak_reconciliation import build_keycloak_reconciliation, retry_keycloak_pushes
 from app.dependencies.keycloak_sync import build_keycloak_sync_adapter
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.provider import Provider, ProviderType
@@ -34,6 +34,7 @@ from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.permission import PermissionRepository
 from app.repositories.role import RoleRepository
 from app.repositories.sync_ledger import ReconciliationRunRepository
+from app.repositories.user import UserRepository
 from app.services.adapters.base import PROVIDER_SYNC, PROVIDER_SYNC_FAILED
 from app.services.adapters.keycloak import PERMISSION_ATTRIBUTE, ROLE_ATTRIBUTE
 from app.services.identity_provisioning import DEFAULT_ROLE_NAME
@@ -49,6 +50,7 @@ from app.services.keycloak_admin import (
 )
 from app.services.reconciliation import ReconciliationService
 from app.services.role import RoleService
+from app.services.user import UserService
 from tests.helpers.keycloak import KeycloakTokenSource
 from tests.helpers.keycloak_model import ADMIN_CLIENT_ID, ADMIN_CLIENT_SECRET, API_AUDIENCE
 
@@ -150,6 +152,10 @@ class Pass:
         result = await service.run()
         assert result.is_ok(), result
         return result.ok["providers"][KEYCLOAK]["stats"]
+
+    async def retry(self) -> None:
+        """One turn of the push retry loop ``main.lifespan`` runs (``run_keycloak_push_retry``)."""
+        await retry_keycloak_pushes(self.api, self.session, self.hold_pass)
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -396,6 +402,67 @@ class TestFailedPushes:
         assert await _roles_of(db_session, model.user_id, model.tenant_id) == []
         assert await _pending(db_session, model) == {}
         assert stats["kept_pending"] >= 1
+
+    async def test_a_failed_membership_removal_is_delivered_by_the_push_retry(
+        self, console, made, db_session, provider, reconcile, environment
+    ):
+        """identity-stack#612: with no reconciliation run, the push retry ends the membership a failed push left."""
+        model, _ = await _pushed(db_session, reconcile, made)
+        organization = _organization(console, model.alias)
+        account = _account(console, model.username)
+
+        async with httpx.AsyncClient(timeout=ADMIN_TIMEOUT_SECONDS) as http:
+            broken = await connect_keycloak_admin(http)
+
+            async def unreachable(*_args, **_kwargs):
+                raise KeycloakAdminUnavailable("admin API unreachable")
+
+            broken.remove_member = unreachable
+            service = RoleService(
+                repository=RoleRepository(db_session),
+                permission_repository=PermissionRepository(db_session),
+                assignment_repository=UserTenantRoleRepository(db_session),
+                adapter=build_keycloak_sync_adapter(broken, db_session),
+            )
+            result = await service.unassign_role_from_user(
+                user_id=model.user_id, tenant_id=model.tenant_id, role_id=model.role_id
+            )
+        assert result.ok[PROVIDER_SYNC] == PROVIDER_SYNC_FAILED
+        assert account["id"] in _member_ids(console, organization)
+
+        await reconcile.retry()
+
+        assert account["id"] not in _member_ids(console, organization)
+        assert await _pending(db_session, model) == {}
+
+    async def test_a_failed_deactivation_is_delivered_by_the_push_retry(
+        self, console, made, db_session, provider, reconcile, environment
+    ):
+        """identity-stack#612: a deactivation Keycloak did not take is pushed again; the account ends disabled."""
+        model, _ = await _pushed(db_session, reconcile, made)
+        assert _account(console, model.username)["enabled"] is True
+
+        async with httpx.AsyncClient(timeout=ADMIN_TIMEOUT_SECONDS) as http:
+            broken = await connect_keycloak_admin(http)
+
+            async def unreachable(*_args, **_kwargs):
+                raise KeycloakAdminUnavailable("admin API unreachable")
+
+            broken.update_user = unreachable
+            service = UserService(
+                repository=UserRepository(db_session),
+                adapter=build_keycloak_sync_adapter(broken, db_session),
+                assignment_repository=UserTenantRoleRepository(db_session),
+            )
+            result = await service.deactivate_user(user_id=model.user_id, tenant_id=model.tenant_id)
+        assert result.ok[PROVIDER_SYNC] == PROVIDER_SYNC_FAILED
+        assert _account(console, model.username)["enabled"] is True
+        assert ("user", str(model.user_id)) in await _pending(db_session, model)
+
+        await reconcile.retry()
+
+        assert _account(console, model.username)["enabled"] is False
+        assert await _pending(db_session, model) == {}
 
     async def test_a_failed_role_assignment_is_delivered_by_the_next_pass(
         self, console, made, db_session, provider, reconcile

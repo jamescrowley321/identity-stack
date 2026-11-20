@@ -190,6 +190,29 @@ class KeycloakReconciliation:
                     return Error(Conflict(message="A Keycloak reconciliation pass is already running"))
                 return await self._reconcile(run_id, stats, span)
 
+    async def push_pending(self) -> Result[dict[str, int], IdentityError]:
+        """The second half alone: push every marked entity, so a push that failed is retried (#612).
+
+        Reads nothing of the realm. ``hold_pass`` is the push retry's lock here: one
+        push at a time, and ``Conflict`` while a pass or another retry pushes.
+        """
+        with tracer.start_as_current_span("KeycloakReconciliation.push_pending") as span:
+            run_id = str(uuid.uuid4())
+            stats = {"pushed": 0, "push_failed": 0, "pending": 0}
+            async with self._hold_pass() as held:
+                if not held:
+                    return Error(Conflict(message="Keycloak's pending pushes are already being pushed"))
+                provider = await self._providers.get_by_name(PROVIDER_NAME)
+                if provider is None:
+                    await self._session.rollback()
+                    return Error(NotFound(message=f"No {PROVIDER_NAME!r} provider row: run the Keycloak seed first"))
+                await self._push_out(provider.id, run_id, stats)
+                stats["pending"] = await self._ledger.count()
+                await self._session.rollback()
+            for key, value in stats.items():
+                span.set_attribute(f"reconciliation.{key}", value)
+            return Ok(stats)
+
     async def _reconcile(self, run_id: str, stats: dict[str, int], span) -> Result[PassOutcome, IdentityError]:
         try:
             await self._acquire_lock()
