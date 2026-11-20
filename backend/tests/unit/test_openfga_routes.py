@@ -86,9 +86,8 @@ class MemoryStore:
     async def all_relations(self, tenant_id, object_type, object_id):
         return await self.relations(tenant_id, object_type, object_id)
 
-    async def objects(self, tenant_id, object_type, relation, subject):
-        ids = sorted({o for (t, ty, o, _r, _s) in self.tuples if (t, ty) == (tenant_id, object_type)})
-        return [o for o in ids if await self.check(tenant_id, object_type, o, relation, subject)]
+    async def objects(self, tenant_id, object_type, relation, subject, *, candidates):
+        return [o for o in candidates if await self.check(tenant_id, object_type, o, relation, subject)]
 
 
 class MemoryDirectory:

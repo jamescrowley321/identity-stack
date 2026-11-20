@@ -149,8 +149,15 @@ async def list_documents(
     """List documents the caller can view, filtered by tenant."""
     tenant_id, user_id = caller.tenant_id, caller.user_id
 
+    # The tenant's documents are the candidates: the store checks each, so none is
+    # lost to a store's cap on how many objects it lists.
+    candidates = (
+        (await session.execute(select(Document.id).where(Document.tenant_id == tenant_id).order_by(Document.id)))
+        .scalars()
+        .all()
+    )
     try:
-        doc_ids = await store.objects(tenant_id, "document", "can_view", user_id)
+        doc_ids = await store.objects(tenant_id, "document", "can_view", user_id, candidates=candidates)
     except RelationshipStoreError as exc:
         logger.error("FGA objects lookup failed for user %s: %s %s", user_id, exc.kind, exc.upstream)
         raise store_error_response(exc) from exc
