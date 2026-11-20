@@ -238,13 +238,13 @@ def otp_for_test_user(login_id: str) -> str:
     return code
 
 
-def enchanted_link_for_test_user(login_id: str) -> str:
-    """An enchanted link a test user signs in with (Descope sends no message to a test user)."""
+def enchanted_link_for_test_user(login_id: str, uri: str = "") -> str:
+    """An enchanted link to ``uri`` a test user signs in with (Descope sends no message to a test user)."""
     with httpx.Client(timeout=30) as client:
         generated = client.post(
             _mgmt_url("/v1/mgmt/tests/generate/enchantedlink"),
             headers=_auth_header(),
-            json={"loginId": login_id, "URI": ""},
+            json={"loginId": login_id, "URI": uri},
         )
     if generated.status_code != HTTPStatus.OK:
         raise RuntimeError(
@@ -254,20 +254,6 @@ def enchanted_link_for_test_user(login_id: str) -> str:
     if not link:
         raise RuntimeError("Generating a test user's enchanted link returned no link")
     return link
-
-
-def verify_enchanted_link(link: str) -> int:
-    """Verify an enchanted link's token at Descope, as clicking it does. Returns the HTTP status."""
-    from urllib.parse import parse_qs, urlsplit
-
-    token = parse_qs(urlsplit(link).query).get("t", [""])[0]
-    with httpx.Client(timeout=30) as client:
-        verified = client.post(
-            f"{DESCOPE_BASE_URL}/v1/auth/enchantedlink/verify",
-            headers={"Authorization": f"Bearer {DESCOPE_PROJECT_ID}"},
-            json={"token": token},
-        )
-    return verified.status_code
 
 
 def get_user_session_token(role_names: tuple[str, ...]) -> str:

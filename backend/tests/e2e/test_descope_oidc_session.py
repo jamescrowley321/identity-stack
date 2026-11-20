@@ -22,7 +22,6 @@ from tests.e2e.helpers.auth import (
     _decode_jwt_payload,
     enchanted_link_for_test_user,
     ensure_person,
-    verify_enchanted_link,
 )
 from tests.e2e.not_applicable import descope_credentials_missing
 
@@ -72,16 +71,11 @@ def oidc_access_token(browser: Browser, frontend_url: str) -> str:
         )
         progress.append("link screen")
 
-        link = enchanted_link_for_test_user(login_id)
+        # The link points back at the hosted flow page, which verifies its ``t`` and goes on.
+        link = enchanted_link_for_test_user(login_id, uri=page.url)
         progress.append(f"link host {link.split('/')[2] if '://' in link else '(none)'}")
-        progress.append(f"verify {verify_enchanted_link(link)}")
-        try:
-            page.wait_for_url(_back_at_the_spa(frontend_url), timeout=_TIMEOUT_MS)
-        except PlaywrightError:
-            # Not completed by the verification alone: open the link, as a click in the email would.
-            progress.append("opening the link")
-            context.new_page().goto(link)
-            page.wait_for_url(_back_at_the_spa(frontend_url), timeout=_TIMEOUT_MS)
+        page.goto(link)
+        page.wait_for_url(_back_at_the_spa(frontend_url), timeout=_TIMEOUT_MS)
         progress.append("back at the SPA")
 
         stored = page.wait_for_function(
