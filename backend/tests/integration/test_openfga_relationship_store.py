@@ -73,7 +73,42 @@ class TestOpenFgaContract(RelationshipStoreContract):
     """Every test of the contract, against OpenFGA."""
 
 
+# OpenFGA's default OPENFGA_LIST_OBJECTS_MAX_RESULTS: ListObjects stops here without saying so.
+LIST_OBJECTS_MAX_RESULTS = 1000
+# The most tuples one Write takes (OPENFGA_MAX_TUPLES_PER_WRITE's default).
+TUPLES_PER_WRITE = 100
+
+
 class TestOpenFgaOnly(FreshIds):
+    async def test_objects_lists_every_document_past_the_list_objects_cap(self, api, store, ids):
+        """ListObjects would answer 1000 of these; every one the subject can view comes back."""
+        granted = sorted(str(uuid.uuid4()) for _ in range(LIST_OBJECTS_MAX_RESULTS + 1))
+        not_granted = sorted(str(uuid.uuid4()) for _ in range(3))
+        for start in range(0, len(granted), TUPLES_PER_WRITE):
+            await api.call(
+                "POST",
+                "/write",
+                {
+                    "authorization_model_id": api.settings.authorization_model_id,
+                    "writes": {
+                        "tuple_keys": [
+                            {
+                                "user": f"user:{ids['alice']}",
+                                "relation": "viewer",
+                                "object": f"document:{ids['tenant']}/{doc}",
+                            }
+                            for doc in granted[start : start + TUPLES_PER_WRITE]
+                        ]
+                    },
+                },
+            )
+
+        held = await store.objects(
+            ids["tenant"], DOCUMENT, "can_view", ids["alice"], candidates=sorted(granted + not_granted)
+        )
+
+        assert sorted(held) == granted
+
     async def test_writing_and_deleting_are_idempotent(self, store, ids):
         for _ in range(2):
             await store.write(ids["tenant"], DOCUMENT, ids["doc"], "viewer", ids["alice"])
