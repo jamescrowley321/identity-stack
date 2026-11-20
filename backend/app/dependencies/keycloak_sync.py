@@ -53,6 +53,9 @@ ORGANIZATION_LOCK_NAMESPACE = "keycloak-organization:"
 ORGANIZATION_LOCK_MARGIN_SECONDS = 5
 ORGANIZATION_LOCK_TIMEOUT_MS = round((ORGANIZATION_HOLD_SECONDS + ORGANIZATION_LOCK_MARGIN_SECONDS) * 1000)
 
+# Every row the session had loaded, with its loaded values: what a rollback expires.
+Loaded = list[tuple[object, dict[str, object]]]
+
 # The link origins the adapter follows to a Keycloak account, as the Zitadel
 # adapter's: a sign-in's, and the backend's own (an account the adapter created,
 # or one an operator's seed names). An admin-made link is not followed: the admin
@@ -97,15 +100,25 @@ def failed(what: str, exc: BaseException) -> str:
     return f"{what} failed in the service's database: {detail}"
 
 
+class UncommittedWorkLost(Exception):
+    """A push's database failure rolled back changes the request had not committed.
+
+    Not a ``LocalDatabaseError``: the adapter does not turn it into a sync error,
+    so the request fails rather than answer for changes that were not made.
+    """
+
+
 class RepositoryKeycloakLinks(KeycloakLinks):
     """The adapter's canonical side, in the request's session.
 
     Reads run in a savepoint of the request's transaction: a failure rolls back
     the savepoint only, so the rows the request loaded stay loaded. A read that
     loses the connection rolls back the transaction the loss ended, so the
-    request's later statements run on a new connection; the rows it loaded stay
-    loaded there too. Each write commits, and one that fails is rolled back: the
-    service has already committed its own change. A database failure is ``LocalDatabaseError``; a write the
+    request's later statements run on a new connection. Each write commits, and
+    one that fails is rolled back: the service has already committed its own
+    change. After either rollback the rows the request loaded stay loaded; when
+    the request had changes it had not committed, the rollback undid them and
+    ``UncommittedWorkLost`` is raised. A database failure is ``LocalDatabaseError``; a write the
     canonical side refuses is ``LinkRefused``.
     """
 
@@ -117,12 +130,14 @@ class RepositoryKeycloakLinks(KeycloakLinks):
         self._roles = RoleRepository(session)
 
     async def _read(self, what: str, read: Callable[[], Awaitable[T]]) -> T:
+        loaded: Loaded | None = None
         try:
+            loaded = await self._loaded()
             async with self._session.begin_nested():
                 return await read()
         except DATABASE_FAILURES as exc:
             if connection_lost(exc):
-                await self._recover()
+                await self._recover(loaded, what, exc)
             raise LocalDatabaseError(failed(what, exc)) from exc
 
     async def _provider_id(self) -> uuid.UUID | None:
@@ -210,7 +225,9 @@ class RepositoryKeycloakLinks(KeycloakLinks):
 
     async def link_organization(self, tenant_id: uuid.UUID, alias: str) -> None:
         """Record ``alias`` as the tenant's organization. A tenant linked to anything else is refused."""
+        loaded: Loaded | None = None
         try:
+            loaded = await self._loaded()
             provider_id = await self._provider_id()
             if provider_id is None:
                 raise LinkRefused(f"no {PROVIDER_NAME!r} provider row: run the Keycloak seed first")
@@ -226,15 +243,17 @@ class RepositoryKeycloakLinks(KeycloakLinks):
             await self._tenants.update(tenant)
             await self._tenants.commit()
         except RepositoryConflictError as exc:
-            await self._rollback()
+            await self._recover(loaded, "the tenant link write", exc)
             raise LinkRefused(f"tenant {tenant_id} could not be linked: another write conflicts") from exc
         except DATABASE_FAILURES as exc:
-            await self._rollback()
+            await self._recover(loaded, "the tenant link write", exc)
             raise LocalDatabaseError(failed("the tenant link write", exc)) from exc
 
     async def link_user(self, user_id: uuid.UUID, sub: str, email: str) -> None:
         """Link the user to the account the adapter created; the same link already there counts as written."""
+        loaded: Loaded | None = None
         try:
+            loaded = await self._loaded()
             provider_id = await self._provider_id()
             if provider_id is None:
                 raise LinkRefused(f"no {PROVIDER_NAME!r} provider row: run the Keycloak seed first")
@@ -255,7 +274,7 @@ class RepositoryKeycloakLinks(KeycloakLinks):
             await self._idp_links.commit()
         except RepositoryConflictError as exc:
             # A sign-in or a concurrent push wrote a link first: the same one counts as written.
-            await self._rollback()
+            await self._recover(loaded, "the IdP link write", exc)
             existing = await self._read(
                 "the IdP link read", lambda: self._idp_links.get_by_provider_and_sub(provider_id, sub)
             )
@@ -263,23 +282,41 @@ class RepositoryKeycloakLinks(KeycloakLinks):
                 return
             raise LinkRefused("the user or the Keycloak account already has another link") from exc
         except DATABASE_FAILURES as exc:
-            await self._rollback()
+            await self._recover(loaded, "the IdP link write", exc)
             raise LocalDatabaseError(failed("the IdP link write", exc)) from exc
 
-    async def _recover(self) -> None:
-        """Roll back the transaction a lost connection ended, keeping the rows the request loaded.
+    async def _loaded(self) -> Loaded | None:
+        """The rows the session has loaded, to put back after a rollback; ``None`` with work not committed.
+
+        Work not committed is a change not flushed yet, or any write the
+        transaction made (Postgres assigns a transaction id at its first write,
+        whether the ORM or a statement of the request's made it).
+        """
+        session = self._session.sync_session
+        if session.new or session.deleted or any(session.is_modified(row) for row in session.dirty):
+            return None
+        if await self._providers.transaction_has_written():
+            return None
+        return [
+            (row, {attr.key: attr.loaded_value for attr in state.attrs if attr.key not in state.unloaded})
+            for state in session.identity_map.all_states()
+            if (row := state.obj()) is not None
+        ]
+
+    async def _recover(self, loaded: Loaded | None, what: str, exc: BaseException) -> None:
+        """Roll back the request's transaction and put back the rows ``loaded`` holds.
 
         A rollback expires every loaded row, and an expired row cannot load
-        again outside an await. A push runs after the service committed, so a
-        row with no change of its own holds what the database holds: its loaded
-        values are put back as they were.
+        again outside an await. With no work of the request's uncommitted, a
+        loaded row holds what the database holds. ``loaded`` is ``None`` when
+        there was such work (or it could not be told): the rollback undid it,
+        and ``UncommittedWorkLost`` says so.
         """
-        loaded = [
-            (state.obj(), {attr.key: attr.loaded_value for attr in state.attrs if attr.key not in state.unloaded})
-            for state in self._session.sync_session.identity_map.all_states()
-            if not state.modified and state.obj() is not None
-        ]
         await self._rollback()
+        if loaded is None:
+            raise UncommittedWorkLost(
+                f"{failed(what, exc)}; the request's uncommitted changes were rolled back"
+            ) from exc
         for row, values in loaded:
             for key, value in values.items():
                 set_committed_value(row, key, value)
