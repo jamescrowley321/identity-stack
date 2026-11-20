@@ -163,6 +163,18 @@ def test_user_id(e2e_provider, request) -> str:
 
 
 @pytest.fixture(scope="session")
+def share_target(e2e_provider, request) -> str:
+    """A user of the admin's tenant, other than the admin, that a document can be shared with."""
+    return e2e_provider.share_target(request)
+
+
+@pytest.fixture
+def relation_target(e2e_provider, request) -> str:
+    """A subject the FGA admin routes write relations for (``E2EProvider.relation_target``)."""
+    return e2e_provider.relation_target(request)
+
+
+@pytest.fixture(scope="session")
 def test_tenant_id(e2e_provider, request) -> str:
     """The tenant the admin principal administers."""
     return e2e_provider.tenant_id(request)

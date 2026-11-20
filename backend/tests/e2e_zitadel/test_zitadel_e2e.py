@@ -26,6 +26,7 @@ UNLINKED = IDENTITIES.cases.unlinked_tenant
 TENANT_ORGANIZATIONS = sorted(key for key, tenant in IDENTITIES.tenants.items() if tenant.canonical)
 
 IDENTITY = "/api/identity"
+VALIDATE_ID_TOKEN = "/api/validate-id-token"
 ADMIN_ROUTE = "/api/access-checks/admin-role"
 VIEWER_ROUTE = "/api/access-checks/viewer-role"
 
@@ -116,7 +117,9 @@ def test_a_first_login_creates_a_member_of_the_home_tenant_only(
     tenant_id = database.tenant_ids()[home]
     assert body["user"]["email"] == email
     assert database.user_ids_with_email(email) == [body["user"]["id"]]
-    assert body["tenant_memberships"] == [{"tenant_id": tenant_id, "tenant_name": home}]
+    assert body["tenant_memberships"] == [
+        {"tenant_id": tenant_id, "tenant_name": home, "external_org_id": zitadel.organization_ids[home]}
+    ]
     assert body["roles"] == [{"tenant_id": tenant_id, "role_name": "member", "permissions": []}]
     assert body["linked_idps"] == [{"provider_name": "zitadel", "external_sub": zitadel.user_ids[NEWCOMER.key]}]
     expect(page.locator("header").get_by_text(home, exact=True)).to_be_visible()
@@ -154,8 +157,10 @@ def test_a_user_of_an_organization_no_tenant_names_gets_nothing(
     assert _answer(api(token).get(IDENTITY)) == (403, NOT_LINKED)
     assert database.user_ids_with_email(UNLINKED.email) == []
     expect(page.locator("header").get_by_text("No tenants", exact=True)).to_be_visible()
+    # Descope's tenant settings do not serve a Zitadel principal: the page is not there (#678).
     page.goto(f"{frontend_url}/settings")
-    expect(page.get_by_text("Access Denied", exact=True)).to_be_visible()
+    expect(page).to_have_url(re.compile(rf"^{re.escape(frontend_url)}/?$"))
+    expect(page.locator("[data-sidebar=sidebar]").get_by_role("link", name="Tenant Settings")).to_have_count(0)
 
 
 # --- 4. Self-registration ------------------------------------------------------------
@@ -177,6 +182,21 @@ def test_a_live_id_token_is_refused(page: Page, frontend_url: str, api, zitadel:
     assert _answer(api(signed_in["access_token"]).get(IDENTITY))[0] == 200
 
     assert _answer(api(signed_in["id_token"]).get(IDENTITY)) == (401, TOKEN_REFUSED)
+
+
+def test_the_spas_live_id_token_is_validated_by_the_instance(page: Page, frontend_url: str, api, zitadel: Instance):
+    signed_in = _sign_in_to_the_spa(page, frontend_url, zitadel.users[LINKED.key])
+
+    response = api(signed_in["id_token"]).post(VALIDATE_ID_TOKEN)
+
+    assert response.status == 200, response.text()
+    body = response.json()
+    assert (body["iss"], body["azp"], zitadel.spa_client_id in body["aud"]) == (
+        zitadel.issuer,
+        zitadel.spa_client_id,
+        True,
+    )
+    assert _answer(api(signed_in["access_token"]).post(VALIDATE_ID_TOKEN)) == (401, TOKEN_REFUSED)
 
 
 def test_a_live_token_from_the_second_application_is_refused(

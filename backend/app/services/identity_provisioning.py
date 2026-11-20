@@ -123,12 +123,9 @@ class IdentityProvisioningService:
         user with that email exists, a new user is created.
 
         With ``assign_default_role`` the user is also assigned the default tenant
-        and its tenant-scoped default role. A caller whose provider takes its
-        grants from the token alone passes ``False``: those grants are never read
-        from the canonical model, and a role written for a user it links would be
-        held by that user's sessions of providers that do read it.
+        and its tenant-scoped default role.
 
-        With ``organization_id`` (Zitadel's organization claim) the user joins,
+        With ``organization_id`` (Zitadel's organization claim, Keycloak's alias) the user joins,
         as the global ``member`` role, the one active tenant whose
         ``external_org_id`` is that organization of this provider
         (``external_org_provider_id``), in place of the default tenant. No

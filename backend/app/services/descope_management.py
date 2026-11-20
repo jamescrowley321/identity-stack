@@ -16,16 +16,16 @@ from typing import Literal
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
+from app.domain import access
 from app.errors.identity import Conflict, Forbidden, IdentityError, NotFound, ProviderError, ValidationError
 from app.logbook import logbook
 from app.outbound import UpstreamStatusError, UpstreamTransportError
+from app.services.adapters.base import AttributeValue
 from app.services.canonical import canonical_user
 from app.services.descope import DescopeManagementClient
 
 logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
-
-AttributeValue = str | int | bool | float | None
 
 
 def _provider_error(operation: str, exc: UpstreamStatusError) -> ProviderError:
@@ -80,6 +80,24 @@ class DescopeManagementAdapter:
                 logger.warning("Descope API error inviting member: %s", exc.response.status_code)
                 return Error(_provider_error("inviting member", exc))
             return Ok({"status": "invited", "email": email, "user": canonical_user(user)})
+
+    async def tenant_member(self, user_id: str, tenant_id: str) -> Result[access.TenantMember, IdentityError]:
+        """The user as the tenant holds it, for ``access.act_on_member``: no roles for a user it does not have.
+
+        ``user_id`` may be a login id: the member is named by the Descope ``userId``
+        the user has, which is what a Descope principal's ``sub`` carries.
+        """
+        with tracer.start_as_current_span("DescopeManagementAdapter.tenant_member"):
+            try:
+                user = await self._client.load_user(user_id)
+            except (UpstreamStatusError, UpstreamTransportError) as exc:
+                logger.warning("Descope API error loading member %s: %s", user_id, exc)
+                return Error(ProviderError(message="Descope API error loading member"))
+            roles: frozenset[str] = frozenset()
+            for membership in user.get("userTenants") or []:
+                if membership.get("tenantId") == tenant_id:
+                    roles = frozenset(membership.get("roleNames") or [])
+            return Ok(access.TenantMember(user_id=user.get("userId") or user_id, roles=roles))
 
     async def set_member_status(
         self, user_id: str, tenant_id: str, status: Literal["enabled", "disabled"]

@@ -14,7 +14,7 @@ import uuid
 import pytest
 
 from app.models.identity.provider import Provider, ProviderType
-from app.models.identity.user import LINK_ORIGIN, LINKED_AT_SIGN_IN, IdPLink, User, UserStatus
+from app.models.identity.user import LINK_ORIGIN, LINKED_AT_SIGN_IN, LINKED_BY_BACKEND, IdPLink, User, UserStatus
 from app.repositories.base import RepositoryConflictError
 from app.repositories.idp_link import IdPLinkRepository
 
@@ -213,3 +213,33 @@ async def test_signed_in_sub_of_a_user_with_no_link_to_the_provider_is_none(db_s
     user, provider = await _seed_user_and_provider(db_session)
 
     assert await repo.signed_in_sub_of(user.id, provider.name) is None
+
+
+BY_BACKEND = {LINK_ORIGIN: LINKED_BY_BACKEND}
+SIGN_IN_OR_BACKEND = frozenset({LINKED_AT_SIGN_IN, LINKED_BY_BACKEND})
+
+
+@pytest.mark.parametrize("metadata", [SIGN_IN, BY_BACKEND], ids=["sign-in", "backend"])
+async def test_sub_made_by_reads_a_link_made_by_one_of_the_origins(db_session, metadata):
+    repo = IdPLinkRepository(db_session)
+    user, provider = await _seed_user_and_provider(db_session)
+    await repo.create(_make_idp_link(user.id, provider.id, external_sub="keycloak-account-id", metadata_=metadata))
+
+    assert await repo.sub_made_by(user.id, provider.name, SIGN_IN_OR_BACKEND) == "keycloak-account-id"
+
+
+@pytest.mark.parametrize(
+    ("metadata", "origins"),
+    [
+        (None, SIGN_IN_OR_BACKEND),
+        ({LINK_ORIGIN: "admin"}, SIGN_IN_OR_BACKEND),
+        (BY_BACKEND, frozenset({LINKED_AT_SIGN_IN})),
+    ],
+    ids=["admin-route-no-origin", "other-origin", "origin-not-asked-for"],
+)
+async def test_sub_made_by_ignores_a_link_made_otherwise(db_session, metadata, origins):
+    repo = IdPLinkRepository(db_session)
+    user, provider = await _seed_user_and_provider(db_session)
+    await repo.create(_make_idp_link(user.id, provider.id, external_sub="typed-in-account-id", metadata_=metadata))
+
+    assert await repo.sub_made_by(user.id, provider.name, origins) is None

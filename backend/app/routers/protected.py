@@ -1,4 +1,4 @@
-from enum import Enum
+from enum import Enum, StrEnum
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from py_identity_model import (
@@ -8,7 +8,7 @@ from py_identity_model import (
     NetworkException,
     TokenValidationConfig,
 )
-from py_identity_model.aio import validate_token
+from py_identity_model.aio import validate_id_token as validate_oidc_id_token
 from py_identity_model.identity import ClaimsPrincipal
 
 from app.dependencies.auth import get_claims, get_current_user
@@ -16,11 +16,19 @@ from app.dependencies.identity import (
     get_identity_provisioning_service,
     get_identity_resolution_service,
 )
-from app.dependencies.rbac import TokenTenant, token_tenant
 from app.errors.identity import Forbidden, NotFound, ValidationError
-from app.knobs import knob, knob_set
+from app.knobs import knob_set
 from app.logbook import logbook
-from app.middleware.providers import ZITADEL_PROVIDER_NAME, ProviderTokenConfig, descope_config
+from app.middleware.providers import (
+    ORGANIZATION_FIRST_LOGIN_PROVIDERS,
+    ProviderTokenConfig,
+    configured_providers,
+    id_token_client_id,
+    id_token_disco_address,
+    select_id_token_provider,
+    unverified_claims,
+    unverified_issuer,
+)
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
 from app.services.first_login_profile import userinfo_profile
 from app.services.identity_provisioning import IdentityProvisioningService
@@ -29,12 +37,6 @@ from app.services.identity_resolution import IdentityResolutionService
 router = APIRouter(tags=["Protected"])
 logger = logbook(__name__)
 
-DESCOPE_PROJECT_ID = knob("DESCOPE_PROJECT_ID", "")
-# ``POST /validate-id-token`` runs behind neither token middleware, so it takes
-# the Descope provider's discovery address, audience and signing algorithms
-# from the same config they use.
-DESCOPE = descope_config(DESCOPE_PROJECT_ID)
-
 # What stops ``POST /validate-id-token`` before the token is judged: the
 # provider's discovery document or JWKS cannot be fetched, was fetched and is
 # unusable, or the provider config itself is refused. None of them says
@@ -42,7 +44,26 @@ DESCOPE = descope_config(DESCOPE_PROJECT_ID)
 PROVIDER_FAULTS = (NetworkException, DiscoveryValidationError, JwksValidationError, ConfigurationException)
 REFUSED_DETAIL = "Invalid or expired token"
 UNAVAILABLE_DETAIL = "Identity provider unavailable"
-# First-login refusals of a provider whose organization picks the user's tenant (Zitadel).
+# The claims that mark an access token: ``scope`` (Descope, Keycloak) and ``scp``
+# (Ory Hydra). No ID token carries either. Zitadel's access token carries neither
+# and is refused by the ``azp`` rule.
+SCOPE_CLAIMS = frozenset({"scope", "scp"})
+
+
+class IdTokenRefusal(StrEnum):
+    """Why ``POST /validate-id-token`` refused a token before or after the library judged it."""
+
+    UNKNOWN_ISSUER = "no configured provider has the token's issuer"
+    CARRIES_SCOPE = "an access token: it carries scope or scp"
+
+
+class IdTokenProviderFault(StrEnum):
+    """Why ``POST /validate-id-token`` cannot judge a token of a configured provider."""
+
+    NO_CLIENT_ID = "the provider names no client id for its ID tokens"
+
+
+# First-login refusals of a provider whose organization picks the user's tenant (Zitadel, Keycloak).
 ORGANIZATION_NOT_LINKED = "Your organization is not linked to a tenant"
 USERINFO_SUBJECT_MISMATCH = "The identity provider's UserInfo does not match the token"
 PROVIDER_NOT_CONFIGURED = "Identity provider not configured"
@@ -50,12 +71,10 @@ PROVISIONING_FAILED = "Could not provision identity"
 
 # Providers eligible for just-in-time provisioning on first login. Ory is
 # greenfield (every user is JIT-provisioned); Descope users are pre-provisioned
-# via the seed, so Descope is intentionally excluded by default. Keycloak is
-# opt-in: provisioning links a new identity to the canonical user with the same
-# verified email, which makes the realm's ``email_verified`` a linking trust
-# root (docs/security.md), so an operator names ``keycloak`` here to accept it.
-# Zitadel is opt-in too (``ory,zitadel``): its first-login users join the tenant
-# their organization is linked to, and take their email from UserInfo.
+# via the seed, so Descope is intentionally excluded by default. Zitadel and
+# Keycloak are opt-in (``ory,zitadel,keycloak``): their first-login users join
+# the tenant their organization is linked to; Zitadel's take their email from
+# UserInfo, Keycloak's from the access token.
 JIT_ENABLED_PROVIDERS = knob_set("JIT_ENABLED_PROVIDERS", "ory")
 
 
@@ -104,41 +123,20 @@ async def claims(claims: dict = Depends(get_claims)):
     return claims
 
 
-def _as_token_tenant_identity(identity: dict, tenant: TokenTenant) -> dict:
-    """The canonical identity of a principal whose tenant and grants come from its own token.
-
-    The one place ``GET /api/identity`` differs by provider. The user and the
-    linked identities are the canonical ones. The tenant and its permissions
-    are the token's (``token_tenant``), so the canonical role assignments,
-    such as the default tenant and role that provisioning grants, are not the
-    caller's here and are not reported: ``roles`` is empty. The memberships are
-    the provider directory's. ``token_tenant`` is the one field only these
-    principals get: its presence says the tenant comes from the token, so
-    switching tenant takes a new token.
-    """
-    return {
-        **identity,
-        "roles": [],
-        "tenant_memberships": [
-            {"tenant_id": membership.tenant_id, "tenant_name": membership.tenant_name}
-            for membership in tenant.memberships
-        ],
-        "token_tenant": {"tenant_id": tenant.tenant_id, "permissions": list(tenant.permissions)},
-    }
-
-
 def _recorded_provider(recorded: object, provider_name: str) -> ProviderTokenConfig | None:
     """The config the token middleware recorded for this principal's provider.
 
     Both middlewares record one beside the claims (conventions §18, and
     ``test_provider_registration.py::TestClaimsAreNeverRecordedWithoutTheirProvider``),
     so ``None`` is only a hand-built request, read as before: the profile from
-    the token's claims. Not for a Zitadel principal: its first login needs its
-    config's organization and UserInfo rules, so ``None`` is refused (500) for
-    it, as is anything recorded that is not the principal's own provider
-    config. A first login whose rules cannot be found is not provisioned.
+    the token's claims. Not for a principal of a provider whose organization
+    picks the first login's tenant (``ORGANIZATION_FIRST_LOGIN_PROVIDERS``):
+    its first login needs its config's organization rules, so ``None`` is
+    refused (500) for it, as is anything recorded that is not the principal's
+    own provider config. A first login whose rules cannot be found is not
+    provisioned.
     """
-    if recorded is None and provider_name != ZITADEL_PROVIDER_NAME.lower():
+    if recorded is None and provider_name not in ORGANIZATION_FIRST_LOGIN_PROVIDERS:
         return None
     if not isinstance(recorded, ProviderTokenConfig) or recorded.name.lower() != provider_name:
         logger.error("first login refused: no provider config recorded for provider %s", provider_name)
@@ -155,7 +153,7 @@ async def _first_login_profile(
 ) -> dict:
     """The profile and organization ``provision`` is called with for a first-login subject.
 
-    For a provider with a ``first_login_organization`` (Zitadel), a provider
+    For a provider with a ``first_login_organization`` (Zitadel, Keycloak), a provider
     with no canonical ``providers`` row is refused (500), and a token that
     names no organization, or names one no single active tenant is linked to
     for that provider, is refused (403), all before UserInfo is fetched. The
@@ -208,17 +206,14 @@ async def canonical_identity(
     request: Request,
     resolver: IdentityResolutionService = Depends(get_identity_resolution_service),
     provisioner: IdentityProvisioningService = Depends(get_identity_provisioning_service),
-    tenant: TokenTenant | None = Depends(token_tenant),
 ):
     """Return the canonical identity (user, roles, permissions, tenants) for the caller.
 
-    Roles and tenants come from the canonical model, except for a provider
-    whose tenant and grants come from its token alone (Keycloak), where they
-    come from the token and the provider's directory (``token_tenant``). For
-    JIT-enabled providers (``JIT_ENABLED_PROVIDERS``), a first-login subject that
-    resolves to no canonical user is provisioned on the fly, then resolved: for
-    Zitadel into the tenant linked to the token's organization, with the profile
-    from UserInfo (``_first_login_profile``).
+    Roles and tenants come from the canonical model. For JIT-enabled providers
+    (``JIT_ENABLED_PROVIDERS``), a first-login subject that resolves to no
+    canonical user is provisioned on the fly, then resolved: for Zitadel and
+    Keycloak into the tenant linked to the token's organization, Zitadel's with
+    the profile from UserInfo (``_first_login_profile``).
     """
     principal = getattr(request.state, "principal", None)
     claims = getattr(request.state, "claims", None)
@@ -243,9 +238,7 @@ async def canonical_identity(
             provider_name=provider_name,
             sub=sub,
             **first_login,
-            # ``tenant`` is set exactly for a provider whose grants come from
-            # its token alone (Keycloak): none are written for it.
-            assign_default_role=tenant is None,
+            assign_default_role=True,
         )
         if provisioned.is_error():
             err = provisioned.error
@@ -270,31 +263,70 @@ async def canonical_identity(
 
     if result.is_error():
         raise HTTPException(status_code=404, detail="Identity not found")
-    if tenant is not None:
-        return _as_token_tenant_identity(result.ok, tenant)
     return result.ok
+
+
+def _trusted_audiences(provider: ProviderTokenConfig, id_token: str) -> list[str] | None:
+    """The audiences besides the client id an ID token of ``provider`` may list.
+
+    Those the token lists, for a provider that adds audiences of its own
+    (``id_token_trusts_listed_audiences``, Zitadel); none for every other.
+    Read before the signature is verified: a token whose ``aud`` was changed
+    fails the signature check.
+    """
+    if not provider.id_token_trusts_listed_audiences:
+        return None
+    aud = unverified_claims(id_token).get("aud")
+    listed = aud if isinstance(aud, list) else [aud]
+    return [entry for entry in listed if isinstance(entry, str)]
 
 
 @router.post("/validate-id-token")
 @limiter.limit(RATE_LIMIT_AUTH)
 async def validate_id_token(request: Request, authorization: str = Header()):
-    """Validate an ID token server-side and return its claims."""
+    """Validate an ID token server-side and return its claims.
+
+    The route runs behind neither token middleware. It takes the configured
+    provider (the middlewares' registry, ``configured_providers``) one of whose
+    ID-token issuers is the token's unverified ``iss``, and validates the token
+    as an OIDC ID token with that provider's discovery document (of the token's
+    issuer, for Descope's two URL issuers: ``id_token_disco_address``), signing
+    algorithms and client id as audience and ``azp``. An ``iss`` no provider
+    has, a refused token and an access token get the uniform 401; a provider
+    that cannot be read gets 503.
+    """
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=400, detail="Invalid authorization header")
 
     id_token = authorization.removeprefix("Bearer ")
 
+    iss = unverified_issuer(id_token)
+    provider = select_id_token_provider(configured_providers(), iss)
+    if provider is None:
+        logger.warning("ID validation refused: %s", IdTokenRefusal.UNKNOWN_ISSUER.name)
+        raise HTTPException(status_code=401, detail=REFUSED_DETAIL)
+    client_id = id_token_client_id(provider)
+    if not client_id:
+        logger.error(
+            "ID validation hit a provider fault: %s (%s)", IdTokenProviderFault.NO_CLIENT_ID.name, provider.name
+        )
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_DETAIL)
+
     config = TokenValidationConfig(
         perform_disco=True,
-        audience=DESCOPE.audience or "",
-        algorithms=sorted(DESCOPE.algorithms) or None,
-        require_https=DESCOPE.require_https,
+        audience=client_id,
+        algorithms=sorted(provider.algorithms) or None,
+        require_https=provider.require_https,
     )
     try:
-        return await validate_token(
-            jwt=id_token,
-            token_validation_config=config,
-            disco_doc_address=DESCOPE.disco_address,
+        # ``nonce=None``: the SPA's code flow sends none, so a token carrying one is refused.
+        claims = await validate_oidc_id_token(
+            id_token,
+            config,
+            disco_doc_address=id_token_disco_address(provider, iss),
+            nonce=None,
+            trusted_audiences=_trusted_audiences(provider, id_token),
+            validate_azp=True,
         )
     except PROVIDER_FAULTS as exc:
         logger.error("ID validation hit a provider fault: %s", _cause(exc))
@@ -306,3 +338,7 @@ async def validate_id_token(request: Request, authorization: str = Header()):
         # DecodeError out for a token that is not a JWT (identity-model#1179).
         logger.warning("ID validation refused: %s", _cause(exc))
         raise HTTPException(status_code=401, detail=REFUSED_DETAIL) from exc
+    if not SCOPE_CLAIMS.isdisjoint(claims):
+        logger.warning("ID validation refused: %s", IdTokenRefusal.CARRIES_SCOPE.name)
+        raise HTTPException(status_code=401, detail=REFUSED_DETAIL)
+    return claims

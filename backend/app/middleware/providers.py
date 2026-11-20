@@ -16,61 +16,44 @@ and issuer validation is skipped.
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
 from app.knobs import knob, knob_flag
-from app.middleware.keycloak import (
-    KeycloakModelError,
-    KeycloakTokenModel,
-    binding_failure,
-    local_issuer,
-    organization,
-    parse_app_clients,
-    parse_portable_permissions,
-    read_grant,
-    single_audience,
-    token_model,
-)
 from app.middleware.zitadel import binding_failure as zitadel_binding_failure
 from app.middleware.zitadel import organization_id as zitadel_organization_id
-from app.services.keycloak_directory import IssuerNamesNoRealm, KeycloakDirectory, MemberIdRefused, MemberUnknown
 
 RS256 = "RS256"
-# The claim that names the client a token was issued to (OIDC Core §2).
-AUTHORIZED_PARTY_CLAIM = "azp"
 # The confirmation claim (RFC 7800 §3.1) and the two members that bind an access
 # token to its sender: a DPoP key (RFC 9449 §6.1) or a client certificate
 # (RFC 8705 §3.1).
 CONFIRMATION_CLAIM = "cnf"
 SENDER_BINDINGS = frozenset({"jkt", "x5t#S256"})
-# Zitadel's config name, the authentication type of its principals. Its first
-# login is placed by organization and profiled from UserInfo, so it is never
-# provisioned without its recorded config (``routers/protected.py``).
+# Zitadel's and Keycloak's config names, the authentication types of their
+# principals. A first login of either is placed by its organization, so it is
+# never provisioned without its recorded config (``routers/protected.py``).
 ZITADEL_PROVIDER_NAME = "Zitadel"
+KEYCLOAK_PROVIDER_NAME = "Keycloak"
+ORGANIZATION_FIRST_LOGIN_PROVIDERS = frozenset({ZITADEL_PROVIDER_NAME.lower(), KEYCLOAK_PROVIDER_NAME.lower()})
+# What a Keycloak token carries to be one for this API beyond its issuer,
+# signature and audience: issued to the SPA (``azp``) and an access token
+# (``typ``). Keycloak marks ID tokens ``ID`` and refresh tokens ``Refresh``.
+KEYCLOAK_AUTHORIZED_PARTY_CLAIM = "azp"
+KEYCLOAK_KIND_CLAIM = "typ"
+KEYCLOAK_ACCESS_KIND = "Bearer"
+# Every client the backend creates for a machine credential has a client id with
+# this prefix (``app.services.adapters.keycloak``), and only those: a token issued
+# to one names it in ``azp``.
+KEYCLOAK_MACHINE_CLIENT_PREFIX = "identity-stack-machine-"
+# The claim that lists the organization aliases a Keycloak token was issued for.
+KEYCLOAK_ORGANIZATION_CLAIM = "organization"
 
 
 class ProviderConfigurationError(ValueError):
     """A provider is configured in a way that would accept tokens it must not."""
-
-
-class MembershipSourcesDisagree(ProviderConfigurationError):
-    """A provider's membership lookup is not the ``counted`` entries of its membership list.
-
-    ``GET /api/identity`` and the routes that confirm a token's tenant would
-    then answer the same token differently.
-    """
-
-
-class TenantMembershipMistyped(TypeError):
-    """A ``TenantMembership`` built with a field of the wrong type.
-
-    ``counted`` must be a ``bool`` and the ids strings: the lookup routes and
-    ``GET /api/identity`` read the same list, and a truthy non-bool or a
-    non-string id would let them count it differently.
-    """
 
 
 @dataclass(frozen=True)
@@ -79,15 +62,11 @@ class TenantClaims:
 
     ``tenant_id`` is the tenant the token is for, or ``None`` when it names none.
     ``roles`` and ``permissions`` are what the token grants in that tenant.
-    ``sole_membership_required`` is true when the token alone does not settle
-    them: they hold only for a caller whose one tenant is ``tenant_id``, which
-    the provider's ``sole_membership_lookup`` has to confirm (conventions §18).
     """
 
     tenant_id: str | None
     roles: list[str]
     permissions: list[str]
-    sole_membership_required: bool = False
 
 
 # A provider's claims extractor: it reads the tenant and the grants out of the
@@ -96,86 +75,18 @@ TenantClaimsExtractor = Callable[[dict], TenantClaims]
 # A provider's token binding: why a token that passed the issuer and audience
 # checks is still not one for this API, or ``None`` when it is.
 TokenBinding = Callable[[dict], str | None]
-# A provider's membership lookup: every tenant the caller of these verified
-# claims belongs to, as the provider's directory has it now, as a list, tuple,
-# set or frozenset of tenant ids (any other answer is refused, a bare string
-# among them). It raises when the directory cannot be asked, and it bounds its
-# own time (conventions §6): the request waits for it.
-#
-# Membership alone is not enough. The token's grants are believed for the one
-# tenant the lookup returns, so a lookup MUST return the token's tenant only
-# where the directory also grants the caller the roles the token carries
-# (ADR-0010, docs/security.md). A lookup that checks membership only lets roles
-# granted in one organization carry over to another. Keycloak's
-# (``CountedMemberships(KeycloakTenantMemberships)``) reads a grant marker per
-# organization.
-SoleMembershipAnswer = list[str] | tuple[str, ...] | set[str] | frozenset[str]
-SoleMembershipLookup = Callable[[dict], Awaitable[SoleMembershipAnswer]]
 # A provider's first-login organization: the id of the organization whose
 # canonical tenant (``tenants.external_org_id``) a user provisioned at first
 # login joins, read from the verified claims, or ``None`` when they name none.
 FirstLoginOrganization = Callable[[dict], str | None]
-
-
-@dataclass(frozen=True)
-class TenantMembership:
-    """One tenant the caller belongs to, as the provider's directory names it.
-
-    ``counted`` says whether the membership counts in the sole-membership
-    confirmation (``SoleMembershipLookup``): every membership does, except the
-    token's own tenant where the directory does not grant the caller the
-    token's roles. Such a tenant is still listed, but the token is not
-    confirmed there.
-    """
-
-    tenant_id: str
-    tenant_name: str
-    counted: bool = True
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.tenant_id, str) or not isinstance(self.tenant_name, str):
-            raise TenantMembershipMistyped("a membership's tenant_id and tenant_name must be strings")
-        if not isinstance(self.counted, bool):
-            raise TenantMembershipMistyped("a membership's counted must be a bool")
-
-
-def counted_tenant_ids(memberships: Iterable[TenantMembership]) -> list[str]:
-    """The tenant ids of the ``counted`` entries of a membership list: the one reading both routes use."""
-    return [membership.tenant_id for membership in memberships if membership.counted]
-
-
-# A provider's membership list: every tenant the caller of these verified claims
-# belongs to, as the provider's directory has it now, for ``GET /api/identity``.
-# It raises when the directory cannot be asked and bounds its own time (§6).
-# Only a ``token_authorized_only`` provider has one: the tenant of its principals
-# is not in the canonical model. A provider that has one has
-# ``CountedMemberships(list)`` as its ``sole_membership_lookup`` and no other
-# (``ProviderTokenConfig`` refuses anything else), so ``rbac.token_tenant``
-# confirms the token from the one list it reads, as the lookup routes do.
-TenantMembershipsLookup = Callable[[dict], Awaitable[Sequence[TenantMembership]]]
-
-
-@dataclass(frozen=True)
-class CountedMemberships:
-    """A ``sole_membership_lookup`` read from a membership list: the tenant ids of its ``counted`` entries."""
-
-    memberships: TenantMembershipsLookup
-
-    async def __call__(self, claims: dict) -> list[str]:
-        return counted_tenant_ids(await self.memberships(claims))
+# The client of a machine credential a token was issued to, or ``None`` for a
+# person's token (``ProviderTokenConfig.machine_client``).
+MachineClientReader = Callable[[dict], str | None]
 
 
 @dataclass(frozen=True)
 class ProviderTokenConfig:
-    """How to validate and interpret tokens from one OIDC provider.
-
-    A provider with a ``tenant_memberships`` list confirms an organization-bound
-    token from that list alone: its ``sole_membership_lookup`` MUST be
-    ``CountedMemberships(tenant_memberships)``, or construction raises
-    ``MembershipSourcesDisagree``. ``rbac.token_tenant`` reads the list once and
-    the lookup routes ask the lookup, so two sources would let one token be
-    confirmed on one route and refused on the other.
-    """
+    """How to validate and interpret tokens from one OIDC provider."""
 
     name: str
     accepted_issuers: frozenset[str]
@@ -201,9 +112,6 @@ class ProviderTokenConfig:
     # "rp_initiated" is standard OIDC RP-initiated logout (Ory) — redirect the
     # browser to the provider's ``end_session_endpoint``.
     logout_kind: str = "management"
-    # Several acceptable audiences (Keycloak: the type client ids). When set it
-    # is used instead of ``audience``: the token's ``aud`` must name one of them.
-    audiences: frozenset[str] = frozenset()
     # Signing algorithms accepted from this provider. Every shipped provider
     # names its set. Empty leaves the choice to py-identity-model, which then
     # accepts its default asymmetric algorithms (RSA, RSA-PSS, ECDSA, EdDSA) in
@@ -212,11 +120,9 @@ class ProviderTokenConfig:
     # Require HTTPS for discovery, JWKS and the logout discovery fetch. The
     # library still allows plain HTTP on loopback when this is on.
     require_https: bool = True
-    # RP-initiated logout: the client id is fixed (``logout_client_id``), or read
-    # from a claim of the caller's token (``logout_client_id_claim``), or else
+    # RP-initiated logout: the client id is fixed (``logout_client_id``), or else
     # ``audience`` (Ory with no ``ORY_CLIENT_ID``).
     logout_client_id: str | None = None
-    logout_client_id_claim: str | None = None
     post_logout_redirect_uri: str | None = None
     # Reads the tenant and the grants from this provider's token claims
     # (conventions §18). ``None``: the token carries neither, and they come from
@@ -227,20 +133,8 @@ class ProviderTokenConfig:
     # and FGA store (``app.dependencies.descope.require_descope_principal``).
     descope_managed: bool = False
     # Checked by both middlewares after the audience check, on every route: a
-    # token it refuses gets the uniform 401 (§28). Keycloak's holds a token to
-    # one ``aud`` and the ``azp`` configured for it.
+    # token it refuses gets the uniform 401 (§28).
     token_binding: TokenBinding | None = None
-    # Answers a token whose claims are ``sole_membership_required`` (§18).
-    # ``None``: nothing can confirm such a token, and it is refused.
-    sole_membership_lookup: SoleMembershipLookup | None = None
-    # Lists the caller's tenants for ``GET /api/identity``. ``None``: they cannot
-    # be listed, and a ``token_authorized_only`` principal is refused there.
-    tenant_memberships: TenantMembershipsLookup | None = None
-    # True when this provider's tenant and grants may come only from its own
-    # token. Startup refuses it with no extractor, and refuses it listed in
-    # ``CANONICAL_RBAC_PROVIDERS``, where the canonical model would decide
-    # instead (``refuse_ambiguous_authorization_source``).
-    token_authorized_only: bool = False
     # Just-in-time provisioning (``GET /api/identity``) places a first-login user,
     # as ``member``, in the one tenant whose ``external_org_id`` this returns,
     # and refuses when it returns ``None`` or no tenant has it. ``None`` here:
@@ -250,14 +144,17 @@ class ProviderTokenConfig:
     # from the provider's UserInfo endpoint, whose ``sub`` must equal the
     # token's, rather than from the access token (Zitadel's carries no email).
     profile_from_userinfo: bool = False
-
-    def __post_init__(self) -> None:
-        if self.tenant_memberships is not None and self.sole_membership_lookup != CountedMemberships(
-            self.tenant_memberships
-        ):
-            raise MembershipSourcesDisagree(
-                f"provider {self.name}: the membership lookup must be the counted entries of its membership list"
-            )
+    # True when this provider's ID tokens list audiences besides the SPA's client
+    # id that the provider adds on its own: Zitadel names every application of
+    # the project and the project id (``tests/fixtures/zitadel/human-id-token-project.json``).
+    # ``POST /api/validate-id-token`` then trusts every audience the token lists;
+    # its ``azp`` must still be the SPA. False: the client id is the only one.
+    id_token_trusts_listed_audiences: bool = False
+    # The machine credential client a token was issued to, or ``None`` for a
+    # person's token. A machine's token is authorized from its canonical machine
+    # credential alone (``app.dependencies.rbac``), never from a user's
+    # memberships. ``None`` here: the provider serves no machine credentials.
+    machine_client: MachineClientReader | None = None
 
 
 def _string_list(value: object) -> list[str]:
@@ -295,18 +192,12 @@ def claimed_tenant_id(claims: dict, provider: ProviderTokenConfig) -> str | None
     """The tenant ``provider``'s extractor reads from ``claims``, or ``None`` with no extractor.
 
     Also ``None`` when the extractor answers with anything but a non-empty
-    string, and when its answer is ``sole_membership_required``: nothing has
-    confirmed that tenant while the token is being authenticated, so it is not
-    recorded as the request's. An extractor that raises is not caught here:
-    both middlewares call this while authenticating, where every failure is the
-    uniform 401.
+    string. An extractor that raises is not caught here: both middlewares call
+    this while authenticating, where every failure is the uniform 401.
     """
     if provider.tenant_claims is None:
         return None
-    claimed = provider.tenant_claims(claims)
-    if claimed.sole_membership_required is not False:
-        return None
-    tenant_id = claimed.tenant_id
+    tenant_id = provider.tenant_claims(claims).tenant_id
     return tenant_id if isinstance(tenant_id, str) and tenant_id else None
 
 
@@ -392,187 +283,138 @@ def ory_config(
     )
 
 
+def local_issuer(issuer_url: str) -> bool:
+    """True when the issuer's host is loopback or a ``.localhost`` name.
+
+    The only issuers plain HTTP may be allowed for. ``localhost`` and every
+    name under it are reserved for loopback (RFC 6761 §6.3).
+    """
+    try:
+        host = urlsplit(issuer_url).hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    host = host.lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def keycloak_machine_client(claims: dict) -> str | None:
+    """The machine credential client a Keycloak token was issued to (``azp``), or ``None``.
+
+    Only a client id with ``KEYCLOAK_MACHINE_CLIENT_PREFIX`` names one. Whether
+    the token is that client's service account's is decided from the canonical
+    machine credential (``app.dependencies.rbac``), not here.
+    """
+    azp = claims.get(KEYCLOAK_AUTHORIZED_PARTY_CLAIM)
+    if isinstance(azp, str) and len(azp) > len(KEYCLOAK_MACHINE_CLIENT_PREFIX):
+        return azp if azp.startswith(KEYCLOAK_MACHINE_CLIENT_PREFIX) else None
+    return None
+
+
+def keycloak_binding_failure(client_id: str, claims: dict) -> str | None:
+    """Why ``claims`` are not those of an access token issued to the SPA ``client_id`` or a machine client, or ``None``.
+
+    ``azp`` must be the SPA's client id or a machine credential's client
+    (``keycloak_machine_client``) and ``typ`` must be ``Bearer``: the realm's ID
+    tokens (``ID``) and refresh tokens (``Refresh``) are signed by the same
+    keys, and an ID token issued to the SPA names the SPA in ``azp`` too. The
+    reason is for the server's log and quotes no claim value.
+    """
+    azp = claims.get(KEYCLOAK_AUTHORIZED_PARTY_CLAIM)
+    if not isinstance(azp, str) or (azp != client_id and keycloak_machine_client(claims) is None):
+        return "azp is neither the SPA client nor a machine credential client"
+    if claims.get(KEYCLOAK_KIND_CLAIM) != KEYCLOAK_ACCESS_KIND:
+        return "typ is not Bearer"
+    return None
+
+
+def keycloak_organization_alias(claims: dict) -> str | None:
+    """The one organization alias a Keycloak token names, or ``None``.
+
+    The one reader of the ``organization`` claim, and only first-login
+    provisioning calls it (``ProviderTokenConfig.first_login_organization``).
+    A list must hold exactly one non-empty string, the shape Keycloak sends;
+    a map (the claim with organization attributes) must have exactly one
+    non-empty key, and its value is not read. A missing claim, two aliases and
+    every other shape name no organization.
+    """
+    claim = claims.get(KEYCLOAK_ORGANIZATION_CLAIM)
+    if isinstance(claim, (list, dict)) and len(claim) == 1:
+        (alias,) = claim
+        return alias if isinstance(alias, str) and alias else None
+    return None
+
+
 @dataclass(frozen=True)
 class KeycloakTokenBinding:
-    """Keycloak's ``token_binding``: one ``aud``, and the ``azp`` configured for it.
+    """Keycloak's ``token_binding``: issued to the SPA client, and an access token (``keycloak_binding_failure``).
 
     A frozen value, not a closure, so that two providers built from the same
     settings compare equal.
     """
 
-    model: KeycloakTokenModel
+    client_id: str
 
     def __call__(self, claims: dict) -> str | None:
-        return binding_failure(self.model, claims)
-
-
-@dataclass(frozen=True)
-class KeycloakTenantClaims:
-    """Keycloak's claims extractor: the organization is the tenant, the client roles the permissions.
-
-    A token that names no single organization names no tenant, which the
-    resolver refuses with 403. A Keycloak token has permissions and a user type
-    but no role, so ``roles`` is always empty and every role-gated route refuses
-    a Keycloak principal. The claims of an organization-bound type are
-    ``sole_membership_required``.
-    """
-
-    model: KeycloakTokenModel
-
-    def __call__(self, claims: dict) -> TenantClaims:
-        grant = read_grant(self.model, claims)
-        if grant is None:
-            return TenantClaims(tenant_id=None, roles=[], permissions=[])
-        return TenantClaims(
-            tenant_id=grant.organization,
-            roles=[],
-            permissions=list(grant.permissions),
-            sole_membership_required=grant.organization_bound,
-        )
-
-
-@dataclass(frozen=True)
-class KeycloakTenantMemberships:
-    """Keycloak's ``tenant_memberships``: every organization the caller belongs to, as the Admin API has it now.
-
-    The token's own organization is ``counted`` only when it marks the caller as
-    holding the token's type (``type:<type client>``,
-    ``app.services.keycloak_directory``); every other organization is counted.
-
-    The member id is the verified token's ``sub`` and nothing else. A ``sub``
-    that is not a well-formed id, or one the realm does not know (a user
-    deleted while the token lives), belongs to no organization: the list is
-    empty, and for a malformed id no call is made.
-    """
-
-    model: KeycloakTokenModel
-    directory: KeycloakDirectory
-
-    async def __call__(self, claims: dict) -> list[TenantMembership]:
-        try:
-            memberships = await self.directory.organizations_of(claims.get("sub"))
-        except (MemberIdRefused, MemberUnknown):
-            return []
-        token_organization = organization(claims)
-        token_type = single_audience(claims)
-        return [
-            TenantMembership(
-                tenant_id=membership.alias,
-                tenant_name=membership.name,
-                counted=membership.alias != token_organization
-                or (token_type is not None and token_type in membership.granted_types),
-            )
-            for membership in memberships
-        ]
-
-
-def keycloak_directory(issuer_url: str, client_id: str, client_secret: str) -> KeycloakDirectory:
-    """The organization lookup's directory, or ``ProviderConfigurationError`` when it cannot be built.
-
-    Both credentials are required: without them no organization-bound token
-    could be confirmed and no membership listed. So is an issuer of the form
-    ``<origin>/realms/<realm>``, the only one the Admin API can be derived
-    from. The message names the variable, never the secret.
-    """
-    if not client_id:
-        raise ProviderConfigurationError("KEYCLOAK_DIRECTORY_CLIENT_ID must be set when KEYCLOAK_ISSUER_URL is set")
-    if not client_secret:
-        raise ProviderConfigurationError("KEYCLOAK_DIRECTORY_CLIENT_SECRET must be set when KEYCLOAK_ISSUER_URL is set")
-    try:
-        return KeycloakDirectory(issuer=issuer_url.rstrip("/"), client_id=client_id, client_secret=client_secret)
-    except IssuerNamesNoRealm as exc:
-        raise ProviderConfigurationError(
-            "KEYCLOAK_ISSUER_URL must be <origin>/realms/<realm>: the organization lookup derives its Admin API from it"
-        ) from exc
+        return keycloak_binding_failure(self.client_id, claims)
 
 
 def keycloak_config(
     issuer_url: str,
-    audiences: frozenset[str],
+    audience: str,
+    client_id: str,
     *,
     require_https: bool = True,
     post_logout_redirect_uri: str | None = None,
-    app_clients: Mapping[str, str] | None = None,
-    portable_types: Iterable[str] = (),
-    organization_bound_types: Iterable[str] = (),
-    portable_permissions: Mapping[str, frozenset[str]] | None = None,
-    organization_lookup: SoleMembershipLookup | None = None,
-    directory_client_id: str | None = None,
-    directory_client_secret: str | None = None,
 ) -> ProviderTokenConfig:
     """Keycloak realm provider config.
 
     ``issuer_url`` is ``<KC_HOSTNAME>/realms/<realm>``, the exact ``iss`` of the
-    realm's tokens. ``audiences`` are the type client ids: ``aud`` names the type
-    and ``azp`` the app client, so logout takes its client id from ``azp``.
-    ``app_clients`` maps each type client to its app client, every type is in
-    ``portable_types`` or ``organization_bound_types``, and
-    ``portable_permissions`` lists what each portable type grants (see
-    ``app.middleware.keycloak``). ``directory_client_id`` and
-    ``directory_client_secret`` are the service account of the read-only
-    Admin API lookup (``app.services.keycloak_directory``): it backs the
-    membership list of ``GET /api/identity`` (``KeycloakTenantMemberships``),
-    and the membership confirmation of an organization-bound token is that
-    list's ``counted`` entries (``CountedMemberships``). Given at all, both
-    must be non-empty; the registration always gives them. Left out (a
-    provider built by hand in a test), no directory is wired: every token of
-    an organization-bound type is refused unless ``organization_lookup``
-    answers it, and the membership list is not available. Both at once are
-    refused (``MembershipSourcesDisagree``): the lookup routes and
-    ``GET /api/identity`` would read different sources.
+    realm's tokens, ``audience`` the API client's id, which the SPA's access
+    tokens list in ``aud``, and ``client_id`` the SPA's public client. A token is
+    accepted only with that issuer, an RS256 signature from the realm's keys,
+    the API audience in ``aud`` and the token binding (``KeycloakTokenBinding``):
+    ``azp`` the SPA and ``typ`` ``Bearer``.
 
-    Fails closed: ``aud`` is always required, only RS256 is accepted, and a
-    half-configured provider is refused, because it would accept tokens it
-    cannot decide. That is a config with no audience, any gap in the token model
-    (``token_model``), and HTTPS enforcement switched off for an issuer that is
-    not on loopback or a ``.localhost`` name.
+    Authorization is canonical: there is no claims extractor, so tenant, roles
+    and permissions come from the canonical model for a deployment that lists
+    ``keycloak`` in ``CANONICAL_RBAC_PROVIDERS`` (and nothing grants otherwise).
+    The ``organization`` claim is read once, at first login
+    (``first_login_organization``), and the profile comes from the access token.
+
+    Fails closed: no audience, no client id, or HTTPS enforcement switched off
+    for an issuer that is not on loopback or a ``.localhost`` name is refused,
+    which stops startup.
     """
     issuer = issuer_url.rstrip("/")
-    accepted_audiences = frozenset(audience.strip() for audience in audiences if audience.strip())
-    if not accepted_audiences:
-        raise ProviderConfigurationError(
-            "KEYCLOAK_AUDIENCES must name at least one type client id when KEYCLOAK_ISSUER_URL is set"
-        )
+    if not audience:
+        raise ProviderConfigurationError("KEYCLOAK_AUDIENCE must name the API client when KEYCLOAK_ISSUER_URL is set")
+    if not client_id:
+        raise ProviderConfigurationError("KEYCLOAK_CLIENT_ID must name the SPA client when KEYCLOAK_ISSUER_URL is set")
     if not require_https and not local_issuer(issuer):
         raise ProviderConfigurationError(
             "KEYCLOAK_REQUIRE_HTTPS may be switched off only for an issuer on loopback or a .localhost name"
         )
-    try:
-        model = token_model(
-            audiences=accepted_audiences,
-            app_clients=app_clients or {},
-            portable_types=portable_types,
-            organization_bound_types=organization_bound_types,
-            portable_permissions=portable_permissions or {},
-        )
-    except KeycloakModelError as exc:
-        raise ProviderConfigurationError(str(exc)) from exc
-    directory = (
-        keycloak_directory(issuer, directory_client_id or "", directory_client_secret or "")
-        if directory_client_id is not None or directory_client_secret is not None
-        else None
-    )
-    if directory is not None and organization_lookup is not None:
-        raise MembershipSourcesDisagree(
-            "Keycloak: organization_lookup cannot be given beside the directory, whose membership list confirms tokens"
-        )
-    memberships = KeycloakTenantMemberships(model, directory) if directory is not None else None
     return ProviderTokenConfig(
-        name="Keycloak",
+        name=KEYCLOAK_PROVIDER_NAME,
         accepted_issuers=frozenset({issuer}),
         disco_address=f"{issuer}/.well-known/openid-configuration",
-        audiences=accepted_audiences,
+        audience=audience,
         require_audience=True,
         algorithms=frozenset({RS256}),
         require_https=require_https,
         logout_kind="rp_initiated",
-        logout_client_id_claim=AUTHORIZED_PARTY_CLAIM,
+        logout_client_id=client_id,
         post_logout_redirect_uri=post_logout_redirect_uri,
-        tenant_claims=KeycloakTenantClaims(model),
-        token_binding=KeycloakTokenBinding(model),
-        sole_membership_lookup=organization_lookup if memberships is None else CountedMemberships(memberships),
-        tenant_memberships=memberships,
-        token_authorized_only=True,
+        token_binding=KeycloakTokenBinding(client_id),
+        first_login_organization=keycloak_organization_alias,
+        machine_client=keycloak_machine_client,
     )
 
 
@@ -642,6 +484,7 @@ def zitadel_config(
         token_binding=ZitadelTokenBinding(client_id),
         first_login_organization=zitadel_organization_id,
         profile_from_userinfo=True,
+        id_token_trusts_listed_audiences=True,
     )
 
 
@@ -697,35 +540,21 @@ def _ory_provider(
 
 def _keycloak_provider(
     issuer_url: str,
-    audiences: frozenset[str],
+    audience: str,
+    client_id: str,
     *,
     require_https: bool,
     post_logout_redirect_uri: str | None,
-    app_clients: Mapping[str, str],
-    portable_types: Iterable[str],
-    organization_bound_types: Iterable[str],
-    portable_permissions: Mapping[str, frozenset[str]],
-    directory_client_id: str,
-    directory_client_secret: str,
 ) -> ProviderTokenConfig | None:
-    """Keycloak when it has an issuer. A half-configured one raises (see ``keycloak_config``).
-
-    The directory's credentials are part of the configuration: a Keycloak with
-    no way to list or confirm memberships is refused at startup.
-    """
+    """Keycloak when it has an issuer. A half-configured one raises (see ``keycloak_config``)."""
     if not issuer_url:
         return None
     return keycloak_config(
         issuer_url,
-        audiences,
+        audience,
+        client_id,
         require_https=require_https,
         post_logout_redirect_uri=post_logout_redirect_uri,
-        app_clients=app_clients,
-        portable_types=portable_types,
-        organization_bound_types=organization_bound_types,
-        portable_permissions=portable_permissions,
-        directory_client_id=directory_client_id,
-        directory_client_secret=directory_client_secret,
     )
 
 
@@ -751,36 +580,14 @@ def _ory_registration() -> ProviderTokenConfig | None:
     )
 
 
-def _client_ids(raw: str) -> frozenset[str]:
-    """A comma-separated list of client ids.
-
-    Client ids are case-sensitive, so these lists are not read with
-    ``knob_set``, which lowercases its entries.
-    """
-    return frozenset(entry.strip() for entry in raw.split(",") if entry.strip())
-
-
 def _keycloak_registration() -> ProviderTokenConfig | None:
-    """Keycloak, when ``KEYCLOAK_ISSUER_URL`` is set. Its other settings are not read without it."""
-    issuer_url = knob("KEYCLOAK_ISSUER_URL", "")
-    if not issuer_url:
-        return None
-    try:
-        app_clients = parse_app_clients(knob("KEYCLOAK_APP_CLIENTS", ""))
-        portable_permissions = parse_portable_permissions(knob("KEYCLOAK_PORTABLE_PERMISSIONS", ""))
-    except KeycloakModelError as exc:
-        raise ProviderConfigurationError(str(exc)) from exc
+    """Keycloak, when ``KEYCLOAK_ISSUER_URL`` is set. Client ids keep their case."""
     return _keycloak_provider(
-        issuer_url,
-        _client_ids(knob("KEYCLOAK_AUDIENCES", "")),
+        knob("KEYCLOAK_ISSUER_URL", ""),
+        knob("KEYCLOAK_AUDIENCE", "").strip(),
+        knob("KEYCLOAK_CLIENT_ID", "").strip(),
         require_https=knob_flag("KEYCLOAK_REQUIRE_HTTPS", "true"),
-        post_logout_redirect_uri=(knob("KEYCLOAK_POST_LOGOUT_REDIRECT_URI") or _default_post_logout_redirect_uri()),
-        app_clients=app_clients,
-        portable_types=_client_ids(knob("KEYCLOAK_PORTABLE_TYPES", "")),
-        organization_bound_types=_client_ids(knob("KEYCLOAK_ORGANIZATION_BOUND_TYPES", "")),
-        portable_permissions=portable_permissions,
-        directory_client_id=knob("KEYCLOAK_DIRECTORY_CLIENT_ID", ""),
-        directory_client_secret=knob("KEYCLOAK_DIRECTORY_CLIENT_SECRET", ""),
+        post_logout_redirect_uri=knob("KEYCLOAK_POST_LOGOUT_REDIRECT_URI") or _default_post_logout_redirect_uri(),
     )
 
 
@@ -868,31 +675,6 @@ def refuse_canonical_descope_managed(providers: Iterable[ProviderTokenConfig], c
         )
 
 
-def refuse_ambiguous_authorization_source(providers: Iterable[ProviderTokenConfig], canonical: Iterable[str]) -> None:
-    """Raise when a ``token_authorized_only`` provider does not have exactly its token as its source.
-
-    ``canonical`` is ``CANONICAL_RBAC_PROVIDERS``, lower-case provider names. A
-    provider in it is decided from the canonical model and its extractor is not
-    called, so listing a provider whose grants depend on what its extractor
-    checks (Keycloak: the token binding, the portable list, the
-    organization-bound rule) would skip all of it. A provider with no extractor
-    has no source at all. The middleware factory calls this at startup.
-    """
-    canonical_names = {name.lower() for name in canonical}
-    for provider in providers:
-        if not provider.token_authorized_only:
-            continue
-        if provider.tenant_claims is None:
-            raise ProviderConfigurationError(
-                f"provider {provider.name!r} declares no authorization source: it has no claims extractor"
-            )
-        if provider.name.lower() in canonical_names:
-            raise ProviderConfigurationError(
-                f"CANONICAL_RBAC_PROVIDERS must not list {provider.name!r}: its tenant and permissions "
-                "come from its own token, and the canonical model would decide them instead"
-            )
-
-
 def _assemble(registrations: Iterable[ProviderRegistration]) -> list[ProviderTokenConfig]:
     """Walk ``registrations`` into a provider list, refusing an ambiguous one.
 
@@ -924,15 +706,10 @@ def build_provider_configs(
     ory_client_id: str | None = None,
     ory_post_logout_redirect_uri: str | None = None,
     keycloak_issuer_url: str = "",
-    keycloak_audiences: frozenset[str] = frozenset(),
+    keycloak_audience: str = "",
+    keycloak_client_id: str = "",
     keycloak_require_https: bool = True,
     keycloak_post_logout_redirect_uri: str | None = None,
-    keycloak_app_clients: Mapping[str, str] | None = None,
-    keycloak_portable_types: Iterable[str] = (),
-    keycloak_organization_bound_types: Iterable[str] = (),
-    keycloak_portable_permissions: Mapping[str, frozenset[str]] | None = None,
-    keycloak_directory_client_id: str = "",
-    keycloak_directory_client_secret: str = "",
     zitadel_issuer_url: str = "",
     zitadel_audience: str = "",
     zitadel_client_id: str = "",
@@ -964,15 +741,10 @@ def build_provider_configs(
             ),
             lambda: _keycloak_provider(
                 keycloak_issuer_url,
-                keycloak_audiences,
+                keycloak_audience,
+                keycloak_client_id,
                 require_https=keycloak_require_https,
                 post_logout_redirect_uri=keycloak_post_logout_redirect_uri,
-                app_clients=keycloak_app_clients or {},
-                portable_types=keycloak_portable_types,
-                organization_bound_types=keycloak_organization_bound_types,
-                portable_permissions=keycloak_portable_permissions or {},
-                directory_client_id=keycloak_directory_client_id,
-                directory_client_secret=keycloak_directory_client_secret,
             ),
             lambda: _zitadel_provider(
                 zitadel_issuer_url,
@@ -999,6 +771,21 @@ def library_token_issuers(provider: ProviderTokenConfig) -> list[str] | None:
     return sorted(provider.accepted_issuers) if len(provider.accepted_issuers) > 1 else None
 
 
+def unverified_claims(token: str) -> dict:
+    """Best-effort read of the payload without verifying the signature; ``{}`` when unreadable.
+
+    Never a security decision on its own: whatever is read here only picks the
+    provider whose keys then verify the signature.
+    """
+    try:
+        payload_b64 = token.split(".")[1]
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload_b64))
+    except Exception:
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
 def unverified_issuer(token: str) -> str | None:
     """Best-effort read of ``iss`` without verifying the signature.
 
@@ -1006,14 +793,61 @@ def unverified_issuer(token: str) -> str | None:
     security decision (the signature is always verified against the selected
     provider's JWKS). Returns None for opaque or mock tokens.
     """
-    try:
-        payload_b64 = token.split(".")[1]
-        payload_b64 += "=" * (-len(payload_b64) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(payload_b64))
-    except Exception:
-        return None
-    iss = claims.get("iss") if isinstance(claims, dict) else None
+    iss = unverified_claims(token).get("iss")
     return iss if isinstance(iss, str) else None
+
+
+def id_token_issuers(provider: ProviderTokenConfig) -> frozenset[str]:
+    """The ``iss`` values an ID token of ``provider`` may carry.
+
+    Its accepted issuers, without the bare issuer: Descope signs ID tokens on
+    ``https://api.descope.com/{pid}`` and ``https://api.descope.com/v1/apps/{pid}``,
+    and the bare project id is the issuer of SDK session and access-key tokens only.
+    """
+    if provider.bare_issuer is None:
+        return provider.accepted_issuers
+    return provider.accepted_issuers - {provider.bare_issuer}
+
+
+def id_token_client_id(provider: ProviderTokenConfig) -> str | None:
+    """The SPA's client id, which an ID token of ``provider`` names in ``aud`` and ``azp``, or None.
+
+    The RP-initiated logout client id where the provider has one (Keycloak,
+    Zitadel, Ory with ``ORY_CLIENT_ID``). Only Descope (``descope_managed``)
+    falls back to its audience: its project id is the client id of its OIDC
+    application. Every other provider's audience is the API's, which its access
+    tokens carry, so an Ory with no ``ORY_CLIENT_ID`` has no client id here.
+    """
+    if provider.logout_client_id:
+        return provider.logout_client_id
+    return provider.audience if provider.descope_managed else None
+
+
+def id_token_disco_address(provider: ProviderTokenConfig, iss: str | None) -> str:
+    """Where the discovery document for an ID token of ``provider`` on ``iss`` is fetched.
+
+    For a provider with several ID-token issuers (Descope), the document of the
+    token's own issuer: each of Descope's URL issuers serves one naming itself as
+    ``issuer``, over the project's one JWKS, and py-identity-model checks an ID
+    token's ``iss`` against the discovery issuer. ``iss`` is one of the provider's
+    configured issuers (``select_id_token_provider``), never an arbitrary URL.
+    For every other provider, its configured discovery address.
+    """
+    issuers = id_token_issuers(provider)
+    if iss is not None and len(issuers) > 1 and iss in issuers:
+        return f"{iss.rstrip('/')}/.well-known/openid-configuration"
+    return provider.disco_address
+
+
+def select_id_token_provider(providers: Iterable[ProviderTokenConfig], iss: object) -> ProviderTokenConfig | None:
+    """The provider one of whose ``id_token_issuers`` equals ``iss``, or None.
+
+    No fallback for a provider with no issuer configured: an ID token is
+    validated only by the provider whose issuer it names.
+    """
+    if not isinstance(iss, str):
+        return None
+    return next((provider for provider in providers if iss in id_token_issuers(provider)), None)
 
 
 def order_candidates(providers: list[ProviderTokenConfig], iss_hint: str | None) -> list[ProviderTokenConfig]:
@@ -1062,33 +896,26 @@ def audience_ok(aud: object, expected: str) -> bool:
     return aud == expected or (isinstance(aud, list) and expected in aud)
 
 
-def accepted_audiences(provider: ProviderTokenConfig) -> frozenset[str]:
-    """The audiences this provider's tokens may carry: ``audiences``, else the single ``audience``."""
-    if provider.audiences:
-        return provider.audiences
-    return frozenset({provider.audience}) if provider.audience else frozenset()
-
-
-def _names_an_accepted_audience(aud: object, accepted: frozenset[str]) -> bool:
-    """True if ``aud`` (a string, or a list of them) names at least one accepted audience."""
+def _names_the_audience(aud: object, expected: str) -> bool:
+    """True if ``aud`` (a string, or a list of them) names ``expected``."""
     if isinstance(aud, str):
-        return aud in accepted
+        return aud == expected
     if isinstance(aud, list):
-        return any(isinstance(entry, str) and entry in accepted for entry in aud)
+        return any(isinstance(entry, str) and entry == expected for entry in aud)
     return False
 
 
 def audience_rejected(claims: dict, provider: ProviderTokenConfig) -> bool:
     """True if the token must be rejected on audience grounds for this provider.
 
-    - ``require_audience`` (Ory, Keycloak): ``aud`` MUST be present and name an
-      accepted audience — fail closed, also when no audience is configured.
+    - ``require_audience`` (Ory, Keycloak, Zitadel): ``aud`` MUST be present and
+      name the configured audience — fail closed, also when none is configured.
     - otherwise (Descope): ``aud`` is checked only when present (session tokens omit it).
     """
-    accepted = accepted_audiences(provider)
+    expected = provider.audience
     if provider.require_audience:
-        return "aud" not in claims or not _names_an_accepted_audience(claims["aud"], accepted)
-    return bool(accepted) and "aud" in claims and not _names_an_accepted_audience(claims["aud"], accepted)
+        return "aud" not in claims or not expected or not _names_the_audience(claims["aud"], expected)
+    return bool(expected) and "aud" in claims and not _names_the_audience(claims["aud"], expected)
 
 
 def binding_refusal(claims: dict, provider: ProviderTokenConfig) -> str | None:

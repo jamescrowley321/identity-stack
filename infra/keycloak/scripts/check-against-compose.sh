@@ -6,7 +6,7 @@
 # With --integration-tests it also runs the backend's Keycloak integration tests
 # (backend/tests/integration/test_keycloak_*.py) against the Terraform-built
 # realm before the destroy, with the generated user ids and passwords and the
-# service accounts' secrets from the outputs test_credentials,
+# admin service account's secret from the outputs test_credentials,
 # backend_environment and user_ids (backend/tests/helpers/keycloak_target.py). Those tests also need the
 # rest of the test stack (TEST_DATABASE_URL) and, for one of them, a Descope
 # client (DESCOPE_PROJECT_ID, DESCOPE_CLIENT_ID, DESCOPE_CLIENT_SECRET).
@@ -14,7 +14,8 @@
 # The script needs keycloak-test up and healthy (`make test-up-keycloak`) and
 # fails when it is not. It never starts, stops or removes the container. Linux
 # and CI only. Run from anywhere in the repo, with terraform, curl, jq and the
-# backend venv (cd backend && uv sync --locked --extra dev).
+# backend venv (cd backend && uv sync --locked --extra dev). The root's own
+# apply also runs bash, curl and jq (organization group membership).
 set -euo pipefail
 
 integration_tests=0
@@ -61,7 +62,7 @@ if ! curl -fsS --connect-timeout 5 --max-time 20 -o /dev/null "$base_url/realms/
 fi
 
 # $work holds the state and outputs.json, with the generated user passwords and
-# the directory client secret. It is kept only when the destroy failed, because
+# the admin client secret. It is kept only when the destroy failed, because
 # the realm it describes may still exist. The next run deletes that realm and
 # then every kept directory (delete_leftover_realm).
 cleanup() {
@@ -146,7 +147,6 @@ if [ "$integration_tests" = 1 ]; then
     KEYCLOAK_TEST_REALM="$terraform_realm" \
       KEYCLOAK_TEST_USER_IDS="$(jq -c .user_ids.value "$work/outputs.json")" \
       KEYCLOAK_TEST_USER_PASSWORDS="$(jq -c .test_credentials.value.users "$work/outputs.json")" \
-      KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET="$(jq -er .backend_environment.value.KEYCLOAK_DIRECTORY_CLIENT_SECRET "$work/outputs.json")" \
       KEYCLOAK_TEST_ADMIN_CLIENT_SECRET="$(jq -er .backend_environment.value.KEYCLOAK_ADMIN_CLIENT_SECRET "$work/outputs.json")" \
       "$python" -m pytest tests/integration/test_keycloak_*.py -v
   )

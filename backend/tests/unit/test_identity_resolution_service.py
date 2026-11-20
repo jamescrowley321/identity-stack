@@ -115,6 +115,8 @@ def _make_tenant(**overrides):
     tenant = MagicMock()
     tenant.id = overrides.get("id", uuid.uuid4())
     tenant.name = overrides.get("name", "Acme Corp")
+    tenant.external_org_id = overrides.get("external_org_id")
+    tenant.external_org_provider_id = overrides.get("external_org_provider_id")
     return tenant
 
 
@@ -244,6 +246,43 @@ class TestResolveHappyPath:
         assert len(result.ok["tenant_memberships"]) == 2
         names = {m["tenant_name"] for m in result.ok["tenant_memberships"]}
         assert names == {"Acme", "Beta"}
+
+
+@pytest.mark.anyio
+class TestMembershipOrganization:
+    """Each membership names its tenant's organization at the resolving provider, and only there."""
+
+    async def test_external_org_id_is_the_resolving_providers_link(self):
+        service, user_repo, idp_link_repo, provider_repo, assignment_repo, role_repo, tenant_repo = _build_service()
+
+        user_id = uuid.uuid4()
+        keycloak = _make_provider(name="keycloak")
+        zitadel_id = uuid.uuid4()
+        acme = _make_tenant(name="Acme", external_org_id="acme", external_org_provider_id=keycloak.id)
+        globex = _make_tenant(name="Globex", external_org_id="globex", external_org_provider_id=keycloak.id)
+        elsewhere = _make_tenant(name="Initech", external_org_id="3141592", external_org_provider_id=zitadel_id)
+        unlinked = _make_tenant(name="Umbrella")
+        tenants = {tenant.id: tenant for tenant in (acme, globex, elsewhere, unlinked)}
+
+        provider_repo.get_by_name.return_value = keycloak
+        idp_link_repo.get_by_provider_name_and_sub.return_value = _make_link(user_id=user_id)
+        user_repo.get.return_value = _make_user(id=user_id)
+        assignment_repo.list_by_user.return_value = [_make_assignment(tenant_id=tid) for tid in tenants]
+        role_repo.get.return_value = _make_role(name="member")
+        role_repo.get_permissions.return_value = []
+        tenant_repo.get.side_effect = lambda tid: tenants[tid]
+        idp_link_repo.get_by_user.return_value = []
+
+        result = await service.resolve(provider="keycloak", sub="kc-sub-bob")
+
+        assert result.is_ok()
+        by_id = {m["tenant_id"]: m for m in result.ok["tenant_memberships"]}
+        assert by_id == {
+            str(acme.id): {"tenant_id": str(acme.id), "tenant_name": "Acme", "external_org_id": "acme"},
+            str(globex.id): {"tenant_id": str(globex.id), "tenant_name": "Globex", "external_org_id": "globex"},
+            str(elsewhere.id): {"tenant_id": str(elsewhere.id), "tenant_name": "Initech", "external_org_id": None},
+            str(unlinked.id): {"tenant_id": str(unlinked.id), "tenant_name": "Umbrella", "external_org_id": None},
+        }
 
 
 @pytest.mark.anyio

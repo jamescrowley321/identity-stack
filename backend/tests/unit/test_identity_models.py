@@ -352,7 +352,21 @@ class TestPackageExports:
     def test_all_models_exported(self):
         from app.models.identity import __all__
 
-        expected = {"IdPLink", "Permission", "Provider", "Role", "RolePermission", "Tenant", "User", "UserTenantRole"}
+        expected = {
+            "IdPLink",
+            "KeycloakPullState",
+            "MachineCredentialRole",
+            "MachineCredentialRow",
+            "PendingPush",
+            "Permission",
+            "Provider",
+            "ReconciliationRun",
+            "Role",
+            "RolePermission",
+            "Tenant",
+            "User",
+            "UserTenantRole",
+        }
         assert set(__all__) == expected
 
     def test_all_8_canonical_tables_in_metadata(self):

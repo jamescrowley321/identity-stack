@@ -1,10 +1,11 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup lint test-up test-down test-unit test-frontend test-integration test-e2e test-all security dev-backend dev-frontend dev test-gateway-proxy dev-gateway test-integration-standalone test-integration-gateway seed zitadel-up zitadel-reset zitadel-admin-pat zitadel-terraform-check zitadel-seed zitadel-frontend
+.PHONY: help setup lint test-up test-down test-unit test-frontend test-integration test-e2e test-all security dev-backend dev-frontend dev test-gateway-proxy dev-gateway test-integration-standalone test-integration-gateway seed zitadel-up zitadel-reset zitadel-admin-pat zitadel-terraform-check zitadel-seed zitadel-frontend keycloak-seed
 
 COMPOSE_TEST := docker compose -f docker-compose.test.yml
 TEST_DATABASE_URL := postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
 TEST_REDIS_URL := redis://localhost:16379/0
+TEST_OPENFGA_URL := http://localhost:18380
 
 # The base compose file refuses to parse without these three variables. The
 # Zitadel targets never start the services that read them, so placeholders keep
@@ -32,8 +33,16 @@ test-up: ## bring up postgres+redis for tests (idempotent; leave running between
 test-up-keycloak: ## bring up the test stack plus keycloak-test (http://keycloak-test.localhost:18180)
 	$(COMPOSE_TEST) --profile keycloak up -d --wait
 
-test-down: ## tear down the test stack, keycloak-test included
-	$(COMPOSE_TEST) --profile keycloak down -v
+.PHONY: test-up-openfga
+test-up-openfga: ## bring up the test stack plus openfga-test (http://localhost:18380, Postgres storage)
+	$(COMPOSE_TEST) --profile openfga up -d --wait
+
+test-down: ## tear down the test stack, keycloak-test and openfga-test included
+	$(COMPOSE_TEST) --profile keycloak --profile openfga down -v
+
+.PHONY: openfga-terraform-check
+openfga-terraform-check: ## apply infra/openfga to a running openfga-test (make test-up-openfga) in a scratch copy, check the second plan is empty and the model is model.json, then destroy
+	infra/openfga/scripts/check-against-compose.sh
 
 .PHONY: keycloak-terraform-check
 keycloak-terraform-check: ## apply infra/keycloak to a fresh realm in a running keycloak-test (make test-up-keycloak), check plan is empty and the realm matches the import
@@ -50,9 +59,9 @@ test-unit: test-up ## run backend unit tests (auto-brings-up test stack)
 	cd backend && TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TEST_REDIS_URL='$(TEST_REDIS_URL)' \
 	python -m pytest tests/unit/ -v
 
-test-integration: test-up-keycloak ## run backend integration tests (auto-brings-up test stack, with keycloak-test)
+test-integration: test-up-keycloak test-up-openfga ## run backend integration tests (auto-brings-up test stack, with keycloak-test and openfga-test)
 	set -a; [ -f backend/.env ] && . backend/.env; set +a; \
-	cd backend && TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TEST_REDIS_URL='$(TEST_REDIS_URL)' \
+	cd backend && TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TEST_REDIS_URL='$(TEST_REDIS_URL)' TEST_OPENFGA_URL='$(TEST_OPENFGA_URL)' \
 	python -m pytest tests/integration/ -v
 
 test-frontend: ## run frontend unit tests
@@ -63,7 +72,7 @@ test-e2e: ## run e2e tests (requires running frontend + backend)
 
 # The suite logs in to the realm the applied infra/keycloak root built: its
 # base URL and name from KEYCLOAK_ISSUER_URL, the users' ids and passwords and
-# the service accounts' secrets from the outputs (tests/helpers/keycloak_target.py).
+# the admin service account's secret from the outputs (tests/helpers/keycloak_target.py).
 # PYTEST_ARGS passes extra pytest options (CI's screenshots and traces).
 KEYCLOAK_TEST_TARGET_JQ := def setting(name): .[name] // error("backend_environment has no \(name): apply infra/keycloak again"); \
 	(.backend_environment.value // error("no backend_environment output: apply infra/keycloak first")) as $$backend \
@@ -73,7 +82,6 @@ KEYCLOAK_TEST_TARGET_JQ := def setting(name): .[name] // error("backend_environm
 	| { KEYCLOAK_TEST_BASE_URL: $$issuer.base, KEYCLOAK_TEST_REALM: $$issuer.realm, \
 		KEYCLOAK_TEST_USER_IDS: (.user_ids.value // error("no user_ids output: apply infra/keycloak first") | tojson), \
 		KEYCLOAK_TEST_USER_PASSWORDS: (.test_credentials.value.users // error("no test_credentials users output: apply infra/keycloak first") | tojson), \
-		KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET: ($$backend | setting("KEYCLOAK_DIRECTORY_CLIENT_SECRET")), \
 		KEYCLOAK_TEST_ADMIN_CLIENT_SECRET: ($$backend | setting("KEYCLOAK_ADMIN_CLIENT_SECRET")) } \
 	| to_entries[] | "export \(.key)=\(.value | @sh)"
 
@@ -149,13 +157,30 @@ zitadel-terraform-integration: ## zitadel-terraform-check, then the backend's li
 	TEST_DATABASE_URL='$(TEST_DATABASE_URL)' TF_VAR_zitadel_access_token="$$($(MAKE) -s zitadel-admin-pat)" \
 	infra/zitadel/scripts/check-against-compose.sh --integration-tests
 
-zitadel-seed: ## link the applied infra/zitadel root to canonical tenants in DATABASE_URL (migrated database; idempotent)
+# The fixture users linked are those holding a role in a canonical tenant; their
+# role assignments, and the realm's permissions and roles, come in with the first
+# reconciliation pass (docs/keycloak.md#reconciliation).
+keycloak-seed: ## register the keycloak provider, link canonical tenants to the applied infra/keycloak root's organization aliases and the fixture users to its users, in DATABASE_URL (migrated database; idempotent)
+	@environment="$$(terraform -chdir=infra/keycloak output -json backend_environment)" || exit 1; \
+	issuer="$$(printf '%s' "$$environment" | jq -er .KEYCLOAK_ISSUER_URL)" || exit 1; \
+	aliases="$$(terraform -chdir=infra/keycloak output -json organization_aliases)" || exit 1; \
+	linked="$$(printf '%s' "$$aliases" | jq -e --slurpfile fixture infra/fixtures/test-identities.json \
+		'with_entries(select($$fixture[0].tenants[.key].canonical))')" || exit 1; \
+	ids="$$(terraform -chdir=infra/keycloak output -json user_ids)" || exit 1; \
+	users="$$(printf '%s' "$$ids" | jq -e --slurpfile fixture infra/fixtures/test-identities.json \
+		'$$fixture[0] as $$f | with_entries(.key as $$name | $$f.users[$$name] as $$user \
+		| select($$user.roles | to_entries | any(.value != null and $$f.tenants[.key].canonical)) \
+		| .value = {external_sub: .value, email: "\($$name)@\($$f.tenants[$$user.home].domain)", \
+			given_name: $$user.first_name, family_name: $$user.last_name})')" || exit 1; \
+	printf '%s' "$$linked" | (cd backend && KEYCLOAK_ISSUER_URL="$$issuer" python -m scripts.seed_keycloak --link-organizations) || exit 1; \
+	printf '%s' "$$users" | (cd backend && KEYCLOAK_ISSUER_URL="$$issuer" python -m scripts.seed_keycloak --link-users)
+
+zitadel-seed: ## link the applied infra/zitadel root to canonical tenants and its two-tenant user and share target in DATABASE_URL (migrated database; idempotent)
 	terraform -chdir=infra/zitadel output -json canonical_seed | (cd backend && python -m scripts.seed_zitadel)
+	terraform -chdir=infra/zitadel output -json share_target_seed | (cd backend && python -m scripts.seed_zitadel)
 
 # The SPA's VITE_OIDC_* values are the applied root's frontend_environment
-# output. The tenant scope template is passed empty: a Zitadel user switches
-# tenant on the client, so a template in frontend/.env must not reach the build.
-# Only VITE_OIDC_* keys are exported; any other key in the output is an error.
+# output. Only VITE_OIDC_* keys are exported; any other key in the output is an error.
 # `docker compose up` without --build then starts this image.
 zitadel-frontend: ## build the frontend image against the applied infra/zitadel root (its frontend_environment output)
 	@env_json="$$(terraform -chdir=infra/zitadel output -json frontend_environment)" || { \
@@ -164,7 +189,7 @@ zitadel-frontend: ## build the frontend image against the applied infra/zitadel 
 	}; \
 	exports="$$(printf '%s' "$$env_json" | jq -er 'to_entries[] | if (.key | test("^VITE_OIDC_[A-Z_]+$$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')" || exit 1; \
 	eval "$$exports"; \
-	VITE_OIDC_TENANT_SCOPE_TEMPLATE= $(COMPOSE_ZITADEL) build frontend
+	$(COMPOSE_ZITADEL) build frontend
 
 # The two environment maps every local provider root outputs, in .env form:
 # backend_environment (sensitive: it holds the service accounts' secrets) for

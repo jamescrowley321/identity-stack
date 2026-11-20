@@ -13,6 +13,12 @@ vi.mock("@/hooks/useApiClient", () => ({
   useApiClient: () => ({ apiFetch: currentFetch }),
 }));
 
+// The pages read the user's roles in the tenant; these tests are about the lists.
+let currentRoles: string[] = ["admin"];
+vi.mock("@/hooks/useRBAC", () => ({
+  useRBAC: () => ({ roles: currentRoles }),
+}));
+
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn() },
 }));
@@ -142,5 +148,39 @@ describe.each(reloadPages)("$name when a reload fails", ({ Page, path, rowAction
 
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith(loadError));
     expect(screen.getByText("acme-row")).toBeInTheDocument();
+  });
+});
+
+describe("AccessKeys: the role a new key carries", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    currentRoles = ["admin"];
+  });
+
+  async function createWith(roles: string[]) {
+    currentRoles = roles;
+    const fetched = vi.fn<(path: string, init?: RequestInit) => Promise<Response>>(() =>
+      Promise.resolve(json(200, { keys: [] })),
+    );
+    currentFetch = fetched;
+    renderIn(AccessKeys);
+    fireEvent.change(screen.getByPlaceholderText("Key name"), { target: { value: "ci key" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    });
+    return fetched.mock.calls.filter(([, init]) => init?.method === "POST");
+  }
+
+  it("sends one role the user holds, never operator", async () => {
+    const posts = await createWith(["operator", "admin"]);
+
+    expect(posts.map(([, init]) => JSON.parse(String(init?.body)).role_names)).toEqual([["admin"]]);
+  });
+
+  it("offers no key to a user with no role but operator", async () => {
+    const posts = await createWith(["operator"]);
+
+    expect(posts).toEqual([]);
+    expect(screen.getByRole("button", { name: "Create" })).toBeDisabled();
   });
 });

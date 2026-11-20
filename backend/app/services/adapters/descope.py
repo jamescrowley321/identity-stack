@@ -6,13 +6,25 @@ Wraps DescopeManagementClient with Result[None, SyncError] returns and OTel span
 from __future__ import annotations
 
 import uuid
+from typing import ClassVar
 
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
+from app.errors.identity import NotFound
 from app.logbook import logbook
-from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.adapters.base import (
+    OWN_PROFILE_OF,
+    AttributeValue,
+    Capability,
+    CustomAttributes,
+    IdentityProviderAdapter,
+    SyncError,
+    TenantAttributes,
+)
 from app.services.descope import DescopeManagementClient
+from app.services.descope_management import DescopeManagementAdapter
+from app.services.relationship_store import RelationshipStoreKind
 
 logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
@@ -24,7 +36,7 @@ _STATUS_MAP: dict[str, str] = {
 }
 
 
-class DescopeSyncAdapter(IdentityProviderAdapter):
+class DescopeSyncAdapter(IdentityProviderAdapter, CustomAttributes):
     """Adapter that syncs canonical identity state to Descope.
 
     Each method wraps a DescopeManagementClient call:
@@ -32,6 +44,15 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
     - On failure: returns Error(SyncError) with operation context
     - OTel span on every call for tracing
     """
+
+    # Access keys and user and tenant custom attributes, through the Descope
+    # Management API (DescopeManagementAdapter). A subject is a Descope user id and
+    # a tenant a Descope tenant id (CustomAttributes).
+    capabilities: ClassVar[frozenset[Capability]] = frozenset(
+        {Capability.MACHINE_CREDENTIALS, Capability.CUSTOM_ATTRIBUTES}
+    )
+    # Descope's own FGA store, keyed on Descope tenant and user ids.
+    relationship_store: ClassVar[RelationshipStoreKind] = RelationshipStoreKind.DESCOPE
 
     def __init__(self, client: DescopeManagementClient) -> None:
         self._client = client
@@ -42,6 +63,8 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
         Expected data keys:
             email: str — user's email (used as loginId in Descope)
             status: str — canonical status ("active", "inactive", "provisioned")
+            OWN_PROFILE_OF: str — the owner's Descope user id; then only given_name and
+                family_name are pushed, to that user
         """
         with tracer.start_as_current_span("descope.sync_user") as span:
             span.set_attribute("user.id", str(user_id))
@@ -65,6 +88,13 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
                             context={"user_id": str(user_id)},
                         )
                     )
+                own = data.get(OWN_PROFILE_OF)
+                if isinstance(own, str) and own:
+                    # The owner's own names, to their own Descope user (its id); no status.
+                    await self._client.update_user_names(
+                        own, data.get("given_name") or "", data.get("family_name") or ""
+                    )
+                    return Ok(None)
                 await self._client.update_user_status(email, descope_status)
                 return Ok(None)
             except Exception as exc:
@@ -239,13 +269,13 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
             span.set_attribute("user.id", str(user_id))
             return Ok(None)
 
-    async def delete_role(self, *, role_id: uuid.UUID) -> Result[None, SyncError]:
+    async def delete_role(self, *, role_id: uuid.UUID, data: dict | None = None) -> Result[None, SyncError]:
         """Delete role from Descope. Placeholder."""
         with tracer.start_as_current_span("descope.delete_role") as span:
             span.set_attribute("role.id", str(role_id))
             return Ok(None)
 
-    async def delete_permission(self, *, permission_id: uuid.UUID) -> Result[None, SyncError]:
+    async def delete_permission(self, *, permission_id: uuid.UUID, data: dict | None = None) -> Result[None, SyncError]:
         """Delete permission from Descope. Placeholder."""
         with tracer.start_as_current_span("descope.delete_permission") as span:
             span.set_attribute("permission.id", str(permission_id))
@@ -255,4 +285,53 @@ class DescopeSyncAdapter(IdentityProviderAdapter):
         """Delete tenant from Descope. Placeholder."""
         with tracer.start_as_current_span("descope.delete_tenant") as span:
             span.set_attribute("tenant.id", str(tenant_id))
+            return Ok(None)
+
+    # --- custom attributes (CustomAttributes) ---------------------------------------
+
+    def _management(self) -> DescopeManagementAdapter:
+        return DescopeManagementAdapter(self._client)
+
+    async def user_attributes(self, *, subject: str) -> Result[dict[str, AttributeValue], SyncError]:
+        with tracer.start_as_current_span("descope.user_attributes"):
+            try:
+                loaded = await self._management().load_profile(subject)
+            except Exception as exc:
+                return Error(SyncError(message=str(exc), operation="user_attributes"))
+            if loaded.is_error():
+                return Error(SyncError(message=loaded.error.message, operation="user_attributes"))
+            return Ok(loaded.ok["custom_attributes"] or {})
+
+    async def set_user_attribute(self, *, subject: str, key: str, value: AttributeValue) -> Result[None, SyncError]:
+        with tracer.start_as_current_span("descope.set_user_attribute"):
+            try:
+                updated = await self._management().update_profile_attribute(subject, key, value)
+            except Exception as exc:
+                return Error(SyncError(message=str(exc), operation="set_user_attribute"))
+            if updated.is_error():
+                return Error(SyncError(message=updated.error.message, operation="set_user_attribute"))
+            return Ok(None)
+
+    async def tenant_attributes(self, *, tenant: str) -> Result[TenantAttributes | None, SyncError]:
+        with tracer.start_as_current_span("descope.tenant_attributes"):
+            try:
+                loaded = await self._management().load_tenant_settings(tenant)
+            except Exception as exc:
+                return Error(SyncError(message=str(exc), operation="tenant_attributes"))
+            if loaded.is_error():
+                if isinstance(loaded.error, NotFound):
+                    return Ok(None)
+                return Error(SyncError(message=loaded.error.message, operation="tenant_attributes"))
+            return Ok(TenantAttributes(name=loaded.ok["name"], attributes=loaded.ok["custom_attributes"] or {}))
+
+    async def set_tenant_attributes(
+        self, *, tenant: str, attributes: dict[str, AttributeValue]
+    ) -> Result[None, SyncError]:
+        with tracer.start_as_current_span("descope.set_tenant_attributes"):
+            try:
+                updated = await self._management().update_tenant_settings(tenant, attributes)
+            except Exception as exc:
+                return Error(SyncError(message=str(exc), operation="set_tenant_attributes"))
+            if updated.is_error():
+                return Error(SyncError(message=updated.error.message, operation="set_tenant_attributes"))
             return Ok(None)

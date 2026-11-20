@@ -243,8 +243,8 @@ The backend owns a canonical Postgres identity store; identity providers are syn
 | Providers | `GET`/`POST /api/providers`, `PATCH /api/providers/{id}`, `GET /api/providers/{id}/capabilities` | Register, list and deactivate IdP configurations; read a provider's capabilities (requires `operator`) |
 | Canonical Users | `GET /api/users` | List canonical users, optionally filtered by status (requires `operator`) |
 | IdP Links | `GET`/`POST /api/users/{id}/idp-links`, `DELETE /api/users/{id}/idp-links/{link_id}` | List, create and delete a canonical user's links to external identities (requires owner/admin) |
-| Sync Status | `GET /api/sync/status`, `GET /api/events/recent` | Per-provider sync state, last reconciliation time and recent inbound sync events (requires `operator`) |
-| Reconciliation | `POST /api/internal/reconciliation/run` | Run a full reconciliation between Postgres and Descope (guarded by `DESCOPE_FLOW_SYNC_SECRET`) |
+| Sync Status | `GET /api/sync/status`, `GET /api/events/recent` | Per-provider sync state, each provider's last reconciliation pass, pending pushes and recent inbound sync events (requires `operator`) |
+| Reconciliation | `POST /api/internal/reconciliation/run` | Run a full reconciliation between Postgres and the provider it is pushed to, Descope or Keycloak (guarded by `DESCOPE_FLOW_SYNC_SECRET`) |
 | Internal sync | `POST /api/internal/users/sync`, `POST /api/internal/webhooks/descope`, `GET /api/internal/identity` | Flow sync, Descope webhooks and identity resolution, each guarded by a shared secret (see [docs/architecture.md](docs/architecture.md#sync-flows)) |
 
 The `operator` role is not one of the roles Terraform defines (`infra/rbac.tf`).

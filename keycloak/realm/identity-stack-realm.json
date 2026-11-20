@@ -14,84 +14,279 @@
   "minimumQuickLoginWaitSeconds": 60,
   "maxFailureWaitSeconds": 900,
   "maxDeltaTimeSeconds": 43200,
+  "eventsEnabled": true,
+  "eventsExpiration": 604800,
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": true,
+  "attributes": {
+    "adminEventsExpiration": "604800",
+    "allowedProtocolMapperTypesForClientAdministrators": "oidc-audience-mapper"
+  },
+  "adminPermissionsEnabled": true,
   "organizations": [
     {
       "name": "Acme",
       "alias": "acme",
       "enabled": true,
-      "domains": [{ "name": "acme.test", "verified": false }],
-      "attributes": {
-        "type:tenant-admin": [
-          "b0b00000-0000-4000-8000-000000000002",
-          "da4e0000-0000-4000-8000-000000000004",
-          "f4a4c000-0000-4000-8000-000000000006"
-        ]
-      },
+      "domains": [
+        {
+          "name": "acme.test",
+          "verified": false
+        }
+      ],
+      "groups": [
+        {
+          "id": "9a010000-0000-4000-8000-000000000001",
+          "name": "owner"
+        },
+        {
+          "id": "9a010000-0000-4000-8000-000000000002",
+          "name": "admin"
+        },
+        {
+          "id": "9a010000-0000-4000-8000-000000000003",
+          "name": "member"
+        },
+        {
+          "id": "9a010000-0000-4000-8000-000000000004",
+          "name": "viewer"
+        }
+      ],
       "members": [
-        { "username": "alice", "membershipType": "UNMANAGED" },
-        { "username": "bob", "membershipType": "UNMANAGED" },
-        { "username": "carol", "membershipType": "UNMANAGED" },
-        { "username": "dave", "membershipType": "UNMANAGED" },
-        { "username": "erin", "membershipType": "UNMANAGED" },
-        { "username": "frank", "membershipType": "UNMANAGED" }
+        {
+          "username": "alice",
+          "membershipType": "UNMANAGED",
+          "groups": [
+            "9a010000-0000-4000-8000-000000000003"
+          ]
+        },
+        {
+          "username": "bob",
+          "membershipType": "UNMANAGED",
+          "groups": [
+            "9a010000-0000-4000-8000-000000000002"
+          ]
+        },
+        {
+          "username": "carol",
+          "membershipType": "UNMANAGED"
+        },
+        {
+          "username": "dave",
+          "membershipType": "UNMANAGED",
+          "groups": [
+            "9a010000-0000-4000-8000-000000000002"
+          ]
+        },
+        {
+          "username": "erin",
+          "membershipType": "UNMANAGED",
+          "groups": [
+            "9a010000-0000-4000-8000-000000000003"
+          ]
+        },
+        {
+          "username": "frank",
+          "membershipType": "UNMANAGED",
+          "groups": [
+            "9a010000-0000-4000-8000-000000000002"
+          ]
+        }
       ]
     },
     {
       "name": "Globex",
       "alias": "globex",
       "enabled": true,
-      "domains": [{ "name": "globex.test", "verified": false }],
-      "members": [{ "username": "bob", "membershipType": "UNMANAGED" }]
+      "domains": [
+        {
+          "name": "globex.test",
+          "verified": false
+        }
+      ],
+      "groups": [
+        {
+          "id": "9a020000-0000-4000-8000-000000000001",
+          "name": "owner"
+        },
+        {
+          "id": "9a020000-0000-4000-8000-000000000002",
+          "name": "admin"
+        },
+        {
+          "id": "9a020000-0000-4000-8000-000000000003",
+          "name": "member"
+        },
+        {
+          "id": "9a020000-0000-4000-8000-000000000004",
+          "name": "viewer"
+        }
+      ],
+      "members": [
+        {
+          "username": "bob",
+          "membershipType": "UNMANAGED",
+          "groups": [
+            "9a020000-0000-4000-8000-000000000004"
+          ]
+        }
+      ]
     },
     {
       "name": "Unlinked",
       "alias": "unlinked",
       "enabled": true,
-      "domains": [{ "name": "unlinked.test", "verified": false }],
-      "members": [{ "username": "grace", "membershipType": "UNMANAGED" }]
+      "domains": [
+        {
+          "name": "unlinked.test",
+          "verified": false
+        }
+      ],
+      "groups": [
+        {
+          "id": "9a030000-0000-4000-8000-000000000001",
+          "name": "owner"
+        },
+        {
+          "id": "9a030000-0000-4000-8000-000000000002",
+          "name": "admin"
+        },
+        {
+          "id": "9a030000-0000-4000-8000-000000000003",
+          "name": "member"
+        },
+        {
+          "id": "9a030000-0000-4000-8000-000000000004",
+          "name": "viewer"
+        }
+      ],
+      "members": [
+        {
+          "username": "grace",
+          "membershipType": "UNMANAGED",
+          "groups": [
+            "9a030000-0000-4000-8000-000000000003"
+          ]
+        }
+      ]
     }
   ],
   "roles": {
     "client": {
-      "member": [
-        { "name": "documents:read" },
-        { "name": "documents:write" }
-      ],
-      "tenant-admin": [
-        { "name": "members:invite" },
-        { "name": "members:remove" },
-        { "name": "settings:manage" }
+      "identity-stack-api": [
+        {
+          "name": "billing:manage"
+        },
+        {
+          "name": "documents:delete"
+        },
+        {
+          "name": "documents:read"
+        },
+        {
+          "name": "documents:write"
+        },
+        {
+          "name": "members:invite"
+        },
+        {
+          "name": "members:remove"
+        },
+        {
+          "name": "members:update_role"
+        },
+        {
+          "name": "projects:create"
+        },
+        {
+          "name": "projects:delete"
+        },
+        {
+          "name": "projects:read"
+        },
+        {
+          "name": "projects:update"
+        },
+        {
+          "name": "settings:manage"
+        },
+        {
+          "name": "owner",
+          "composite": true,
+          "composites": {
+            "client": {
+              "identity-stack-api": [
+                "billing:manage",
+                "documents:delete",
+                "documents:read",
+                "documents:write",
+                "members:invite",
+                "members:remove",
+                "members:update_role",
+                "projects:create",
+                "projects:delete",
+                "projects:read",
+                "projects:update",
+                "settings:manage"
+              ]
+            }
+          }
+        },
+        {
+          "name": "admin",
+          "composite": true,
+          "composites": {
+            "client": {
+              "identity-stack-api": [
+                "documents:delete",
+                "documents:read",
+                "documents:write",
+                "members:invite",
+                "members:remove",
+                "members:update_role",
+                "projects:create",
+                "projects:delete",
+                "projects:read",
+                "projects:update",
+                "settings:manage"
+              ]
+            }
+          }
+        },
+        {
+          "name": "member",
+          "composite": true,
+          "composites": {
+            "client": {
+              "identity-stack-api": [
+                "documents:read",
+                "documents:write",
+                "members:invite",
+                "projects:read",
+                "projects:update"
+              ]
+            }
+          }
+        },
+        {
+          "name": "viewer",
+          "composite": true,
+          "composites": {
+            "client": {
+              "identity-stack-api": [
+                "documents:read",
+                "projects:read"
+              ]
+            }
+          }
+        }
       ]
     }
   },
   "clients": [
     {
-      "clientId": "member",
-      "name": "Type client: member",
-      "enabled": true,
-      "publicClient": false,
-      "secret": "local-only-member-type-client",
-      "standardFlowEnabled": false,
-      "implicitFlowEnabled": false,
-      "directAccessGrantsEnabled": false,
-      "serviceAccountsEnabled": false,
-      "fullScopeAllowed": false
-    },
-    {
-      "clientId": "tenant-admin",
-      "name": "Type client: tenant-admin",
-      "enabled": true,
-      "publicClient": false,
-      "secret": "local-only-tenant-admin-type-client",
-      "standardFlowEnabled": false,
-      "implicitFlowEnabled": false,
-      "directAccessGrantsEnabled": false,
-      "serviceAccountsEnabled": false,
-      "fullScopeAllowed": false
-    },
-    {
-      "clientId": "member-app",
-      "name": "App client for type member",
+      "clientId": "identity-stack-spa",
+      "name": "The identity-stack SPA",
       "enabled": true,
       "publicClient": true,
       "standardFlowEnabled": true,
@@ -99,18 +294,56 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "fullScopeAllowed": false,
-      "redirectUris": ["http://localhost:3000"],
-      "webOrigins": ["http://localhost:3000"],
+      "redirectUris": [
+        "http://localhost:3000"
+      ],
+      "webOrigins": [
+        "http://localhost:3000"
+      ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
         "post.logout.redirect.uris": "http://localhost:3000/login"
       },
-      "defaultClientScopes": ["basic", "roles", "profile", "email", "web-origins", "acr"],
-      "optionalClientScopes": ["organization", "offline_access"]
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "email",
+        "web-origins",
+        "acr"
+      ],
+      "optionalClientScopes": [
+        "organization",
+        "offline_access"
+      ],
+      "protocolMappers": [
+        {
+          "name": "API audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "identity-stack-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
     },
     {
-      "clientId": "tenant-admin-app",
-      "name": "App client for type tenant-admin",
+      "clientId": "identity-stack-api",
+      "name": "The identity-stack API: its id is the access token audience; its client roles are the canonical permissions and roles",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "local-only-api-client",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false
+    },
+    {
+      "clientId": "identity-stack-other",
+      "name": "Another public client, without the API audience",
       "enabled": true,
       "publicClient": true,
       "standardFlowEnabled": true,
@@ -118,32 +351,31 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "fullScopeAllowed": false,
-      "redirectUris": ["http://localhost:3000"],
-      "webOrigins": ["http://localhost:3000"],
+      "redirectUris": [
+        "http://localhost:3000"
+      ],
+      "webOrigins": [
+        "http://localhost:3000"
+      ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
         "post.logout.redirect.uris": "http://localhost:3000/login"
       },
-      "defaultClientScopes": ["basic", "roles", "profile", "email", "web-origins", "acr"],
-      "optionalClientScopes": ["organization", "offline_access"]
-    },
-    {
-      "clientId": "identity-stack-directory",
-      "name": "Backend service account: organization lookup, read-only",
-      "enabled": true,
-      "publicClient": false,
-      "secret": "local-only-directory-client",
-      "standardFlowEnabled": false,
-      "implicitFlowEnabled": false,
-      "directAccessGrantsEnabled": false,
-      "serviceAccountsEnabled": true,
-      "fullScopeAllowed": false,
-      "defaultClientScopes": ["kc-admin-api"],
-      "optionalClientScopes": []
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "email",
+        "web-origins",
+        "acr"
+      ],
+      "optionalClientScopes": [
+        "organization",
+        "offline_access"
+      ]
     },
     {
       "clientId": "identity-stack-admin",
-      "name": "Backend service account: pushes canonical tenants and users",
+      "name": "Backend service account: pushes to and pulls from the realm",
       "enabled": true,
       "publicClient": false,
       "secret": "local-only-admin-client",
@@ -152,23 +384,105 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
       "fullScopeAllowed": false,
-      "defaultClientScopes": ["kc-admin-api"],
+      "defaultClientScopes": [
+        "kc-admin-api"
+      ],
       "optionalClientScopes": []
+    },
+    {
+      "clientId": "admin-permissions",
+      "authorizationServicesEnabled": true,
+      "authorizationSettings": {
+        "resources": [
+          {
+            "name": "Clients",
+            "type": "Clients",
+            "scopes": [
+              {
+                "name": "view"
+              },
+              {
+                "name": "manage"
+              },
+              {
+                "name": "map-roles"
+              },
+              {
+                "name": "map-roles-client-scope"
+              },
+              {
+                "name": "map-roles-composite"
+              }
+            ]
+          }
+        ],
+        "policies": [
+          {
+            "name": "identity-stack-admin service account",
+            "type": "user",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "users": "[\"service-account-identity-stack-admin\"]"
+            }
+          },
+          {
+            "name": "identity-stack-admin manages the API client",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "defaultResourceType": "Clients",
+              "resources": "[\"identity-stack-api\"]",
+              "scopes": "[\"view\", \"manage\", \"map-roles-composite\"]",
+              "applyPolicies": "[\"identity-stack-admin service account\"]"
+            }
+          },
+          {
+            "name": "identity-stack-admin reads the realm-management client",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "defaultResourceType": "Clients",
+              "resources": "[\"realm-management\"]",
+              "scopes": "[\"view\"]",
+              "applyPolicies": "[\"identity-stack-admin service account\"]"
+            }
+          }
+        ],
+        "scopes": [
+          {
+            "name": "view"
+          },
+          {
+            "name": "manage"
+          },
+          {
+            "name": "map-roles"
+          },
+          {
+            "name": "map-roles-client-scope"
+          },
+          {
+            "name": "map-roles-composite"
+          }
+        ]
+      }
     }
   ],
   "clientScopeMappings": {
-    "member": [
-      { "client": "member-app", "roles": ["documents:read", "documents:write"] }
-    ],
-    "tenant-admin": [
-      {
-        "client": "tenant-admin-app",
-        "roles": ["members:invite", "members:remove", "settings:manage"]
-      }
-    ],
     "realm-management": [
-      { "client": "identity-stack-directory", "roles": ["view-users", "view-organizations"] },
-      { "client": "identity-stack-admin", "roles": ["manage-users", "manage-organizations"] }
+      {
+        "client": "identity-stack-admin",
+        "roles": [
+          "manage-users",
+          "manage-organizations",
+          "query-clients",
+          "view-events",
+          "create-client"
+        ]
+      }
     ]
   },
   "users": [
@@ -180,8 +494,13 @@
       "emailVerified": true,
       "firstName": "Alice",
       "lastName": "Single-Org",
-      "credentials": [{ "type": "password", "value": "local-only-alice", "temporary": false }],
-      "clientRoles": { "member": ["documents:read", "documents:write"] }
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-only-alice",
+          "temporary": false
+        }
+      ]
     },
     {
       "id": "b0b00000-0000-4000-8000-000000000002",
@@ -191,11 +510,13 @@
       "emailVerified": true,
       "firstName": "Bob",
       "lastName": "Two-Orgs",
-      "credentials": [{ "type": "password", "value": "local-only-bob", "temporary": false }],
-      "clientRoles": {
-        "member": ["documents:read"],
-        "tenant-admin": ["members:invite", "members:remove", "settings:manage"]
-      }
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-only-bob",
+          "temporary": false
+        }
+      ]
     },
     {
       "id": "ca401000-0000-4000-8000-000000000003",
@@ -205,7 +526,13 @@
       "emailVerified": true,
       "firstName": "Carol",
       "lastName": "No-Role",
-      "credentials": [{ "type": "password", "value": "local-only-carol", "temporary": false }]
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-only-carol",
+          "temporary": false
+        }
+      ]
     },
     {
       "id": "da4e0000-0000-4000-8000-000000000004",
@@ -215,10 +542,13 @@
       "emailVerified": true,
       "firstName": "Dave",
       "lastName": "One-Org-Admin",
-      "credentials": [{ "type": "password", "value": "local-only-dave", "temporary": false }],
-      "clientRoles": {
-        "tenant-admin": ["members:invite", "members:remove", "settings:manage"]
-      }
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-only-dave",
+          "temporary": false
+        }
+      ]
     },
     {
       "id": "e4140000-0000-4000-8000-000000000005",
@@ -228,10 +558,13 @@
       "emailVerified": true,
       "firstName": "Erin",
       "lastName": "Write-Only",
-      "credentials": [{ "type": "password", "value": "local-only-erin", "temporary": false }],
-      "clientRoles": {
-        "member": ["documents:write"]
-      }
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-only-erin",
+          "temporary": false
+        }
+      ]
     },
     {
       "id": "f4a4c000-0000-4000-8000-000000000006",
@@ -241,10 +574,13 @@
       "emailVerified": true,
       "firstName": "Frank",
       "lastName": "Moving-Admin",
-      "credentials": [{ "type": "password", "value": "local-only-frank", "temporary": false }],
-      "clientRoles": {
-        "tenant-admin": ["members:invite", "members:remove", "settings:manage"]
-      }
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-only-frank",
+          "temporary": false
+        }
+      ]
     },
     {
       "id": "64ace000-0000-4000-8000-000000000007",
@@ -254,26 +590,175 @@
       "emailVerified": true,
       "firstName": "Grace",
       "lastName": "Unlinked-Org",
-      "credentials": [{ "type": "password", "value": "local-only-grace", "temporary": false }],
-      "clientRoles": {
-        "member": ["documents:read", "documents:write"]
-      }
-    },
-    {
-      "username": "service-account-identity-stack-directory",
-      "enabled": true,
-      "serviceAccountClientId": "identity-stack-directory",
-      "clientRoles": {
-        "realm-management": ["view-users", "view-organizations"]
-      }
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-only-grace",
+          "temporary": false
+        }
+      ]
     },
     {
       "username": "service-account-identity-stack-admin",
       "enabled": true,
       "serviceAccountClientId": "identity-stack-admin",
       "clientRoles": {
-        "realm-management": ["manage-users", "manage-organizations"]
+        "realm-management": [
+          "manage-users",
+          "manage-organizations",
+          "query-clients",
+          "view-events",
+          "create-client"
+        ]
       }
     }
-  ]
+  ],
+  "components": {
+    "org.keycloak.userprofile.UserProfileProvider": [
+      {
+        "providerId": "declarative-user-profile",
+        "subComponents": {},
+        "config": {
+          "kc.user.profile.config": [
+            "{\"attributes\":[{\"name\":\"username\",\"displayName\":\"${username}\",\"validations\":{\"length\":{\"min\":\"3\",\"max\":\"255\"},\"username-prohibited-characters\":{},\"up-username-not-idn-homograph\":{}},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"email\",\"displayName\":\"${email}\",\"validations\":{\"email\":{},\"length\":{\"max\":\"255\"}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"firstName\",\"displayName\":\"${firstName}\",\"validations\":{\"length\":{\"max\":\"255\"},\"person-name-prohibited-characters\":{}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"lastName\",\"displayName\":\"${lastName}\",\"validations\":{\"length\":{\"max\":\"255\"},\"person-name-prohibited-characters\":{}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false}],\"groups\":[{\"name\":\"user-metadata\",\"displayHeader\":\"User metadata\",\"displayDescription\":\"Attributes, which refer to user metadata\"}],\"unmanagedAttributePolicy\":\"ADMIN_EDIT\"}"
+          ]
+        }
+      }
+    ],
+    "org.keycloak.services.clientregistration.policy.ClientRegistrationPolicy": [
+      {
+        "name": "Trusted Hosts",
+        "providerId": "trusted-hosts",
+        "subType": "anonymous",
+        "subComponents": {},
+        "config": {
+          "host-sending-registration-request-must-match": [
+            "true"
+          ],
+          "client-uris-must-match": [
+            "true"
+          ]
+        }
+      },
+      {
+        "name": "Consent Required",
+        "providerId": "consent-required",
+        "subType": "anonymous",
+        "subComponents": {},
+        "config": {}
+      },
+      {
+        "name": "Full Scope Disabled",
+        "providerId": "scope",
+        "subType": "anonymous",
+        "subComponents": {},
+        "config": {}
+      },
+      {
+        "name": "Max Clients Limit",
+        "providerId": "max-clients",
+        "subType": "anonymous",
+        "subComponents": {},
+        "config": {
+          "max-clients": [
+            "200"
+          ]
+        }
+      },
+      {
+        "name": "Default Roles Disabled",
+        "providerId": "default-roles",
+        "subType": "anonymous",
+        "subComponents": {},
+        "config": {}
+      },
+      {
+        "name": "Allowed Registration Web Origins",
+        "providerId": "registration-web-origins",
+        "subType": "anonymous",
+        "subComponents": {},
+        "config": {}
+      },
+      {
+        "name": "Allowed Protocol Mapper Types",
+        "providerId": "allowed-protocol-mappers",
+        "subType": "anonymous",
+        "subComponents": {},
+        "config": {
+          "allowed-protocol-mapper-types": [
+            "oidc-full-name-mapper",
+            "oidc-usermodel-property-mapper",
+            "oidc-address-mapper",
+            "oidc-sha256-pairwise-sub-mapper",
+            "oidc-usermodel-attribute-mapper",
+            "saml-user-property-mapper",
+            "saml-role-list-mapper",
+            "saml-user-attribute-mapper"
+          ]
+        }
+      },
+      {
+        "name": "Allowed Client Scopes",
+        "providerId": "allowed-client-templates",
+        "subType": "anonymous",
+        "subComponents": {},
+        "config": {
+          "allow-default-scopes": [
+            "true"
+          ]
+        }
+      },
+      {
+        "name": "Full Scope Disabled",
+        "providerId": "scope",
+        "subType": "authenticated",
+        "subComponents": {},
+        "config": {}
+      },
+      {
+        "name": "Default Roles Disabled",
+        "providerId": "default-roles",
+        "subType": "authenticated",
+        "subComponents": {},
+        "config": {}
+      },
+      {
+        "name": "Allowed Registration Web Origins",
+        "providerId": "registration-web-origins",
+        "subType": "authenticated",
+        "subComponents": {},
+        "config": {}
+      },
+      {
+        "name": "Allowed Protocol Mapper Types",
+        "providerId": "allowed-protocol-mappers",
+        "subType": "authenticated",
+        "subComponents": {},
+        "config": {
+          "allowed-protocol-mapper-types": [
+            "oidc-full-name-mapper",
+            "oidc-usermodel-property-mapper",
+            "oidc-address-mapper",
+            "oidc-sha256-pairwise-sub-mapper",
+            "oidc-usermodel-attribute-mapper",
+            "saml-user-property-mapper",
+            "saml-role-list-mapper",
+            "saml-user-attribute-mapper",
+            "oidc-audience-mapper"
+          ]
+        }
+      },
+      {
+        "name": "Allowed Client Scopes",
+        "providerId": "allowed-client-templates",
+        "subType": "authenticated",
+        "subComponents": {},
+        "config": {
+          "allow-default-scopes": [
+            "true"
+          ]
+        }
+      }
+    ]
+  }
 }

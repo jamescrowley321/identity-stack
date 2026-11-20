@@ -173,6 +173,7 @@ class PermissionService:
             if decision.is_error():
                 return Error(identity_error(decision.error))
             decided, updated = decision.ok
+            previous_name = row.name
 
             apply_permission(decided, row)
             try:
@@ -185,11 +186,12 @@ class PermissionService:
 
             await self._invalidate(updated, permission.id)
 
+            sync_data: dict = {"name": permission.name.value, "description": permission.description}
+            if previous_name != permission.name.value:
+                # A provider that keys permissions by name (Keycloak client roles) renames the one it holds.
+                sync_data["previous_name"] = previous_name
             self._log_sync_failure(
-                await self._adapter.sync_permission(
-                    permission_id=permission.id,
-                    data={"name": permission.name.value, "description": permission.description},
-                ),
+                await self._adapter.sync_permission(permission_id=permission.id, data=sync_data),
                 permission.id,
                 "update_permission",
             )
@@ -223,7 +225,7 @@ class PermissionService:
             await self._invalidate(deleted, permission_id)
 
             self._log_sync_failure(
-                await self._adapter.delete_permission(permission_id=permission_id),
+                await self._adapter.delete_permission(permission_id=permission_id, data={"name": deleted.name}),
                 permission_id,
                 "delete_permission",
             )

@@ -1,14 +1,11 @@
-"""Startup refuses a Keycloak provider that is half-configured or unsafe.
+"""The Keycloak registration, and startup refusing a Keycloak provider that is half-configured or unsafe.
 
-With ``KEYCLOAK_ISSUER_URL`` set, the backend starts only when the ``azp``
-mapping, the declaration of every type, the portable permission lists and the
-provider's authorization source are all there, and plain HTTP is allowed only
-for a local issuer. Each test starts from the complete configuration of the
-fixture realm and breaks one thing.
+Each test starts from the local realm's complete configuration (the
+``backend_environment`` output of ``infra/keycloak``: a plain-HTTP
+``.localhost`` issuer with ``KEYCLOAK_REQUIRE_HTTPS=false``) and changes one thing.
 """
 
 import importlib
-from dataclasses import replace
 
 import pytest
 from fastapi import FastAPI
@@ -17,32 +14,18 @@ from app.dependencies import rbac
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.providers import (
-    CountedMemberships,
-    KeycloakTenantClaims,
-    KeycloakTenantMemberships,
     KeycloakTokenBinding,
     ProviderConfigurationError,
+    build_provider_configs,
     configured_providers,
-    descope_config,
     keycloak_config,
-    ory_config,
-    refuse_ambiguous_authorization_source,
+    keycloak_organization_alias,
 )
-from app.services.keycloak_directory import KeycloakDirectory
-from tests.helpers.keycloak_model import (
-    DIRECTORY_CLIENT_ID,
-    DIRECTORY_CLIENT_SECRET,
-    MEMBER_TYPE_CLIENT,
-    MODEL_VARIABLES,
-    TENANT_ADMIN_TYPE_CLIENT,
-    directory_settings,
-    model_settings,
-    set_model_environment,
-)
+from tests.helpers.keycloak_model import API_AUDIENCE, KEYCLOAK_VARIABLES, SPA_CLIENT_ID, set_client_environment
 
 LOCAL_ISSUER = "http://keycloak.localhost:8180/realms/identity-stack"
 REMOTE_ISSUER = "https://keycloak.example.test/realms/identity-stack"
-AUDIENCES = frozenset({MEMBER_TYPE_CLIENT, TENANT_ADMIN_TYPE_CLIENT})
+REDIRECT = "http://localhost:3000/signed-out"
 KEYCLOAK = "Keycloak"
 STANDALONE = "standalone"
 GATEWAY = "gateway"
@@ -51,32 +34,24 @@ FACTORY_LOGGER = "app.middleware.factory"
 _PROVIDER_VARIABLES = (
     "DESCOPE_PROJECT_ID",
     "ORY_ISSUER_URL",
-    "ORY_AUDIENCE",
-    "ORY_REQUIRE_AUDIENCE",
-    "ORY_CLIENT_ID",
-    "ORY_POST_LOGOUT_REDIRECT_URI",
-    "KEYCLOAK_ISSUER_URL",
-    "KEYCLOAK_AUDIENCES",
-    "KEYCLOAK_REQUIRE_HTTPS",
-    "KEYCLOAK_POST_LOGOUT_REDIRECT_URI",
-    *MODEL_VARIABLES,
+    "ZITADEL_ISSUER_URL",
     "FRONTEND_URL",
+    *KEYCLOAK_VARIABLES,
 )
 
 
 @pytest.fixture
 def complete(monkeypatch):
-    """The fixture realm, completely configured, on its local plain-HTTP issuer."""
+    """The local realm, completely configured, on its plain-HTTP issuer."""
     for name in _PROVIDER_VARIABLES:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", LOCAL_ISSUER)
-    monkeypatch.setenv("KEYCLOAK_AUDIENCES", "member,tenant-admin")
+    set_client_environment(monkeypatch)
     monkeypatch.setenv("KEYCLOAK_REQUIRE_HTTPS", "false")
-    set_model_environment(monkeypatch, MEMBER_TYPE_CLIENT, TENANT_ADMIN_TYPE_CLIENT)
     return monkeypatch
 
 
-def _keycloak() -> object:
+def _keycloak():
     (provider,) = [provider for provider in configured_providers() if provider.name == KEYCLOAK]
     return provider
 
@@ -98,75 +73,54 @@ def _start(monkeypatch, mode: str) -> list:
     return token_middleware.kwargs["providers"]
 
 
-class TestACompleteConfigurationStarts:
-    @pytest.mark.parametrize("mode", [STANDALONE, GATEWAY])
-    def test_with_keycloak_localhost_and_https_enforcement_off(self, complete, mode):
-        providers = _start(complete, mode)
-
-        assert [provider.name for provider in providers] == ["Descope", KEYCLOAK]
-
-    def test_the_provider_carries_the_binding_and_the_extractor_of_its_model(self, complete):
+class TestTheRegistration:
+    def test_it_registers_the_issuer_with_the_api_audience_required(self, complete):
         provider = _keycloak()
 
-        assert provider == keycloak_config(
-            LOCAL_ISSUER,
-            AUDIENCES,
-            require_https=False,
-            post_logout_redirect_uri="http://localhost:3000/login",
-            **model_settings(MEMBER_TYPE_CLIENT, TENANT_ADMIN_TYPE_CLIENT),
-            **directory_settings(),
-        )
-        assert isinstance(provider.token_binding, KeycloakTokenBinding)
-        assert isinstance(provider.tenant_claims, KeycloakTenantClaims)
-        assert provider.token_binding.model == provider.tenant_claims.model
-        assert provider.token_authorized_only is True
+        assert provider.accepted_issuers == frozenset({LOCAL_ISSUER})
+        assert provider.disco_address == f"{LOCAL_ISSUER}/.well-known/openid-configuration"
+        assert provider.audience == API_AUDIENCE
+        assert provider.require_audience is True
+        assert provider.algorithms == frozenset({"RS256"})
 
-    def test_the_lookup_and_the_membership_list_read_one_directory(self, complete):
+    def test_the_spa_binding_is_on(self, complete):
+        assert _keycloak().token_binding == KeycloakTokenBinding(SPA_CLIENT_ID)
+
+    def test_authorization_is_canonical_and_first_login_reads_the_organization(self, complete):
         provider = _keycloak()
 
-        assert isinstance(provider.tenant_memberships, KeycloakTenantMemberships)
-        assert provider.sole_membership_lookup == CountedMemberships(provider.tenant_memberships)
-        assert provider.tenant_memberships.model == provider.tenant_claims.model
-        assert provider.tenant_memberships.directory == KeycloakDirectory(
-            issuer=LOCAL_ISSUER, client_id=DIRECTORY_CLIENT_ID, client_secret=DIRECTORY_CLIENT_SECRET
-        )
+        assert provider.tenant_claims is None
+        assert provider.descope_managed is False
+        assert provider.first_login_organization is keycloak_organization_alias
+        assert provider.profile_from_userinfo is False
 
-    @pytest.mark.parametrize("variable", ["KEYCLOAK_DIRECTORY_CLIENT_ID", "KEYCLOAK_DIRECTORY_CLIENT_SECRET"])
-    @pytest.mark.parametrize("value", [None, ""], ids=["unset", "empty"])
-    def test_startup_refuses_a_keycloak_without_the_directory(self, complete, variable, value):
-        if value is None:
-            complete.delenv(variable)
-        else:
-            complete.setenv(variable, value)
+    def test_logout_is_rp_initiated_with_the_spas_client_id(self, complete):
+        complete.setenv("KEYCLOAK_POST_LOGOUT_REDIRECT_URI", REDIRECT)
+        provider = _keycloak()
 
-        with pytest.raises(ProviderConfigurationError, match=f"^{variable} must be set"):
-            configured_providers()
+        assert provider.logout_kind == "rp_initiated"
+        assert provider.logout_client_id == SPA_CLIENT_ID
+        assert provider.post_logout_redirect_uri == REDIRECT
 
-    @pytest.mark.parametrize(
-        "issuer",
-        [
-            "http://keycloak.localhost:8180",
-            "http://keycloak.localhost:8180/realms/",
-            "http://keycloak.localhost:8180/realms/identity-stack/extra",
-            "http://keycloak.localhost:8180/auth/identity-stack",
-        ],
-    )
-    def test_startup_refuses_an_issuer_the_admin_api_cannot_be_derived_from(self, complete, issuer):
-        complete.setenv("KEYCLOAK_ISSUER_URL", issuer)
+    def test_the_redirect_defaults_to_the_frontend_login_page(self, complete):
+        complete.setenv("FRONTEND_URL", "http://app.localhost:3000/")
 
-        with pytest.raises(ProviderConfigurationError, match=r"^KEYCLOAK_ISSUER_URL must be <origin>/realms/<realm>"):
-            configured_providers()
+        assert _keycloak().post_logout_redirect_uri == "http://app.localhost:3000/login"
 
-    def test_the_refusal_does_not_quote_the_secret(self, complete):
-        complete.delenv("KEYCLOAK_DIRECTORY_CLIENT_ID")
+    def test_the_https_switch_is_the_providers_own(self, complete):
+        assert _keycloak().require_https is False
 
-        with pytest.raises(ProviderConfigurationError) as refused:
-            configured_providers()
+    def test_a_trailing_slash_is_dropped_because_the_token_issuer_has_none(self, complete):
+        complete.setenv("KEYCLOAK_ISSUER_URL", f"{LOCAL_ISSUER}/")
 
-        assert DIRECTORY_CLIENT_SECRET not in str(refused.value)
+        assert _keycloak().accepted_issuers == frozenset({LOCAL_ISSUER})
 
-    def test_the_secret_is_not_in_the_providers_repr(self, complete):
-        assert DIRECTORY_CLIENT_SECRET not in repr(_keycloak())
+    def test_client_ids_keep_their_case_and_lose_surrounding_space(self, complete):
+        complete.setenv("KEYCLOAK_AUDIENCE", " Identity-Stack-API ")
+        complete.setenv("KEYCLOAK_CLIENT_ID", " Identity-Stack-SPA ")
+        provider = _keycloak()
+
+        assert (provider.audience, provider.logout_client_id) == ("Identity-Stack-API", "Identity-Stack-SPA")
 
     def test_a_remote_issuer_starts_with_https_enforced(self, complete):
         complete.setenv("KEYCLOAK_ISSUER_URL", REMOTE_ISSUER)
@@ -174,87 +128,54 @@ class TestACompleteConfigurationStarts:
 
         assert _keycloak().require_https is True
 
-    def test_without_an_issuer_the_other_settings_are_not_read(self, complete):
+    def test_without_an_issuer_nothing_is_registered(self, complete):
         complete.delenv("KEYCLOAK_ISSUER_URL")
-        complete.setenv("KEYCLOAK_APP_CLIENTS", "not a pair")
-        complete.setenv("KEYCLOAK_PORTABLE_PERMISSIONS", "member=documents:write")
+        complete.delenv("KEYCLOAK_AUDIENCE")
 
         assert [provider.name for provider in configured_providers()] == ["Descope"]
 
+    def test_the_explicit_builder_builds_the_same_provider(self, complete):
+        built = build_provider_configs(
+            keycloak_issuer_url=LOCAL_ISSUER,
+            keycloak_audience=API_AUDIENCE,
+            keycloak_client_id=SPA_CLIENT_ID,
+            keycloak_require_https=False,
+            keycloak_post_logout_redirect_uri="http://localhost:3000/login",
+        )
 
-class TestAnIncompleteConfigurationIsRefused:
-    """Each case leaves one question open, so no token could be decided without a guess."""
+        assert built == configured_providers()
 
+
+class TestACompleteConfigurationStarts:
+    @pytest.mark.parametrize("mode", [STANDALONE, GATEWAY])
+    def test_on_the_local_issuer_with_https_enforcement_off(self, complete, mode):
+        assert [provider.name for provider in _start(complete, mode)] == ["Descope", KEYCLOAK]
+
+    @pytest.mark.parametrize("mode", [STANDALONE, GATEWAY])
+    def test_listed_in_canonical_rbac_providers(self, complete, mode):
+        """Keycloak is authorized from the canonical model: listing it is the supported setup."""
+        complete.setattr(rbac, "CANONICAL_RBAC_PROVIDERS", frozenset({"ory", "keycloak"}))
+
+        assert [provider.name for provider in _start(complete, mode)] == ["Descope", KEYCLOAK]
+
+    @pytest.mark.parametrize("mode", [STANDALONE, GATEWAY])
+    def test_https_enforcement_off_is_logged_as_a_warning(self, complete, mode, caplog):
+        caplog.set_level("WARNING", logger=FACTORY_LOGGER)
+
+        _start(complete, mode)
+
+        assert [r.getMessage() for r in caplog.records if r.name == FACTORY_LOGGER and KEYCLOAK in r.getMessage()] == [
+            "HTTPS enforcement is off for provider Keycloak: its discovery document and signing keys are fetched "
+            "over plain HTTP. Use this for a local issuer only."
+        ]
+
+
+class TestAHalfConfiguredKeycloakDoesNotStart:
     CASES = [
-        pytest.param({"KEYCLOAK_APP_CLIENTS": None}, "KEYCLOAK_APP_CLIENTS", id="no azp mapping"),
-        pytest.param(
-            {"KEYCLOAK_APP_CLIENTS": "member=member-app"}, "KEYCLOAK_APP_CLIENTS", id="a type with no app client"
-        ),
-        pytest.param({"KEYCLOAK_APP_CLIENTS": "member"}, "KEYCLOAK_APP_CLIENTS", id="an entry that is not a pair"),
-        pytest.param(
-            {"KEYCLOAK_APP_CLIENTS": "member=member-app,member=other,tenant-admin=tenant-admin-app"},
-            "KEYCLOAK_APP_CLIENTS",
-            id="two app clients for one type",
-        ),
-        pytest.param(
-            {"KEYCLOAK_APP_CLIENTS": "member=tenant-admin,tenant-admin=tenant-admin-app"},
-            "KEYCLOAK_APP_CLIENTS",
-            id="an app client that is an accepted audience",
-        ),
-        pytest.param(
-            {"KEYCLOAK_APP_CLIENTS": "member=shared-app,tenant-admin=shared-app"},
-            "KEYCLOAK_APP_CLIENTS",
-            id="one app client for two types",
-        ),
-        pytest.param(
-            {"KEYCLOAK_APP_CLIENTS": "member=member-app,tenant-admin=tenant-admin-app,viewer=viewer-app"},
-            "KEYCLOAK_APP_CLIENTS",
-            id="an app client for a type that is no audience",
-        ),
-        pytest.param(
-            {"KEYCLOAK_ORGANIZATION_BOUND_TYPES": None},
-            "KEYCLOAK_ORGANIZATION_BOUND_TYPES",
-            id="a type declared neither way",
-        ),
-        pytest.param(
-            {"KEYCLOAK_PORTABLE_TYPES": None, "KEYCLOAK_PORTABLE_PERMISSIONS": None},
-            "KEYCLOAK_PORTABLE_TYPES",
-            id="another type declared neither way",
-        ),
-        pytest.param(
-            {"KEYCLOAK_ORGANIZATION_BOUND_TYPES": "member,tenant-admin"},
-            "KEYCLOAK_ORGANIZATION_BOUND_TYPES",
-            id="a type declared both ways",
-        ),
-        pytest.param(
-            {"KEYCLOAK_PORTABLE_TYPES": "member,viewer"}, "KEYCLOAK_AUDIENCES", id="a declared type that is no audience"
-        ),
-        pytest.param(
-            {"KEYCLOAK_PORTABLE_PERMISSIONS": None},
-            "KEYCLOAK_PORTABLE_PERMISSIONS",
-            id="a portable type with no permission list",
-        ),
-        pytest.param(
-            {"KEYCLOAK_PORTABLE_PERMISSIONS": "member=documents:read,member=documents:write"},
-            "KEYCLOAK_PORTABLE_PERMISSIONS",
-            id="a portable write permission",
-        ),
-        pytest.param(
-            {"KEYCLOAK_PORTABLE_PERMISSIONS": "member=documents"},
-            "KEYCLOAK_PORTABLE_PERMISSIONS",
-            id="a portable permission with no action",
-        ),
-        pytest.param(
-            {"KEYCLOAK_PORTABLE_PERMISSIONS": "documents:read"},
-            "KEYCLOAK_PORTABLE_PERMISSIONS",
-            id="a permission entry that is not a pair",
-        ),
-        pytest.param(
-            {"KEYCLOAK_PORTABLE_PERMISSIONS": "member=documents:read,tenant-admin=settings:read"},
-            "KEYCLOAK_PORTABLE_PERMISSIONS",
-            id="a permission list for an organization-bound type",
-        ),
-        pytest.param({"KEYCLOAK_AUDIENCES": None}, "KEYCLOAK_AUDIENCES", id="no audience"),
+        ({"KEYCLOAK_AUDIENCE": None}, "KEYCLOAK_AUDIENCE"),
+        ({"KEYCLOAK_AUDIENCE": "  "}, "KEYCLOAK_AUDIENCE"),
+        ({"KEYCLOAK_CLIENT_ID": None}, "KEYCLOAK_CLIENT_ID"),
+        ({"KEYCLOAK_CLIENT_ID": ""}, "KEYCLOAK_CLIENT_ID"),
     ]
 
     @staticmethod
@@ -280,19 +201,24 @@ class TestAnIncompleteConfigurationIsRefused:
         with pytest.raises(ProviderConfigurationError, match=named):
             _start(complete, mode)
 
+    @pytest.mark.parametrize(("audience", "client_id"), [("", SPA_CLIENT_ID), (API_AUDIENCE, "")])
+    def test_the_config_function_refuses_it_too(self, audience, client_id):
+        with pytest.raises(ProviderConfigurationError):
+            keycloak_config(LOCAL_ISSUER, audience, client_id)
 
-class TestPlainHttpIsForALocalIssuerOnly:
+
+class TestHttpsEnforcementOffNeedsALocalIssuer:
     @pytest.mark.parametrize(
         "issuer",
         [
-            "http://keycloak.example.test/realms/identity-stack",
             REMOTE_ISSUER,
+            "http://keycloak.example.test/realms/identity-stack",
             "http://10.0.0.5:8180/realms/identity-stack",
-            "http://keycloak.localhost.example.test/realms/identity-stack",
+            "http://localhost.example.test/realms/identity-stack",
         ],
     )
     @pytest.mark.parametrize("mode", [STANDALONE, GATEWAY])
-    def test_https_enforcement_off_for_any_other_issuer_does_not_start(self, complete, mode, issuer):
+    def test_a_remote_issuer_does_not_start(self, complete, mode, issuer):
         complete.setenv("KEYCLOAK_ISSUER_URL", issuer)
 
         with pytest.raises(ProviderConfigurationError, match="KEYCLOAK_REQUIRE_HTTPS"):
@@ -301,78 +227,22 @@ class TestPlainHttpIsForALocalIssuerOnly:
     @pytest.mark.parametrize(
         "issuer",
         [
-            LOCAL_ISSUER,
-            "http://keycloak-test.localhost:18180/realms/identity-stack",
             "http://localhost:8180/realms/identity-stack",
             "http://127.0.0.1:8180/realms/identity-stack",
             "http://[::1]:8180/realms/identity-stack",
+            "http://KEYCLOAK-TEST.LOCALHOST:18180/realms/identity-stack",
         ],
     )
-    def test_loopback_and_dot_localhost_issuers_start(self, complete, issuer):
+    def test_a_local_issuer_starts(self, complete, issuer):
         complete.setenv("KEYCLOAK_ISSUER_URL", issuer)
 
         assert _keycloak().require_https is False
 
     def test_the_explicit_builder_refuses_it_too(self):
         with pytest.raises(ProviderConfigurationError, match="KEYCLOAK_REQUIRE_HTTPS"):
-            keycloak_config(REMOTE_ISSUER, AUDIENCES, require_https=False, **model_settings(*sorted(AUDIENCES)))
-
-    @staticmethod
-    def _plain_http_warnings(caplog) -> list[str]:
-        return [
-            record.getMessage()
-            for record in caplog.records
-            if record.name == FACTORY_LOGGER and record.levelname == "WARNING"
-        ]
-
-    @pytest.mark.parametrize("mode", [STANDALONE, GATEWAY])
-    def test_starting_with_https_enforcement_off_is_logged_as_a_warning(self, complete, mode, caplog):
-        """A ``.localhost`` name is trusted as it is written, whatever it resolves to: the operator is told."""
-        with caplog.at_level("WARNING", logger=FACTORY_LOGGER):
-            _start(complete, mode)
-
-        assert self._plain_http_warnings(caplog) == [
-            "HTTPS enforcement is off for provider Keycloak: its discovery document and signing keys "
-            "are fetched over plain HTTP. Use this for a local issuer only."
-        ]
-
-    @pytest.mark.parametrize("mode", [STANDALONE, GATEWAY])
-    def test_starting_with_https_enforced_logs_no_such_warning(self, complete, mode, caplog):
-        complete.setenv("KEYCLOAK_ISSUER_URL", REMOTE_ISSUER)
-        complete.delenv("KEYCLOAK_REQUIRE_HTTPS")
-
-        with caplog.at_level("WARNING", logger=FACTORY_LOGGER):
-            _start(complete, mode)
-
-        assert self._plain_http_warnings(caplog) == []
-
-
-class TestTheAuthorizationSourceIsTheToken:
-    """A provider in ``CANONICAL_RBAC_PROVIDERS`` is decided from the canonical model, not by its extractor."""
-
-    @pytest.mark.parametrize("mode", [STANDALONE, GATEWAY])
-    @pytest.mark.parametrize("listed", [{"ory", "keycloak"}, {"keycloak"}])
-    def test_keycloak_listed_as_a_canonical_provider_does_not_start(self, complete, mode, listed):
-        complete.setattr(rbac, "CANONICAL_RBAC_PROVIDERS", frozenset(listed))
-
-        with pytest.raises(ProviderConfigurationError, match="CANONICAL_RBAC_PROVIDERS must not list 'Keycloak'"):
-            _start(complete, mode)
-
-    def test_the_name_is_compared_without_case(self, complete):
-        with pytest.raises(ProviderConfigurationError, match="CANONICAL_RBAC_PROVIDERS"):
-            refuse_ambiguous_authorization_source([_keycloak()], ["KeyCloak"])
-
-    def test_a_provider_that_lost_its_extractor_declares_no_source(self, complete):
-        unsourced = replace(_keycloak(), tenant_claims=None)
-
-        with pytest.raises(ProviderConfigurationError, match="declares no authorization source"):
-            refuse_ambiguous_authorization_source([unsourced], ["ory"])
-
-    def test_the_default_list_starts(self, complete):
-        assert refuse_ambiguous_authorization_source([_keycloak()], ["ory"]) is None
-
-    def test_descope_and_ory_are_not_held_to_it(self):
-        """Ory listed as canonical is its configuration, and Descope has its own startup check."""
-        others = [descope_config("P123"), ory_config("https://ory.example.test", "api")]
-
-        assert refuse_ambiguous_authorization_source(others, ["ory", "descope"]) is None
+            build_provider_configs(
+                keycloak_issuer_url=REMOTE_ISSUER,
+                keycloak_audience=API_AUDIENCE,
+                keycloak_client_id=SPA_CLIENT_ID,
+                keycloak_require_https=False,
+            )

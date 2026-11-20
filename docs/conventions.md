@@ -75,8 +75,8 @@ response and `UpstreamTransportError` for no response at all. No module in `app/
 [ADR-0006](adr/0006-outbound-http-and-logging-helpers.md).
 
 A router function that calls Descope **MUST** catch both `UpstreamStatusError` and
-`UpstreamTransportError` and answer them with 502, as `documents.py`, `fga.py` and
-`attributes.py::get_profile` do. Otherwise a Descope outage surfaces as an unhandled 500. A
+`UpstreamTransportError` and answer them with 502.
+The FGA and document routes call no provider: their store answers a `RelationshipStoreError` (§18). Otherwise a Descope outage surfaces as an unhandled 500. A
 function that catches `Exception` counts as handling both.
 
 The routes behind `DescopeManagementAdapter` (§5) leave that decision to the adapter, which
@@ -85,7 +85,9 @@ reports an upstream failure as an `Error`.
 - Exception: the adapter's member methods (`list_members`, `invite_member`,
   `set_member_status`, `remove_member`), plus `update_profile_attribute`,
   `load_tenant_settings` and `update_tenant_settings`. They catch only `UpstreamStatusError`,
-  so a transport failure propagates and the route answers 500. That predates #512, and
+  so a transport failure propagates and the route answers 500 (the last three are called
+  by `DescopeSyncAdapter`'s custom attributes, which answer any failure as `SyncError`, so
+  the profile and tenant settings routes answer it 502). That predates #512, and
   changing those answers to 502 is a behaviour change left for a follow-up.
 - Exception: the adapter's six access-key methods. None of them catches an upstream failure,
   so every Descope error and timeout on the `routers/accesskeys.py` routes surfaces as 500.
@@ -159,7 +161,7 @@ Log calls **MUST** pass values as `%`-style arguments, as in
 
 Log records **MUST NOT** contain credentials. That covers bearer tokens, the Descope
 management key, `DESCOPE_WEBHOOK_SECRET`, `DESCOPE_FLOW_SYNC_SECRET`,
-`INTERNAL_IDENTITY_KEY`, `ZITADEL_ADMIN_TOKEN`, `KEYCLOAK_DIRECTORY_CLIENT_SECRET` and `KEYCLOAK_ADMIN_CLIENT_SECRET` and the
+`INTERNAL_IDENTITY_KEY`, `ZITADEL_ADMIN_TOKEN` and `KEYCLOAK_ADMIN_CLIENT_SECRET` and the
 service-account tokens they are exchanged for, and raw `Authorization` headers. Log identifiers instead, such as a
 user id, tenant id, provider name or HTTP status. An upstream response body **MUST** be
 truncated to 500 characters before it is logged (`exc.response.text[:500]`).
@@ -222,11 +224,11 @@ RFC 9457 problem-detail bodies (`application/problem+json`) **MUST** be built on
   UserInfo `sub` that differs, 409 for an email a canonical user already holds, 500
   when the provider has no `providers` row, and 503 when UserInfo cannot be read, as
   for every provider fault in the module.
-- Exception: the handlers in `routers/users.py` and `routers/attributes.py`, and
-  `routers/accesskeys.py::_verify_key_tenant`. They answer an `Error` from
-  `DescopeManagementAdapter` with the `{"detail": ...}` 400/403/502 bodies those routes had
-  before the adapter existed, and `get_profile` and `get_tenant_settings` answer one with
-  blank defaults. The member activate and deactivate routes answer a member shared with
+- Exception: the handlers in `routers/users.py` and `routers/attributes.py`. They answer an `Error` from
+  `DescopeManagementAdapter` (or, in `attributes.py`, a `SyncError` from the sync adapter's
+  custom attributes) with the `{"detail": ...}` 400/403/502 bodies those routes had
+  before the adapter existed, and `get_profile` answers one with no custom attributes and
+  `get_tenant_settings` a tenant the provider lacks with blank defaults. The member activate and deactivate routes answer a member shared with
   another tenant with a 409 in the same style (#581). Moving them to problem details is a
   behaviour change left for a follow-up.
 
@@ -257,7 +259,8 @@ raise `IdentityErrorRaised(<IdentityError>)`, which the app renders through
 
 ### 15. Every tenant-scoped route declares its authorization
 
-A route is tenant-scoped when it depends on `get_tenant_id` or `get_tenant_claims`. Every
+A route is tenant-scoped when it depends on `get_tenant_id`, `get_tenant_access`, `get_tenant_claims`
+or `get_tenant_memberships`. Every
 tenant-scoped route **MUST** also depend on `require_role`, `require_permission` or
 `require_fga`. See [ADR-0003](adr/0003-authorization-as-route-dependencies.md).
 
@@ -276,7 +279,9 @@ tenant-scoped route **MUST** also depend on `require_role`, `require_permission`
 
 Code in `app/routers/` **MUST NOT** read `request.state.claims` or
 `request.state.principal`. It takes them from the dependencies in `app/dependencies/`:
-`get_claims`, `get_current_user`, `get_tenant_id` and `get_tenant_claims`. In particular, a
+`get_claims`, `get_current_user`, `get_tenant_id`, `get_tenant_access` (the tenant with the
+caller's roles and permissions in it), `get_tenant_claims` and `get_tenant_memberships`. In
+particular, a
 handler **MUST NOT** read the `dct` claim to find its tenant. It takes the tenant from
 `get_tenant_id`.
 
@@ -298,41 +303,12 @@ or several candidate tenants, a tenant selector that names a tenant the caller d
 belong to, a non-active canonical user and a malformed `dct`. An error from the FGA store
 **MUST** be answered with 502 and treated as a denial, never as an allow.
 
-For a Keycloak principal the branches are those of the token model
-(`app/middleware/keycloak.py`, [ADR-0010](adr/0010-keycloak-token-model.md)), and each
-failure has one answer, in this order:
-
-1. **At authentication, 401** with the uniform body, on every route: more than one `aud`,
-   an `aud` that is not a configured type client, and an `azp` that is missing, not a
-   string or not the app client configured for that `aud`.
-2. **From the token alone, 403:** an `organization` claim that is missing or names anything
-   but exactly one alias (a one-element list or a one-key map), client roles that cannot be
-   read (`resource_access`, its entry for the `aud` or `roles` is missing or of the wrong
-   type, or `roles` holds an entry that is not a string), a permission that is not in
-   `resource_access[aud].roles` or, for a portable type, not on its portable list, and
-   every `require_role` gate. A token whose `organization` or client roles cannot be read
-   names no tenant: `get_tenant_id` refuses it too. An empty `roles` list is readable and
-   holds nothing.
-3. **From the membership lookup**, for a token of an organization-bound type only, and only
-   after the first two: 403 when no lookup is wired or when the caller's organizations are
-   anything but the token's alone, and 502 with no grant when the lookup fails, does not
-   answer within `MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`, or answers with something that is not
-   a collection of strings. The order **MUST NOT** depend on how
-   a route declares its dependencies: `get_tenant_id`'s own dependency runs every guard on
-   the request's route that is registered with `refuses_from_the_token_alone`
-   (`require_descope_principal`, `get_tenant_claims`), with that guard's own answer, and
-   applies the check of every `require_*` gate, before it asks the lookup. A dependency that
-   refuses from the claims and provider alone **MUST** be registered so;
-   `test_keycloak_routes.py` refuses a shipped dependency of such a route that is neither a
-   gate, a registered guard nor listed with its reason in `RUNS_AFTER_THE_LOOKUP`.
-
 *Enforcement:* review, plus tests (`test_rbac_dependencies.py`, `test_tenant_resolution.py`,
-`test_fga_dependencies.py`, `test_keycloak_token_model.py`, `test_keycloak_tenant_access.py`,
-`test_keycloak_routes.py`).
+`test_fga_dependencies.py`, `test_keycloak_canonical_authorization.py`).
 
 ### 18. One resolver decides the tenant and the grants
 
-`get_tenant_id`, `require_role`, `require_global_role` and `require_permission` **MUST** take the request's tenant
+`get_tenant_id`, `get_tenant_access`, `require_role`, `require_global_role` and `require_permission` **MUST** take the request's tenant
 and the caller's roles and permissions from
 `app.dependencies.tenant_access.resolve_tenant_access`. A dependency **MUST NOT** read a
 tenant, role or permission claim itself. The resolver takes its sources in this order:
@@ -340,119 +316,216 @@ tenant, role or permission claim itself. The resolver takes its sources in this 
 1. **The provider's claims extractor** (`ProviderTokenConfig.tenant_claims`, §28), for a
    provider that is not listed in `CANONICAL_RBAC_PROVIDERS`. Descope's extractor reads
    the signed `dct` and `tenants` claims, and a Descope principal **MUST** be decided from
-   them alone. Keycloak's reads `organization` and `resource_access[aud].roles`: the
-   tenant is the organization alias, an opaque string that is neither a Descope tenant id
-   nor a canonical tenant UUID, the permissions are the client roles, and there is no
-   role. A Keycloak principal **MUST** be decided from those two claims alone, and
-   `realm_access`, `dct` and `tenants` on its token **MUST NOT** be read. A provider with
-   no extractor has no source and is refused: another provider's claim shapes on its token
-   are not read.
+   them alone. Descope is the one provider with an extractor. A provider with no extractor
+   has no source and is refused: another provider's claim shapes on its token are not read.
 2. **The request's tenant selector**, for a provider listed in `CANONICAL_RBAC_PROVIDERS`
    (default `ory`). The selector is the `X-Tenant-ID` request header. It grants nothing by
    itself: it only chooses among the tenants the caller's canonical memberships name. A
    selector naming any other tenant **MUST** be refused, and no grant is read from that
    tenant. An empty or repeated header is refused too. A value that parses as a UUID is
-   compared in its canonical lower-case form, and any other value as it is.
+   compared in its canonical lower-case form, and any other value as it is. The SPA
+   remembers the tenant chosen last, and each new sign-in drops it, for every provider: the
+   selector then starts on the membership whose `external_org_id` (`GET /api/identity`) is
+   the organization the sign-in named, else the first membership.
 3. **The caller's sole canonical membership**, when the request selects nothing.
 
 Anything else is 403, including an extractor that raises, and one whose answer is not a
-`TenantClaims` with a non-empty string for the tenant, lists of strings for the roles
-and the permissions, and a boolean for `sole_membership_required`. Roles and permissions **MUST** be resolved from the canonical model
-only for a provider listed in `CANONICAL_RBAC_PROVIDERS`.
+`TenantClaims` with a non-empty string for the tenant and lists of strings for the roles
+and the permissions. Roles and permissions **MUST** be resolved from the canonical model
+only for a provider listed in `CANONICAL_RBAC_PROVIDERS`. Ory, Zitadel and Keycloak are
+authorized this way ([ADR-0011](adr/0011-keycloak-canonical-authorization.md)): their
+tokens say who the caller is, and no request-time decision reads a role, permission or
+tenant claim from them.
 
-An extractor **MAY** mark its answer `sole_membership_required`: the token alone does not
-settle it, and it holds only for a caller whose one tenant is the token's. Keycloak's does
-so for a token of an organization-bound type, because client roles are realm-wide. The
-resolver **MUST** refuse such an answer (403, `This tenant is not confirmed as the caller's
-only membership`) unless it is handed the tenant that the provider's
-`sole_membership_lookup` confirmed, so a caller of the resolver that confirms nothing
-grants nothing. `app.dependencies.rbac` asks the lookup, once per request, after what the
-token alone decides (§17). A lookup **MUST** bound its own time (§6), and the request
-waits for it no longer than `MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`: a lookup that has not
-answered by then is cancelled and is a failed lookup (502). The token
-middlewares **MUST NOT** record the tenant of such an answer as `request.state.tenant_id`:
-nothing has confirmed it at authentication, so it stays `None` for the whole request.
-Confirming the membership does not show that the token's client roles were granted for
-that organization: Keycloak keeps a user's client roles when the user leaves an
-organization. A lookup **MUST** therefore confirm the grant as well as the membership:
-Keycloak's (`CountedMemberships(KeycloakTenantMemberships)`) counts the token's organization
-only where its `type:<type client>` attribute lists the caller's id. A provider with a
-`tenant_memberships` list **MUST** have that list's `counted` entries
-(`CountedMemberships`) as its lookup and no other, so `GET /api/identity` and the routes
-that ask the lookup answer one token alike; `ProviderTokenConfig` refuses anything else
-(`MembershipSourcesDisagree`). A lookup **MUST** ask about the
-verified token's `sub` and nothing from the request, and **MUST** refuse a `sub` that is
-not a well-formed id before any call. The canonical membership read of the third source
-**MUST NOT** be served from the identity cache, and it **MUST NOT** be kept beyond the request
-that made it. `get_tenant_id` **MUST NOT** open a database session or read the canonical
+The canonical membership read of the third source **MUST NOT** be served from the identity
+cache, and it **MUST NOT** be kept beyond the request that made it. `get_tenant_id` **MUST NOT** open a database session or read the canonical
 model for any other provider. See
 [ADR-0009](adr/0009-provider-registrations-and-one-tenant-resolver.md).
 
-A route that hands the request's tenant id or the caller's `sub` to Descope's Management
-API or its FGA store **MUST** depend on `app.dependencies.descope.require_descope_principal`,
-on the route or on its router. The resolver gives a principal of a canonical provider a
-canonical tenant id, which names nothing in Descope, so the guard refuses (403) every
-principal whose provider is not `descope_managed` (§28), before the tenant is resolved and
-before Descope is called. Its 403 body is its own, `This route serves Descope principals
-only`, not the resolver's "select a tenant first": selecting a tenant would not help the
-caller. A request with no claims gets 401 from the guard itself (§17). A route that is
-handed the management adapter (`get_descope_management`) **MUST** carry the guard or be
-listed, with what keeps another provider's subject from Descope, in the same test's
-`UNGUARDED_ADAPTER_ROUTES`. Every route that depends on `get_tenant_id` **MUST** be listed in
-`backend/tests/unit/test_descope_backed_routes.py`, either in `DESCOPE_TENANT_ROUTES` or,
-with its reason, in `PROVIDER_NEUTRAL_ROUTES`. Adding a route to the second register is a
-reviewed decision, and a route whose service mirrors its writes to Descope through a sync
-adapter is Descope-backed: `POST /api/roles/assign` and `/api/roles/remove` are, because
-`RoleService` sends each assignment to Descope. The second register holds the two
-`/api/access-checks` routes, which answer the resolver's tenant to a holder of
+**A route the SPA calls serves every provider** ([ADR-0012](adr/0012-routes-speak-canonical.md)).
+It reads and writes canonical services, and a provider is called only from a sync adapter or a
+relationship store. Each route says how it keeps one provider's tenant and user ids from another:
+every route that depends on `get_tenant_id` or `get_tenant_access` **MUST** be listed in one
+register of `backend/tests/unit/test_descope_backed_routes.py`, which walks every route of the
+application against them:
+
+| Register | Routes | What keeps the ids apart |
+|---|---|---|
+| `DESCOPE_TENANT_ROUTES`, `DESCOPE_PROJECT_ROUTES` | None today | `require_descope_principal` |
+| `SYNC_PROVIDER_TENANT_ROUTES`, `SYNC_PROVIDER_PROJECT_ROUTES` | Role assignment, members, role and permission definitions | `require_sync_provider_principal` |
+| `PER_PROVIDER_ROUTES` | `/api/keys` | The sync provider builds the service |
+| `RELATIONSHIP_STORE_ROUTES` | `/api/fga/*`, `/api/documents*` | `capabilities.served` |
+| `ADAPTER_CAPABILITY_ROUTES` | The profile's custom attributes, the tenant settings | `capabilities.served` |
+| `PROVIDER_NEUTRAL_ROUTES` | `GET /api/tenants/current`, `GET /api/roles/me`, the two `/api/access-checks` permission routes | Nothing behind them hands an id to a provider |
+
+Adding a route to `PROVIDER_NEUTRAL_ROUTES` is a reviewed decision, with its reason.
+`GET /api/roles/me` answers the caller's own roles and permissions in the resolver's tenant: a
+Descope principal's from its claims, a canonical principal's from the canonical model.
+`GET /api/tenants/current` reads a canonical principal's tenant from the canonical model and
+loads only a Descope principal's (its `dct`) from Descope; it refuses any other principal (403)
+(#673). The `/api/access-checks` routes answer the resolver's tenant to a holder of
 `documents:read` or `settings:manage` and depend on nothing but the resolver.
 
-`GET /api/identity` takes the tenant and the permissions of a `token_authorized_only`
-principal (Keycloak) from the same resolver, through `app.dependencies.rbac.token_tenant`,
-and **MUST NOT** report the canonical role assignments as that principal's: canonical roles
-are not its grants, and provisioning writes none for it (`assign_default_role=False`). A
-token that names no tenant **MUST** be refused (403 `No tenant context`) before any lookup
-and before provisioning, as on every other route. Its memberships come from the provider's
-`tenant_memberships` list, and a token whose tenant is not on that list **MUST** be refused
-(403): the directory is believed over the token. A list that cannot be had is 502. The
-list is read once per request, within one `MEMBERSHIP_LOOKUP_TIMEOUT_SECONDS`, and also
-confirms a `sole_membership_required` token (its `counted` entries are what the provider's
-`sole_membership_lookup` would answer), so the request does not ask the directory twice. For
-every other provider `token_tenant` answers `None` without I/O and the response is the
-canonical identity, unchanged.
+**The Descope guard.** A route that hands the request's tenant id or the caller's `sub` to
+Descope's Management API **MUST** depend on `app.dependencies.descope.require_descope_principal`,
+on the route or on its router, and be listed in `DESCOPE_TENANT_ROUTES`, or in
+`DESCOPE_PROJECT_ROUTES` when it is over state that belongs to the whole Descope project. The
+resolver gives a principal of a canonical provider a canonical tenant id, which names nothing in
+Descope, so the guard refuses (403) every principal whose provider is not `descope_managed`
+(§28), before the tenant is resolved and before Descope is called. Its 403 body is its own,
+`This route serves Descope principals only`, not the resolver's "select a tenant first":
+selecting a tenant would not help the caller. A request with no claims gets 401 from the guard
+itself (§17). A route over project state needs the guard because `require_role` answers for one
+tenant: without it, a canonical principal who is an admin of any one of several tenants would
+reach that state by naming that tenant. A route that is handed the management adapter
+(`get_descope_management`) **MUST** carry the guard or be listed, with what keeps another
+provider's subject from Descope, in `UNGUARDED_ADAPTER_ROUTES`. No route is in these registers
+today; code that builds a Descope service from the caller's ids calls the guard itself (the
+access keys, below).
 
-A Keycloak principal **MUST** get 403 on every route that takes a tenant (`get_tenant_id`
-or `get_tenant_claims`) or is gated by a role, unless the route is in
-`PROVIDER_NEUTRAL_ROUTES` (`backend/tests/unit/test_keycloak_routes.py` walks every
-shipped route): its tenant is an organization alias, which names nothing in Descope and
-is not a UUID.
+**Routes whose writes go to the sync provider.** A route whose service pushes its writes to the
+configured sync adapter (`SYNC_PROVIDER`) **MUST** depend on
+`app.dependencies.sync_provider.require_sync_provider_principal` and be listed in
+`SYNC_PROVIDER_TENANT_ROUTES` or `SYNC_PROVIDER_PROJECT_ROUTES`: the role assignment routes
+(`POST /api/roles/assign`, `/api/roles/remove`), the member routes (`GET /api/members`,
+`POST /api/members/invite`, `POST /api/members/{user_id}/deactivate` and `/activate`,
+`DELETE /api/members/{user_id}`) and the role and permission definition routes (`/api/roles`,
+`/api/roles/{name}`, `/api/permissions`, `/api/permissions/{name}`; the two lists take the
+request's tenant and are in `SYNC_PROVIDER_TENANT_ROUTES`). The adapter takes the
+request's tenant id and the user ids as its provider's, so the guard refuses (403, `This route
+serves <provider> principals only`) every principal whose provider is not the sync provider,
+before the tenant is resolved and before anything is written. In a Descope deployment
+(`SYNC_PROVIDER=descope`, the default) it passes exactly the `descope_managed` principals
+`require_descope_principal` passes, with the same body (#676). Who is a principal of the sync
+provider **MUST** be decided by `identity.is_sync_provider_principal` alone: the guard calls it,
+and `capabilities.served` reports it as `sync_provider_principal` in `GET /api/capabilities`, by
+which the SPA shows the Members and Roles pages (`PAGE_REQUIREMENTS`), so no page the SPA shows
+calls a route that fences the caller out. Each of these routes **MUST** also depend on
+`app.dependencies.rbac.refuse_machine_principal` (below): no machine credential changes which
+people hold which roles, the definitions every tenant's grants read, or who belongs to a tenant
+(#683).
 
-A route over state that belongs to the whole Descope project **MUST** carry the same guard
-and be listed in `DESCOPE_PROJECT_ROUTES` in that file: the role and permission definition
-routes (`/api/roles`, `/api/roles/{name}`, `/api/permissions`, `/api/permissions/{name}`),
-whose services mirror each change to Descope, and `GET` and `PUT /api/fga/schema`.
-`require_role` answers for one tenant, so without the guard a canonical principal who is
-an admin of any one of several tenants would reach them by naming that tenant.
+- **Members.** The member routes take their members from
+  `app.dependencies.identity.get_member_directory`: in a Descope deployment the Descope
+  management adapter, as before, and otherwise `MemberService` over the canonical users and
+  memberships, whose changes the sync adapter pushes (Keycloak: organization membership and the
+  role's organization group) (#677). They stay `require_role("owner", "admin")` in the request's
+  tenant. An invitation **MUST** only create: the user and its memberships commit together, and
+  an email any canonical user already has, in any case, is refused (409,
+  `MemberRefusal.ACCOUNT_EXISTS`) whatever tenant holds it, so an admin can neither enrol another
+  tenant's account nor learn about it. A member's status is the account's (the model keeps no
+  status per membership), so it is set only for a user whose sole tenant is the request's, under
+  a lock on the user's row (409 otherwise), and a user who is no member of the tenant reads the
+  same whether or not it exists. Deactivating, activating and removing a member **MUST** first
+  pass `access.act_on_member` over the member's roles in the tenant, read from the same directory
+  (Descope's `userTenants` or the canonical assignments): a member holding `owner` only by an
+  owner (403, `MemberActionRefusal.OWNER_REQUIRED`), one holding `operator` only by an operator
+  (`operator_grant_check`), and never the caller itself for a deactivation or a removal (403,
+  `MemberActionRefusal.ACTING_ON_SELF`), since a deactivated user cannot sign back in to undo it.
+- **Role assignment.** `POST /api/roles/assign` **MUST** give a role only to a user who already
+  holds one in the request's tenant, whatever the adapter (403, `access.NotATenantMember`), with
+  the same answer for an unknown user and another tenant's: otherwise a tenant admin could pull
+  another tenant's user, an operator among them, into theirs (#693). The first membership comes
+  from sign-in provisioning or an invitation.
+- **Definitions.** The role and permission definitions belong to no tenant and every tenant's
+  grants read them, so the routes that change them are gated by
+  `app.dependencies.rbac.require_definitions_role`
+  (`require_global_role("operator", claimed_roles=("owner", "admin"))`): a canonical principal
+  **MUST** hold `operator` by its sole membership. A tenant `admin` is refused: its role is one
+  tenant's, and with it the caller could delete the `owner` role, which ends that role in every
+  tenant, or grant the `member` role a permission everywhere. A Descope principal is decided from
+  its claims and keeps `owner` or `admin`, as before. Listing them (`GET /api/roles`,
+  `GET /api/permissions`) changes nothing and shows only the global definitions, so it is gated by
+  `require_role(*DEFINITION_READERS)` (`owner`, `admin` or `operator`) in the request's tenant: the
+  Roles page lists them to assign a role (#707).
+- **`operator` itself.** Assigning or removing `operator` through `POST /api/roles/assign` or
+  `/api/roles/remove`, or inviting with it through `POST /api/members/invite`, **MUST** be
+  refused (403, `RoleGrantRefusal.OPERATOR_GRANT`) unless the caller holds `operator` as
+  `require_global_role` decides it (`app.dependencies.rbac.operator_grant_check`): the routes take
+  `owner` or `admin` in one tenant, and `operator` opens every tenant's state. Creating, changing,
+  renaming to or from, or deleting the `operator` role definition **MUST** be refused the same
+  way (`RoleGrantRefusal.OPERATOR_DEFINITION`, `operator_definition_check`): a Descope `owner` or
+  `admin` passes `require_definitions_role` and could otherwise strip `operator` from every
+  operator. Both hold for every provider, Descope included.
 
-A route over state that belongs to no tenant and that Descope does not hold **MUST** be
-gated by `app.dependencies.rbac.require_global_role`, not `require_role`: `GET /api/users`
-(every tenant's users), `/api/providers`, `/api/sync/status` and `/api/events/recent`. One
-role in one tenant opens all of that state, so on these routes the request chooses
-nothing. A canonical principal is decided by their sole membership, and one with several
-memberships is refused, whether they send the `X-Tenant-ID` header, carry a `dct` claim
-on the token, or name no tenant at all. A
-Descope principal is decided from its claims, as by `require_role`. The project-level
-grant these routes need is #593. A route gated by `require_role` or `require_permission`
-**MUST** depend on `get_tenant_id` or on the guard, or be listed with its reason in
-`SELF_SCOPED_ROLE_ROUTES` in the same test file.
+**Machine credentials.** The `/api/keys` routes serve the `machine_credentials` capability
+through `MachineCredentialService`, which the configured sync provider builds
+(`get_machine_credential_service`): a Descope deployment's Descope access keys, and a canonical
+provider's canonical machine credentials (Keycloak: a client the adapter registers). They carry
+no static guard, and are listed in `PER_PROVIDER_ROUTES`: the Descope builder **MUST** call
+`require_descope_principal` before it builds anything, and each route **MUST** take its service
+before its tenant, so another provider's principal is refused before the tenant is resolved and
+before Descope is called. A token issued to a canonical provider's machine credential client
+(`ProviderTokenConfig.machine_client`) **MUST** be authorized from that credential alone
+(`rbac._load_machine_memberships`): its one tenant, its roles there, and nothing while it is
+inactive, expired or deleted. It is never resolved as a user. A credential **MUST** hold at least
+one role, only roles its creator holds in the tenant, and never `operator`
+(`ROLES_NOT_FOR_MACHINES` in `app/domain/credentials`): a credential has exactly one membership,
+so `require_global_role` would serve it every tenant's state. Such a token **MUST** be refused
+(`refuse_machine_principal`, 403 `MachinePrincipalRefused`) on every route that changes
+people's roles, memberships, credentials or relations: the `/api/keys` routes, so no credential
+mints its successor; every route of the sync provider's registers above; the relationship
+store's writes (`PUT /api/fga/schema`, `POST` and `DELETE /api/fga/relations`, a document's
+share and revoke), so no credential makes anyone a document's owner; and the IdP-link writes,
+which decide which account signs in as a person. `MACHINE_REFUSED_ROUTES` in
+`test_descope_backed_routes.py` lists them, and every other write of the application **MUST** be
+listed in `MACHINE_PERMITTED_WRITES` there with why a machine may make it. A Descope access-key
+session is not such a token: Descope has no `machine_client` reader (#699).
+
+**Capabilities.** A route that serves an optional capability of the sync adapter (`Capability`
+in `app/services/adapters/base.py`: the machine credentials, the custom attributes of the profile
+and the tenant settings) or the relationship store (the FGA and document routes) **MUST** depend
+on that capability's dependency in `app/dependencies/capabilities.py` as its first dependency,
+before the guard. What serves the caller is decided by one function, `capabilities.served`: the
+sync adapter's capabilities serve only a principal of the sync provider (its registration's
+`own_principal` in `SYNC_ADAPTERS`; for Descope, a `descope_managed` provider), because a
+capability takes the caller's `sub` and the request's tenant as that provider's own ids. The
+exception is an adapter's `canonical_capabilities`, kept in the canonical model and taking none
+of the provider's ids, which serve every principal authorized from the canonical model
+(`rbac.is_canonical_principal`) and never a Descope principal, whose `dct` may name a canonical
+tenant's id: Keycloak's machine credentials (#680). Each
+relationship store serves only the principals whose ids it keys on (below). A caller not served
+answers 404 (`CapabilityMissing`), not the guard's 403: the route is not there for them.
+`GET /api/capabilities` reports `served`, and the SPA shows a page only when it is there. A route
+that reaches the provider only through a sync adapter capability (the profile's custom
+attributes, `GET` and `PATCH /api/tenants/current/settings`) carries no Descope guard and calls
+the adapter, never `get_descope_management`; it is listed with its reason in
+`ADAPTER_CAPABILITY_ROUTES`. Adding a capability to an adapter means implementing its interface
+(`CustomAttributes` for `custom_attributes`; `IdentityProviderAdapter.__init_subclass__` refuses
+a declaration without it).
+
+**The relationship store.** The FGA and document routes reach relations only through the
+`RelationshipStore` interface (`app/services/relationship_store.py`, from
+`get_relationship_store`), which `RELATIONSHIP_STORE` selects, and default to the sync provider's
+store (Descope's for Descope, OpenFGA for Keycloak and Zitadel). Only that module calls the
+Descope client's FGA methods (`tests/unit/test_relationship_store.py`). Each store is one entry in
+`app.dependencies.identity.RELATIONSHIP_STORES`, which says whom it serves, how it is built and
+which user directory names its subjects. A store **MUST** serve only the principals whose ids it
+keys on: Descope's store a `descope_managed` principal, keyed on `dct` and `sub`; OpenFGA a
+principal of a provider in `CANONICAL_RBAC_PROVIDERS`, keyed on the resolver's canonical tenant
+id and the caller's canonical user id, never the token's `sub`. So these routes carry no
+`require_descope_principal`: `served` refuses everyone else 404. They take the tenant from the
+resolver (`get_tenant_id`) and the subject from `app.dependencies.fga.get_relationship_caller`
+(`require_fga` resolves both the same way), and look a target user up in the store's own
+directory (`get_user_directory`: Descope's users or the canonical ones), never in another
+provider's. A store reports every failure as a `RelationshipStoreError` whose `kind` decides the
+answer (`store_error_response`).
+
+**State that belongs to no tenant.** A route over state that belongs to no tenant and that
+Descope does not hold **MUST** be gated by `app.dependencies.rbac.require_global_role`, not
+`require_role`, and be listed in `GLOBAL_ROLE_ROUTES`: `GET /api/users` (every tenant's users),
+`/api/providers`, `/api/sync/status` and `/api/events/recent`, and the changes to the role and
+permission definitions above (`require_definitions_role`). One role in one tenant opens all of that state,
+so on these routes the request chooses nothing. A canonical principal is decided by their sole
+membership, and one with several memberships is refused, whether they send the `X-Tenant-ID`
+header, carry a `dct` claim on the token, or name no tenant at all. A Descope principal is
+decided from its claims, as by `require_role`. The project-level grant these routes need is
+#593. A route gated by `require_role` or `require_permission` **MUST** depend on `get_tenant_id`
+or on a guard, or be listed with its reason in `SELF_SCOPED_ROLE_ROUTES` in the same test file.
 
 A `descope_managed` provider **MUST NOT** be listed in `CANONICAL_RBAC_PROVIDERS`: it
 would pass the guard with a canonical tenant id. The middleware factory refuses that
-configuration at startup (`refuse_canonical_descope_managed`). A `token_authorized_only`
-provider (Keycloak) **MUST NOT** be listed there either: the canonical model would decide
-its principals and its extractor, with the portable list and the organization-bound rule,
-would not be called. The factory refuses that too, and a `token_authorized_only` provider
-with no extractor (`refuse_ambiguous_authorization_source`).
+configuration at startup (`refuse_canonical_descope_managed`).
 
 - Exception: a `dct` claim on the token of a provider listed in
   `CANONICAL_RBAC_PROVIDERS` is read as a tenant selector, as it was before the header
@@ -464,42 +537,59 @@ with no extractor (`refuse_ambiguous_authorization_source`).
   the resolver, which logs a warning each time. `require_descope_principal` refuses it: the guard passes only a provider
   it knows to be `descope_managed`. Code in `app/` that sets `request.state.claims`
   **MUST** set `request.state.provider` beside it.
-- Exception: `require_fga` (`dependencies/fga.py::_extract_tenant_id`) reads `dct` itself.
-  It checks relations in Descope's FGA store, which is keyed on Descope tenant ids, so it
-  serves Descope principals only.
-- Exception: `get_tenant_claims` returns the Descope `tenants` claim as it is, for the
-  routes that list a Descope principal's memberships. A principal of a provider that
-  has its own extractor and is not `descope_managed` (Keycloak) is refused with 403
-  (`TENANTS_CLAIM_NOT_READ`), whatever the token carries, so `GET /api/tenants` and the
-  `/api/tenants/{tenant_id}/resources` routes refuse it rather than answer an empty
-  membership list. A provider with no extractor of its own (Ory) is still read for the
-  claim (#597).
+- Exception: `get_tenant_memberships` (`dependencies/tenant.py`) gives every tenant the
+  caller belongs to, for the routes that list them or check membership of a path tenant
+  (`GET /api/tenants`, the `/api/tenants/{tenant_id}/resources` routes). It takes them from
+  the resolver's sources: a provider in `CANONICAL_RBAC_PROVIDERS` gets its canonical
+  memberships (the same uncached, per-request read as source 3), and any other principal
+  the `tenants` claim through `get_tenant_claims`. A Descope principal's tenant ids are
+  Descope's, which name no canonical tenant, so its memberships are its claim (#673).
+- Exception: `get_tenant_claims` returns the Descope `tenants` claim as it is, for
+  `get_tenant_memberships`. It reads the claim
+  through `get_descope_claims`, which refuses (403, `DESCOPE_CLAIMS_ONLY`) every principal
+  whose provider is not `descope_managed`, whatever its token carries: a provider mapper
+  that put a `tenants` claim on Ory, Zitadel or Keycloak tokens would otherwise grant
+  membership of any tenant it names.
 - Exception: `POST /api/tenants` is gated by `require_admin_role`
-  (`routers/tenants.py`), which reads a top-level `roles` claim itself, for every
-  provider, and takes no tenant (#596).
-- Exception: `GET /api/profile` carries no guard, because every provider's session loads
-  it. The handler asks Descope for a Descope principal only (`is_descope_principal`) and
-  answers anyone else with the empty profile, without a call. `PATCH /api/profile` carries
-  the guard.
-- Exception: `GET /api/tenants` takes no tenant from `get_tenant_id`, carries no guard and
-  answers a principal of another provider as it did before the resolver (#590).
-- Exception: the role and permission definitions and the FGA schema belong to no tenant
-  and are gated by `require_role`, which answers for one tenant. A Descope principal who
+  (`routers/tenants.py`), which reads a top-level `roles` claim itself and takes no
+  tenant. It takes the claims from `get_descope_claims`, so only a Descope principal is
+  decided from that claim; every other provider's is refused (403) (#596).
+- Exception: `GET` and `PATCH /api/profile` carry no capability gate, because every
+  provider's session loads and saves it. Names and email are the canonical user's
+  (`GET /api/identity`'s resolution); `PATCH` saves the caller's own given and family
+  names there (never the email: sign-in and sync link accounts by it; both names are
+  required and held to Keycloak's person-name rules, which every sync provider takes,
+  so a name a provider would refuse is a 422, not a save the next pull undoes) and pushes them,
+  with `OWN_PROFILE_OF`, only to the caller's own account at the sync provider, and only
+  when the caller is its principal (`capabilities.sync_provider_subject`). The custom
+  attributes are asked of the sync adapter only for a caller its `custom_attributes`
+  capability serves, and are empty for anyone else; they are written through
+  `PATCH /api/profile/attributes`, which is gated.
+- Exception: `GET /api/tenants` takes no tenant from `get_tenant_id` and carries no guard:
+  it lists the caller's own memberships from `get_tenant_memberships` (#673).
+- Exception: the FGA schema belongs to no tenant and is gated by `require_role`, which
+  answers for one tenant. On OpenFGA the schema is read-only: `infra/openfga` holds the model,
+  and `PUT /api/fga/schema` answers 409. A Descope principal who
   holds the role in their current tenant is served there, as before the resolver (#593).
 - Exception: the `/api/users/{user_id}/idp-links` routes are gated by `require_role` and
   take no tenant from `get_tenant_id`. `_require_user_in_tenant` reads `dct` itself and
   answers 404 without one (#590).
 
 *Enforcement:* review, plus tests (`test_tenant_resolution.py`, `test_rbac_dependencies.py`,
-`test_tenant_dependencies.py`, and `test_descope_backed_routes.py`, which walks every route
+`test_tenant_dependencies.py`, `test_descope_claim_routes.py`, which sends Keycloak, Ory
+and Zitadel tokens with forged `tenants` and `roles` claims to every route that reads them
+and to the tenant routes, which must not read them, `test_tenant_routes_canonical.py`,
+which serves each provider's principal its own tenants and resources and refuses another
+tenant's, `test_capabilities.py`, which holds each capability to its routes and its
+dependency first on each, `test_machine_principal.py`, which shows a machine token gets its
+credential's grants and nothing else and is refused on every `/api/keys`, role, member,
+relation-write and IdP-link-write route, and `test_descope_backed_routes.py`, which walks every route
 of the application against its registers, calls each guarded route as a canonical
 principal, and calls each `require_global_role` route as an operator of one of several
-tenants who names it). `test_keycloak_routes.py` calls every route that takes a tenant or
-is gated by a role as a Keycloak `member` and as a confirmed Keycloak `tenant-admin`, and
-`test_keycloak_tenant_access.py` covers the extractor, the confirmation and the lookup,
-`test_keycloak_directory.py` the Admin API call and the grant marker, and
-`test_keycloak_identity.py` `GET /api/identity`. `test_provider_registration.py` fails on a writer of `request.state.claims`
-that records no provider.
+tenants who names it). `test_keycloak_canonical_authorization.py` shows a Keycloak
+principal's grants come from the canonical store whatever its token claims, and fails on
+a Keycloak branch in `app/dependencies/` or `app/routers/`. `test_provider_registration.py`
+fails on a writer of `request.state.claims` that records no provider.
 
 ## Data access
 
@@ -511,8 +601,8 @@ either. They **SHOULD** construct a repository, as `routers/idp_links.py` does.
 
 - Exception: `routers/tenants.py`, which reads and writes the demo `TenantResource` table.
 - Exception: `routers/documents.py`, which reads and writes the demo `Document` table.
-- Exception: `dependencies/identity.py`, which takes the reconciliation advisory lock and the
-  Keycloak organization lock (`pg_advisory_xact_lock`).
+- Exception: `dependencies/identity.py`, which takes the reconciliation advisory lock
+  (`pg_advisory_xact_lock`).
 - Exception: `main.py`, whose lifespan runs `SELECT 1` to check the database connection
   before it accepts requests.
 
@@ -677,8 +767,8 @@ settings themselves.
 Everything that differs between providers is a field of `ProviderTokenConfig`: the
 accepted issuers and audiences, the signing algorithms, the logout kind with the
 provider's own client id and post-logout redirect URI, the claims extractor (§18),
-`descope_managed` (§18), the token binding, the membership lookup and
-`token_authorized_only` (§18), and `require_https`. `require_https` **MUST** default to on, so that plain-HTTP discovery is
+`descope_managed` (§18), the token binding, the first-login organization reader and
+whether the first-login profile comes from UserInfo, and `require_https`. `require_https` **MUST** default to on, so that plain-HTTP discovery is
 allowed only for the one provider whose own switch turns it off. A registration that would
 accept tokens it must not **MUST** raise, which stops startup. `configured_providers()`
 raises `ProviderConfigurationError` when two providers share a name or an issuer, because
@@ -689,18 +779,23 @@ A provider whose tokens need more than an issuer and an audience to be tokens fo
 declares a `token_binding`. Both token middlewares **MUST** check it (`binding_refusal`)
 after the audience check and before any claim becomes a principal, a tenant or a
 permission, so that it holds on every route, and **MUST** answer a refusal with the uniform
-401. Keycloak's binding is exactly one `aud` and the `azp` configured for it.
+401.
 
-The Keycloak registration **MUST** refuse to build a half-configured provider. With
-`KEYCLOAK_ISSUER_URL` set it raises unless `KEYCLOAK_AUDIENCES` names a type client,
-`KEYCLOAK_APP_CLIENTS` names the app client of every type client, no app client is
-itself an audience and no two type clients share one, every type client is in exactly one of `KEYCLOAK_PORTABLE_TYPES` and
-`KEYCLOAK_ORGANIZATION_BOUND_TYPES`, every portable type has a list in
-`KEYCLOAK_PORTABLE_PERMISSIONS` holding only `<domain>:read` and `<domain>:list`
-permissions, and `KEYCLOAK_REQUIRE_HTTPS` is on or the issuer host is loopback or a
+The Keycloak registration **MUST** refuse to start with `KEYCLOAK_ISSUER_URL` set unless
+`KEYCLOAK_AUDIENCE` names the API client and `KEYCLOAK_CLIENT_ID` the SPA client, and
+**MUST** refuse `KEYCLOAK_REQUIRE_HTTPS` off unless the issuer host is loopback or a
 `.localhost` name. That exemption is by name: nothing checks what a `.localhost` name
 resolves to. The middleware factory therefore **MUST** log a warning at startup for every
-provider whose `require_https` is off. See [ADR-0010](adr/0010-keycloak-token-model.md).
+provider whose `require_https` is off. Its binding is an RS256 signature, `aud`
+containing the API client, `azp` the SPA client and `typ` `Bearer`: Keycloak signs the
+SPA's ID tokens (`typ` `ID`) and refresh tokens (`typ` `Refresh`) with the same keys, and
+its access tokens carry `sid` and `auth_time` too. It has no claims extractor: its
+principals are decided from the canonical model. Its `organization` claim is read by
+`keycloak_organization_alias` alone, and only first-login provisioning calls it, through
+`ProviderTokenConfig.first_login_organization`: exactly one alias, the
+`external_org_id` of one active tenant of the `keycloak` provider, places the user;
+anything else provisions nothing. The profile comes from the access token. See
+[ADR-0011](adr/0011-keycloak-canonical-authorization.md).
 
 The Zitadel registration **MUST** refuse to start with `ZITADEL_ISSUER_URL` set unless
 `ZITADEL_AUDIENCE` names the project id and `ZITADEL_CLIENT_ID` the SPA application, and
@@ -728,8 +823,8 @@ The user such a login creates is marked `users.email_from_organization`, and no 
 login of any provider (just-in-time provisioning, the Descope flow sync) **MUST** link to
 that user by email either: it is `EmailLinkRefused` too. A Descope reconciliation run
 **MUST NOT** link or update that user either; it skips it and logs the holder's id. A login that finds, by email,
-the user a concurrent login for its own subject just created gets that user. A Zitadel
-principal with no recorded provider config **MUST NOT** be provisioned (500).
+the user a concurrent login for its own subject just created gets that user. A Zitadel or
+Keycloak principal with no recorded provider config **MUST NOT** be provisioned (500).
 
 Both token middlewares **MUST** build the principal and read the tenant with the
 provider's extractor inside the code path that answers a failure with the uniform 401, so
@@ -748,6 +843,8 @@ standalone and in gateway mode, with the cause logged and not returned.
 *Enforcement:* tests (`test_provider_registration.py` registers a second provider from the
 test alone and drives it through the factory, both middlewares and logout;
 `test_keycloak_startup.py` starts the factory on each incomplete Keycloak configuration,
+`test_keycloak_token_binding.py` runs the recorded Keycloak tokens through the binding,
+`test_keycloak_first_login.py` checks that the organization claim has one reader,
 `test_zitadel_startup.py` on each incomplete Zitadel one, `test_zitadel_token_binding.py`
 runs the recorded Zitadel tokens through the binding and `test_zitadel_first_login.py`
 checks that the organization claim has one reader), plus review.

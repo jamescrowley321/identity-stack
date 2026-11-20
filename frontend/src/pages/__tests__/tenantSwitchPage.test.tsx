@@ -254,6 +254,32 @@ describe("AccessKeys across a tenant switch", () => {
     });
   }
 
+  it("shows the client id a canonical provider's credential signs in with, beside its secret", async () => {
+    stubNetwork(keysPage, (r) =>
+      r.method === "POST" && r.url === "/api/keys"
+        ? json(200, { key: { id: "k1", clientId: "identity-stack-machine-k1" }, cleartext: "secret-k1" })
+        : undefined,
+    );
+    renderPage(AccessKeys);
+    expect(await screen.findByText("tenant-acme-row")).toBeInTheDocument();
+
+    await createKey("ci key");
+
+    expect(await screen.findByText("secret-k1")).toBeInTheDocument();
+    expect(screen.getByText("identity-stack-machine-k1")).toBeInTheDocument();
+  });
+
+  it("shows no client id for a Descope access key, whose secret is the key", async () => {
+    stubNetwork(keysPage, created);
+    renderPage(AccessKeys);
+    expect(await screen.findByText("tenant-acme-row")).toBeInTheDocument();
+
+    await createKey("ci key");
+
+    expect(await screen.findByText("secret-of-tenant-acme")).toBeInTheDocument();
+    expect(screen.queryByText(/Client ID/)).not.toBeInTheDocument();
+  });
+
   it("drops the previous tenant's new-key secret and the half-typed name", async () => {
     stubNetwork(keysPage, created);
     renderPage(AccessKeys);

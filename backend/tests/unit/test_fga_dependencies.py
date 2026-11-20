@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.dependencies.fga import extract_user_id, require_fga, resolve_fga_user_target
+from app.services.relationship_users import DescopeUserDirectory
 
 
 def _make_request(claims, path_params=None, descope_client=None):
@@ -206,15 +207,16 @@ VICTIM_USER_ID = "U3JvictimInternalId"
 
 
 def _client_returning(user):
+    """Descope's user directory over a client whose ``load_user`` answers ``user``."""
     client = MagicMock()
     client.load_user = AsyncMock(return_value=user)
-    return client
+    return DescopeUserDirectory(client)
 
 
 def _client_raising(exc):
     client = MagicMock()
     client.load_user = AsyncMock(side_effect=exc)
-    return client
+    return DescopeUserDirectory(client)
 
 
 class TestResolveFgaUserTargetTenantScoping:
@@ -301,3 +303,24 @@ class TestResolveFgaUserTargetTenantScoping:
         with pytest.raises(HTTPException) as exc_info:
             await resolve_fga_user_target(client, "member@example.com", CALLER_TENANT)
         assert exc_info.value.status_code == 502
+
+
+class TestResolveFgaUserTargetForAClosedStore:
+    """A store whose subjects are users only (OpenFGA): nothing unresolved reaches it."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "directory",
+        [
+            _client_returning({"userId": VICTIM_USER_ID, "userTenants": [{"tenantId": OTHER_TENANT}]}),
+            _client_raising(_make_http_status_error(404)),
+        ],
+        ids=["outside-the-tenant", "no-such-user"],
+    )
+    async def test_an_unresolved_target_is_none(self, directory):
+        assert await resolve_fga_user_target(directory, "victim", CALLER_TENANT, open_subjects=False) is None
+
+    @pytest.mark.asyncio
+    async def test_a_user_of_the_tenant_resolves(self):
+        directory = _client_returning({"userId": VICTIM_USER_ID, "userTenants": [{"tenantId": CALLER_TENANT}]})
+        assert await resolve_fga_user_target(directory, "member", CALLER_TENANT, open_subjects=False) == VICTIM_USER_ID

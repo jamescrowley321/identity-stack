@@ -6,11 +6,10 @@ import { ThemeProvider } from "next-themes";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { IdentityProvider } from "./contexts/IdentityContext";
 import App from "./App";
-import { buildOidcConfig, readTenantScopeTemplate } from "@/config/oidc";
+import { buildOidcConfig } from "@/config/oidc";
 import "./index.css";
 
 const oidcConfig = buildOidcConfig(import.meta.env);
-const tenantScopeTemplate = readTenantScopeTemplate(import.meta.env);
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
@@ -18,7 +17,7 @@ createRoot(document.getElementById("root")!).render(
       <TooltipProvider>
         <AuthProvider {...oidcConfig}>
           <BrowserRouter>
-            <IdentityProvider tenantScopeTemplate={tenantScopeTemplate}>
+            <IdentityProvider>
               <App />
             </IdentityProvider>
           </BrowserRouter>

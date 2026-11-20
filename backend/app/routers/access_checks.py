@@ -1,9 +1,7 @@
 """Routes that answer from the caller's tenant and grants alone.
 
 Two depend on ``get_tenant_id`` and ``require_permission`` and on nothing
-else: the handler calls no provider and reads no table. The resolver may ask
-the provider's membership lookup first, for a token that needs its sole
-membership confirmed (an organization-bound Keycloak token). They show what the tenant
+else: the handler calls no provider and reads no table. They show what the tenant
 resolver decided for the request (conventions §18), for a principal of any
 provider, and give an end-to-end run a route that needs a read permission and
 one that needs a management permission.
@@ -11,8 +9,7 @@ one that needs a management permission.
 Two more depend on ``require_role`` and on nothing else, and answer the roles the
 caller holds in the request's tenant: one needs ``owner`` or ``admin``, the other
 any canonical role. They give an end-to-end run a route gated on a role, for a
-provider whose authorization is canonical (Ory, Zitadel). A Keycloak token
-carries no role, so a Keycloak principal is refused on both.
+provider whose authorization is canonical (Ory, Zitadel, Keycloak).
 """
 
 from fastapi import APIRouter, Depends

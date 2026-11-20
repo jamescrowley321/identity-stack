@@ -223,6 +223,7 @@ async def test_deactivate_member_forwards_the_id_this_api_hands_out(mock_validat
 async def test_remove_member_forwards_the_id_this_api_hands_out(mock_validate, mock_descope, client):
     mock_validate.return_value = ADMIN_CLAIMS
     descope_user_id = "U3J36liQh0rQ39NT2SdRqdEqb4Zs"
+    mock_descope.load_user.return_value = {**DESCOPE_USER, "userId": descope_user_id}
     mock_descope.remove_user_from_tenant.return_value = None
 
     response = await client.delete(f"/api/members/{descope_user_id}", headers=AUTH_HEADER)
@@ -255,6 +256,7 @@ async def test_activate_member(mock_validate, mock_descope, client):
 async def test_remove_member(mock_validate, mock_descope, client):
     mock_validate.return_value = ADMIN_CLAIMS
     user_id = "U2abc123"
+    mock_descope.load_user.return_value = DESCOPE_USER
     mock_descope.remove_user_from_tenant.return_value = None
 
     response = await client.delete(
@@ -386,6 +388,7 @@ async def test_activate_member_descope_error(mock_validate, mock_descope, client
 async def test_remove_member_descope_error(mock_validate, mock_descope, client):
     """Descope API error removing -> 502."""
     mock_validate.return_value = ADMIN_CLAIMS
+    mock_descope.load_user.return_value = DESCOPE_USER
     mock_descope.remove_user_from_tenant.side_effect = _make_http_status_error(500)
 
     response = await client.delete(
@@ -494,6 +497,112 @@ async def test_member_status_refuses_a_user_shared_with_another_tenant(
         )
     }
     mock_descope.update_user_status.assert_not_awaited()
+
+
+# --- Who a tenant admin may act on: the member's roles in the tenant (access.act_on_member) ---
+
+MEMBER_ACTIONS = {
+    "deactivate": ("POST", "/deactivate", "update_user_status"),
+    "activate": ("POST", "/activate", "update_user_status"),
+    "remove": ("DELETE", "", "remove_user_from_tenant"),
+}
+OWNER_REFUSED = {"detail": "Only owners can deactivate, activate or remove an owner"}
+OPERATOR_REFUSED = {"detail": "Only operators can assign or remove the operator role"}
+SELF_REFUSED = {"detail": "You cannot deactivate or remove yourself"}
+
+
+def _member_with(roles: list[str], user_id: str = "U2abc123") -> dict:
+    return {**DESCOPE_USER, "userId": user_id, "userTenants": [{"tenantId": TENANT_ID, "roleNames": roles}]}
+
+
+async def _act(client, route: str, user_id: str):
+    method, suffix, _ = MEMBER_ACTIONS[route]
+    return await client.request(method, f"/api/members/{user_id}{suffix}", headers=AUTH_HEADER)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("route", sorted(MEMBER_ACTIONS))
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_a_descope_admin_cannot_act_on_the_owner(mock_validate, mock_descope, client, route):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_descope.load_user.return_value = _member_with(["owner"])
+
+    response = await _act(client, route, "U2abc123")
+
+    assert (response.status_code, response.json()) == (403, OWNER_REFUSED)
+    getattr(mock_descope, MEMBER_ACTIONS[route][2]).assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("route", sorted(MEMBER_ACTIONS))
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_a_descope_owner_acts_on_another_owner(mock_validate, mock_descope, client, route):
+    mock_validate.return_value = OWNER_CLAIMS
+    mock_descope.load_user.return_value = _member_with(["owner"])
+
+    response = await _act(client, route, "U2abc123")
+
+    assert response.status_code == 200
+    getattr(mock_descope, MEMBER_ACTIONS[route][2]).assert_awaited_once()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("route", sorted(MEMBER_ACTIONS))
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_a_descope_admin_cannot_act_on_an_operator(mock_validate, mock_descope, client, route):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_descope.load_user.return_value = _member_with(["operator"])
+
+    response = await _act(client, route, "U2abc123")
+
+    assert (response.status_code, response.json()) == (403, OPERATOR_REFUSED)
+    getattr(mock_descope, MEMBER_ACTIONS[route][2]).assert_not_awaited()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("route", sorted(MEMBER_ACTIONS))
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_a_descope_operator_acts_on_an_operator(mock_validate, mock_descope, client, route):
+    mock_validate.return_value = {
+        **ADMIN_CLAIMS,
+        "tenants": {TENANT_ID: {"roles": ["admin", "operator"], "permissions": []}},
+    }
+    mock_descope.load_user.return_value = _member_with(["operator"])
+
+    response = await _act(client, route, "U2abc123")
+
+    assert response.status_code == 200
+    getattr(mock_descope, MEMBER_ACTIONS[route][2]).assert_awaited_once()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("route", ["deactivate", "remove"])
+@pytest.mark.parametrize("named_by", ["user123", "admin@example.com"], ids=["user id", "login id"])
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_a_descope_admin_neither_deactivates_nor_removes_itself(
+    mock_validate, mock_descope, client, route, named_by
+):
+    """Named by its userId or its login id, the caller is the Descope user its ``sub`` names."""
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_descope.load_user.return_value = _member_with(["admin"], user_id=ADMIN_CLAIMS["sub"])
+
+    response = await _act(client, route, named_by)
+
+    assert (response.status_code, response.json()) == (403, SELF_REFUSED)
+    mock_descope.load_user.assert_awaited_once_with(named_by)
+    getattr(mock_descope, MEMBER_ACTIONS[route][2]).assert_not_awaited()
+
+
+@pytest.mark.anyio
+@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
+async def test_a_failed_descope_member_lookup_removes_nothing(mock_validate, mock_descope, client):
+    mock_validate.return_value = ADMIN_CLAIMS
+    mock_descope.load_user.side_effect = _make_http_status_error(500)
+
+    response = await _act(client, "remove", "U2abc123")
+
+    assert (response.status_code, response.json()) == (502, {"detail": "Failed to remove member"})
+    mock_descope.remove_user_from_tenant.assert_not_awaited()
 
 
 # --- Input validation ---

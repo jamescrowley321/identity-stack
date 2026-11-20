@@ -5,8 +5,8 @@ import uuid
 import pytest
 
 from app.domain import access
-from app.errors.access import identity_error
-from app.errors.identity import Conflict, NotFound, ValidationError
+from app.errors.access import NOT_A_MEMBER_OF_THE_TENANT, MemberActionRefusal, identity_error
+from app.errors.identity import Conflict, Forbidden, NotFound, ValidationError
 
 ROLE_ID = uuid.uuid4()
 PERMISSION_ID = uuid.uuid4()
@@ -38,6 +38,12 @@ TRANSLATIONS = [
         access.AssignmentNotFound(user_id=USER_ID, tenant_id=TENANT_ID, role_id=ROLE_ID),
         NotFound(message=f"Role assignment not found for user '{USER_ID}' in tenant '{TENANT_ID}'"),
     ),
+    (
+        access.NotATenantMember(user_id=USER_ID, tenant_id=TENANT_ID),
+        Forbidden(message=NOT_A_MEMBER_OF_THE_TENANT),
+    ),
+    (access.ActingOnSelf(user_id=str(USER_ID)), Forbidden(message=MemberActionRefusal.ACTING_ON_SELF)),
+    (access.OwnerRequired(user_id=str(USER_ID)), Forbidden(message=MemberActionRefusal.OWNER_REQUIRED)),
     (
         access.InvalidName(access.NameSubject.ROLE, access.NameFault.EMPTY),
         ValidationError(message="Role name must not be empty"),

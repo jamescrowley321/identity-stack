@@ -1,165 +1,177 @@
 # Keycloak fixtures
 
-Taken on 2026-11-15 from `quay.io/keycloak/keycloak:26.8.2`, started with
-`docker compose --profile keycloak up --wait` and the realm in
+Tokens taken on 2026-11-18 from `quay.io/keycloak/keycloak:26.8.2`, the compose `keycloak-test`
+service (`make test-up-keycloak`) with the realm in
 [`../realm/identity-stack-realm.json`](../realm/identity-stack-realm.json).
 
 | File | What it is |
 |---|---|
-| `discovery.json` | Body of `GET http://keycloak.localhost:8180/realms/identity-stack/.well-known/openid-configuration`, fetched from the host. The backend container returned the same document. |
-| `access-token.json` | Decoded header and claims of one access token: user `bob`, client `member-app`, scope `openid organization:acme`, authorization code flow with PKCE S256 through the login form. The signature is not stored. |
+| `access-token.json` | Decoded header and claims of the SPA's access token: user `bob` (role assignments `admin` in `acme`, `viewer` in `globex`), client `identity-stack-spa`, scope `openid profile email organization:acme`, authorization code flow with PKCE S256 through the login form. |
+| `id-token.json` | The ID token of the same login. |
+| `other-client-access-token.json` | `bob`'s access token through `identity-stack-other`, the other public client, with the same scope: a token without the API audience. |
+| `discovery.json` | Body of `GET http://keycloak.localhost:8180/realms/identity-stack/.well-known/openid-configuration`, fetched from the host on 2026-11-15 (the compose `keycloak` service). The backend container returned the same document. |
 
-The signing key is generated per container, so `kid`, `sid`, `jti` and the times differ on every
-instance. The claim names and shapes are what the fixture is for. The users' ids are fixed in the
-realm import (table below), so a token's `sub` is the same on every instance from now on; the
-`sub` in `access-token.json` was taken before that.
+No signature is stored. The signing key is generated per container, so `kid`, `sid`, `jti` and
+the times differ on every instance; the issuer is the instance's (`keycloak-test` here). The
+claim names and shapes are what the fixtures are for. The users' ids are fixed in the realm
+import (table below), so a token's `sub` is the same on every instance.
 
 ## The realm
 
+The token says who the caller is; the canonical store (the backend database) says what the caller
+may do. Nothing in the realm grants a role that reaches a token.
+
 [`infra/keycloak/`](../../infra/keycloak/README.md) builds the same realm in Terraform. A change
-that adds a user, client, role, organization or member to the import file adds it there too;
-`make keycloak-terraform-check` compares the two.
+that adds a user, client, role, group, organization or member to the import file adds it there
+too; `make keycloak-terraform-check` compares the two.
 
 Every secret and password below is a local fixture. The realm's redirect URIs
 (`http://localhost:3000`, post-logout `http://localhost:3000/login`), its SSL mode `none` and the
 `admin`/`admin` bootstrap login are for this local container only; do not copy them elsewhere.
 
-| Client | Kind | Client roles |
+| Client | Kind | What |
 |---|---|---|
-| `member` | confidential type client, no flows | `documents:read`, `documents:write` |
-| `tenant-admin` | confidential type client, no flows | `members:invite`, `members:remove`, `settings:manage` |
-| `member-app` | public, PKCE S256, full scope off, scope-mapped to `member` | none |
-| `tenant-admin-app` | public, PKCE S256, full scope off, scope-mapped to `tenant-admin` | none |
-| `identity-stack-directory` | confidential, service account only, client scope `kc-admin-api`, full scope off | its service account holds `realm-management` `view-users` and `view-organizations` |
-| `identity-stack-admin` | confidential, service account only, client scope `kc-admin-api`, full scope off | its service account holds `realm-management` `manage-users` and `manage-organizations` |
+| `identity-stack-spa` | public, standard flow only, PKCE S256, full scope off | The SPA. Default client scopes `basic`, `profile`, `email`, `web-origins`, `acr` (no `roles`); optional `organization`, `offline_access`. An audience mapper (`oidc-audience-mapper`, included client `identity-stack-api`) puts the API client in its access tokens' `aud`, not in its ID tokens'. |
+| `identity-stack-api` | confidential, no flows, full scope off | The API: its client id is the audience. Its client roles are the canonical permissions, `<domain>:<action>` (`billing:manage`, `documents:delete`, `documents:read`, `documents:write`, `members:invite`, `members:remove`, `members:update_role`, `projects:create`, `projects:delete`, `projects:read`, `projects:update`, `settings:manage`), and the canonical roles `owner`, `admin`, `member` and `viewer` as composite client roles of their permissions (`owner` all twelve, `admin` all but `billing:manage`, `member` `documents:read`, `documents:write`, `members:invite`, `projects:read`, `projects:update`, `viewer` `documents:read`, `projects:read`). No user and no group holds any of them, and no client is scope-mapped to them. |
+| `identity-stack-other` | public, as the SPA, without the audience mapper | Another client, for tests that its tokens are refused. |
+| `identity-stack-admin` | confidential, service account only, client scope `kc-admin-api`, full scope off | The backend's Keycloak admin adapter (`KEYCLOAK_ADMIN_CLIENT_ID`, secret `local-only-admin-client`): see "The admin service account" below. |
 
-`identity-stack-directory` is the backend's organization lookup (`KEYCLOAK_DIRECTORY_CLIENT_ID`,
-secret `local-only-directory-client`). Probed on 26.8.2: the endpoint
-`GET /admin/realms/identity-stack/organizations/members/{id}/organizations` opens to neither
-role alone and to both together, and both are read-only. With them the service account is
-refused (403) creating an organization, adding a member, editing an organization's attributes,
-mapping a client role and listing clients. Without the `kc-admin-api` client scope its token
-lacks the Admin API audience and every Admin API call is 401.
+`admin-permissions` is the client Keycloak creates when fine-grained admin permissions (v2) are
+on (`adminPermissionsEnabled`); the import gives it the one permission described below.
 
-`identity-stack-admin` is the backend's Keycloak admin adapter (`KEYCLOAK_ADMIN_CLIENT_ID`,
-secret `local-only-admin-client`), which pushes canonical tenants and users to the realm
-(`backend/app/services/adapters/keycloak.py`). Probed on 26.8.2: `manage-users` and
-`manage-organizations` together let it find, create, update and delete users and
-organizations and add and remove organization members, and nothing else it needs; it is
-refused (403) listing realm roles.
+### Role assignments are organization groups
+
+Each organization owns four groups, one per canonical role: `owner`, `admin`, `member` and
+`viewer`. A user's role in a tenant is membership of that organization's group for the role. The
+groups map no role, realm or client, so the membership is the record of the assignment and grants
+nothing; the backend never reads it from a token, and no protocol mapper writes groups to one. The
+realm has no realm-level groups.
+
+Measured on 26.8.2 (feature `ORGANIZATION` on, which is the default): organization-owned groups
+exist. `GET`/`POST /admin/realms/{realm}/organizations/{id}/groups` list and create them, and
+`PUT`/`DELETE .../organizations/{id}/groups/{group}/members/{user}` add and remove a member.
+Keycloak refuses (400) a user who is not a member of the organization ("User is not member of
+the organization"), and refuses the realm group API for these groups (`GET /groups/{id}`,
+`PUT /users/{id}/groups/{group}`: "Cannot manage organization related group via non Organization
+API"); `GET /users/{id}/groups` does not list them, `GET .../organizations/{id}/members/{user}/groups`
+does. A group's role mappings are read at `.../organizations/{id}/groups/{group}/role-mappings`.
+Admin events name the resource types `ORGANIZATION_GROUP` and `ORGANIZATION_GROUP_MEMBERSHIP`.
+The realm import accepts them: `organizations[].groups` (each with a fixed `id`) and
+`organizations[].members[].groups` (group ids). The Terraform provider (`keycloak/keycloak`
+5.10.0, the latest) creates them (`keycloak_group.organization_id`) but has no resource for their
+members, so `infra/keycloak` sets those through the Organization API (its README says how).
+
+| Organization | Group ids (`owner`, `admin`, `member`, `viewer`) |
+|---|---|
+| `acme` | `9a010000-0000-4000-8000-00000000000{1,2,3,4}` |
+| `globex` | `9a020000-0000-4000-8000-00000000000{1,2,3,4}` |
+| `unlinked` | `9a030000-0000-4000-8000-00000000000{1,2,3,4}` |
+
+### Events
+
+User events and admin events are on, admin events with their representations
+(`adminEventsDetailsEnabled`). Keycloak keeps both for 7 days (`eventsExpiration` 604800,
+realm attribute `adminEventsExpiration` 604800), longer than the interval between reconciliation
+passes, which repair what the event store let expire. The event types are Keycloak's defaults and
+the listener is `jboss-logging`.
+
+### The admin service account
+
+`identity-stack-admin` pushes canonical changes to the realm and reads its events back. Its
+service account holds the `realm-management` roles `manage-users`, `manage-organizations`,
+`query-clients`, `view-events` and `create-client`, no realm role, and two fine-grained admin permissions, through
+a user policy naming the service account: `view`, `manage` and `map-roles-composite` on the client
+`identity-stack-api`, and `view` on the client `realm-management`. The import names both clients
+by `clientId` in the permissions' `resources`; Keycloak resolves them to the clients' ids. Without `kc-admin-api` as a client scope its token lacks
+the Admin API audience and every Admin API call is 401.
+
+Probed on 26.8.2 against both the imported realm and the Terraform-built one:
+
+| What it does | Needs | Observed |
+|---|---|---|
+| Find, create, update (disable) and delete users | `manage-users` | 200/201/204/204 |
+| Find, create and delete organizations | `manage-organizations` | 200/201/204 |
+| Add and remove an organization member | `manage-users` and `manage-organizations` | 201/204; with `manage-organizations` alone, adding is 403; with `manage-users` alone, listing and creating organizations are 403 |
+| Create and delete an organization's group; add, list and remove its members | `manage-users` and `manage-organizations` | 201/204, 204/200/204; without `manage-users` the members calls fail (403/404) |
+| Find the API client by `clientId` (`GET /clients?clientId=`) | `query-clients` and the permission's `view` | 200 with the client; without either, the lookup does not find it |
+| List, create, update and delete the API client's roles | the permission's `view` and `manage` | 200/201/204/204; with `manage` alone, 403 |
+| Add and remove a role's composites | the permission's `map-roles-composite` | 204/204; without it 403 |
+| Read admin events and user events | `view-events` | 200/200 |
+| Register a client through client registration (`POST /realms/{realm}/clients-registrations/default`), as the backend does for a machine credential | `create-client`, mapped to the client's scope as well as to its service account | 201 with the client's secret and a registration access token; without the scope mapping, 403. Through the Admin API (`POST /clients`) the same role is 403: that path needs `manage` on every client |
+| Register a client with an `oidc-audience-mapper` | the authenticated "Allowed Protocol Mapper Types" policy and the realm attribute `allowedProtocolMapperTypesForClientAdministrators` both naming the type | 201; with either one alone, 403 "ProtocolMapper type not allowed" |
+| What `allowedProtocolMapperTypesForClientAdministrators` (realm attribute, here `oidc-audience-mapper`) changes for a client administrator without `manage-realm` | the attribute | It widens, from nothing to exactly that type. Absent, such an administrator may add no protocol mapper of any type: through the Admin API the admin client's `POST /clients/{api client}/protocol-mappers/models` is 403 for an `oidc-audience-mapper` and an `oidc-hardcoded-claim-mapper` alike, and an authenticated client registration may carry none (the policy's types are intersected with the attribute's, `ProtocolMappersClientRegistrationPolicy` and `ProtocolMappersResource` in 26.8.2). Set, the same calls answer 201 for the audience mapper and 403 for the hardcoded-claim mapper: the admin client may now add an audience mapper to the API client, the one client it manages, and to the clients it registers. No narrower setting lets it register a machine client with the API audience |
+| Disable and enable a registered client's service account | `manage-users` | 204/204; the client's client-credentials grant answers 401 `invalid_request` while disabled |
+| Delete a registered client with its registration access token | the token alone | 204; afterwards the token answers 401, and the client's grant 401 `invalid_client` |
+| Read its own `realm-management` roles (`GET /users/{id}/role-mappings/clients/{realm-management}/composite`), as the adapter does at startup | the `view` permission on `realm-management` | 200 with the four roles; without it Keycloak leaves `realm-management` out of the answer (`{}` and `[]`) |
+
+Refused (403): reading or changing any other client (the SPA's redirect URIs among them), changing
+the `realm-management` client, giving itself `realm-admin`, reading or changing a client it
+registered through the Admin API, listing or creating realm roles,
+changing realm settings. A realm-wide `manage-clients` would let it
+rewrite the SPA client, so the client permission replaces it. What the grants still allow beyond
+the adapter's needs, because Keycloak offers nothing narrower: `manage-users` also creates realm
+groups (201), and `manage` on the API client also changes the API client's own settings and reads
+its secret (204/200). The API client has no flow on, and a token it could get names it in `azp`,
+not the SPA.
+
+### Users
 
 The realm brokers no identity provider, lets no one register, keeps emails unique and has
 `verifyEmail` on, because the backend links a Keycloak identity to an existing canonical user
 on a verified email ([`docs/security.md`](../../docs/security.md#authorization-rbac--fga)).
-Every fixture user's email is imported as verified.
+Every fixture user's email is imported as verified. No user holds a client role or a realm role.
 
-| User | Id (`sub`) | Password | Organizations | Client roles |
-|---|---|---|---|---|
-| `alice` | `a11ce000-0000-4000-8000-000000000001` | `local-only-alice` | `acme` | `member`: both |
-| `bob` | `b0b00000-0000-4000-8000-000000000002` | `local-only-bob` | `acme`, `globex` | `member`: `documents:read`; `tenant-admin`: all three |
-| `carol` | `ca401000-0000-4000-8000-000000000003` | `local-only-carol` | `acme` | none |
-| `dave` | `da4e0000-0000-4000-8000-000000000004` | `local-only-dave` | `acme` | `tenant-admin`: all three |
-| `erin` | `e4140000-0000-4000-8000-000000000005` | `local-only-erin` | `acme` | `member`: `documents:write` |
-| `frank` | `f4a4c000-0000-4000-8000-000000000006` | `local-only-frank` | `acme` | `tenant-admin`: all three |
-| `grace` | `64ace000-0000-4000-8000-000000000007` | `local-only-grace` | `unlinked` | `member`: both |
+| User | Id (`sub`) | Password | Organizations and role assignments |
+|---|---|---|---|
+| `alice` | `a11ce000-0000-4000-8000-000000000001` | `local-only-alice` | `acme`: `member` |
+| `bob` | `b0b00000-0000-4000-8000-000000000002` | `local-only-bob` | `acme`: `admin`; `globex`: `viewer` |
+| `carol` | `ca401000-0000-4000-8000-000000000003` | `local-only-carol` | `acme`: none |
+| `dave` | `da4e0000-0000-4000-8000-000000000004` | `local-only-dave` | `acme`: `admin` |
+| `erin` | `e4140000-0000-4000-8000-000000000005` | `local-only-erin` | `acme`: `member` |
+| `frank` | `f4a4c000-0000-4000-8000-000000000006` | `local-only-frank` | `acme`: `admin` |
+| `grace` | `64ace000-0000-4000-8000-000000000007` | `local-only-grace` | `unlinked`: `member` |
 
-`dave` is a tenant admin in exactly one organization, and `erin` is a `member` user without
-`documents:read`. `frank` is another tenant admin of `acme` alone, whom the integration tests
-move to `globex` and back. `grace` is the one member of `unlinked`, an organization no canonical
-tenant names.
-
-The users, the organizations and who belongs where are the shared test fixture
-[`infra/fixtures/test-identities.json`](../../infra/fixtures/test-identities.json), which every
-provider's Terraform root builds from; the unit test `backend/tests/unit/test_identity_fixture.py` fails
-when this import disagrees with it. The ids, passwords and client roles are Keycloak's own.
-
-Organization `acme` carries the attribute `type:tenant-admin` listing `bob`, `dave` and `frank`:
-the organization's record that they hold the `tenant-admin` type there. `globex` marks no one.
-Client roles are realm-wide, so the backend believes an organization-bound token only where the
-token's organization marks its user. The backend's token model for this realm declares `member` portable with
-the one portable permission `documents:read`, and `tenant-admin` organization-bound
-([`docs/architecture.md`](../../docs/architecture.md#keycloak-token-model)). `bob`'s
-`tenant-admin` tokens are therefore refused in both of his organizations (he belongs to two),
-`dave`'s and `frank`'s are accepted in `acme`, and `erin`'s `member` token grants nothing. Removing a member
-from an organization leaves its marker alone: adding them back restores the type there unless the
-id is taken off the attribute too.
+The users, the organizations, who belongs where and each one's role there are the shared test
+fixture [`infra/fixtures/test-identities.json`](../../infra/fixtures/test-identities.json), which
+every provider's Terraform root builds from; the unit test
+`backend/tests/unit/test_identity_fixture.py` fails when this import disagrees with it. The ids
+and passwords are Keycloak's own.
 
 The login form is identity-first: username on one page, password on the next.
 
 ## Claim shapes
 
-All observed on access tokens from the running container.
+Observed on the recorded tokens and on every login `make keycloak-terraform-check` makes.
 
 | Claim | Observed |
 |---|---|
-| `iss` | `http://keycloak.localhost:8180/realms/identity-stack`. Equal to `issuer` in discovery, from the host and from the backend container. No trailing slash. |
-| `aud` | A JSON **string**, not an array: `"member"` through `member-app`, `"tenant-admin"` through `tenant-admin-app`. Nothing else is in it (no `account`). |
-| `azp` | Present; the app client (`"member-app"`). |
-| `organization` | A JSON **array of aliases**: `["acme"]`. Not a map. |
-| `resource_access` | `{"<type client>": {"roles": [...]}}`, holding only the type client the app client is scope-mapped to. Role order varies between tokens. |
-| `scope` | Space-separated string that includes the `organization:<alias>` that was granted. Order varies between tokens. |
-| No client role (`carol`) | The token has **no `aud` and no `resource_access`** at all. `azp` and `organization` are still there. |
-| No organization scope requested | No `organization` claim. |
-| ID token | `aud` is the app client (`"member-app"`); `organization` has the same array shape. |
+| `iss` | `<KC_HOSTNAME>/realms/identity-stack`, equal to `issuer` in discovery. No trailing slash. |
+| `typ` | `Bearer` on access tokens, `ID` on ID tokens. Keycloak marks refresh tokens `Refresh`. Access tokens carry `sid` and `auth_time` too, so only `typ` tells them from ID tokens. |
+| `aud` | SPA access token: the JSON **string** `"identity-stack-api"`, nothing else (no `account`), also for `carol`, who has no role assignment. SPA ID token: `"identity-stack-spa"`. `identity-stack-other`'s access token: **no `aud`**. |
+| `azp` | The client logged in through: `identity-stack-spa` or `identity-stack-other`. |
+| `email_verified` | `true`, on access and ID tokens. `email`, `name`, `given_name`, `family_name` and `preferred_username` are on both. |
+| `organization` | A JSON **array of aliases**: `["acme"]`, on access and ID tokens. Absent when the `organization` scope is not requested. |
+| `resource_access`, `realm_access` | **Absent** on every token, also for a user with role assignments (`bob`, `dave`): no role is mapped to a user or group, the clients have full scope off and no scope mapping, and the `roles` client scope is not on them. |
+| `groups` | Absent. |
+| `scope` | Space-separated string; includes the `organization` or `organization:<alias>` that was granted. Order varies between tokens. |
 
 The `organization` claim can hold more than one alias. `organization:acme organization:globex`
 and `organization:*` both gave `bob` `["globex", "acme"]`. Scope `organization` with no alias
-stops on an organization picker page.
+gives a member of one organization that one (`alice`: `["acme"]`) and stops a member of several
+on an organization picker page.
 
-## Rows of the epic's evidence table settled here
+## Other things measured on 26.8.2
+
+Measured on 2026-11-15 and 2026-11-16 with the earlier realm, whose clients differed; the
+organization behaviour below does not depend on the clients.
 
 | Row | Observed |
 |---|---|
-| Default shape of the `organization` claim | Array of alias strings. |
-| `resource_access` nesting | `resource_access.<client>.roles`, an array of strings. |
-| `aud` is only the type client | Yes, as a single string. Absent when the user has no role on the type client. |
-| `azp` on access tokens | Present, equal to the app client. |
-| Issuer string | `<KC_HOSTNAME>/realms/<realm>`. |
-| Full-URL `KC_HOSTNAME` with `http://` | Works. Every endpoint in discovery uses that origin, and the same URL answers from the host and from other containers through the `keycloak.localhost` network alias (checked from the Debian-based backend image and from Alpine). |
+| Full-URL `KC_HOSTNAME` with `http://` | Works. Every endpoint in discovery uses that origin, and the same URL answers from the host and from other containers through the network alias (checked from the Debian-based backend image and from Alpine). |
 | A refreshed token keeps its organization | Yes. A plain refresh returns `organization: ["acme"]` again. A refresh that asks for `scope=openid organization:globex` succeeds but returns a token with **no** `organization` claim, so refresh cannot switch organization. |
-| Second authorize request on a live SSO session | For a member of both organizations, a second authorize request with `organization:globex` returns a code with no login form, also with `prompt=none`. The new token has `organization: ["globex"]` and the same `sid`. The refresh token issued for `acme` keeps working and still yields `acme`. The end-to-end suite repeats this through the SPA's tenant switch on every pull request ([`docs/keycloak.md`](../../docs/keycloak.md)). |
-| Listing a user's organizations: the admin role it needs | `realm-management` `view-users` **and** `view-organizations`, plus the `kc-admin-api` client scope on the calling client; neither role alone opens it (see `identity-stack-directory` above). |
-| A token after the user is removed from its organization | The access token stays valid until it expires (300 s); `userinfo` and the next refresh answer `invalid_grant` "Invalid organization", so the `organization` claim does not survive a refresh. Measured below. |
-
-## An organization the user is not in
-
-Keycloak 26.8.2 never put an organization in a token for a user outside it, but it **did not
-refuse the request** in the way the server administration guide describes. `alice` is in
-`acme` only:
-
-| Request | Result |
-|---|---|
-| `organization:globex`, fresh login | Code and token are issued. The token has no `organization` claim and `organization:globex` is missing from `scope`. |
-| `organization:acme organization:globex`, fresh login | Token with `organization: ["acme"]`; the `globex` scope is dropped. |
-| `organization:globex` on a live session started for `acme` | The password page is shown again. After it, the token has no `organization` claim. |
-| The same with `prompt=none` | Redirect with `error=login_required`. |
-| `organization:nope` (no such organization) | Redirect with `error=invalid_scope` before any login. |
-
-A caller therefore has to treat a missing `organization` claim, or one that differs from what it
-asked for, as a refusal.
-
-## Other things seen
-
-- The public app clients get a refresh token in the standard flow (`expires_in` 300,
-  `refresh_expires_in` 1800 with realm defaults).
-- An authorize request without `code_challenge_method` is refused with `invalid_request`.
-- Session cookies are set `Secure; SameSite=None` although the origin is plain HTTP. Chromium
-  kept them for `keycloak.localhost`. `curl` with a cookie jar does not send them back, and the
-  login form then answers 400.
-
-## Leaving an organization while holding a token for it
-
-Measured on 2026-11-16 against `quay.io/keycloak/keycloak:26.8.2` with this realm and realm
-default lifetimes (access token 300 s). `alice` logged in through `member-app` for `acme`
-(token with `organization: ["acme"]`), then an admin removed her from `acme`:
-
-| Step | Observed |
-|---|---|
-| The access token she holds | Unchanged and still valid until its `exp`: it is a JWT the backend verifies with the realm's keys, and nothing revokes it. A portable permission on it holds for the rest of its lifetime, at most 300 s. |
-| `userinfo` with that access token | `400 invalid_grant`, "Invalid organization". |
-| Refresh with her refresh token | `400 invalid_grant`, "Invalid organization". No new token is issued, so the `organization` claim does not survive the refresh. |
-| She is added back to `acme`, same refresh token | `200`; the new token has `organization: ["acme"]` again. |
-
-So the window after removal is the remaining lifetime of the access token already issued, and
-it ends at the next refresh. For an organization-bound type the backend asks the Admin API on
-every request, so the window there is closed by the lookup.
+| Second authorize request on a live SSO session | For a member of both organizations, a second authorize request with `organization:globex` returns a code with no login form, also with `prompt=none`; the new token has `organization: ["globex"]` and the same `sid`. |
+| A token after the user is removed from its organization | The access token stays valid until it expires (300 s); `userinfo` and the next refresh answer `400 invalid_grant` "Invalid organization". Added back, the same refresh token works again. |
+| An organization the user is not in | Never put in a token, but not refused either: `organization:globex` for `alice` (in `acme` only) issues a token with no `organization` claim; with `organization:acme organization:globex` the `globex` scope is dropped; on a live session the password page is shown again, and with `prompt=none` the answer is `error=login_required`. `organization:nope` (no such organization) is `error=invalid_scope` before any login. A caller treats a missing `organization` claim, or one that differs from what it asked for, as a refusal. |
+| Refresh tokens | The public clients get one in the standard flow (`expires_in` 300, `refresh_expires_in` 1800 with realm defaults). |
+| PKCE | An authorize request without `code_challenge_method` is refused with `invalid_request`. |
+| Cookies | Session cookies are set `Secure; SameSite=None` although the origin is plain HTTP. Chromium kept them for `keycloak.localhost`. `curl` with a cookie jar does not send them back, and the login form then answers 400. |
