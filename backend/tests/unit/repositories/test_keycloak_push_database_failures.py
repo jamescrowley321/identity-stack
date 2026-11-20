@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.dependencies.keycloak_sync import RepositoryKeycloakLinks
+from app.dependencies.keycloak_sync import RepositoryKeycloakLinks, UncommittedWorkLost
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.role import Role
@@ -26,7 +26,7 @@ from app.repositories.provider import ProviderRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 from app.services.adapters.base import PROVIDER_SYNC, PROVIDER_SYNC_FAILED
-from app.services.adapters.keycloak import PROVIDER_NAME, KeycloakSyncAdapter, LinkRefused
+from app.services.adapters.keycloak import PROVIDER_NAME, KeycloakSyncAdapter, LinkRefused, LocalDatabaseError
 from app.services.memberships import restore_memberships
 from app.services.user import UserService
 
@@ -238,6 +238,73 @@ async def test_a_deactivation_whose_connection_drops_answers_provider_sync_faile
         user.id,
         UserStatus.inactive,
         PROVIDER_SYNC_FAILED,
+        1,
+    )
+
+
+async def test_a_lost_connection_under_an_unflushed_change_rolls_it_back_and_says_so(
+    async_engine, members, monkeypatch
+):
+    tenant, _role, users = members
+    monkeypatch.setattr(IdPLinkRepository, "sub_made_by", dropping_read)
+
+    async with sessions(async_engine)() as session:
+        row = await TenantRepository(session).get(tenant.id)
+        row.name = "renamed, not committed"
+        with pytest.raises(UncommittedWorkLost) as lost:
+            await RepositoryKeycloakLinks(session).linked_subject(users[0].id)
+        await session.commit()
+    async with sessions(async_engine)() as check:
+        held = (await TenantRepository(check).get(tenant.id)).name
+
+    assert (str(lost.value), held) == (
+        f"{CONNECTION_LOST}; the request's uncommitted changes were rolled back",
+        tenant.name,
+    )
+
+
+@pytest.mark.parametrize("flushed", [False, True], ids=["pending", "flushed"])
+async def test_a_lost_connection_under_an_uncommitted_row_rolls_it_back_and_says_so(
+    async_engine, members, monkeypatch, flushed
+):
+    _tenant, _role, users = members
+    monkeypatch.setattr(IdPLinkRepository, "sub_made_by", dropping_read)
+    added = Tenant(id=uuid.uuid4(), name=f"tenant-{uuid.uuid4().hex[:8]}")
+
+    async with sessions(async_engine)() as session:
+        session.add(added)
+        if flushed:
+            await session.flush()
+        with pytest.raises(UncommittedWorkLost):
+            await RepositoryKeycloakLinks(session).linked_subject(users[0].id)
+        await session.commit()
+    async with sessions(async_engine)() as check:
+        held = await TenantRepository(check).get(added.id)
+
+    assert held is None
+
+
+async def dropping_update(self, entity):
+    await self._session.execute(text("SELECT pg_terminate_backend(pg_backend_pid())"))
+    return entity
+
+
+async def test_a_link_write_that_loses_the_connection_leaves_the_requests_rows_as_committed(
+    async_engine, members, keycloak_provider, monkeypatch
+):
+    tenant, _role, _users = members
+    monkeypatch.setattr(TenantRepository, "update", dropping_update)
+
+    async with sessions(async_engine)() as session:
+        row = await TenantRepository(session).get(tenant.id)
+        with pytest.raises(LocalDatabaseError) as failure:
+            await RepositoryKeycloakLinks(session).link_organization(tenant.id, "organization")
+        loaded = (row.name, row.external_org_id, row.external_org_provider_id)
+        still_answers = (await session.execute(text("SELECT 1"))).scalar_one()
+
+    assert (str(failure.value), loaded, still_answers) == (
+        "the tenant link write failed in the service's database: the connection was lost (DBAPIError)",
+        (tenant.name, None, None),
         1,
     )
 
