@@ -470,7 +470,11 @@ share and revoke), so no credential makes anyone a document's owner; and the IdP
 which decide which account signs in as a person. `MACHINE_REFUSED_ROUTES` in
 `test_descope_backed_routes.py` lists them, and every other write of the application **MUST** be
 listed in `MACHINE_PERMITTED_WRITES` there with why a machine may make it. A Descope access-key
-session is not such a token: Descope has no `machine_client` reader (#699).
+session is refused on the same routes: Descope's `machine_client` reader
+(`providers.descope_access_key`) takes a Descope token that names no authentication method (`amr`,
+or `damr` under a template that overrides the system claims) for an access key's, since Descope
+stamps one on every user session and none on an access key's. Its grants still come from its
+claims, like every Descope principal's (#699).
 
 **Capabilities.** A route that serves an optional capability of the sync adapter (`Capability`
 in `app/services/adapters/base.py`: the machine credentials, the custom attributes of the profile

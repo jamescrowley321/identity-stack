@@ -12,6 +12,7 @@ import pytest
 from playwright.sync_api import APIRequestContext
 
 from app.services.adapters.base import Capability
+from tests.e2e.helpers.api import assert_refused_for_role
 from tests.e2e.not_applicable import descope_credentials_missing
 
 # --- Unauthenticated endpoint tests (no credentials needed) ---
@@ -261,6 +262,4 @@ class TestAdminEndpoints:
             # token was as green as the gate working. 502 is also out — an
             # authorization denial happens in the dependency, before any upstream
             # call, so it cannot legitimately be an upstream error.
-            assert resp.status == 403, (
-                f"{path} returned {resp.status} to a non-admin token, expected 403: {resp.text()[:200]}"
-            )
+            assert_refused_for_role(resp)

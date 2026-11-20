@@ -64,6 +64,7 @@ TENANT_ID = "51c5957b-684a-453f-8ab1-8f239999c4d8"
 
 ADMIN_CLAIMS = {
     "sub": "admin1",
+    "amr": ["email"],
     "dct": TENANT_ID,
     "tenants": {
         TENANT_ID: {"roles": ["admin"], "permissions": []},
@@ -72,6 +73,7 @@ ADMIN_CLAIMS = {
 
 OWNER_CLAIMS = {
     "sub": "owner1",
+    "amr": ["email"],
     "dct": TENANT_ID,
     "tenants": {
         TENANT_ID: {"roles": ["owner"], "permissions": []},
@@ -80,6 +82,7 @@ OWNER_CLAIMS = {
 
 VIEWER_CLAIMS = {
     "sub": "viewer1",
+    "amr": ["email"],
     "dct": TENANT_ID,
     "tenants": {
         TENANT_ID: {"roles": ["viewer"], "permissions": []},
@@ -88,6 +91,7 @@ VIEWER_CLAIMS = {
 
 OPERATOR_CLAIMS = {
     "sub": "operator1",
+    "amr": ["email"],
     "dct": TENANT_ID,
     "tenants": {
         TENANT_ID: {"roles": ["operator"], "permissions": []},
@@ -449,6 +453,7 @@ DESCOPE_TENANT_ID = "T3Bj8QOcyflY8V0bvSu1eEoHmjk6"
 
 DESCOPE_ADMIN_CLAIMS = {
     "sub": "admin1",
+    "amr": ["email"],
     "dct": DESCOPE_TENANT_ID,
     "tenants": {
         DESCOPE_TENANT_ID: {"roles": ["admin"], "permissions": []},

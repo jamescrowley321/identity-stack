@@ -45,6 +45,7 @@ TENANT_ID = "51c5957b-684a-453f-8ab1-8f239999c4d8"
 
 ADMIN_CLAIMS = {
     "sub": "user123",
+    "amr": ["email"],
     "dct": TENANT_ID,
     "tenants": {
         TENANT_ID: {"roles": ["admin"], "permissions": ["members.invite", "members.remove"]},
@@ -53,6 +54,7 @@ ADMIN_CLAIMS = {
 
 VIEWER_CLAIMS = {
     "sub": "user456",
+    "amr": ["email"],
     "dct": TENANT_ID,
     "tenants": {
         TENANT_ID: {"roles": ["viewer"], "permissions": ["projects.read"]},
@@ -61,6 +63,7 @@ VIEWER_CLAIMS = {
 
 OWNER_CLAIMS = {
     "sub": "owner1",
+    "amr": ["email"],
     "dct": TENANT_ID,
     "tenants": {
         TENANT_ID: {"roles": ["owner"], "permissions": ["members.invite", "members.remove"]},

@@ -27,6 +27,7 @@ from tests.e2e.helpers.descope_mgmt import (  # noqa: F401 - re-exported for cal
     E2E_TEST_TENANT_ID,
     LEAKED_ACCESS_KEY_PREFIX,
     LEAKED_USER_PREFIXES,
+    PERSON_USER_PREFIX,
     _auth_header,
     _mgmt_url,
     sweep_leaked_e2e_access_keys,
@@ -173,14 +174,119 @@ def create_authenticated_context(browser, frontend_url: str, access_token: str) 
     return context
 
 
-def get_admin_session_token(email: str = "", tenant_id: str = "") -> str:
-    """Get a Descope session token with admin/owner roles for E2E testing.
+# The roles of the run's two Descope principals in the test tenant: ``ADMIN`` and ``MEMBER``.
+ADMIN_ROLES = ("owner", "admin")
+MEMBER_ROLES = ("viewer",)
+
+
+def ensure_person(role_names: tuple[str, ...], tenant_id: str = "") -> str:
+    """The Descope test user holding exactly ``role_names`` in the test tenant, created when missing.
+
+    Returns its login id. One user per role set, kept across runs like
+    ``E2E_TEST_EMAIL`` and never swept: Descope allows a project five test users.
+    One found with any other tenants or roles is deleted and made again, so a
+    session's one tenant is the test tenant (its ``dct``) and its roles are these.
+    """
+    tenant_id = tenant_id or E2E_TEST_TENANT_ID
+    if not DESCOPE_MANAGEMENT_KEY:
+        raise RuntimeError("DESCOPE_MANAGEMENT_KEY must be set")
+    if not tenant_id:
+        raise RuntimeError("E2E_TEST_TENANT_ID must be set")
+    domain = E2E_TEST_EMAIL.rpartition("@")[2] or "example.com"
+    login_id = f"{PERSON_USER_PREFIX}{'-'.join(role_names)}@{domain}"
+    wanted = [{"tenantId": tenant_id, "roleNames": sorted(role_names)}]
+    with httpx.Client(timeout=30) as client:
+        loaded = client.get(_mgmt_url("/v1/mgmt/user"), headers=_auth_header(), params={"loginId": login_id})
+        if loaded.status_code == HTTPStatus.OK:
+            user = loaded.json().get("user", {})
+            held = [
+                {"tenantId": t.get("tenantId"), "roleNames": sorted(t.get("roleNames") or [])}
+                for t in user.get("userTenants") or []
+            ]
+            if user.get("test") and held == wanted:
+                return login_id
+            client.post(_mgmt_url("/v1/mgmt/user/delete"), headers=_auth_header(), json={"loginId": login_id})
+        created = client.post(
+            _mgmt_url("/v1/mgmt/user/create/test"),
+            headers=_auth_header(),
+            json={
+                "loginId": login_id,
+                "email": login_id,
+                "name": "E2E Person",
+                "verifiedEmail": True,
+                "userTenants": [{"tenantId": tenant_id, "roleNames": list(role_names)}],
+            },
+        )
+    if created.status_code != HTTPStatus.OK:
+        raise RuntimeError(f"Creating a test user failed: HTTP {created.status_code} {created.text[:200]}")
+    return login_id
+
+
+def otp_for_test_user(login_id: str) -> str:
+    """A one-time code a test user signs in with, by email OTP (Descope sends no message to a test user)."""
+    with httpx.Client(timeout=30) as client:
+        otp = client.post(
+            _mgmt_url("/v1/mgmt/tests/generate/otp"),
+            headers=_auth_header(),
+            json={"loginId": login_id, "deliveryMethod": "email"},
+        )
+    if otp.status_code != HTTPStatus.OK:
+        raise RuntimeError(f"Generating a test user's OTP failed: HTTP {otp.status_code} {otp.text[:200]}")
+    code = otp.json().get("code", "")
+    if not code:
+        raise RuntimeError("Generating a test user's OTP returned no code")
+    return code
+
+
+def enchanted_link_for_test_user(login_id: str, uri: str = "") -> str:
+    """An enchanted link to ``uri`` a test user signs in with (Descope sends no message to a test user)."""
+    with httpx.Client(timeout=30) as client:
+        generated = client.post(
+            _mgmt_url("/v1/mgmt/tests/generate/enchantedlink"),
+            headers=_auth_header(),
+            json={"loginId": login_id, "URI": uri},
+        )
+    if generated.status_code != HTTPStatus.OK:
+        raise RuntimeError(
+            f"Generating a test user's enchanted link failed: HTTP {generated.status_code} {generated.text[:200]}"
+        )
+    link = generated.json().get("link", "")
+    if not link:
+        raise RuntimeError("Generating a test user's enchanted link returned no link")
+    return link
+
+
+def get_user_session_token(role_names: tuple[str, ...]) -> str:
+    """A Descope USER session of the test user holding ``role_names`` in the test tenant (``ensure_person``).
+
+    The run's ``ADMIN`` (``ADMIN_ROLES``) and ``MEMBER`` (``MEMBER_ROLES``) are people:
+    an access-key session is a machine, which the backend refuses on ``/api/keys``
+    and the role and member routes before any role is read (#699).
+    """
+    login_id = ensure_person(role_names)
+    code = otp_for_test_user(login_id)
+    with httpx.Client(timeout=30) as client:
+        verified = client.post(
+            f"{DESCOPE_BASE_URL}/v1/auth/otp/verify/email",
+            headers={"Authorization": f"Bearer {DESCOPE_PROJECT_ID}"},
+            json={"loginId": login_id, "code": code},
+        )
+    if verified.status_code != HTTPStatus.OK:
+        raise RuntimeError(f"Verifying a test user's OTP failed: HTTP {verified.status_code} {verified.text[:200]}")
+    token = verified.json().get("sessionJwt", "")
+    if not token:
+        raise RuntimeError("Verifying a test user's OTP returned no sessionJwt")
+    return token
+
+
+def get_access_key_session_token(tenant_id: str = "") -> str:
+    """A Descope session exchanged for a new owner+admin access key of the test tenant: a machine.
 
     Strategy: create a temporary tenant-scoped access key with admin/owner roles
     via the Management API, then exchange it via Descope's access key exchange
-    endpoint. The resulting session JWT:
-    1. Is signed by Descope's project keys (verifiable via OIDC JWKS)
-    2. Contains dct and tenants claims needed by require_role()
+    endpoint. The resulting session JWT is signed by Descope's project keys and
+    carries the tenants claim require_role() reads, and no ``amr``: the backend
+    takes it for a machine (#699).
     """
     import uuid
 
@@ -251,22 +357,6 @@ def get_admin_session_token(email: str = "", tenant_id: str = "") -> str:
                 )
         except Exception as exc:  # noqa: BLE001 - never mask the original failure
             print(f"[E2E] LEAK: error deleting admin access key {key_name} ({key_id}): {exc!r}")
-
-    # Debug: log all decoded claims for CI diagnosis
-    try:
-        payload = _decode_jwt_payload(token)
-        print(f"[E2E] Admin token ALL claims: {list(payload.keys())}")
-        tenants_info = payload.get("tenants")
-        if isinstance(tenants_info, dict):
-            tenants_info = {k: v.get("roles", []) if isinstance(v, dict) else v for k, v in tenants_info.items()}
-        print(
-            f"[E2E] Admin token key claims: dct={payload.get('dct')}, "
-            f"tenants={tenants_info}, "
-            f"iss={payload.get('iss')}, aud={payload.get('aud')}, "
-            f"sub={payload.get('sub')}"
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"[E2E] Could not decode admin token: {exc}")
 
     return token
 

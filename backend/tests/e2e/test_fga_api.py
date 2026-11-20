@@ -1,6 +1,6 @@
 """E2E tests for FGA administration: schema, relations, and permission checks.
 
-These tests require DESCOPE_MANAGEMENT_KEY env var (for admin token via tenant-scoped access key).
+These tests require DESCOPE_MANAGEMENT_KEY env var (for the admin principal, an owner+admin test user).
 They exercise the real Descope FGA API via the backend's /api/fga/* endpoints.
 """
 

@@ -78,6 +78,11 @@ NO_SYNC_PROVIDER_PAGES = (
 DEFINITIONS_NOT_SYNCED = f"{NOT_THE_SYNC_PROVIDER}; changing the definitions also needs operator (#710)"
 DESCOPE_MANAGEMENT_API = "calls the Descope Management API itself; the run has no Descope project"
 DESCOPE_ACCESS_KEY = "is about a Descope access-key session, which no other provider has"
+DESCOPE_OIDC_SESSION = "signs a Descope test user in through Descope's hosted OIDC flow, which no other provider has"
+NO_CANONICAL_IDENTITY = (
+    "is about the Descope admin, a test user with no canonical identity; this provider's admin is a "
+    "seeded canonical user"
+)
 ORY_PROVIDER = "proves the Ory provider, which only the Descope run's backend configures"
 NO_CUSTOM_ATTRIBUTES = (
     "this run's backend syncs with Descope, whose custom attributes serve Descope principals only, so "
@@ -145,9 +150,11 @@ NOT_APPLICABLE: dict[str, dict[str, str]] = {
     # Keycloak's machine credentials are canonical clients of the realm (#680): both run there.
     "test_page_content.py::test_access_keys_page_loads": {ZITADEL: NO_MACHINE_CREDENTIALS},
     "test_api_endpoints.py::TestAdminEndpoints::test_keys_list_responds": {ZITADEL: NO_MACHINE_CREDENTIALS},
-    "test_identity_repository_ui.py::test_role_created_via_api_is_invisible_to_an_access_key_session": _both(
-        DESCOPE_ACCESS_KEY
+    "test_identity_repository_ui.py::test_role_created_via_api_is_invisible_to_an_admin_with_no_identity": _both(
+        NO_CANONICAL_IDENTITY
     ),
+    "test_descope_access_key.py": _both(DESCOPE_ACCESS_KEY),
+    "test_descope_oidc_session.py": _both(DESCOPE_OIDC_SESSION),
     # Documents and FGA run for every provider: OpenFGA serves the canonical runs' principals (#682).
 }
 

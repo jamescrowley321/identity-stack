@@ -76,6 +76,7 @@ def _unresolving_client(**kwargs) -> AsyncMock:
 
 ADMIN_CLAIMS = {
     "sub": "user123",
+    "amr": ["email"],
     "dct": "tenant-abc",
     "tenants": {
         "tenant-abc": {
@@ -87,6 +88,7 @@ ADMIN_CLAIMS = {
 
 OWNER_CLAIMS = {
     "sub": "owner1",
+    "amr": ["email"],
     "dct": "tenant-abc",
     "tenants": {
         "tenant-abc": {
@@ -98,6 +100,7 @@ OWNER_CLAIMS = {
 
 VIEWER_CLAIMS = {
     "sub": "user456",
+    "amr": ["email"],
     "dct": "tenant-abc",
     "tenants": {
         "tenant-abc": {
@@ -109,6 +112,7 @@ VIEWER_CLAIMS = {
 
 OTHER_TENANT_CLAIMS = {
     "sub": "user999",
+    "amr": ["email"],
     "dct": "tenant-xyz",
     "tenants": {
         "tenant-xyz": {
@@ -120,6 +124,7 @@ OTHER_TENANT_CLAIMS = {
 
 NO_TENANT_CLAIMS = {
     "sub": "user789",
+    "amr": ["email"],
     "tenants": {},
 }
 

@@ -197,6 +197,7 @@ def test_user_sweep_batches_user_ids_and_spares_the_fixture_user(descope):
                     "users": [
                         {"userId": "U_leak", "loginIds": ["e2e-invite-abc@example.com"]},
                         {"userId": "U_leak2", "loginIds": ["e2e-lifecycle-def@example.com"]},
+                        {"userId": "U_admin", "loginIds": ["e2e-signin-0a1b2c3d@example.com"]},
                         {"userId": "U_keep", "loginIds": ["keep-me@example.com"]},
                         {"userId": "U_real", "loginIds": ["someone@example.com"]},
                         {"userId": "", "loginIds": ["e2e-invite-noid@example.com"]},
@@ -209,8 +210,9 @@ def test_user_sweep_batches_user_ids_and_spares_the_fixture_user(descope):
 
     recorder = descope(handler)
 
-    assert mgmt.sweep_leaked_e2e_users() == 2
-    assert recorder.bodies_for("/user/delete/batch") == [{"userIds": ["U_leak", "U_leak2"]}]
+    assert mgmt.sweep_leaked_e2e_users() == 3
+    assert recorder.bodies_for("/user/search") == [{"limit": 500, "page": 0, "withTestUser": True}]
+    assert recorder.bodies_for("/user/delete/batch") == [{"userIds": ["U_leak", "U_leak2", "U_admin"]}]
 
 
 def test_large_backlog_is_chunked_and_fully_counted(descope):
@@ -232,3 +234,36 @@ def test_large_backlog_is_chunked_and_fully_counted(descope):
     sent = recorder.bodies_for("/role/delete/batch")
     assert [len(b["roleNames"]) for b in sent] == [100, 100, 50]
     assert [n for b in sent for n in b["roleNames"]] == [r["name"] for r in leaked]
+
+
+def test_user_sweep_reads_every_page_before_deleting(descope, monkeypatch, capsys):
+    """A project with more users than one page holds still has its leaked users found, and each is named."""
+    monkeypatch.setattr(mgmt, "_USER_SEARCH_PAGE_SIZE", 2)
+    pages = {
+        0: [
+            {"userId": "U_real", "loginIds": ["someone@example.com"]},
+            {"userId": "U_first", "loginIds": ["e2e-signin-aaaa@example.com"]},
+        ],
+        1: [
+            {"userId": "U_keep", "loginIds": ["keep-me@example.com"]},
+            {"userId": "U_second", "loginIds": ["e2e-invite-bbbb@example.com"]},
+        ],
+        2: [{"userId": "U_third", "loginIds": ["e2e-lifecycle-cccc@example.com"]}],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/mgmt/user/search":
+            return httpx.Response(200, json={"users": pages[json.loads(request.content)["page"]]})
+        if request.url.path == "/v1/mgmt/user/delete/batch":
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    recorder = descope(handler)
+
+    assert mgmt.sweep_leaked_e2e_users() == 3
+    assert [body["page"] for body in recorder.bodies_for("/user/search")] == [0, 1, 2]
+    assert recorder.bodies_for("/user/delete/batch") == [{"userIds": ["U_first", "U_second", "U_third"]}]
+    assert (
+        "[E2E] user sweep: deleting "
+        "['e2e-invite-bbbb@example.com', 'e2e-lifecycle-cccc@example.com', 'e2e-signin-aaaa@example.com']"
+    ) in capsys.readouterr().out

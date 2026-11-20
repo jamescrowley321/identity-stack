@@ -65,6 +65,7 @@ AUTH_HEADER = {"Authorization": "Bearer valid.token"}
 
 AUTHED_CLAIMS = {
     "sub": "user-1",
+    "amr": ["email"],
     "dct": "tenant-abc",
     "tenants": {"tenant-abc": {"roles": ["admin"], "permissions": []}},
 }

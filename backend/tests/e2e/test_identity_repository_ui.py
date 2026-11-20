@@ -67,7 +67,7 @@ def test_navigate_to_settings_page(admin_page: Page, frontend_url: str):
 # --- Test 2: Data display — create role via API, verify in UI ---
 
 
-def test_role_created_via_api_is_invisible_to_an_access_key_session(
+def test_role_created_via_api_is_invisible_to_an_admin_with_no_identity(
     admin_page: Page,
     admin_api_context: APIRequestContext,
     backend_url: str,
@@ -76,28 +76,23 @@ def test_role_created_via_api_is_invisible_to_an_access_key_session(
     """A role created through the admin API stays invisible to THIS browser session.
 
     This is a statement about the fixture's identity, not about where useRBAC
-    reads roles from. ``get_admin_session_token`` mints a tenant-scoped access
-    key, exchanges it for a session JWT and deletes the key, so the JWT's ``sub``
-    is the access key id (``K...``) rather than a Descope user id (``U...``).
+    reads roles from. ``get_admin_user_session_token`` signs in a test user it
+    has just created in Descope, which has no canonical identity.
 
     ``GET /api/identity`` answers from the canonical model — provider row, then
-    an IdP link on ``external_sub`` — and IdP links only ever come from Descope
-    *users* (``scripts/seed_descope.import_idp_links``). An access key is not a
-    user and cannot have one, and Descope is not in ``JIT_ENABLED_PROVIDERS``
-    (default ``{"ory"}``), so nothing provisions one on the fly. The endpoint
-    404s for this subject however the database is seeded. IdentityContext fails
-    closed on that, useTenants stays empty, ``useRBAC().isAdmin`` is false, and
-    the admin-gated ``Role Definitions`` card — the only place a role nobody is
-    assigned would show up — never renders.
+    an IdP link on ``external_sub`` — and IdP links come from Descope users only
+    when ``scripts/seed_descope.import_idp_links`` or the user webhook records
+    them, which neither reaches a user created during the run. Descope is not in
+    ``JIT_ENABLED_PROVIDERS`` (default ``{"ory"}``), so nothing provisions one on
+    the fly. IdentityContext fails closed on that, useTenants stays empty,
+    ``useRBAC().isAdmin`` is false, and the admin-gated ``Role Definitions``
+    card — the only place a role nobody is assigned would show up — never
+    renders. (The admin was an access-key session until #699, with the same
+    404: an access key is no user.)
 
-    An earlier version promised this test would start failing once #392 sourced
-    useRBAC from ``GET /api/identity``. It could not: #392 changed which payload
-    the client reads, and this session has no canonical identity to read from.
-    Verified live in #455.
-
-    So the 404 is asserted outright instead of being left implicit. If an
-    access-key session ever does resolve to a canonical identity, this test fails
-    on that assertion, and that is the point to rewrite it into a visibility
+    So the 404 is asserted outright instead of being left implicit. If the
+    admin ever does resolve to a canonical identity, this test fails on that
+    assertion, and that is the point to rewrite it into a visibility
     assertion. Browser-level coverage of #392 needs a session whose subject is a
     canonical user — tracked in #458.
     """
@@ -107,8 +102,8 @@ def test_role_created_via_api_is_invisible_to_an_access_key_session(
     identity_resp = admin_api_context.get(f"{backend_url}/api/identity")
     assert identity_resp.status == 404, (
         "This session is expected to have no canonical identity, but "
-        f"GET /api/identity returned {identity_resp.status}. If access-key "
-        "sessions now resolve, rewrite this test to assert the role IS visible."
+        f"GET /api/identity returned {identity_resp.status}. If the admin "
+        "now resolves, rewrite this test to assert the role IS visible."
     )
     assert identity_resp.json().get("detail") == "Identity not found", (
         f"Expected the endpoint's own 404, got body {identity_resp.text()!r}"

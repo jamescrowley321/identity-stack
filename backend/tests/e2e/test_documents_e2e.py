@@ -4,7 +4,7 @@ These tests exercise the real Descope FGA API and the backend's document + FGA e
 together, verifying that FGA relations are correctly created, checked, and cleaned up
 throughout the document lifecycle.
 
-Requires DESCOPE_MANAGEMENT_KEY env var (for admin token via tenant-scoped access key).
+Requires DESCOPE_MANAGEMENT_KEY env var (for the admin principal, an owner+admin test user).
 
 Known gaps (tracked):
 - Cross-tenant isolation (AC-13/14): requires second tenant fixture
