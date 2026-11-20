@@ -125,7 +125,9 @@ class IdentityResolutionService:
 
         A membership's ``external_org_id`` is its tenant's organization at the
         resolving provider (``provider_id``), and ``None`` when the tenant is
-        linked to no organization or to another provider's.
+        linked to no organization or to another provider's. Its ``status`` is the
+        tenant's: a suspended tenant is listed, and the authorization path refuses
+        to serve it (``app.dependencies.rbac``).
         """
         # Get all role assignments for this user
         assignments = await self._assignment_repository.list_by_user(user_id)
@@ -157,6 +159,7 @@ class IdentityResolutionService:
                     {
                         "tenant_id": str(tenant.id),
                         "tenant_name": tenant.name,
+                        "status": tenant.status.value,
                         "external_org_id": (
                             tenant.external_org_id if tenant.external_org_provider_id == provider_id else None
                         ),

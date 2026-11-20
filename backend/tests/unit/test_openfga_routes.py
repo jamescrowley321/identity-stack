@@ -36,6 +36,7 @@ from app.services.relationship_store import (
     RelationshipStoreKind,
 )
 from app.services.relationship_users import DirectoryUser
+from tests.helpers.canonical_payload import active_memberships
 from tests.unit.test_descope_backed_routes import (
     DESCOPE_ADMIN,
     DESCOPE_PROJECT,
@@ -109,6 +110,7 @@ class _Canonical:
             {
                 "user": {"id": CALLER, "status": "active"},
                 "roles": [{"tenant_id": TENANT_A, "role_name": "owner", "permissions": []}],
+                "tenant_memberships": active_memberships([{"tenant_id": TENANT_A}]),
             }
         )
 

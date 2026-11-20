@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from app.dependencies import rbac
 from app.dependencies.rbac import get_rbac_session, require_permission, require_role
 from app.errors.identity import NotFound
+from tests.helpers.canonical_payload import active_memberships
 
 
 def _make_request(claims, auth_type: str | None = None):
@@ -191,10 +192,12 @@ def _grants(*entries, status: str = "active") -> Ok:
     is how a missing status check stayed invisible, so it is built in here rather
     than added per test.
     """
+    roles = [{"tenant_id": t, "role_name": r, "permissions": list(p)} for t, r, p in entries]
     return Ok(
         {
             "user": {"id": "canonical-user-1", "status": status},
-            "roles": [{"tenant_id": t, "role_name": r, "permissions": list(p)} for t, r, p in entries],
+            "roles": roles,
+            "tenant_memberships": active_memberships(roles),
         }
     )
 

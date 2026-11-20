@@ -92,6 +92,7 @@ from app.services.relationship_store import RelationshipStoreKind
 from app.services.role import RoleService
 from app.services.sync_status import SyncStatusService
 from app.services.user import UserService
+from tests.helpers.canonical_payload import active_memberships
 
 DESCOPE_PROJECT = "P123"
 DESCOPE_ISSUER = f"https://api.descope.com/{DESCOPE_PROJECT}"
@@ -451,7 +452,13 @@ class _CanonicalStore:
 
     async def resolve(self, *, provider: str, sub: str):
         self.calls.append((provider, sub))
-        return Ok({"user": {"id": "canonical-user-1", "status": "active"}, "roles": self.roles})
+        return Ok(
+            {
+                "user": {"id": "canonical-user-1", "status": "active"},
+                "roles": self.roles,
+                "tenant_memberships": active_memberships(self.roles),
+            }
+        )
 
 
 @pytest.fixture

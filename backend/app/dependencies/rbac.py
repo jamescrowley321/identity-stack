@@ -54,6 +54,7 @@ from app.knobs import knob_set
 from app.logbook import logbook
 from app.middleware.providers import ProviderTokenConfig
 from app.models.database import get_session_factory
+from app.models.identity.tenant import TenantStatus
 from app.models.identity.user import UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
@@ -158,6 +159,8 @@ async def _load_machine_memberships(
         logger.warning("canonical role resolution refused a machine credential not in force (sub=%r)", sub)
         raise HTTPException(status_code=403, detail=NO_TENANT_CONTEXT)
     tenant_id = str(credential.tenant_id)
+    tenant = await TenantRepository(session).get(credential.tenant_id)
+    active = tenant is not None and tenant.status == TenantStatus.active
     grants = await repository.permissions(credential.id)
     if credentials.holdable_roles(tuple(grants)).is_error():
         # A role deleted or renamed since the credential was made: it holds none, or one no
@@ -170,6 +173,7 @@ async def _load_machine_memberships(
             for role_name, permissions in grants.items()
         ),
         tenants=frozenset({tenant_id}),
+        active_tenants=frozenset({tenant_id}) if active else frozenset(),
     )
 
 
@@ -187,6 +191,8 @@ async def _load_canonical_memberships(
 
     Raises 401 when the token names no subject, and 403 when there is no database,
     no canonical identity for the subject, or the canonical user is not active.
+    A tenant that is not active stays among the memberships but out of
+    ``active_tenants``, so the resolver serves it to no tenant-scoped request.
     A token issued to a machine credential's client is decided from that
     credential alone (``_load_machine_memberships``), never from a user's
     memberships. Which tenant the request is for is the resolver's decision, not
@@ -236,6 +242,7 @@ async def _load_canonical_memberships(
         raise HTTPException(status_code=403, detail=NO_TENANT_CONTEXT)
 
     user_id = (result.ok.get("user") or {}).get("id")
+    tenant_memberships = result.ok.get("tenant_memberships", [])
     return CanonicalMemberships(
         user_id=user_id if isinstance(user_id, str) and user_id else None,
         grants=tuple(
@@ -246,9 +253,15 @@ async def _load_canonical_memberships(
             )
             for grant in result.ok.get("roles", [])
         ),
-        tenant_names={
-            membership["tenant_id"]: membership["tenant_name"] for membership in result.ok.get("tenant_memberships", [])
-        },
+        tenant_names={membership["tenant_id"]: membership["tenant_name"] for membership in tenant_memberships},
+        # A suspended tenant, or one whose status is missing or unknown, is not
+        # served to its members (``resolve_tenant_access``): the resolver keeps its
+        # grants and leaves it out of ``active_tenants``.
+        active_tenants=frozenset(
+            membership["tenant_id"]
+            for membership in tenant_memberships
+            if membership.get("status") == TenantStatus.active.value
+        ),
     )
 
 

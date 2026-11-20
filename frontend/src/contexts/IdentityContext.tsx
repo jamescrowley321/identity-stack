@@ -10,7 +10,13 @@ import type { ReactNode } from "react";
 import { useAuth } from "react-oidc-context";
 import { useApiClient } from "../hooks/useApiClient";
 import { TenantSelectorContext } from "./TenantSelector";
-import { initialTenantId, readStoredTenantId, signInOrganization, storeTenantId } from "./tenantSelection";
+import {
+  initialTenantId,
+  readStoredTenantId,
+  servableMemberships,
+  signInOrganization,
+  storeTenantId,
+} from "./tenantSelection";
 
 /**
  * Shape of the canonical `GET /api/identity` payload (provider-neutral).
@@ -31,6 +37,8 @@ export interface CanonicalTenantMembership {
   tenant_name: string;
   /** The tenant's organization at the caller's provider; `null` (or absent) when it has none there. */
   external_org_id?: string | null;
+  /** The tenant's canonical status (`active`, `suspended`); absent from an older payload. */
+  status?: string;
 }
 
 export interface CanonicalLinkedIdp {
@@ -166,7 +174,7 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
   // Honor the client-side selection only while it remains a valid membership;
   // otherwise start on the sign-in's organization, else the first membership.
   const currentTenantId = useMemo(
-    () => initialTenantId(identity?.tenant_memberships ?? [], selectedTenantId, organization),
+    () => initialTenantId(servableMemberships(identity?.tenant_memberships ?? []), selectedTenantId, organization),
     [identity, selectedTenantId, organization],
   );
 

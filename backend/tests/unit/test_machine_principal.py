@@ -19,11 +19,12 @@ from fastapi.testclient import TestClient
 
 from app.dependencies import identity, rbac
 from app.dependencies.rbac import MACHINE_PRINCIPAL_REFUSED, MACHINE_ROLES_REFUSED, get_rbac_session
-from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER
+from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER, TenantRefusal
 from app.domain import credentials
 from app.main import app as shipped_app
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.providers import KEYCLOAK_MACHINE_CLIENT_PREFIX, descope_config, keycloak_config
+from app.models.identity.tenant import Tenant, TenantStatus
 from tests.helpers.keycloak_model import API_AUDIENCE, SPA_CLIENT_ID
 from tests.helpers.local_op import RS256, LocalProvider, local_provider
 
@@ -72,6 +73,18 @@ class _Credentials:
         return type(self).grants
 
 
+class _Tenants:
+    """Stands in for TenantRepository: the credential's tenant, in ``status``."""
+
+    status: TenantStatus = TenantStatus.active
+
+    def __init__(self, _session) -> None:
+        pass
+
+    async def get(self, tenant_id):
+        return Tenant(id=tenant_id, name="Acme", status=type(self).status) if tenant_id == ACME else None
+
+
 class _NoUserLookups:
     def __init__(self, **_kwargs) -> None:
         raise AssertionError("a machine token must not be resolved as a user")
@@ -88,6 +101,8 @@ def stored(monkeypatch) -> type[_Credentials]:
     monkeypatch.setattr(rbac, "CANONICAL_RBAC_PROVIDERS", frozenset({"ory", "keycloak"}))
     monkeypatch.setattr(rbac, "MachineCredentialRepository", _Credentials)
     monkeypatch.setattr(rbac, "IdentityResolutionService", _NoUserLookups)
+    monkeypatch.setattr(rbac, "TenantRepository", _Tenants)
+    monkeypatch.setattr(_Tenants, "status", TenantStatus.active)
     monkeypatch.setattr(_Credentials, "credential", CREDENTIAL)
     monkeypatch.setattr(_Credentials, "lookups", [])
     return _Credentials
@@ -183,6 +198,14 @@ class TestARefusedCredential:
         response = _get(client, ADMIN_ROLE, _machine_token(op))
 
         assert (response.status_code, response.json()) == (403, NO_TENANT)
+
+    @pytest.mark.parametrize("tenant", [None, str(ACME)], ids=["unselected", "selected"])
+    def test_its_suspended_tenant_is_not_served(self, op, client, stored, monkeypatch, tenant):
+        monkeypatch.setattr(_Tenants, "status", TenantStatus.suspended)
+
+        response = _get(client, ADMIN_ROLE, _machine_token(op), tenant=tenant)
+
+        assert (response.status_code, response.json()) == (403, {"detail": TenantRefusal.SUSPENDED})
 
     def test_a_persons_subject_on_a_machine_clients_token_grants_nothing(self, op, client, stored):
         """A user signing in through a machine client (were its flows ever switched on) is no person here."""
