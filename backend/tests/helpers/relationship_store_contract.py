@@ -84,15 +84,20 @@ class RelationshipStoreContract(FreshIds):
         await store.write(ids["tenant"], DOCUMENT, ids["other_doc"], "editor", ids["bob"])
         await store.write(ids["other_tenant"], DOCUMENT, ids["other_doc"], "viewer", ids["alice"])
 
-        assert await store.objects(ids["tenant"], DOCUMENT, "can_view", ids["alice"]) == [ids["doc"]]
-        assert await store.objects(ids["tenant"], DOCUMENT, "can_delete", ids["bob"]) == []
+        candidates = [ids["doc"], ids["other_doc"]]
+        assert await store.objects(ids["tenant"], DOCUMENT, "can_view", ids["alice"], candidates=candidates) == [
+            ids["doc"]
+        ]
+        assert await store.objects(ids["tenant"], DOCUMENT, "can_delete", ids["bob"], candidates=candidates) == []
 
     async def test_tenants_never_share_an_object(self, store: RelationshipStore, ids):
         await store.write(ids["tenant"], DOCUMENT, ids["doc"], "owner", ids["alice"])
 
         assert await store.check(ids["other_tenant"], DOCUMENT, ids["doc"], "owner", ids["alice"]) is False
         assert await store.all_relations(ids["other_tenant"], DOCUMENT, ids["doc"]) == []
-        assert await store.objects(ids["other_tenant"], DOCUMENT, "can_view", ids["alice"]) == []
+        assert (
+            await store.objects(ids["other_tenant"], DOCUMENT, "can_view", ids["alice"], candidates=[ids["doc"]]) == []
+        )
 
     async def test_the_schema_reads_as_text_naming_the_document_relations(self, store: RelationshipStore):
         schema = await store.read_schema()

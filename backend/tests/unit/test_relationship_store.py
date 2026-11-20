@@ -414,7 +414,8 @@ class TestDescopeStore:
             {"resource": None},
             "junk",
         ]
-        assert await DescopeRelationshipStore(client).objects("t1", "document", "can_view", "u1") == ["d1"]
+        store = DescopeRelationshipStore(client)
+        assert await store.objects("t1", "document", "can_view", "u1", candidates=["d0", "d1", "d2"]) == ["d1"]
 
     async def test_relations_are_typed(self, client):
         client.list_all_relations.return_value = [
@@ -572,13 +573,62 @@ class TestOpenFgaStore:
         ]
         assert [body["tuple_key"] for body in bodies] == [{"object": "document:t1/d1"}] * 2
 
-    async def test_objects_are_the_tenants_own_ids(self):
-        def answer(_request: httpx.Request) -> httpx.Response:
+    async def test_objects_are_the_candidates_batch_checked_in_pages(self):
+        """Every candidate is checked, 50 to a BatchCheck: no ListObjects cap can drop one."""
+        candidates = [f"d{n}" for n in range(120)]
+        bodies: list[dict] = []
+
+        def answer(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            bodies.append((request.url.path, body))
+            # Allow the even-numbered documents.
             return httpx.Response(
-                200, json={"objects": ["document:t1/d1", "document:t2/d2", "document:t1/", "folder:t1/f"]}
+                200,
+                json={
+                    "result": {
+                        check["correlation_id"]: {"allowed": int(check["tuple_key"]["object"].split("/d")[1]) % 2 == 0}
+                        for check in body["checks"]
+                    }
+                },
             )
 
-        assert await _openfga(answer).objects("t1", "document", "can_view", "u1") == ["d1"]
+        held = await _openfga(answer).objects("t1", "document", "can_view", "u1", candidates=candidates)
+
+        assert held == [f"d{n}" for n in range(0, 120, 2)]
+        assert [path for path, _ in bodies] == ["/stores/store-1/batch-check"] * 3
+        checked = [check["tuple_key"] for _, body in bodies for check in body["checks"]]
+        assert checked == [
+            {"user": "user:u1", "relation": "can_view", "object": f"document:t1/d{n}"} for n in range(120)
+        ]
+        assert [len(body["checks"]) for _, body in bodies] == [50, 50, 20]
+        assert {body["authorization_model_id"] for _, body in bodies} == {"model-1"}
+
+    async def test_no_candidates_asks_nothing(self):
+        def answer(_request: httpx.Request) -> httpx.Response:
+            raise AssertionError("no call expected")
+
+        assert await _openfga(answer).objects("t1", "document", "can_view", "u1", candidates=[]) == []
+
+    @pytest.mark.parametrize(
+        "result",
+        [
+            {"0": {"allowed": True}, "1": {"error": {"input_error": "validation_error", "message": "x"}}},
+            {"0": {"allowed": True}},
+            {},
+        ],
+        ids=["a-check-errs", "a-check-is-missing", "no-result"],
+    )
+    async def test_a_check_left_unanswered_fails_the_list(self, result):
+        def answer(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"result": result} if result else {})
+
+        with pytest.raises(RelationshipStoreError) as caught:
+            await _openfga(answer).objects("t1", "document", "can_view", "u1", candidates=["d0", "d1"])
+
+        assert (caught.value.kind, caught.value.detail) == (
+            RelationshipStoreErrorKind.UNAVAILABLE,
+            "OpenFGA did not answer every check",
+        )
 
     async def test_the_schema_is_read_only(self):
         with pytest.raises(RelationshipStoreError) as caught:
