@@ -32,7 +32,11 @@ def _mgmt_url(path: str) -> str:
 # Login-id prefixes for users the E2E suite creates as fixtures. Anything
 # matching these is disposable by construction — the suffix is a random uuid4
 # fragment, so a surviving one can only be litter from an earlier run.
-LEAKED_USER_PREFIXES = ("e2e-invite-", "e2e-lifecycle-")
+LEAKED_USER_PREFIXES = ("e2e-invite-", "e2e-lifecycle-", "e2e-admin-")
+
+# Login-id prefix of the owner+admin test user the run signs in as
+# (``auth.get_admin_user_session_token``): one per sign-in, swept with the rest.
+ADMIN_USER_PREFIX = "e2e-admin-"
 
 # Name prefix for the throwaway owner+admin key `get_admin_session_token` mints
 # once per session. The suffix is a uuid4 fragment, so a survivor can only be
@@ -222,7 +226,8 @@ def sweep_leaked_e2e_users() -> int:
         response = client.post(
             _mgmt_url("/v2/mgmt/user/search"),
             headers=_auth_header(),
-            json={"limit": 500, "page": 0},
+            # The admin principal is a test user, which a search leaves out unless asked.
+            json={"limit": 500, "page": 0, "withTestUser": True},
         )
         if response.status_code != HTTPStatus.OK:
             print(f"[E2E] user sweep: search returned {response.status_code}, skipping")

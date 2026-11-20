@@ -1,6 +1,6 @@
 """E2E tests for RBAC administration: CRUD lifecycle and auth enforcement.
 
-These tests require DESCOPE_MANAGEMENT_KEY env var (for admin token via tenant-scoped access key).
+These tests require DESCOPE_MANAGEMENT_KEY env var (for the admin principal, an owner+admin test user).
 They exercise the real Descope API via the backend's /api/roles and /api/permissions endpoints.
 
 NOTE: Descope's /v1/mgmt/role/all and /v1/mgmt/permission/all endpoints return 500 (E010009)

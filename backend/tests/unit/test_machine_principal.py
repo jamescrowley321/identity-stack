@@ -14,16 +14,24 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from expression import Ok
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.dependencies import identity, rbac
+from app.dependencies.identity import get_machine_credential_service, get_member_directory
 from app.dependencies.rbac import MACHINE_PRINCIPAL_REFUSED, MACHINE_ROLES_REFUSED, get_rbac_session
 from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER
 from app.domain import credentials
 from app.main import app as shipped_app
 from app.middleware.auth import TokenValidationMiddleware
-from app.middleware.providers import KEYCLOAK_MACHINE_CLIENT_PREFIX, descope_config, keycloak_config
+from app.middleware.providers import (
+    KEYCLOAK_MACHINE_CLIENT_PREFIX,
+    descope_access_key,
+    descope_config,
+    keycloak_config,
+)
+from app.services.machine_credentials import MachineCredentials, MachineCredentialService
 from tests.helpers.keycloak_model import API_AUDIENCE, SPA_CLIENT_ID
 from tests.helpers.local_op import RS256, LocalProvider, local_provider
 
@@ -302,3 +310,181 @@ class TestAMachineChangesNoRelationOrLink:
         )
 
         _assert_refused_as_a_machine(response, stored)
+
+
+# --- Descope access-key sessions (#699) ------------------------------------------------
+#
+# An access key exchanged for a session (POST /v1/auth/accesskey/exchange) is signed by
+# the project's keys on the bare project id, with ``drn`` DS like a user's session. What
+# tells them apart is ``amr``: Descope stamps it on every user session and none on an
+# access key's (docs.descope.com/management/token; the live claims of the e2e admin's
+# access-key session were drn, exp, iat, iss, rexp, sub and tenants).
+
+DESCOPE_PROJECT = "P2machine"
+DESCOPE_TENANT = "T2acme"
+ACCESS_KEY_ID = "K2accesskey"
+DESCOPE_USER_ID = "U2person"
+
+
+def _descope_session(op: LocalProvider, **extra) -> str:
+    """A Descope session token of an owner+admin of ``DESCOPE_TENANT``, as the exchange or a sign-in returns it."""
+    claims = {
+        "iss": DESCOPE_PROJECT,
+        "drn": "DS",
+        "sub": ACCESS_KEY_ID,
+        "tenants": {DESCOPE_TENANT: {"roles": ["owner", "admin"], "permissions": []}},
+    }
+    return op.token(RS256, {**claims, **extra})
+
+
+def _user_session(op: LocalProvider) -> str:
+    return _descope_session(op, sub=DESCOPE_USER_ID, amr=["email"])
+
+
+class _AccessKeys(MachineCredentials):
+    """Descope's access keys, recording every call."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def create(self, *, tenant_id, name, expire_time, role_names):
+        self.calls.append("create")
+        return Ok({"key": {"id": "K2successor"}, "cleartext": "secret"})
+
+    async def list(self, *, tenant_id):
+        self.calls.append("list")
+        return Ok({"keys": []})
+
+    async def get(self, *, tenant_id, credential_id):
+        self.calls.append("get")
+        return Ok({"key": {"id": credential_id}})
+
+    async def set_active(self, *, tenant_id, credential_id, active):
+        self.calls.append("set_active")
+        return Ok(None)
+
+    async def delete(self, *, tenant_id, credential_id):
+        self.calls.append("delete")
+        return Ok(None)
+
+
+class _Members:
+    """Descope's member directory, recording every call."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def list_members(self, tenant_id):
+        self.calls.append("list_members")
+        return Ok({"members": []})
+
+
+@pytest.fixture
+def descope_stores() -> tuple[_AccessKeys, _Members]:
+    return _AccessKeys(), _Members()
+
+
+@pytest.fixture
+def descope_client(op, descope_stores, monkeypatch) -> TestClient:
+    """The shipped routes behind the shipped middleware, Descope's keys moved to the loopback provider."""
+    monkeypatch.setattr(identity, "SYNC_PROVIDER", "descope")
+    keys, members = descope_stores
+    app = FastAPI()
+    for exception, handler in shipped_app.exception_handlers.items():
+        app.add_exception_handler(exception, handler)
+    app.include_router(shipped_app.router)
+    app.state.descope_client = object()
+    app.dependency_overrides[get_machine_credential_service] = lambda: MachineCredentialService(keys)
+    app.dependency_overrides[get_member_directory] = lambda: members
+    descope = replace(
+        descope_config(DESCOPE_PROJECT),
+        disco_address=op.disco_address,
+        accepted_issuers=frozenset({op.issuer, DESCOPE_PROJECT}),
+    )
+    app.add_middleware(TokenValidationMiddleware, providers=[descope])
+    return TestClient(app)
+
+
+def _assert_machine_refused(response) -> None:
+    assert (response.status_code, response.json()["type"], response.json()["detail"]) == (
+        403,
+        "/errors/forbidden",
+        MACHINE_PRINCIPAL_REFUSED,
+    )
+
+
+class TestADescopeAccessKeySessionIsAMachine:
+    """An owner/admin access key would otherwise mint its successor and manage its siblings, roles and members."""
+
+    @pytest.mark.parametrize(("method", "path"), KEY_ROUTES)
+    def test_every_key_route_refuses_it(self, op, descope_client, descope_stores, method, path):
+        response = descope_client.request(
+            method,
+            path,
+            json={"name": "successor", "expire_time": 4_102_444_800, "role_names": ["admin"]},
+            headers={"Authorization": f"Bearer {_descope_session(op)}"},
+        )
+
+        _assert_machine_refused(response)
+        assert descope_stores[0].calls == []
+
+    @pytest.mark.parametrize(
+        ("method", "path", "body"), ROLE_AND_MEMBER_ROUTES, ids=[f"{m} {p}" for m, p, _ in ROLE_AND_MEMBER_ROUTES]
+    )
+    def test_every_role_and_member_route_refuses_it(self, op, descope_client, descope_stores, method, path, body):
+        response = descope_client.request(
+            method, path, json=body, headers={"Authorization": f"Bearer {_descope_session(op)}"}
+        )
+
+        _assert_machine_refused(response)
+        assert descope_stores[1].calls == []
+
+    def test_an_empty_authentication_method_list_names_no_person(self, op, descope_client):
+        response = descope_client.get("/api/keys", headers={"Authorization": f"Bearer {_descope_session(op, amr=[])}"})
+
+        _assert_machine_refused(response)
+
+    def test_its_grants_still_serve_the_routes_a_machine_may_use(self, op, descope_client):
+        response = descope_client.get(ADMIN_ROLE, headers={"Authorization": f"Bearer {_descope_session(op)}"})
+
+        assert (response.status_code, response.json()) == (200, {"roles": ["owner", "admin"]})
+
+
+class TestADescopeUserSessionIsAPerson:
+    def test_it_lists_the_tenants_keys(self, op, descope_client, descope_stores):
+        response = descope_client.get("/api/keys", headers={"Authorization": f"Bearer {_user_session(op)}"})
+
+        assert (response.status_code, response.json()) == (200, {"keys": []})
+        assert descope_stores[0].calls == ["list"]
+
+    def test_it_lists_the_tenants_members(self, op, descope_client, descope_stores):
+        response = descope_client.get("/api/members", headers={"Authorization": f"Bearer {_user_session(op)}"})
+
+        assert (response.status_code, response.json()) == (200, {"members": []})
+        assert descope_stores[1].calls == ["list_members"]
+
+
+class TestDescopeAccessKeyReader:
+    @pytest.mark.parametrize(
+        ("claims", "access_key"),
+        [
+            ({"sub": ACCESS_KEY_ID}, ACCESS_KEY_ID),
+            ({"sub": "ignored", "dsub": ACCESS_KEY_ID}, ACCESS_KEY_ID),
+            ({"sub": ACCESS_KEY_ID, "amr": []}, ACCESS_KEY_ID),
+            ({"sub": ACCESS_KEY_ID, "amr": "email"}, ACCESS_KEY_ID),
+            ({}, ""),
+            ({"sub": DESCOPE_USER_ID, "amr": ["email"]}, None),
+            ({"sub": DESCOPE_USER_ID, "damr": ["oauth"]}, None),
+        ],
+        ids=[
+            "no amr",
+            "subject overridden by a template",
+            "empty amr",
+            "amr not a list",
+            "no subject either",
+            "user session",
+            "user session under a template overriding amr",
+        ],
+    )
+    def test_a_session_naming_no_authentication_method_is_an_access_keys(self, claims, access_key):
+        assert descope_access_key(claims) == access_key

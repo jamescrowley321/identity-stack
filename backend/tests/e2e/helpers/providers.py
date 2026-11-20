@@ -11,10 +11,11 @@ The two principals:
 - ``MEMBER``: signed in, with no admin role in the tenant it acts in;
 - ``ADMIN``: owner or admin of the tenant it acts in.
 
-Descope keeps exactly what the suite did before (``helpers/auth.py``): a
-client-credentials token for the member, an exchanged tenant access key for the
-admin, tokens injected into the SPA's session storage, the same local skips and
-the same CI credential check. Keycloak and Zitadel need no credential beyond what
+Descope keeps what the suite did before (``helpers/auth.py``): a
+client-credentials token for the member, a test user's session for the admin
+(an access-key session is a machine, refused the admin routes: #699), tokens
+injected into the SPA's session storage, the same local skips and the same CI
+credential check. Keycloak and Zitadel need no credential beyond what
 their applied Terraform root outputs: both principals are the fixture's
 two-tenant user, signed in through the SPA's client and the provider's own
 forms, naming the tenant it acts in by ``X-Tenant-ID``. They fail the run, never
@@ -66,8 +67,8 @@ class FailedSignIns:
     """Each principal signs in until its first failure; later attempts fail at once.
 
     The token fixtures are per test, so without this a failing sign-in would be
-    retried by every test: for Descope's admin that is a new owner+admin access
-    key on the shared project per test, each able to wait out a timeout. A pytest
+    retried by every test: for Descope's admin that is a new owner+admin test user
+    on the shared project per test, each able to wait out a timeout. A pytest
     skip or fail raised by ``sign_in`` is an outcome, not a failure, and passes
     through unrecorded.
     """
@@ -259,8 +260,7 @@ class DescopeProvider(E2EProvider):
 
     def __init__(self, backend_url: str, frontend_url: str) -> None:
         super().__init__(backend_url, frontend_url)
-        self._tokens: dict[str, str] = {}
-        self._failed = FailedSignIns()
+        self._tokens = SignedInTokens()
 
     @property
     def _has_mgmt_key(self) -> bool:
@@ -308,25 +308,22 @@ class DescopeProvider(E2EProvider):
         return ensure_test_user()
 
     def access_token(self, principal: str, request: pytest.FixtureRequest) -> str:
-        """One token per principal for the whole run, as the suite always had.
+        """Each principal's token, signed in again once it is about to expire (``SignedInTokens``).
 
-        A failed sign-in is tried once per run too, as when the token fixtures
-        were session-scoped; a skip (credential not set) still skips each test.
+        A failed sign-in is tried once per run; a skip (credential not set) still
+        skips each test.
         """
-        if principal not in self._tokens:
-            self._tokens[principal] = self._failed.attempt(principal, lambda: self._new_token(principal))
-        return self._tokens[principal]
+        return self._tokens.get(principal, lambda: self._new_token(principal))
 
     def _new_token(self, principal: str) -> str:
-        from tests.e2e.helpers.auth import get_admin_session_token, get_oidc_access_token
+        from tests.e2e.helpers.auth import get_admin_user_session_token, get_oidc_access_token
 
         if principal == ADMIN:
-            # A tenant-scoped access key with owner+admin, exchanged for a session
-            # token: it passes OIDC validation AND carries the dct/tenants claims
-            # require_role() reads.
+            # A test user holding owner+admin in the tenant, signed in: a person, whose
+            # session carries the tenants claim require_role() reads.
             if not self._has_mgmt_key:
                 pytest.skip("DESCOPE_MANAGEMENT_KEY not set")
-            return get_admin_session_token()
+            return get_admin_user_session_token()
         # Client credentials: an OIDC-compatible token with no tenant claims.
         if not self._has_client_creds:
             pytest.skip("DESCOPE_CLIENT_ID/DESCOPE_CLIENT_SECRET not set")

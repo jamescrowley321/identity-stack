@@ -107,7 +107,8 @@ Three defaults are pending the owner's answer (epic identity-stack#672, "Owner d
 - A deployment serves the member and role routes to one provider's principals: the sync
   provider's. Any other principal is refused 403 there, and its SPA shows no Members or Roles page.
   CI's Zitadel job is such a deployment: its backend syncs to Descope (identity-stack#709).
-- Descope access-key sessions are not machine principals under these rules: Descope has no
-  `machine_client` reader, so such a session is served as its claims say (identity-stack#699).
+- Descope access-key sessions are machine principals under these rules: Descope's `machine_client`
+  reader takes a session that names no authentication method (`amr`) for an access key's, so it
+  is refused where a machine credential is (identity-stack#699).
 - An Ory or Keycloak deployment that adds FGA needs an OpenFGA server and the applied
   `infra/openfga` root, and starts with no relations.

@@ -197,6 +197,7 @@ def test_user_sweep_batches_user_ids_and_spares_the_fixture_user(descope):
                     "users": [
                         {"userId": "U_leak", "loginIds": ["e2e-invite-abc@example.com"]},
                         {"userId": "U_leak2", "loginIds": ["e2e-lifecycle-def@example.com"]},
+                        {"userId": "U_admin", "loginIds": ["e2e-admin-0a1b2c3d@example.com"]},
                         {"userId": "U_keep", "loginIds": ["keep-me@example.com"]},
                         {"userId": "U_real", "loginIds": ["someone@example.com"]},
                         {"userId": "", "loginIds": ["e2e-invite-noid@example.com"]},
@@ -209,8 +210,9 @@ def test_user_sweep_batches_user_ids_and_spares_the_fixture_user(descope):
 
     recorder = descope(handler)
 
-    assert mgmt.sweep_leaked_e2e_users() == 2
-    assert recorder.bodies_for("/user/delete/batch") == [{"userIds": ["U_leak", "U_leak2"]}]
+    assert mgmt.sweep_leaked_e2e_users() == 3
+    assert recorder.bodies_for("/user/search") == [{"limit": 500, "page": 0, "withTestUser": True}]
+    assert recorder.bodies_for("/user/delete/batch") == [{"userIds": ["U_leak", "U_leak2", "U_admin"]}]
 
 
 def test_large_backlog_is_chunked_and_fully_counted(descope):

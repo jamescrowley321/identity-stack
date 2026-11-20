@@ -403,18 +403,21 @@ def _bearer(claims: dict) -> dict[str, str]:
 ORY_OWNER = {"iss": ORY_ISSUER, "aud": ORY_AUDIENCE, "sub": ORY_SUB}
 DESCOPE_MEMBER = {
     "iss": DESCOPE_ISSUER,
+    "amr": ["email"],
     "sub": "descope-user",
     "dct": "t1",
     "tenants": {"t1": {"roles": ["member"], "permissions": ["documents.read"]}},
 }
 DESCOPE_OPERATOR = {
     "iss": DESCOPE_ISSUER,
+    "amr": ["email"],
     "sub": "descope-operator",
     "dct": "t1",
     "tenants": {"t1": {"roles": ["operator"], "permissions": []}},
 }
 DESCOPE_ADMIN = {
     "iss": DESCOPE_ISSUER,
+    "amr": ["email"],
     "sub": "descope-admin",
     "dct": "t1",
     "tenants": {"t1": {"roles": ["admin"], "permissions": []}},
@@ -1160,6 +1163,7 @@ ASSIGNMENT_PATHS = sorted(ASSIGNMENT_ANSWERS)
 def _descope_token_in_tenant_a(roles: list[str]) -> dict:
     return {
         "iss": DESCOPE_ISSUER,
+        "amr": ["email"],
         "sub": "descope-tenant-a",
         "dct": TENANT_A,
         "tenants": {TENANT_A: {"roles": roles, "permissions": []}},

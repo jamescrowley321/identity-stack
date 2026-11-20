@@ -81,7 +81,7 @@ GATED_PAGES = {
 }
 
 # Whether the SPA shows each run's admin fixture as an admin of its tenant. The
-# Descope run's admin is an access-key session, which the SPA shows no admin role:
+# Descope run's admin is a test user with no canonical identity, which the SPA shows no admin role:
 # that run checks the pages a member sees.
 SPA_ADMIN = {DESCOPE: False, KEYCLOAK: True, ZITADEL: True}
 

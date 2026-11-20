@@ -46,6 +46,7 @@ async def client():
 
 ADMIN_CLAIMS = {
     "sub": "user123",
+    "amr": ["email"],
     "dct": "tenant-abc",
     "tenants": {
         "tenant-abc": {"roles": ["admin"], "permissions": ["settings.manage"]},
@@ -54,6 +55,7 @@ ADMIN_CLAIMS = {
 
 OWNER_CLAIMS = {
     "sub": "owner123",
+    "amr": ["email"],
     "dct": "tenant-abc",
     "tenants": {
         "tenant-abc": {"roles": ["owner"], "permissions": ["settings.manage"]},
@@ -62,6 +64,7 @@ OWNER_CLAIMS = {
 
 VIEWER_CLAIMS = {
     "sub": "user456",
+    "amr": ["email"],
     "dct": "tenant-abc",
     "tenants": {
         "tenant-abc": {"roles": ["viewer"], "permissions": ["projects.read"]},

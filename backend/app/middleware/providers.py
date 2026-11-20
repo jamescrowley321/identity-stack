@@ -50,6 +50,13 @@ KEYCLOAK_ACCESS_KIND = "Bearer"
 KEYCLOAK_MACHINE_CLIENT_PREFIX = "identity-stack-machine-"
 # The claim that lists the organization aliases a Keycloak token was issued for.
 KEYCLOAK_ORGANIZATION_CLAIM = "organization"
+# How a Descope user signed in (``amr``), or the same list moved aside when a JWT
+# template overrides the system claims (``damr``). Descope stamps it on every user
+# session and never on an access key's: "User session claims like amr, dct, and act
+# do not apply to access key JWTs" (docs.descope.com/management/token). An
+# access-key session's ``sub`` is the key's id, and its ``dsub`` when overridden.
+DESCOPE_AUTHENTICATION_METHODS_CLAIMS = ("amr", "damr")
+DESCOPE_SUBJECT_CLAIMS = ("dsub", "sub")
 
 
 class ProviderConfigurationError(ValueError):
@@ -151,9 +158,12 @@ class ProviderTokenConfig:
     # its ``azp`` must still be the SPA. False: the client id is the only one.
     id_token_trusts_listed_audiences: bool = False
     # The machine credential client a token was issued to, or ``None`` for a
-    # person's token. A machine's token is authorized from its canonical machine
-    # credential alone (``app.dependencies.rbac``), never from a user's
-    # memberships. ``None`` here: the provider serves no machine credentials.
+    # person's token. Such a token is refused wherever people's roles, members,
+    # credentials or relations change (``rbac.refuse_machine_principal``). A
+    # canonical provider's is authorized from its canonical machine credential
+    # alone (``app.dependencies.rbac``), never from a user's memberships; a
+    # Descope access key's from its claims, like every Descope principal.
+    # ``None`` here: the provider issues no machine tokens.
     machine_client: MachineClientReader | None = None
 
 
@@ -186,6 +196,26 @@ def descope_tenant_claims(claims: dict) -> TenantClaims:
         roles=_string_list(tenant_info.get("roles")),
         permissions=_string_list(tenant_info.get("permissions")),
     )
+
+
+def descope_access_key(claims: dict) -> str | None:
+    """The access key a Descope session was exchanged for (its ``sub``), or ``None`` for a user's session.
+
+    A session that names no authentication method (``amr`` or ``damr``, a
+    non-empty list) is an access key's: Descope stamps one on every user session
+    and none on an access key's. Fails closed: a Descope token without one is
+    taken for a machine's, whatever else it carries. A subject that is not a
+    non-empty string is still a machine's, named by the empty string.
+    """
+    for name in DESCOPE_AUTHENTICATION_METHODS_CLAIMS:
+        methods = claims.get(name)
+        if isinstance(methods, list) and methods:
+            return None
+    for name in DESCOPE_SUBJECT_CLAIMS:
+        subject = claims.get(name)
+        if isinstance(subject, str) and subject:
+            return subject
+    return ""
 
 
 def claimed_tenant_id(claims: dict, provider: ProviderTokenConfig) -> str | None:
@@ -242,6 +272,7 @@ def descope_config(project_id: str) -> ProviderTokenConfig:
         tenant_claims=descope_tenant_claims,
         descope_managed=True,
         algorithms=frozenset({RS256}),
+        machine_client=descope_access_key,
     )
 
 

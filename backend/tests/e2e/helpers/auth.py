@@ -20,6 +20,7 @@ from playwright.sync_api import BrowserContext
 # unit-tested without importing playwright. Re-exported here because conftest and
 # the E2E suite import them from this module.
 from tests.e2e.helpers.descope_mgmt import (  # noqa: F401 - re-exported for callers
+    ADMIN_USER_PREFIX,
     DESCOPE_BASE_URL,
     DESCOPE_MANAGEMENT_KEY,
     DESCOPE_PROJECT_ID,
@@ -173,14 +174,68 @@ def create_authenticated_context(browser, frontend_url: str, access_token: str) 
     return context
 
 
-def get_admin_session_token(email: str = "", tenant_id: str = "") -> str:
-    """Get a Descope session token with admin/owner roles for E2E testing.
+def get_admin_user_session_token(tenant_id: str = "") -> str:
+    """A Descope USER session of a new owner+admin of the test tenant: the run's ``ADMIN``.
+
+    An access-key session is a machine, which the backend refuses on ``/api/keys``
+    and the role and member routes (#699), so the admin is a person. Each call
+    creates a test user (``ADMIN_USER_PREFIX``, swept with the run's other users)
+    holding owner and admin in the tenant and nothing else, so the session's one
+    tenant is its ``dct``, and signs it in with a test OTP. A new user per sign-in:
+    another run's sweep may delete an earlier one, which a re-sign-in would trip on.
+    """
+    import uuid
+
+    tenant_id = tenant_id or E2E_TEST_TENANT_ID
+    if not DESCOPE_MANAGEMENT_KEY:
+        raise RuntimeError("DESCOPE_MANAGEMENT_KEY must be set")
+    if not tenant_id:
+        raise RuntimeError("E2E_TEST_TENANT_ID must be set")
+    domain = E2E_TEST_EMAIL.rpartition("@")[2] or "example.com"
+    login_id = f"{ADMIN_USER_PREFIX}{uuid.uuid4().hex[:8]}@{domain}"
+
+    with httpx.Client(timeout=30) as client:
+        created = client.post(
+            _mgmt_url("/v1/mgmt/user/create/test"),
+            headers=_auth_header(),
+            json={
+                "loginId": login_id,
+                "email": login_id,
+                "name": "E2E Admin",
+                "verifiedEmail": True,
+                "userTenants": [{"tenantId": tenant_id, "roleNames": ["owner", "admin"]}],
+            },
+        )
+        if created.status_code != HTTPStatus.OK:
+            raise RuntimeError(f"Creating the admin test user failed: HTTP {created.status_code} {created.text[:200]}")
+        otp = client.post(
+            _mgmt_url("/v1/mgmt/tests/generate/otp"),
+            headers=_auth_header(),
+            json={"loginId": login_id, "deliveryMethod": "email"},
+        )
+        if otp.status_code != HTTPStatus.OK:
+            raise RuntimeError(f"Generating the admin's OTP failed: HTTP {otp.status_code} {otp.text[:200]}")
+        verified = client.post(
+            f"{DESCOPE_BASE_URL}/v1/auth/otp/verify/email",
+            headers={"Authorization": f"Bearer {DESCOPE_PROJECT_ID}"},
+            json={"loginId": login_id, "code": otp.json().get("code", "")},
+        )
+        if verified.status_code != HTTPStatus.OK:
+            raise RuntimeError(f"Verifying the admin's OTP failed: HTTP {verified.status_code} {verified.text[:200]}")
+    token = verified.json().get("sessionJwt", "")
+    if not token:
+        raise RuntimeError("Verifying the admin's OTP returned no sessionJwt")
+    return token
+
+
+def get_access_key_session_token(tenant_id: str = "") -> str:
+    """A Descope session exchanged for a new owner+admin access key of the test tenant: a machine.
 
     Strategy: create a temporary tenant-scoped access key with admin/owner roles
     via the Management API, then exchange it via Descope's access key exchange
-    endpoint. The resulting session JWT:
-    1. Is signed by Descope's project keys (verifiable via OIDC JWKS)
-    2. Contains dct and tenants claims needed by require_role()
+    endpoint. The resulting session JWT is signed by Descope's project keys and
+    carries the tenants claim require_role() reads, and no ``amr``: the backend
+    takes it for a machine (#699).
     """
     import uuid
 
@@ -251,22 +306,6 @@ def get_admin_session_token(email: str = "", tenant_id: str = "") -> str:
                 )
         except Exception as exc:  # noqa: BLE001 - never mask the original failure
             print(f"[E2E] LEAK: error deleting admin access key {key_name} ({key_id}): {exc!r}")
-
-    # Debug: log all decoded claims for CI diagnosis
-    try:
-        payload = _decode_jwt_payload(token)
-        print(f"[E2E] Admin token ALL claims: {list(payload.keys())}")
-        tenants_info = payload.get("tenants")
-        if isinstance(tenants_info, dict):
-            tenants_info = {k: v.get("roles", []) if isinstance(v, dict) else v for k, v in tenants_info.items()}
-        print(
-            f"[E2E] Admin token key claims: dct={payload.get('dct')}, "
-            f"tenants={tenants_info}, "
-            f"iss={payload.get('iss')}, aud={payload.get('aud')}, "
-            f"sub={payload.get('sub')}"
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"[E2E] Could not decode admin token: {exc}")
 
     return token
 
