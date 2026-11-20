@@ -24,6 +24,7 @@ from app.repositories.sync_ledger import CanonicalStateRepository, PendingPushRe
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 from app.services.adapters.keycloak import KeycloakSyncAdapter
+from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.inbound_sync import InboundSyncService, KeycloakPullRepositories
 from app.services.keycloak_admin import KeycloakAdminApi
 from app.services.keycloak_reconciliation import KeycloakReconciliation
@@ -34,6 +35,7 @@ def build_keycloak_reconciliation(
     session: AsyncSession,
     acquire_lock: Callable[[], Coroutine[Any, Any, None]],
     hold_pass: Callable[[], AbstractAsyncContextManager[bool]],
+    publisher: CacheInvalidationPublisher | None = None,
 ) -> KeycloakReconciliation:
     """The Keycloak pass: Keycloak through ``api``, the canonical model through ``session``."""
     links = RepositoryKeycloakLinks(session)
@@ -62,4 +64,5 @@ def build_keycloak_reconciliation(
         pull_state=KeycloakPullStateRepository(session),
         providers=ProviderRepository(session),
         events=SyncEventRepository(session),
+        publisher=publisher,
     )

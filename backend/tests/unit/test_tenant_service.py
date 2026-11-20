@@ -7,7 +7,7 @@ Tests cover:
 """
 
 import uuid
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from expression import Error, Ok
@@ -75,6 +75,28 @@ class TestCreateTenant:
         await service.create_tenant(name=tenant.name)
 
         assert call_order == ["commit", "sync"]
+
+    async def test_create_tenant_invalidates_identities_cached_before_the_organization_link(self):
+        """The adapter links the tenant to its organization in the sync: an identity cached before is dropped."""
+        repo = AsyncMock(spec=TenantRepository)
+        repo.get_by_name.return_value = None
+        tenant = _make_tenant()
+        repo.create.return_value = tenant
+        cache: dict[str, dict] = {}
+        publisher = AsyncMock(spec=CacheInvalidationPublisher)
+        publisher.publish.side_effect = lambda **_event: cache.clear()
+        adapter = AsyncMock(spec=IdentityProviderAdapter)
+
+        async def sync_tenant(**_kw):
+            cache[str(tenant.id)] = {"tenant_id": str(tenant.id), "external_org_id": None}
+            return Ok(None)
+
+        adapter.sync_tenant.side_effect = sync_tenant
+        service = TenantService(repository=repo, adapter=adapter, publisher=publisher)
+
+        await service.create_tenant(name=tenant.name)
+
+        assert cache == {}
 
     async def test_create_tenant_duplicate_name_returns_conflict(self):
         service, repo, _adapter = _build_service()
@@ -250,7 +272,10 @@ class TestCacheInvalidationPublishing:
         result = await service.create_tenant(name=tenant.name, domains=tenant.domains)
 
         assert result.is_ok()
-        publisher.publish.assert_awaited_once_with(entity_type="tenant", entity_id=tenant.id, operation="create")
+        assert publisher.publish.await_args_list == [
+            call(entity_type="tenant", entity_id=tenant.id, operation="create"),
+            call(entity_type="tenant", entity_id=tenant.id, operation="sync"),
+        ]
 
     async def test_no_publish_on_failure(self):
         publisher = AsyncMock(spec=CacheInvalidationPublisher)
