@@ -10,11 +10,13 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from enum import StrEnum
 from typing import TypeVar
 
 import sqlalchemy as sa
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.logbook import logbook
 from app.models.identity.user import LINK_ORIGIN, LINKED_AT_SIGN_IN, LINKED_BY_BACKEND, IdPLink
@@ -59,18 +61,51 @@ ORGANIZATION_LOCK_TIMEOUT_MS = round((ORGANIZATION_HOLD_SECONDS + ORGANIZATION_L
 FOLLOWED_LINK_ORIGINS = frozenset({LINKED_AT_SIGN_IN, LINKED_BY_BACKEND})
 
 
+class DatabaseFailure(StrEnum):
+    """What a database failure under a push was, as its message names it."""
+
+    CONNECTION_LOST = "the connection was lost"
+    LOCK_TIMEOUT = "a lock was not taken within lock_timeout"
+    QUERY_CANCELED = "the statement was canceled"
+
+
+# SQLSTATEs (Postgres, appendix A) a failure is named by.
+_FAILURE_BY_SQLSTATE = {
+    "55P03": DatabaseFailure.LOCK_TIMEOUT,  # lock_not_available
+    "57014": DatabaseFailure.QUERY_CANCELED,  # query_canceled: statement_timeout, a cancel request
+}
+
+
+def connection_lost(exc: BaseException) -> bool:
+    """``exc`` dropped the session's connection: SQLAlchemy invalidated it, and the transaction with it."""
+    return isinstance(exc, DBAPIError) and exc.connection_invalidated
+
+
+def database_failure(exc: BaseException) -> DatabaseFailure | None:
+    """The kind of ``exc``, from the driver's SQLSTATE; ``None`` for any other failure."""
+    if connection_lost(exc):
+        return DatabaseFailure.CONNECTION_LOST
+    if isinstance(exc, DBAPIError):
+        return _FAILURE_BY_SQLSTATE.get(getattr(exc.orig, "sqlstate", None))
+    return None
+
+
 def failed(what: str, exc: BaseException) -> str:
-    """A LocalDatabaseError's message: the exception's type only, never the statement or its parameters."""
-    return f"{what} failed in the service's database: {type(exc).__name__}"
+    """A LocalDatabaseError's message: the failure's kind and type, never the statement or its parameters."""
+    kind = database_failure(exc)
+    detail = type(exc).__name__ if kind is None else f"{kind.value} ({type(exc).__name__})"
+    return f"{what} failed in the service's database: {detail}"
 
 
 class RepositoryKeycloakLinks(KeycloakLinks):
     """The adapter's canonical side, in the request's session.
 
     Reads run in a savepoint of the request's transaction: a failure rolls back
-    the savepoint only, so the rows the request loaded stay loaded. Each write
-    commits, and one that fails is rolled back: the service has already committed
-    its own change. A database failure is ``LocalDatabaseError``; a write the
+    the savepoint only, so the rows the request loaded stay loaded. A read that
+    loses the connection rolls back the transaction the loss ended, so the
+    request's later statements run on a new connection; the rows it loaded stay
+    loaded there too. Each write commits, and one that fails is rolled back: the
+    service has already committed its own change. A database failure is ``LocalDatabaseError``; a write the
     canonical side refuses is ``LinkRefused``.
     """
 
@@ -86,6 +121,8 @@ class RepositoryKeycloakLinks(KeycloakLinks):
             async with self._session.begin_nested():
                 return await read()
         except DATABASE_FAILURES as exc:
+            if connection_lost(exc):
+                await self._recover()
             raise LocalDatabaseError(failed(what, exc)) from exc
 
     async def _provider_id(self) -> uuid.UUID | None:
@@ -229,12 +266,30 @@ class RepositoryKeycloakLinks(KeycloakLinks):
             await self._rollback()
             raise LocalDatabaseError(failed("the IdP link write", exc)) from exc
 
+    async def _recover(self) -> None:
+        """Roll back the transaction a lost connection ended, keeping the rows the request loaded.
+
+        A rollback expires every loaded row, and an expired row cannot load
+        again outside an await. A push runs after the service committed, so a
+        row with no change of its own holds what the database holds: its loaded
+        values are put back as they were.
+        """
+        loaded = [
+            (state.obj(), {attr.key: attr.loaded_value for attr in state.attrs if attr.key not in state.unloaded})
+            for state in self._session.sync_session.identity_map.all_states()
+            if not state.modified and state.obj() is not None
+        ]
+        await self._rollback()
+        for row, values in loaded:
+            for key, value in values.items():
+                set_committed_value(row, key, value)
+
     async def _rollback(self) -> None:
         try:
             await self._session.rollback()
         except DATABASE_FAILURES as exc:
-            # The write's own failure is what the push reports.
-            logger.warning("Keycloak link write: the rollback failed too: %s", type(exc).__name__)
+            # The failure that called for the rollback is what the push reports.
+            logger.warning("Keycloak link: the rollback failed too: %s", type(exc).__name__)
 
 
 async def _release(savepoint: AsyncSessionTransaction, alias: str) -> None:

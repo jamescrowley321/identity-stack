@@ -194,3 +194,105 @@ async def test_a_link_a_sign_in_wrote_meanwhile_counts_as_written_or_is_refused(
         async with sessions(async_engine)() as cleanup:
             await cleanup.execute(delete(IdPLink).where(IdPLink.external_sub == sub))
             await cleanup.commit()
+
+
+async def dropping_read(self, user_id: uuid.UUID, provider_name: str, *origins) -> str | None:
+    """The request's connection drops under the read: Postgres ends its backend, as a failover or reset does."""
+    await self._session.execute(text("SELECT pg_terminate_backend(pg_backend_pid())"))
+    return None
+
+
+CONNECTION_LOST = "the IdP link read failed in the service's database: the connection was lost (DBAPIError)"
+
+
+async def test_restoring_memberships_whose_connection_drops_logs_each_and_leaves_the_session_usable(
+    async_engine, members, monkeypatch, caplog
+):
+    tenant, role, users = members
+    monkeypatch.setattr(IdPLinkRepository, "sub_made_by", dropping_read)
+    caplog.set_level(logging.WARNING, logger="app.services.memberships")
+
+    async with sessions(async_engine)() as session:
+        await restore_memberships(
+            UserTenantRoleRepository(session), adapter(session), [(user.id, tenant.id) for user in users]
+        )
+        still_answers = (await session.execute(text("SELECT 1"))).scalar_one()
+
+    logged = [record.getMessage() for record in caplog.records if record.name == "app.services.memberships"]
+    expected = f"IdP sync failed for role {role.id} (restore_membership): {CONNECTION_LOST}"
+    assert (logged, still_answers) == ([expected, expected], 1)
+
+
+async def test_a_deactivation_whose_connection_drops_answers_provider_sync_failed(async_engine, members, monkeypatch):
+    tenant, _role, users = members
+    user = users[0]
+    monkeypatch.setattr(IdPLinkRepository, "sub_made_by", dropping_read)
+
+    async with sessions(async_engine)() as session:
+        service = UserService(repository=UserRepository(session), adapter=adapter(session), publisher=AsyncMock())
+        result = await service.deactivate_user(tenant_id=tenant.id, user_id=user.id)
+        still_answers = (await session.execute(text("SELECT 1"))).scalar_one()
+
+    assert result.is_ok()
+    assert (result.ok["id"], result.ok["status"], result.ok[PROVIDER_SYNC], still_answers) == (
+        user.id,
+        UserStatus.inactive,
+        PROVIDER_SYNC_FAILED,
+        1,
+    )
+
+
+def tenant_read_running(*statements: str):
+    """A tenant read that runs ``statements`` in the request's session (the read's savepoint)."""
+
+    async def read(self, tenant_id: uuid.UUID) -> Tenant | None:
+        for statement in statements:
+            await self._session.execute(text(statement))
+        return None
+
+    return read
+
+
+HELD_LOCK_KEY = 632_633
+
+
+@pytest.fixture
+async def held_lock(async_engine):
+    """An advisory lock another session holds for the test."""
+    async with async_engine.connect() as holder:
+        await holder.execute(text("SELECT pg_advisory_lock(:key)"), {"key": HELD_LOCK_KEY})
+        yield
+        await holder.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": HELD_LOCK_KEY})
+
+
+@pytest.mark.parametrize(
+    ("statements", "named"),
+    [
+        pytest.param(
+            ("SET LOCAL lock_timeout = '50ms'", f"SELECT pg_advisory_xact_lock({HELD_LOCK_KEY})"),
+            "a lock was not taken within lock_timeout (DBAPIError)",
+            id="lock_timeout",
+        ),
+        pytest.param(
+            ("SET LOCAL statement_timeout = '50ms'", "SELECT pg_sleep(5)"),
+            "the statement was canceled (DBAPIError)",
+            id="statement_timeout",
+        ),
+        pytest.param(("SELECT * FROM no_such_table",), "ProgrammingError", id="other"),
+    ],
+)
+async def test_a_tenant_link_read_that_fails_is_named_by_its_sqlstate_and_leaves_the_session_usable(
+    async_engine, held_lock, monkeypatch, statements, named
+):
+    monkeypatch.setattr(TenantRepository, "get", tenant_read_running(*statements))
+    tenant_id = uuid.uuid4()
+
+    async with sessions(async_engine)() as session:
+        result = await adapter(session).sync_tenant(tenant_id=tenant_id, data={"name": "organization"})
+        still_answers = (await session.execute(text("SELECT 1"))).scalar_one()
+
+    assert result.is_error()
+    assert (result.error.message, still_answers) == (
+        f"the tenant link read failed in the service's database: {named}",
+        1,
+    )
