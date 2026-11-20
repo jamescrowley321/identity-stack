@@ -24,7 +24,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.dependencies import rbac
 from app.dependencies.identity import get_idp_link_service
-from app.dependencies.rbac import INSUFFICIENT_PERMISSIONS, get_rbac_session
+from app.dependencies.rbac import NOT_A_CANONICAL_PRINCIPAL, get_rbac_session
 from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER
 from app.errors.identity import IdentityErrorRaised
 from app.errors.problem_detail import identity_error_raised_handler
@@ -247,11 +247,12 @@ def test_a_tenants_owner_or_admin_is_refused(client, store, users, links, provid
     assert links.mock_calls == []
 
 
+@pytest.mark.parametrize("role", ["admin", "owner", "operator"])
 @pytest.mark.parametrize("route", sorted(ROUTES))
-def test_a_descope_admin_whose_dct_is_a_canonical_tenant_id_is_refused(client, users, links, route):
-    """Before #722 the guard parsed ``dct`` as a canonical UUID and found Alice's Acme membership."""
-    response = ROUTES[route](client, ALICE, _descope_headers("admin"))
+def test_a_descope_principal_is_refused_whatever_it_claims(client, users, links, route, role):
+    """Its ``dct`` is spelled as Acme's canonical UUID: before #722 the guard found Alice's Acme membership."""
+    response = ROUTES[route](client, ALICE, _descope_headers(role))
 
-    assert (response.status_code, response.json()["detail"]) == (403, INSUFFICIENT_PERMISSIONS)
+    assert (response.status_code, response.json()["detail"]) == (403, NOT_A_CANONICAL_PRINCIPAL)
     assert users.lookups == []
     assert links.mock_calls == []

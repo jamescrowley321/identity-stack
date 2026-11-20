@@ -220,6 +220,8 @@ IDP_LINK_WRITE_ROUTES: frozenset[tuple[str, str]] = frozenset(
 # (method, path) of every route a machine credential's token is refused on
 # (``refuse_machine_principal``): no credential manages credentials, people's roles or
 # sign-in links, the definitions, a tenant's members or anyone's relations (#680, #683).
+# Every IdP-link route: the canonical model's operators only, never a Descope principal (#722).
+IDP_LINK_ROUTES = IDP_LINK_WRITE_ROUTES | {("GET", "/api/users/{user_id}/idp-links")}
 MACHINE_REFUSED_ROUTES = PER_PROVIDER_ROUTES | SYNC_PROVIDER_ROUTES | RELATION_WRITE_ROUTES | IDP_LINK_WRITE_ROUTES
 
 _NO_PRINCIPAL = "takes no principal: guarded by a shared secret, not a token"
@@ -557,6 +559,9 @@ class TestTheRegisters:
 
     def test_the_sync_provider_guard_is_on_exactly_the_sync_provider_routes(self):
         assert _routes_depending_on(require_sync_provider_principal) == SYNC_PROVIDER_ROUTES
+
+    def test_only_canonical_principals_reach_the_idp_link_routes(self):
+        assert _routes_depending_on(rbac.require_canonical_principal) == IDP_LINK_ROUTES
 
     def test_machines_are_refused_on_exactly_the_credential_role_member_and_relation_routes(self):
         assert _routes_depending_on(refuse_machine_principal) == MACHINE_REFUSED_ROUTES

@@ -19,6 +19,7 @@ from fastapi import Depends
 from httpx import ASGITransport, AsyncClient
 
 from app.dependencies.identity import get_idp_link_service
+from app.dependencies.rbac import require_canonical_principal
 from app.errors.identity import Conflict, NotFound
 from app.main import app
 from app.models.database import get_async_session
@@ -56,6 +57,14 @@ def _override_services(mock_idp_link_service, mock_session):
 
 
 TENANT_ID = "51c5957b-684a-453f-8ab1-8f239999c4d8"
+
+
+@pytest.fixture(autouse=True)
+def _canonical_principal():
+    """Descope-shaped callers here; the canonical-only gate is test_idp_links_canonical.py's."""
+    app.dependency_overrides[require_canonical_principal] = lambda: None
+    yield
+    app.dependency_overrides.pop(require_canonical_principal, None)
 
 
 @pytest.fixture

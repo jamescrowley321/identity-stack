@@ -515,7 +515,10 @@ Descope does not hold **MUST** be gated by `app.dependencies.rbac.require_global
 `/api/providers`, `/api/sync/status` and `/api/events/recent`, the
 `/api/users/{user_id}/idp-links` routes (a link signs its login in as the person, with every
 grant they hold in every tenant, so a tenant's owner or admin making one would take over the
-person's other tenants (#722); a user the canonical model does not hold is 404), and the changes to the role and
+person's other tenants (#722); they also depend on `rbac.require_canonical_principal`, which
+refuses (403) every principal whose provider is not in `CANONICAL_RBAC_PROVIDERS`, so a Descope
+principal's claims, `operator` among them, open no link; a user the canonical model does not
+hold is 404), and the changes to the role and
 permission definitions above (`require_definitions_role`). One role in one tenant opens all of that state,
 so on these routes the request chooses nothing. A canonical principal is decided by their sole
 membership, and one with several memberships is refused, whether they send the `X-Tenant-ID`

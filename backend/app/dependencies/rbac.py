@@ -140,6 +140,28 @@ def refuse_machine_principal(request: Request) -> None:
         raise IdentityErrorRaised(MachinePrincipalRefused(message=MACHINE_PRINCIPAL_REFUSED))
 
 
+NOT_A_CANONICAL_PRINCIPAL = "This route serves principals authorized from the canonical model only"
+
+
+def require_canonical_principal(request: Request) -> None:
+    """Refuse (403) a principal whose provider is not in ``CANONICAL_RBAC_PROVIDERS``; 401 without claims.
+
+    For the routes over canonical state that only the canonical model's grants may open
+    (the IdP links, #722): a Descope principal's claims, ``operator`` among them, are
+    Descope's and grant nothing there.
+    """
+    claims = getattr(request.state, "claims", None)
+    if not isinstance(claims, dict):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if not is_canonical_principal(request):
+        logger.warning(
+            "refused: provider=%s sub=%r called a route that serves canonical principals only",
+            _principal_provider(request) or "unrecorded",
+            claims.get("sub"),
+        )
+        raise HTTPException(status_code=403, detail=NOT_A_CANONICAL_PRINCIPAL)
+
+
 async def _load_machine_memberships(
     request: Request, sub: str, client_id: str, session: AsyncSession
 ) -> CanonicalMemberships:

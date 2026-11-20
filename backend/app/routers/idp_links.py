@@ -6,7 +6,12 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies.identity import get_idp_link_service
-from app.dependencies.rbac import OPERATOR_ROLE, refuse_machine_principal, require_global_role
+from app.dependencies.rbac import (
+    OPERATOR_ROLE,
+    refuse_machine_principal,
+    require_canonical_principal,
+    require_global_role,
+)
 from app.errors.identity import IdentityErrorRaised, NotFound
 from app.errors.problem_detail import result_to_response
 from app.middleware.rate_limit import RATE_LIMIT_AUTH, limiter
@@ -16,7 +21,9 @@ from app.services.idp_link import IdPLinkService
 
 router = APIRouter(tags=["IdP Links"])
 # A link decides which provider account signs in as a person, so no machine credential makes or removes one.
-NO_MACHINES = [Depends(refuse_machine_principal)]
+# Only the canonical model's grants open a link: a Descope principal's claims, operator among them, do not (#722).
+CANONICAL_ONLY = [Depends(require_canonical_principal)]
+NO_MACHINES = [*CANONICAL_ONLY, Depends(refuse_machine_principal)]
 # A link signs its login in as the person in every tenant they belong to, with every grant they hold,
 # so it is state that belongs to no tenant: an operator manages it, never a tenant's admin (#722).
 LINK_MANAGERS = require_global_role(OPERATOR_ROLE)
@@ -59,7 +66,7 @@ async def _require_user(user_uuid: uuid.UUID, session: AsyncSession) -> None:
         raise IdentityErrorRaised(NotFound(message=_USER_NOT_FOUND))
 
 
-@router.get("/users/{user_id}/idp-links")
+@router.get("/users/{user_id}/idp-links", dependencies=CANONICAL_ONLY)
 async def list_user_idp_links(
     request: Request,
     user_id: str,
