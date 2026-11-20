@@ -10,8 +10,9 @@ mapping of ``docs/keycloak.md#admin-adapter``:
   sign-in through it finds the tenant. Its name is the tenant's, its domains
   exactly the tenant's ``self_provisioning_domains`` when that key is given, and
   ``enabled`` follows the tenant's ``status`` when that key is given (``active``
-  enabled, ``suspended`` disabled). Other fields are sent back as found (Keycloak
-  resets what a PUT leaves out); an organization that already matches is not
+  enabled, ``suspended`` disabled). The fields Keycloak resets when a PUT leaves
+  them out (``enabled`` among them) are sent back as found; the domains, which it
+  keeps, are sent only when given; an organization that already matches is not
   written. A tenant linked to another provider's organization is refused.
   ``delete_tenant`` deletes the organization; one not there is deleted.
 - **User → user.** ``sync_user`` creates or updates the user whose username is
@@ -50,7 +51,12 @@ the client role, so a retry after a partial failure still finds what is left.
 Nothing ever maps a client role to a user or group.
 
 Every push is idempotent: each reads the state first and writes only what
-differs, and a repeat writes nothing. Every push but a delete reaches the
+differs, and a repeat writes nothing. A push that reads an organization and sends
+it back (``sync_tenant``, ``set_tenant_attributes``) holds the organization's lock
+(``KeycloakLinks.organization_lock``) from the read to the write, so a suspension
+or a domain change another push makes in between is not undone. A realm admin's
+change in Keycloak takes no lock: one landing between such a read and its write
+can still be undone. Every push but a delete reaches the
 Keycloak account the canonical user's ``keycloak`` link names when a sign-in or
 the backend made it (``KeycloakLinks.linked_subject``; the backend's links are
 the accounts the adapter created and those an operator's seed names) unless it
@@ -74,6 +80,7 @@ import json
 import math
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from typing import ClassVar, Protocol
 
 from expression import Error, Ok, Result
@@ -180,6 +187,13 @@ class KeycloakLinks(Protocol):
 
     async def role(self, role_id: uuid.UUID) -> tuple[str, uuid.UUID | None] | None:
         """The canonical role's name and its tenant (``None`` for a global role), or ``None`` when it is gone."""
+        ...
+
+    def organization_lock(self, alias: str) -> AbstractAsyncContextManager[None]:
+        """Hold the lock of the organization ``alias``: one push at a time reads it and sends it back.
+
+        Held across the service's workers. A failure taking it is ``LocalDatabaseError``.
+        """
         ...
 
 
@@ -350,7 +364,8 @@ def _machine_client_representation(
 _KEPT_ON_A_USER_PUT = frozenset({"enabled", "emailVerified", "requiredActions"})
 
 # An organization's fields Keycloak 26.8.2 resets when a PUT leaves them out (``enabled``
-# to true): an attribute write sends them as read, and nothing else but the attributes.
+# to true): a write sends them as read (but those it changes), and of the rest only what
+# it changes (the attributes, the domains).
 _ORGANIZATION_RESET_ON_A_PUT = ("id", "name", "alias", "enabled", "description", "redirectUrl")
 
 
@@ -488,16 +503,17 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush, Custom
             if linked is None and await self._links.linked_elsewhere(tenant_id):
                 raise _Refused(Refusal.TENANT_LINKED_ELSEWHERE)
             alias = linked or str(tenant_id)
-            organization = await self._api.find_organization(alias)
-            if organization is None:
-                representation = {"name": name, "alias": alias}
-                if "domains" in wanted:
-                    representation["domains"] = [{"name": domain} for domain in wanted["domains"]]
-                if "enabled" in wanted:
-                    representation["enabled"] = wanted["enabled"]
-                await self._api.create_organization(representation)
-            else:
-                await self._update_organization(organization, wanted)
+            async with self._links.organization_lock(alias):
+                organization = await self._api.find_organization(alias)
+                if organization is None:
+                    representation = {"name": name, "alias": alias}
+                    if "domains" in wanted:
+                        representation["domains"] = [{"name": domain} for domain in wanted["domains"]]
+                    if "enabled" in wanted:
+                        representation["enabled"] = wanted["enabled"]
+                    await self._api.create_organization(representation)
+                else:
+                    await self._update_organization(organization, wanted)
             if linked is None:
                 await self._links.link_organization(tenant_id, alias)
 
@@ -508,9 +524,11 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush, Custom
     async def _update_organization(self, found: dict, wanted: dict) -> None:
         """Send the organization back with the wanted fields replaced; nothing when it already matches.
 
-        Keycloak 26.8.2 resets the fields a PUT leaves out (``enabled`` to true,
-        ``description`` and ``redirectUrl`` to nothing), so they are sent as
-        found. ``attributes`` are never sent: Keycloak keeps them.
+        Keycloak 26.8.2 resets the fields of ``_ORGANIZATION_RESET_ON_A_PUT`` a PUT
+        leaves out (``enabled`` to true, ``description`` and ``redirectUrl`` to
+        nothing), so they are sent as found. The domains and ``attributes``, which
+        it keeps, are sent only when wanted (domains) or never (attributes): sent as
+        found, they would undo a change made since the read.
         """
         held_domains = sorted(entry.get("name") for entry in found.get("domains") or [] if isinstance(entry, dict))
         differs = found.get("name") != wanted["name"]
@@ -518,7 +536,7 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush, Custom
         differs |= "enabled" in wanted and found.get("enabled") is not wanted["enabled"]
         if not differs:
             return
-        representation = {key: value for key, value in found.items() if key != "attributes"}
+        representation = {field: found[field] for field in _ORGANIZATION_RESET_ON_A_PUT if field in found}
         representation["name"] = wanted["name"]
         if "domains" in wanted:
             representation["domains"] = [{"name": domain} for domain in wanted["domains"]]
@@ -586,16 +604,20 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush, Custom
         self, *, tenant: str, attributes: dict[str, AttributeValue]
     ) -> Result[None, SyncError]:
         async def push() -> None:
-            organization = await self._full_organization(tenant)
-            if organization is None:
-                raise _Refused(Refusal.NO_ORGANIZATION)
-            # Keycloak keeps the domains a PUT leaves out, but resets ``enabled`` and the
-            # other fields of _ORGANIZATION_RESET_ON_A_PUT: those go back as read.
-            sent = {field: organization[field] for field in _ORGANIZATION_RESET_ON_A_PUT if field in organization}
-            held = _attributes(organization)
-            await self._api.update_organization(
-                organization["id"], {**sent, "attributes": _attribute_values(attributes, held)}
-            )
+            alias = await self._alias(uuid.UUID(_tenant_uuid(tenant)))
+            # Locked from the read to the write: ``enabled`` goes back as read, so another
+            # push's suspension in between would otherwise be undone.
+            async with self._links.organization_lock(alias):
+                organization = await self._full_organization(tenant)
+                if organization is None:
+                    raise _Refused(Refusal.NO_ORGANIZATION)
+                # Keycloak keeps the domains a PUT leaves out, but resets ``enabled`` and the
+                # other fields of _ORGANIZATION_RESET_ON_A_PUT: those go back as read.
+                sent = {field: organization[field] for field in _ORGANIZATION_RESET_ON_A_PUT if field in organization}
+                held = _attributes(organization)
+                await self._api.update_organization(
+                    organization["id"], {**sent, "attributes": _attribute_values(attributes, held)}
+                )
 
         with tracer.start_as_current_span("keycloak.set_tenant_attributes"):
             return await _run("set_tenant_attributes", {"tenant_id": tenant}, push)
