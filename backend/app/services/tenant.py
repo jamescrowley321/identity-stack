@@ -83,6 +83,9 @@ class TenantService:
                 tenant_id,
                 "create_tenant",
             )
+            # The sync links the tenant to its organization (external_org_id) and commits
+            # that: an identity cached in between would keep the tenant unlinked.
+            await self._publisher.publish(entity_type="tenant", entity_id=tenant_id, operation="sync")
 
             return Ok(result_dict)
 
