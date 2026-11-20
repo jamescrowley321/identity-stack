@@ -60,6 +60,14 @@ class IdPLinkRepository(BaseRepository[IdPLink]):
         None when the user has no such link, or when it was made otherwise (the
         admin route): its subject is whatever the admin typed in.
         """
+        return await self.sub_made_by(user_id, provider_name, frozenset({LINKED_AT_SIGN_IN}))
+
+    async def sub_made_by(self, user_id: uuid.UUID, provider_name: str, origins: frozenset[str]) -> str | None:
+        """The external subject of the user's link to the provider ``provider_name``, if one of ``origins`` made it.
+
+        ``origins`` are ``LINK_ORIGIN`` values. None when the user has no such
+        link, or when its origin is another or none (the admin route).
+        """
         stmt = (
             sa.select(IdPLink.external_sub, IdPLink.metadata_)
             .join(Provider, Provider.id == IdPLink.provider_id)
@@ -68,6 +76,10 @@ class IdPLinkRepository(BaseRepository[IdPLink]):
         row = (await self._session.execute(stmt)).one_or_none()
         if row is None:
             return None
+        external_sub, metadata = row
+        if isinstance(metadata, dict) and metadata.get(LINK_ORIGIN) in origins:
+            return external_sub
+        return None
         external_sub, metadata = row
         if isinstance(metadata, dict) and metadata.get(LINK_ORIGIN) == LINKED_AT_SIGN_IN:
             return external_sub

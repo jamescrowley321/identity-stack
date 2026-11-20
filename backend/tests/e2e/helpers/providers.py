@@ -15,8 +15,10 @@ Descope keeps exactly what the suite did before (``helpers/auth.py``): a
 client-credentials token for the member, an exchanged tenant access key for the
 admin, tokens injected into the SPA's session storage, the same local skips and
 the same CI credential check. Keycloak and Zitadel need no credential beyond what
-their applied Terraform root outputs, sign in through the SPA and the provider's
-own forms, and fail the run, never skip it, when anything they need is missing.
+their applied Terraform root outputs: both principals are the fixture's
+two-tenant user, signed in through the SPA's client and the provider's own
+forms, naming the tenant it acts in by ``X-Tenant-ID``. They fail the run, never
+skip it, when anything they need is missing.
 """
 
 import base64
@@ -33,11 +35,11 @@ import pytest
 from playwright.sync_api import Browser, BrowserContext, Page, Request, expect
 from playwright.sync_api import Error as PlaywrightError
 
+from tests.e2e.helpers.api import unique_name
 from tests.e2e.not_applicable import (
     DESCOPE,
     INTERNAL_ENDPOINT_SECRETS,
     KEYCLOAK,
-    KEYCLOAK_SPA_ADMIN,
     ZITADEL,
     missing_internal_endpoint_secrets,
 )
@@ -172,6 +174,17 @@ class E2EProvider(ABC):
     @abstractmethod
     def user_id(self, request: pytest.FixtureRequest) -> str:
         """The id the backend's routes take for ``MEMBER``."""
+
+    def share_target(self, request: pytest.FixtureRequest) -> str:
+        """A user of ``ADMIN``'s tenant other than ``ADMIN``, as a share takes them: ``MEMBER`` by default."""
+        return self.user_id(request)
+
+    def relation_target(self, request: pytest.FixtureRequest) -> str:
+        """A subject the FGA admin routes write relations for.
+
+        Descope's store keys on whatever it is given, so a fresh name each time.
+        """
+        return unique_name("user")
 
     # --- shared by the providers that sign in through the SPA ---------------------
 
@@ -352,111 +365,26 @@ class DescopeProvider(E2EProvider):
         return user_id
 
 
-# --- Keycloak ------------------------------------------------------------------------
+# --- Keycloak and Zitadel ------------------------------------------------------------
 
 
-class KeycloakProvider(E2EProvider):
-    """``keycloak-test`` with ``infra/keycloak`` applied; ``make test-e2e-keycloak`` points the run at it.
+class TwoTenantUserProvider(E2EProvider):
+    """A provider whose principals are the fixture's two-tenant user, each acting in one tenant.
 
-    ``MEMBER`` is the fixture's member case on the SPA's app client
-    (``member-app``), ``ADMIN`` its tenant admin on ``tenant-admin-app``; both
-    sign in to the acme organization, whose canonical tenant is the fixture key.
+    The user is linked by the provider's seed with its roles: ``ADMIN`` acts in
+    the tenant where it is admin, ``MEMBER`` in the one where it is viewer, each
+    naming its tenant by ``X-Tenant-ID`` as the SPA does. Authorization comes
+    from the canonical model, so the token is the same for both.
     """
 
-    name = KEYCLOAK
-
-    def __init__(self, backend_url: str, frontend_url: str) -> None:
-        super().__init__(backend_url, frontend_url)
-        self._tokens = SignedInTokens()
-
-    @cached_property
-    def _keycloak(self):
-        # Imported here: the module reads the KEYCLOAK_TEST_* target at import,
-        # which only a Keycloak run sets.
-        from tests.helpers import keycloak
-
-        return keycloak
-
-    def _user(self, principal: str):
-        return self._keycloak.DAVE if principal == ADMIN else self._keycloak.ALICE
-
-    def _client(self, principal: str) -> str:
-        return self._keycloak.TENANT_ADMIN_APP_CLIENT if principal == ADMIN else self._keycloak.MEMBER_APP_CLIENT
-
-    def check_ready(self, request: pytest.FixtureRequest) -> None:
-        self._check_internal_endpoint_secrets()
-        source = self._keycloak.KeycloakTokenSource()
-        try:
-            source.check_reachable()
-        except self._keycloak.KeycloakTokenSourceUnavailable as exc:
-            pytest.fail(str(exc))
-        self._check_stack_answers(request.getfixturevalue("browser"))
-
-    def access_token(self, principal: str, request: pytest.FixtureRequest) -> str:
-        def sign_in() -> str:
-            return (
-                self._keycloak.KeycloakTokenSource()
-                .login(self._user(principal), client_id=self._client(principal), scope=self._keycloak.ACME_SCOPE)
-                .access_token
-            )
-
-        return self._tokens.get(principal, sign_in)
-
-    @staticmethod
-    def _member_app_only(principal: str) -> None:
-        """The SPA signs in through member-app: a page as the tenant admin would be a member's session."""
-        if principal == ADMIN:
-            pytest.fail(f"no Keycloak admin page: {KEYCLOAK_SPA_ADMIN}; list the test in tests/e2e/not_applicable.py")
-
-    def signed_in_context(self, browser: Browser, principal: str, request: pytest.FixtureRequest) -> BrowserContext:
-        self._member_app_only(principal)
-        return browser.new_context(viewport={"width": 1280, "height": 720})
-
-    def open_app(self, page: Page, principal: str) -> None:
-        """Sign In on the SPA's login page, then Keycloak's identity-first form."""
-        self._member_app_only(principal)
-        user = self._user(principal)
-        page.goto(f"{self.frontend_url}/login")
-        page.get_by_role("button", name="Sign In").click()
-        page.locator('input[name="username"]').fill(user.username)
-        page.locator('input[name="username"]').press("Enter")
-        page.locator('input[name="password"]').fill(user.password)
-        page.locator('input[name="password"]').press("Enter")
-        page.wait_for_url(f"{self.frontend_url}/")
-
-    def tenant_id(self, request: pytest.FixtureRequest) -> str:
-        identity = self._identity(self.access_token(ADMIN, request))
-        return identity["token_tenant"]["tenant_id"]
-
-    def user_id(self, request: pytest.FixtureRequest) -> str:
-        return self._identity(self.access_token(MEMBER, request))["user"]["id"]
-
-
-# --- Zitadel -------------------------------------------------------------------------
-
-
-class ZitadelProvider(E2EProvider):
-    """The compose Zitadel with ``infra/zitadel`` applied and ``make zitadel-seed`` run.
-
-    Both principals are the fixture's two-tenant user, linked by the seed with
-    its roles: ``ADMIN`` acts in the tenant where it is admin, ``MEMBER`` in the
-    one where it is viewer, each naming its tenant by ``X-Tenant-ID`` as the SPA
-    does. The fixture's first-login user is left alone: ``tests/e2e_zitadel``
-    needs its first login fresh.
-    """
-
-    name = ZITADEL
+    #: The step that links the user, named when it is not in both tenants.
+    seed_step: str
 
     def __init__(self, backend_url: str, frontend_url: str) -> None:
         super().__init__(backend_url, frontend_url)
         self._tokens = SignedInTokens()
         self._browser: Browser | None = None
-
-    @cached_property
-    def _instance(self):
-        from tests.e2e_zitadel.instance import read_outputs
-
-        return read_outputs()
+        self._memberships_missing: str | None = None
 
     @cached_property
     def _linked(self):
@@ -464,64 +392,54 @@ class ZitadelProvider(E2EProvider):
 
         return IDENTITIES.cases.two_tenants
 
+    @property
+    @abstractmethod
+    def _scope(self) -> str:
+        """The scope the user signs in with."""
+
+    @abstractmethod
+    def _sign_in(self) -> str:
+        """A new access token for the linked user, through the SPA's client."""
+
+    @abstractmethod
+    def _sign_in_page(self, page: Page) -> None:
+        """After the SPA's Sign In, answer the provider's forms until the SPA's root shows."""
+
     def _tenant_key(self, principal: str) -> str:
         role = ADMIN if principal == ADMIN else "viewer"
         (tenant,) = [tenant for tenant, held in self._linked.roles.items() if held == role]
         return tenant
 
+    def _tenant_name(self, key: str) -> str:
+        """The canonical tenant's name for fixture tenant ``key``: the seed names it after the key."""
+        return key
+
     @cached_property
     def _tenant_ids(self) -> dict[str, str]:
         """Canonical tenant id by fixture tenant key, from the linked user's memberships.
 
-        Both fixture tenants must be there: without ``make zitadel-seed`` the
-        linked user is in neither, and the run fails here naming the step.
+        Both fixture tenants must be there: without the seed the linked user is
+        in neither, and the run fails here naming the user, its scope, the step
+        and what ``GET /api/identity`` answered. The lookup runs once: every
+        later test fails with the same message.
         """
+        if self._memberships_missing is not None:
+            pytest.fail(f"{self._memberships_missing} (found earlier in this run)")
         identity = self._identity(self._signed_in_token())
-        ids = {membership["tenant_name"]: membership["tenant_id"] for membership in identity["tenant_memberships"]}
-        missing = sorted({self._tenant_key(ADMIN), self._tenant_key(MEMBER)} - ids.keys())
+        by_name = {membership["tenant_name"]: membership["tenant_id"] for membership in identity["tenant_memberships"]}
+        keys = {self._tenant_key(ADMIN), self._tenant_key(MEMBER)}
+        missing = sorted(key for key in keys if self._tenant_name(key) not in by_name)
         if missing:
-            pytest.fail(
-                f"the linked user {self._linked.key} is not a member of {', '.join(missing)}: "
-                "run `make zitadel-seed` first"
+            self._memberships_missing = (
+                f"the linked user {self._linked.key}, both principals (signed in with scope {self._scope!r}), is not "
+                f"a member of {', '.join(missing)}: run `{self.seed_step}` first. GET {_IDENTITY} answered {identity}"
             )
-        return ids
-
-    def check_ready(self, request: pytest.FixtureRequest) -> None:
-        self._check_internal_endpoint_secrets()
-        instance = self._instance
-        try:
-            httpx.get(
-                f"{instance.issuer}/.well-known/openid-configuration", timeout=_PROBE_TIMEOUT_SECONDS
-            ).raise_for_status()
-        except httpx.HTTPError as exc:
-            pytest.fail(f"the Zitadel at {instance.issuer} does not answer ({exc!r}): run `make zitadel-up` first")
-        browser = request.getfixturevalue("browser")
-        self._check_stack_answers(browser)
-        self._browser = browser
+            pytest.fail(self._memberships_missing)
+        return {key: by_name[self._tenant_name(key)] for key in keys}
 
     def _signed_in_token(self) -> str:
-        """The linked user's token, signed in through the SPA's application (again when it is about to expire)."""
+        """The linked user's token, signed in through the SPA's client (again when it is about to expire)."""
         return self._tokens.get(self._linked.key, self._sign_in)
-
-    def _sign_in(self) -> str:
-        from tests.e2e_zitadel.browser_login import BrowserLogin
-
-        if self._browser is None:
-            pytest.fail("the Zitadel provider signs in only after check_ready")
-        context = self._browser.new_context()
-        try:
-            return (
-                BrowserLogin(self._instance.issuer, self.frontend_url)
-                .authorize(
-                    context,
-                    self._instance.users[self._linked.key],
-                    client_id=self._instance.spa_client_id,
-                    scope=self._instance.spa_scope,
-                )
-                .access_token
-            )
-        finally:
-            context.close()
 
     def access_token(self, principal: str, request: pytest.FixtureRequest) -> str:
         return self._signed_in_token()
@@ -533,15 +451,14 @@ class ZitadelProvider(E2EProvider):
         return browser.new_context(viewport={"width": 1280, "height": 720})
 
     def open_app(self, page: Page, principal: str) -> None:
-        """Sign In through Login V2, then pick the principal's tenant in the SPA's switcher."""
-        from tests.e2e_zitadel.browser_login import sign_in
-
+        """Sign In through the provider's forms, then pick the principal's tenant in the SPA's switcher."""
         page.goto(f"{self.frontend_url}/login")
         page.get_by_role("button", name="Sign In").click()
-        sign_in(page, self._instance.users[self._linked.key], self.frontend_url)
+        self._sign_in_page(page)
 
-        name = self._tenant_key(principal)
-        tenant_id = self._tenant_ids[name]
+        key = self._tenant_key(principal)
+        tenant_id = self._tenant_ids[key]
+        name = self._tenant_name(key)
         switcher = page.locator("header").get_by_role("combobox")
         expect(switcher).to_be_visible()
         if switcher.inner_text() != name:
@@ -560,6 +477,163 @@ class ZitadelProvider(E2EProvider):
 
     def user_id(self, request: pytest.FixtureRequest) -> str:
         return self._identity(self._signed_in_token())["user"]["id"]
+
+    def share_target(self, request: pytest.FixtureRequest) -> str:
+        """The fixture's second member of ``ADMIN``'s tenant, by email: ``ADMIN`` and ``MEMBER`` are one user.
+
+        The provider's seed links them (``make keycloak-seed``, ``make zitadel-seed``).
+        """
+        from tests.helpers.identity_fixture import IDENTITIES
+
+        user = IDENTITIES.cases.write_only
+        assert user.roles.get(self._tenant_key(ADMIN)), f"{user.key} is not a member of the admin's tenant"
+        return user.email
+
+    def relation_target(self, request: pytest.FixtureRequest) -> str:
+        """The share target: OpenFGA's subjects are users of the caller's tenant only."""
+        return self.share_target(request)
+
+
+class KeycloakProvider(TwoTenantUserProvider):
+    """``keycloak-test`` with ``infra/keycloak`` applied and ``make keycloak-seed`` run.
+
+    ``make test-e2e-keycloak`` points the run at the realm. The backend syncs to
+    it (``SYNC_PROVIDER=keycloak``), so before the first test a reconciliation
+    pass takes the realm's permissions, roles and the linked users' role
+    assignments into the canonical model. The user signs in through the SPA's
+    client with the SPA's scope, picking the organization Keycloak asks for.
+    """
+
+    name = KEYCLOAK
+    seed_step = "make keycloak-seed"
+
+    def _tenant_name(self, key: str) -> str:
+        """Reconciliation gives a linked tenant its organization's name, the fixture tenant's name."""
+        from tests.helpers.identity_fixture import IDENTITIES
+
+        return IDENTITIES.tenants[key].name
+
+    @cached_property
+    def _keycloak(self):
+        # Imported here: the module reads the KEYCLOAK_TEST_* target at import,
+        # which only a Keycloak run sets.
+        from tests.helpers import keycloak
+
+        return keycloak
+
+    @cached_property
+    def _model(self):
+        from tests.helpers import keycloak_model
+
+        return keycloak_model
+
+    @property
+    def _scope(self) -> str:
+        return self._model.SPA_SCOPE
+
+    def check_ready(self, request: pytest.FixtureRequest) -> None:
+        self._check_internal_endpoint_secrets()
+        source = self._keycloak.KeycloakTokenSource()
+        try:
+            source.check_reachable()
+        except self._keycloak.KeycloakTokenSourceUnavailable as exc:
+            pytest.fail(str(exc))
+        browser = request.getfixturevalue("browser")
+        self._check_stack_answers(browser)
+        self._browser = browser
+        from tests.e2e_keycloak.realm import take_in_the_realm
+
+        take_in_the_realm(self.backend_url)
+
+    def _sign_in(self) -> str:
+        from tests.e2e_keycloak.browser_login import BrowserLogin
+
+        if self._browser is None:
+            pytest.fail("the Keycloak provider signs in only after check_ready")
+        context = self._browser.new_context()
+        try:
+            return (
+                BrowserLogin(self._keycloak.KeycloakTokenSource())
+                .authorize(
+                    context,
+                    self._keycloak.TARGET.users[self._linked.key],
+                    client_id=self._model.SPA_CLIENT_ID,
+                    scope=self._scope,
+                    organization=self._tenant_key(ADMIN),
+                )
+                .access_token
+            )
+        finally:
+            context.close()
+
+    def _sign_in_page(self, page: Page) -> None:
+        from tests.e2e_keycloak.browser_login import sign_in
+
+        sign_in(
+            page,
+            self._keycloak.TARGET.users[self._linked.key],
+            self.frontend_url,
+            organization=self._tenant_key(ADMIN),
+        )
+
+
+class ZitadelProvider(TwoTenantUserProvider):
+    """The compose Zitadel with ``infra/zitadel`` applied and ``make zitadel-seed`` run.
+
+    The fixture's first-login user is left alone: ``tests/e2e_zitadel`` needs
+    its first login fresh.
+    """
+
+    name = ZITADEL
+    seed_step = "make zitadel-seed"
+
+    @cached_property
+    def _instance(self):
+        from tests.e2e_zitadel.instance import read_outputs
+
+        return read_outputs()
+
+    @property
+    def _scope(self) -> str:
+        return self._instance.spa_scope
+
+    def check_ready(self, request: pytest.FixtureRequest) -> None:
+        self._check_internal_endpoint_secrets()
+        instance = self._instance
+        try:
+            httpx.get(
+                f"{instance.issuer}/.well-known/openid-configuration", timeout=_PROBE_TIMEOUT_SECONDS
+            ).raise_for_status()
+        except httpx.HTTPError as exc:
+            pytest.fail(f"the Zitadel at {instance.issuer} does not answer ({exc!r}): run `make zitadel-up` first")
+        browser = request.getfixturevalue("browser")
+        self._check_stack_answers(browser)
+        self._browser = browser
+
+    def _sign_in(self) -> str:
+        from tests.e2e_zitadel.browser_login import BrowserLogin
+
+        if self._browser is None:
+            pytest.fail("the Zitadel provider signs in only after check_ready")
+        context = self._browser.new_context()
+        try:
+            return (
+                BrowserLogin(self._instance.issuer, self.frontend_url)
+                .authorize(
+                    context,
+                    self._instance.users[self._linked.key],
+                    client_id=self._instance.spa_client_id,
+                    scope=self._scope,
+                )
+                .access_token
+            )
+        finally:
+            context.close()
+
+    def _sign_in_page(self, page: Page) -> None:
+        from tests.e2e_zitadel.browser_login import sign_in
+
+        sign_in(page, self._instance.users[self._linked.key], self.frontend_url)
 
 
 PROVIDER_CLASSES: dict[str, type[E2EProvider]] = {

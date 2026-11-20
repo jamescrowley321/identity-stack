@@ -4,12 +4,15 @@ Each root takes the same variables (``issuer_url``, ``frontend_url``) and gives 
 outputs: ``backend_environment`` and ``frontend_environment``, maps whose keys are the
 environment variables the backend and the SPA read, and ``test_credentials``. A key in an
 environment map that docs/environment-variables.md does not list for that side is a variable
-the app does not read, and fails here. The plain-HTTP rule is written once, in
+the app does not read, and fails here; a ``backend_environment`` key must also be a name the
+backend reads through ``app.knobs``, and every setting the backend reads for the root's
+provider must be one of its keys. The plain-HTTP rule is written once, in
 ``infra/modules/provider-urls``.
 
 The roots are read as text: the unit suite runs without Terraform.
 """
 
+import ast
 import json
 import os
 import re
@@ -23,6 +26,16 @@ import yaml
 REPO = Path(__file__).resolve().parents[3]
 INFRA = REPO / "infra"
 ENV_DOC = REPO / "docs" / "environment-variables.md"
+BACKEND_APP = REPO / "backend" / "app"
+# The ``app.knobs`` readers: each takes the variable's name as its first argument.
+KNOB_READERS = frozenset({"knob", "knob_flag", "knob_set", "required_knob"})
+# Settings the backend reads for a root's provider that the root does not set: tuning
+# knobs with a default, which an operator sets only to change it.
+NOT_FROM_THE_ROOT = {
+    # The event pull's tuning, read with defaults; the root emits what names the realm and its clients.
+    "keycloak": {"KEYCLOAK_PULL_EVENTS", "KEYCLOAK_PULL_INTERVAL_SECONDS", "KEYCLOAK_PULL_PAGE_SIZE"},
+    "zitadel": {"ZITADEL_ADMIN_TIMEOUT_SECONDS", "ZITADEL_POST_LOGOUT_REDIRECT_URI"},
+}
 URL_MODULE = INFRA / "modules" / "provider-urls"
 
 # Each local root and the prefix of the backend variables it configures.
@@ -97,6 +110,33 @@ def test_root_gives_the_common_outputs(root: str) -> None:
     assert sensitive == sorted(SENSITIVE_OUTPUTS)
 
 
+# What tests and set-up read from each root besides the environment maps: the issuer, the SPA's
+# client id, another client's id for negative tests, the API audience and the tenants'
+# organizations. Zitadel's audience is the project id and its organizations are keyed ids;
+# Keycloak's audience is the API client id and a token names organizations by alias.
+ROOT_IDENTIFIERS = {
+    "keycloak": ("issuer_url", "spa_client_id", "other_client_id", "api_audience", "organization_aliases"),
+    "zitadel": ("issuer_url", "spa_client_id", "other_client_id", "project_id", "organization_ids"),
+}
+# The backend settings that bind a token to the SPA: the issuer, the audience and the client id.
+TOKEN_BINDING_SETTINGS = ("ISSUER_URL", "AUDIENCE", "CLIENT_ID")
+
+
+@pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
+def test_root_names_the_issuer_clients_audience_and_organizations(root: str) -> None:
+    declared = set(re.findall(r'^output "([a-z_]+)"', _root_text(root), re.MULTILINE))
+
+    assert sorted(set(ROOT_IDENTIFIERS[root]) - declared) == []
+
+
+@pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
+def test_backend_environment_binds_tokens_to_the_spa(root: str) -> None:
+    keys = _map_keys(_block(_root_text(root), "output", "backend_environment"))
+    expected = {f"{LOCAL_ROOTS[root]}{name}" for name in TOKEN_BINDING_SETTINGS}
+
+    assert sorted(expected - keys) == []
+
+
 @pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
 @pytest.mark.parametrize("output", sorted(DOC_SECTIONS))
 def test_environment_keys_are_variables_the_app_reads(root: str, output: str) -> None:
@@ -105,6 +145,38 @@ def test_environment_keys_are_variables_the_app_reads(root: str, output: str) ->
 
     assert keys, f"infra/{root} output {output} has no keys: the scan matched nothing"
     assert sorted(keys - documented) == []
+
+
+def _backend_knobs() -> set[str]:
+    """Every variable name the backend reads through ``app.knobs``: the string literal its reader is called with."""
+    names: set[str] = set()
+    for path in sorted(BACKEND_APP.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in KNOB_READERS
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                names.add(node.args[0].value)
+    return names
+
+
+def test_the_knob_scan_finds_the_backends_settings() -> None:
+    """The scan reads the calls it is meant to: a guard against a scan that matches nothing."""
+    assert {"KEYCLOAK_ISSUER_URL", "ZITADEL_ISSUER_URL", "CANONICAL_RBAC_PROVIDERS"} <= _backend_knobs()
+
+
+@pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
+def test_backend_environment_is_exactly_what_the_backend_reads_for_the_provider(root: str) -> None:
+    """A key no ``knob(...)`` reads, or a setting the backend reads that the root does not emit, fails here."""
+    keys = _map_keys(_block(_root_text(root), "output", "backend_environment"))
+    read = {name for name in _backend_knobs() if name.startswith(LOCAL_ROOTS[root])} - NOT_FROM_THE_ROOT[root]
+
+    assert sorted(keys - read) == []
+    assert sorted(read - keys) == []
 
 
 @pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
@@ -156,6 +228,9 @@ E2E_TARGETS = {"keycloak": "test-e2e-keycloak", "zitadel": "test-e2e-zitadel"}
 # The admin adapter's credential in backend_environment: it writes to the provider, and the e2e
 # backends do not sync to it.
 ADMIN_CREDENTIALS = {"keycloak": "KEYCLOAK_ADMIN_CLIENT_", "zitadel": "ZITADEL_ADMIN_TOKEN"}
+# The e2e backend that syncs with its provider, and so takes the admin credential:
+# the Keycloak suites exercise the push, the event pull and reconciliation.
+SYNCING_E2E_ROOTS = {"keycloak"}
 BACKEND_STEP = "Start backend"
 
 
@@ -213,19 +288,52 @@ def _sample_environment(root: str, output: str) -> dict[str, str]:
     return {key: f"value of {key}" for key in _map_keys(_block(_root_text(root), "output", output))}
 
 
-@pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
+@pytest.mark.parametrize("root", sorted(set(LOCAL_ROOTS) - SYNCING_E2E_ROOTS))
 def test_e2e_backend_reads_backend_environment_without_the_admin_credential(root: str) -> None:
     """The step's own jq filter, run over every backend_environment key, exports all but the admin credential."""
-    run = _step_run(_e2e_job(root), BACKEND_STEP)
-    filters = [text for text in re.findall(r"jq -er '([^']*)'", run) if "to_entries" in text]
     environment = _sample_environment(root, "backend_environment")
     expected = sorted(key for key in environment if not key.startswith(ADMIN_CREDENTIALS[root]))
 
+    assert sorted(environment) != expected, f"infra/{root} backend_environment has no admin credential to drop"
+    assert _exported_backend_environment(root, environment) == expected
+    assert _e2e_job_step_env(root).get("SYNC_PROVIDER", "descope") != root
+
+
+@pytest.mark.parametrize("root", sorted(SYNCING_E2E_ROOTS))
+def test_a_syncing_e2e_backend_reads_all_of_backend_environment(root: str) -> None:
+    """The step's own jq filter exports every backend_environment key, the admin credential included."""
+    environment = _sample_environment(root, "backend_environment")
+
+    assert any(key.startswith(ADMIN_CREDENTIALS[root]) for key in environment)
+    assert _exported_backend_environment(root, environment) == sorted(environment)
+    assert _e2e_job_step_env(root)["SYNC_PROVIDER"] == root
+
+
+def _exported_backend_environment(root: str, environment: dict[str, str], prefix: str | None = None) -> list[str]:
+    """What the step's jq filter for ``root``'s settings (the one naming ``prefix``) exports from ``environment``."""
+    run = _step_run(_e2e_job(root), BACKEND_STEP)
+    prefix = LOCAL_ROOTS[root] if prefix is None else prefix
+    filters = [text for text in re.findall(r"jq -er '([^']*)'", run) if "to_entries" in text and prefix in text]
     assert f"terraform -chdir=infra/{root} output -json backend_environment" in run
     assert len(filters) == 1, f"{BACKEND_STEP} should export through one to_entries jq filter: {filters}"
-    assert sorted(environment) != expected, f"infra/{root} backend_environment has no admin credential to drop"
     exported = _jq(filters[0], environment, "-er")
-    assert sorted(line.split("=", 1)[0].removeprefix("export ") for line in exported) == expected
+    return sorted(line.split("=", 1)[0].removeprefix("export ") for line in exported)
+
+
+@pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
+def test_e2e_backend_reads_the_openfga_roots_backend_environment(root: str) -> None:
+    """Both e2e backends serve their principals FGA and documents from the applied infra/openfga."""
+    environment = _sample_environment("openfga", "backend_environment")
+    run = _step_run(_e2e_job(root), BACKEND_STEP)
+
+    assert "terraform -chdir=infra/openfga output -json backend_environment" in run
+    assert _exported_backend_environment(root, environment, prefix="OPENFGA_") == sorted(environment)
+    assert "RELATIONSHIP_STORE" in environment
+
+
+def _e2e_job_step_env(root: str) -> dict:
+    (step,) = [step for step in _e2e_job(root)["steps"] if step.get("name") == BACKEND_STEP]
+    return step.get("env", {})
 
 
 @pytest.mark.parametrize("root", sorted(LOCAL_ROOTS))
@@ -315,7 +423,6 @@ KEYCLOAK_TEST_SETTINGS = (
     "KEYCLOAK_TEST_REALM",
     "KEYCLOAK_TEST_USER_IDS",
     "KEYCLOAK_TEST_USER_PASSWORDS",
-    "KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET",
     "KEYCLOAK_TEST_ADMIN_CLIENT_SECRET",
 )
 
@@ -323,7 +430,6 @@ KEYCLOAK_TEST_SETTINGS = (
 def _keycloak_outputs() -> dict:
     backend = _sample_environment("keycloak", "backend_environment")
     backend["KEYCLOAK_ISSUER_URL"] = KEYCLOAK_DEFAULT_ISSUER
-    backend["KEYCLOAK_DIRECTORY_CLIENT_SECRET"] = "directory 'secret'"
     backend["KEYCLOAK_ADMIN_CLIENT_SECRET"] = "admin $secret"
     return {
         "backend_environment": {"sensitive": True, "value": backend},
@@ -372,7 +478,6 @@ def test_e2e_keycloak_target_gives_the_suite_the_applied_realm(tmp_path: Path) -
         "KEYCLOAK_TEST_REALM": "identity-stack-terraform",
         "KEYCLOAK_TEST_USER_IDS": json.dumps({"alice": "id-a"}, separators=(",", ":")),
         "KEYCLOAK_TEST_USER_PASSWORDS": json.dumps({"alice": "pw 'a'"}, separators=(",", ":")),
-        "KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET": "directory 'secret'",
         "KEYCLOAK_TEST_ADMIN_CLIENT_SECRET": "admin $secret",
     }
 
@@ -401,15 +506,11 @@ def _issuer(value: str):
         (_without(("backend_environment",)), "backend_environment"),
         (_issuer("http://keycloak.localhost:8180/identity-stack-terraform"), "KEYCLOAK_ISSUER_URL"),
         (_issuer("http://keycloak.localhost:8180//realms/identity-stack-terraform"), "KEYCLOAK_ISSUER_URL"),
-        (
-            _without(("backend_environment", "value", "KEYCLOAK_DIRECTORY_CLIENT_SECRET")),
-            "KEYCLOAK_DIRECTORY_CLIENT_SECRET",
-        ),
         (_without(("backend_environment", "value", "KEYCLOAK_ADMIN_CLIENT_SECRET")), "KEYCLOAK_ADMIN_CLIENT_SECRET"),
         (_without(("user_ids",)), "user_ids"),
         (_without(("test_credentials", "value", "users")), "test_credentials"),
     ],
-    ids=["no-backend", "issuer-without-realm", "issuer-double-slash", "no-directory", "no-admin", "no-ids", "no-users"],
+    ids=["no-backend", "issuer-without-realm", "issuer-double-slash", "no-admin", "no-ids", "no-users"],
 )
 def test_e2e_keycloak_target_refuses_outputs_it_cannot_read(change, named: str, tmp_path: Path) -> None:
     """A missing output or setting fails the target naming it, before the suite runs with a ``null``."""

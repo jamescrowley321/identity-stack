@@ -59,17 +59,12 @@ async def _descope_management_logout(provider: ProviderTokenConfig, claims: dict
 def _logout_client_id(provider: ProviderTokenConfig, claims: dict) -> str | None:
     """The client id to log out.
 
-    The provider's fixed one (``ORY_CLIENT_ID``); else the claim it names, which
-    for Keycloak is ``azp``, the app client the caller's token was issued to;
-    else its single audience, which is what Ory has always fallen back to. A
-    Keycloak token without a usable ``azp`` sends no ``client_id``, and Keycloak
-    then goes by ``id_token_hint`` alone.
+    The provider's fixed one (``ORY_CLIENT_ID``, the Keycloak and Zitadel SPA
+    client ids); else its single audience, which is what Ory has always fallen
+    back to.
     """
     if provider.logout_client_id:
         return provider.logout_client_id
-    if provider.logout_client_id_claim:
-        claimed = claims.get(provider.logout_client_id_claim)
-        return claimed if isinstance(claimed, str) and claimed else None
     return provider.audience
 
 

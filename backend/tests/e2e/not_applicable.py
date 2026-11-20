@@ -61,42 +61,39 @@ def missing_internal_endpoint_secrets(provider: str, environment: Mapping[str, s
 #
 # One sentence each, saying what about the provider makes the test inapplicable.
 
-DESCOPE_ONLY_ROUTE = (
-    "the route serves Descope principals only (require_descope_principal, #566): it reads or writes "
-    "Descope's roles, permissions, members, access keys, FGA or documents; canonical routes for "
-    "other providers are #590"
+DEFINITIONS_NEED_OPERATOR = (
+    "changing the role and permission definitions needs operator from a canonical principal's sole membership "
+    "(require_definitions_role, #676), and the run's admin is the two-tenant fixture user, a tenant admin: "
+    "no fixture user of this provider is an operator (#710)"
 )
+NOT_THE_SYNC_PROVIDER = (
+    "the member, role and permission routes serve the sync provider's principals "
+    "(require_sync_provider_principal, #676, #677) and this run's backend syncs to Descope (SYNC_PROVIDER unset: "
+    "it holds no Zitadel write credential), so they answer its principals 403 (#709)"
+)
+NO_SYNC_PROVIDER_PAGES = (
+    "this run's backend syncs to Descope, so its principals are no sync provider principals "
+    "(GET /api/capabilities) and the SPA has no Members or Roles page for them (#683, #709)"
+)
+DEFINITIONS_NOT_SYNCED = f"{NOT_THE_SYNC_PROVIDER}; changing the definitions also needs operator (#710)"
 DESCOPE_MANAGEMENT_API = "calls the Descope Management API itself; the run has no Descope project"
 DESCOPE_ACCESS_KEY = "is about a Descope access-key session, which no other provider has"
-TENANTS_CLAIM = (
-    "the route reads Descope's tenants claim, which this provider's tokens do not carry; it answers "
-    "403 TENANTS_CLAIM_NOT_READ (#557)"
-)
-ID_TOKEN_VALIDATION = (
-    "POST /api/validate-id-token validates against the Descope provider only: 503 for this provider (#636)"
-)
-ZITADEL_TENANTS_CLAIM = (
-    "the route reads Descope's tenants claim, which a Zitadel token does not carry: it lists no "
-    "tenant and refuses the tenant's routes as not a member (as for Ory, #597); a Zitadel "
-    "principal's tenants come from GET /api/identity"
-)
-TENANT_SETTINGS = (
-    "the Tenant Settings page loads GET /api/tenants/current/settings, the Descope tenant's custom "
-    "attributes, which serves Descope principals only (#590)"
-)
-KEYCLOAK_ROLE_GATE = (
-    "the route is gated on canonical role names (require_role); a Keycloak principal is granted "
-    "permissions from client roles in its token and holds no role (#557)"
-)
-KEYCLOAK_SPA_ADMIN = (
-    "the SPA is built for the member type's app client (member-app); a Keycloak tenant admin signs "
-    "in through tenant-admin-app, which no SPA build serves"
-)
 ORY_PROVIDER = "proves the Ory provider, which only the Descope run's backend configures"
+NO_CUSTOM_ATTRIBUTES = (
+    "this run's backend syncs with Descope, whose custom attributes serve Descope principals only, so "
+    "its principals have no custom_attributes capability and the SPA no Tenant Settings page (#678, #679)"
+)
+NO_MACHINE_CREDENTIALS = (
+    "this run's backend syncs with Descope, whose access keys serve Descope principals only, so its "
+    "principals have no machine_credentials capability and the SPA no Access Keys page (#678, #680)"
+)
 
 
 def _both(reason: str) -> dict[str, str]:
     return {KEYCLOAK: reason, ZITADEL: reason}
+
+
+DEFINITIONS = {KEYCLOAK: DEFINITIONS_NEED_OPERATOR, ZITADEL: DEFINITIONS_NOT_SYNCED}
 
 
 def _each(module: str, tests: list[str], reasons: dict[str, str]) -> dict[str, dict[str, str]]:
@@ -109,39 +106,19 @@ def _each(module: str, tests: list[str], reasons: dict[str, str]) -> dict[str, d
 NOT_APPLICABLE: dict[str, dict[str, str]] = {
     "test_ory_sso_e2e.py": {KEYCLOAK: ORY_PROVIDER, ZITADEL: ORY_PROVIDER},
     # Login, session and identity
-    "test_api_authenticated.py::test_tenants_endpoint_lists_user_tenants": {KEYCLOAK: TENANTS_CLAIM},
-    "test_api_authenticated.py::test_validate_id_token": _both(ID_TOKEN_VALIDATION),
-    "test_page_content.py::test_no_5xx_errors_on_dashboard": _both(ID_TOKEN_VALIDATION),
-    "test_api_endpoints.py::TestAuthenticatedEndpoints::test_tenants_returns_200": {KEYCLOAK: TENANTS_CLAIM},
-    "test_async_db_migration.py::TestAsyncTenantEndpoints::test_list_tenants_returns_list": {KEYCLOAK: TENANTS_CLAIM},
-    "test_identity_crud_e2e.py::TestTenantOperations::test_list_tenants_returns_jwt_tenants": {
-        KEYCLOAK: TENANTS_CLAIM,
-        ZITADEL: ZITADEL_TENANTS_CLAIM,
-    },
-    "test_identity_crud_e2e.py::TestTenantOperations::test_get_current_tenant": _both(DESCOPE_ONLY_ROUTE),
-    # Tenant resources
-    **_each(
-        "test_async_db_migration.py::TestAsyncTenantResourcesCRUD",
-        ["test_tenant_resource_create_and_list", "test_tenant_resource_duplicate_returns_409"],
-        {KEYCLOAK: TENANTS_CLAIM, ZITADEL: ZITADEL_TENANTS_CLAIM},
-    ),
-    # RBAC administration
+    # RBAC administration. A tenant admin lists the definitions (#707); changing them needs operator.
     **_each(
         "test_api_endpoints.py::TestAdminEndpoints",
-        [
-            "test_roles_list_responds",
-            "test_permissions_list_responds",
-            "test_members_list_responds",
-            "test_keys_list_responds",
-        ],
-        _both(DESCOPE_ONLY_ROUTE),
+        ["test_roles_list_responds", "test_permissions_list_responds"],
+        {ZITADEL: NOT_THE_SYNC_PROVIDER},
     ),
-    "test_api_endpoints.py::TestAdminEndpoints::test_idp_links_responds": {KEYCLOAK: KEYCLOAK_ROLE_GATE},
-    "test_multi_idp_e2e.py::TestIdPLinkCrudAdmin": {KEYCLOAK: KEYCLOAK_ROLE_GATE},
-    "test_identity_crud_e2e.py::TestPermissionCrudCanonical": _both(DESCOPE_ONLY_ROUTE),
-    "test_identity_crud_e2e.py::TestRoleCrudCanonical": _both(DESCOPE_ONLY_ROUTE),
-    "test_identity_crud_e2e.py::TestMemberCrud": _both(DESCOPE_ONLY_ROUTE),
-    "test_identity_repository_api.py": _both(DESCOPE_ONLY_ROUTE),
+    "test_identity_crud_e2e.py::TestPermissionCrudCanonical": DEFINITIONS,
+    "test_identity_crud_e2e.py::TestRoleCrudCanonical": DEFINITIONS,
+    # The member routes serve the sync provider's principals (#677): Keycloak's run
+    # syncs to Keycloak and runs them; Zitadel's backend syncs to Descope.
+    "test_api_endpoints.py::TestAdminEndpoints::test_members_list_responds": {ZITADEL: NOT_THE_SYNC_PROVIDER},
+    "test_identity_crud_e2e.py::TestMemberCrud": {ZITADEL: NOT_THE_SYNC_PROVIDER},
+    "test_identity_repository_api.py": DEFINITIONS,
     **_each(
         "test_rbac_api.py",
         [
@@ -150,65 +127,28 @@ NOT_APPLICABLE: dict[str, dict[str, str]] = {
             "test_permission_crud_lifecycle",
             "test_role_crud_lifecycle",
         ],
-        _both(DESCOPE_ONLY_ROUTE),
+        DEFINITIONS,
     ),
     **_each(
         "test_rbac_api.py",
         ["test_tf_seeded_roles_present", "test_tf_seeded_permissions_present", "test_runtime_role_assignment"],
         _both(DESCOPE_MANAGEMENT_API),
     ),
-    "test_identity_repository_ui.py::test_navigate_to_settings_page": {
-        KEYCLOAK: KEYCLOAK_SPA_ADMIN,
-        ZITADEL: TENANT_SETTINGS,
-    },
+    # Pages a capability gives (test_capability_pages.py checks each run sees exactly its own)
+    "test_identity_repository_ui.py::test_navigate_to_roles_page": {ZITADEL: NO_SYNC_PROVIDER_PAGES},
+    "test_identity_repository_ui.py::test_navigate_to_members_page": {ZITADEL: NO_SYNC_PROVIDER_PAGES},
+    "test_page_content.py::test_members_page_loads": {ZITADEL: NO_SYNC_PROVIDER_PAGES},
+    "test_page_content.py::test_roles_page_loads": {ZITADEL: NO_SYNC_PROVIDER_PAGES},
+    "test_identity_repository_ui.py::test_navigate_to_settings_page": {ZITADEL: NO_CUSTOM_ATTRIBUTES},
+    "test_authenticated_ui.py::test_navigate_to_settings": {ZITADEL: NO_CUSTOM_ATTRIBUTES},
+    "test_page_content.py::test_tenant_settings_handles_no_tenant": {ZITADEL: NO_CUSTOM_ATTRIBUTES},
+    # Keycloak's machine credentials are canonical clients of the realm (#680): both run there.
+    "test_page_content.py::test_access_keys_page_loads": {ZITADEL: NO_MACHINE_CREDENTIALS},
+    "test_api_endpoints.py::TestAdminEndpoints::test_keys_list_responds": {ZITADEL: NO_MACHINE_CREDENTIALS},
     "test_identity_repository_ui.py::test_role_created_via_api_is_invisible_to_an_access_key_session": _both(
         DESCOPE_ACCESS_KEY
     ),
-    # Documents and FGA
-    "test_async_db_migration.py::TestAsyncDocumentCRUD": _both(DESCOPE_ONLY_ROUTE),
-    "test_async_db_migration.py::TestAsyncErrorResponses::test_invalid_document_id_format_returns_422": _both(
-        DESCOPE_ONLY_ROUTE
-    ),
-    **_each(
-        "test_async_db_migration.py::TestAsyncDocumentValidation",
-        ["test_create_document_empty_title_rejected", "test_create_document_missing_title_rejected"],
-        _both(DESCOPE_ONLY_ROUTE),
-    ),
-    **_each(
-        "test_documents_e2e.py",
-        [
-            "test_create_document_creates_fga_owner",
-            "test_owner_has_all_permissions",
-            "test_editor_has_view_and_edit_not_delete",
-            "test_viewer_has_view_only",
-            "test_document_get_allowed_for_owner",
-            "test_document_update_allowed_for_owner",
-            "test_permission_derivation_through_endpoints",
-            "test_document_fga_denies_without_relation",
-            "test_document_delete_cleans_fga_relations",
-            "test_list_documents_returns_authorized",
-            "test_list_documents_excludes_unauthorized",
-            "test_share_document_grants_access",
-            "test_revoke_share_denies_access",
-            "test_sequential_relation_revocation_no_stale_grants",
-        ],
-        _both(DESCOPE_ONLY_ROUTE),
-    ),
-    **_each(
-        "test_fga_api.py",
-        [
-            "test_get_fga_schema",
-            "test_relation_create_and_delete",
-            "test_list_relations_empty",
-            "test_check_permission_denied_for_nonexistent",
-            "test_create_relation_validation",
-            "test_list_relations_validation",
-            "test_check_permission_validation",
-            "test_relation_lifecycle_with_permission_check",
-            "test_update_fga_schema",
-        ],
-        _both(DESCOPE_ONLY_ROUTE),
-    ),
+    # Documents and FGA run for every provider: OpenFGA serves the canonical runs' principals (#682).
 }
 
 

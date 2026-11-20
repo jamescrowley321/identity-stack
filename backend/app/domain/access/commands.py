@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from enum import Enum
 
 from app.domain.access.values import PermissionName, RoleName
 
@@ -74,3 +75,18 @@ class UpdatePermission:
 @dataclass(frozen=True)
 class DeletePermission:
     permission_id: uuid.UUID
+
+
+class MemberAction(Enum):
+    DEACTIVATE = "deactivate"
+    ACTIVATE = "activate"
+    REMOVE = "remove"
+
+
+@dataclass(frozen=True)
+class ActOnMember:
+    """``caller_id`` is the caller's user id as the deployment spells it (None when it has none)."""
+
+    action: MemberAction
+    caller_id: str | None
+    caller_roles: frozenset[str]

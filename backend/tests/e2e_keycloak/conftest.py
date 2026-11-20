@@ -7,10 +7,13 @@ It needs, all running and none of them optional:
   ``KEYCLOAK_TEST_*`` variables (``tests/helpers/keycloak_target.py``) from the
   root's outputs;
 - the backend on ``E2E_BACKEND_URL`` (default ``http://localhost:8000``),
-  configured from the root's ``backend_environment``, with the ``keycloak``
-  provider row seeded and ``JIT_ENABLED_PROVIDERS`` naming it;
-- the SPA, built from the root's ``frontend_environment`` for ``member-app``, on
-  ``http://localhost:3000``: the only origin the realm's app clients redirect to.
+  configured from the root's ``backend_environment`` with ``keycloak`` in
+  ``CANONICAL_RBAC_PROVIDERS`` and ``JIT_ENABLED_PROVIDERS`` and
+  ``SYNC_PROVIDER=keycloak`` (the event pull runs), on a database ``make
+  keycloak-seed`` linked to the realm;
+- the SPA, built from the root's ``frontend_environment`` for
+  ``identity-stack-spa``, on ``http://localhost:3000``: the only origin the
+  realm's clients redirect to.
 
 When any of them does not answer, every test fails: the suite never skips.
 
@@ -26,10 +29,11 @@ from playwright.sync_api import APIRequestContext, Browser, BrowserContext, Play
 from playwright.sync_api import Error as PlaywrightError
 
 from tests.e2e_keycloak.browser_login import BrowserLogin
+from tests.e2e_keycloak.realm import take_in_the_realm
 from tests.helpers.keycloak import KEYCLOAK_REDIRECT_URI, KeycloakTokenSource, KeycloakTokenSourceUnavailable
 
 BACKEND_URL = os.environ.get("E2E_BACKEND_URL", "http://localhost:8000")
-# Fixed by the realm: the app clients accept no other redirect URI.
+# Fixed by the realm: its clients accept no other redirect URI.
 FRONTEND_URL = KEYCLOAK_REDIRECT_URI
 _PROBE_TIMEOUT_SECONDS = 10
 
@@ -46,7 +50,7 @@ def keycloak() -> KeycloakTokenSource:
 
 @pytest.fixture(scope="session", autouse=True)
 def _stack_answers(keycloak, browser: Browser):
-    """Fail the whole run, never skip it, when the backend or the SPA is not up.
+    """Fail the whole run, never skip it, when the backend or the SPA is not up; then take the realm in.
 
     The SPA is asked through Chromium and must show its own Sign In button, so
     another server answering on its port does not pass for it.
@@ -65,6 +69,7 @@ def _stack_answers(keycloak, browser: Browser):
             pytest.fail(f"the SPA is not answering at {FRONTEND_URL} ({exc}); see tests/e2e_keycloak/conftest.py")
     finally:
         context.close()
+    take_in_the_realm(BACKEND_URL)
 
 
 @pytest.fixture(scope="session")

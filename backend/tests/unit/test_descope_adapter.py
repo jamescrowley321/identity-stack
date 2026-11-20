@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock
 import pytest
 from expression import Ok
 
-from app.services.adapters.base import SyncError
+from app.services.adapters.base import OWN_PROFILE_OF, SyncError
 from app.services.adapters.descope import DescopeSyncAdapter
 
 
@@ -40,6 +40,22 @@ class TestSyncUser:
 
         assert result == Ok(None)
         mock_client.update_user_status.assert_awaited_once_with("a@b.com", "enabled")
+
+    async def test_the_owners_names_go_to_their_own_descope_user_and_no_status(self, adapter, mock_client):
+        result = await adapter.sync_user(
+            user_id=uuid.uuid4(),
+            data={
+                "email": "a@b.com",
+                "status": "inactive",
+                "given_name": "Ann",
+                "family_name": "B",
+                OWN_PROFILE_OF: "descope-user-1",
+            },
+        )
+
+        assert result == Ok(None)
+        mock_client.update_user_names.assert_awaited_once_with("descope-user-1", "Ann", "B")
+        mock_client.update_user_status.assert_not_awaited()
 
     async def test_sync_inactive_user_calls_disabled(self, adapter, mock_client):
         result = await adapter.sync_user(

@@ -99,12 +99,12 @@ jobs:
 
       - uses: ./.github/actions/setup-backend
 
-      - name: Start test stack (postgres + redis + hydra + keycloak)
+      - name: Start test stack (postgres + redis + hydra + keycloak + openfga)
         # The Keycloak issuer is a fixed *.localhost name; pin it to loopback
         # rather than depend on the runner's resolver.
         run: |
           echo "127.0.0.1 keycloak-test.localhost" | sudo tee -a /etc/hosts
-          docker compose -f docker-compose.test.yml --profile keycloak up -d --wait
+          docker compose -f docker-compose.test.yml --profile keycloak --profile openfga up -d --wait
 
       - name: Run integration tests
         # Deliberately unguarded. A step-level `if:` on a credential meant that an
@@ -125,6 +125,7 @@ jobs:
           DESCOPE_EXPIRED_TOKEN: ${{ secrets.DESCOPE_EXPIRED_TOKEN }}
           TEST_DATABASE_URL: postgresql+asyncpg://identity_test:identity_test@localhost:15432/identity_test
           TEST_REDIS_URL: redis://localhost:16379/0
+          TEST_OPENFGA_URL: http://localhost:18380
 
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
@@ -144,7 +145,31 @@ jobs:
 
       - name: Stop test stack
         if: always()
-        run: docker compose -f docker-compose.test.yml --profile keycloak down -v
+        run: docker compose -f docker-compose.test.yml --profile keycloak --profile openfga down -v
+
+  openfga-terraform-check:
+    name: OpenFGA Terraform Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # No credential: the store and model are built in the openfga-test container,
+    # so this runs on every pull request, forks and Dependabot included.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "1.16.2"
+          terraform_wrapper: false
+
+      - name: Start openfga-test
+        run: make test-up-openfga
+
+      - name: Apply infra/openfga, check the second plan is empty and the model is model.json
+        run: make openfga-terraform-check
+
+      - name: Stop test stack
+        if: always()
+        run: make test-down
 
   keycloak-terraform-check:
     name: Keycloak Terraform Check
@@ -450,7 +475,7 @@ jobs:
     # keycloak-test with the compose bootstrap admin, so this runs on every
     # pull request, forks and Dependabot included. The Descope E2E job above
     # needs secrets and serves its own SPA on localhost:3000, the only origin
-    # the realm's app clients redirect to, so Keycloak has a job of its own: the
+    # the realm's clients redirect to, so Keycloak has a job of its own: the
     # shared UI and API suite (backend/tests/e2e/, E2E_PROVIDER=keycloak) and
     # the Keycloak suite (backend/tests/e2e_keycloak/).
     env:
@@ -477,12 +502,21 @@ jobs:
       - name: Install frontend dependencies
         run: cd frontend && npm ci
 
-      - name: Start test stack (postgres + redis + hydra + keycloak)
+      - name: Start test stack (postgres + redis + hydra + keycloak + openfga)
         # The Keycloak issuer is a fixed *.localhost name; pin it to loopback
         # rather than depend on the runner's resolver.
         run: |
           echo "127.0.0.1 keycloak-test.localhost" | sudo tee -a /etc/hosts
           make test-up-keycloak
+          make test-up-openfga
+
+      - name: Apply infra/openfga
+        # The relationship store of a Keycloak deployment (RELATIONSHIP_STORE
+        # defaults to openfga for SYNC_PROVIDER=keycloak). Local state in
+        # infra/openfga, which the backend step reads the outputs from.
+        run: |
+          terraform -chdir=infra/openfga init -input=false
+          terraform -chdir=infra/openfga apply -auto-approve -input=false -var api_url=http://localhost:18380
 
       - name: Apply infra/keycloak
         # A realm beside the compose import, built by the root. Local state in
@@ -496,27 +530,21 @@ jobs:
           KEYCLOAK_USER: admin
           KEYCLOAK_PASSWORD: admin
 
-      - name: Build frontend for the realm's member-app
-        # The root's frontend_environment. The suite starts bob in acme, so the
-        # build asks for that organization by name, and the tenant switch asks
-        # for the one picked, instead of letting Keycloak ask him which one.
+      - name: Build frontend for the realm's SPA client
+        # The root's frontend_environment: the plain organization scope. The
+        # tenant is switched in the app with the X-Tenant-ID selector.
         run: |
           # Captured first: `eval "$(...)"` would drop a terraform or jq failure.
           set -o pipefail
           vars="$(terraform -chdir=infra/keycloak output -json frontend_environment \
             | jq -er 'to_entries[] | if (.key | test("^VITE_OIDC_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
           eval "$vars"
-          cd frontend && VITE_OIDC_SCOPE="openid profile email organization:acme" \
-            VITE_OIDC_TENANT_SCOPE_TEMPLATE="openid profile email organization:{tenant}" npm run build
+          cd frontend && npm run build
 
-      - name: Apply database schema and register the Keycloak provider
+      - name: Apply database schema, register the Keycloak provider, link the tenants and users
         run: |
-          set -o pipefail
-          KEYCLOAK_ISSUER_URL="$(terraform -chdir=infra/keycloak output -json backend_environment | jq -er .KEYCLOAK_ISSUER_URL)"
-          export KEYCLOAK_ISSUER_URL
-          cd backend
-          python -m alembic upgrade head
-          python -m scripts.seed_keycloak
+          (cd backend && python -m alembic upgrade head)
+          make keycloak-seed
 
       # The internal endpoints' shared secrets, generated per run as in the
       # Descope E2E job: the shared suite's internal-endpoint tests compute
@@ -530,19 +558,23 @@ jobs:
           done
 
       - name: Start backend
-        # The root's backend_environment without the admin client: this backend
-        # does not sync to Keycloak (SYNC_PROVIDER stays descope), so it gets no
-        # credential that writes to the realm. The directory client's secret is
-        # masked in the job log. Descope is left unconfigured: these tests present
-        # Keycloak tokens only. The log goes to a file: the backend outlives this step.
+        # The root's backend_environment, admin client included: the backend
+        # syncs with the realm (SYNC_PROVIDER=keycloak), so it pushes canonical
+        # changes, polls the realm's events (the tests that change the realm
+        # wait for the next poll) and runs the reconciliation the suites start
+        # with. The provider's settings all come from the root's outputs. Canonical authorization and first login for
+        # keycloak. Descope is left unconfigured: these tests present Keycloak
+        # tokens only. The log goes to a file: the backend outlives this step.
         run: |
           # Captured first: `eval "$(...)"` would drop a terraform or jq failure.
           set -o pipefail
           environment="$(terraform -chdir=infra/keycloak output -json backend_environment)"
-          directory_secret="$(printf '%s' "$environment" | jq -er .KEYCLOAK_DIRECTORY_CLIENT_SECRET)"
-          echo "::add-mask::$directory_secret"
           vars="$(printf '%s' "$environment" \
-            | jq -er 'to_entries[] | select(.key | startswith("KEYCLOAK_ADMIN_CLIENT_") | not) | if (.key | test("^KEYCLOAK_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
+            | jq -er 'to_entries[] | if (.key | test("^KEYCLOAK_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
+          eval "$vars"
+          openfga="$(terraform -chdir=infra/openfga output -json backend_environment)"
+          vars="$(printf '%s' "$openfga" \
+            | jq -er 'to_entries[] | if (.key | test("^(RELATIONSHIP_STORE|OPENFGA_[A-Z_]+)$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
           eval "$vars"
           cd backend
           uvicorn app.main:app --host 127.0.0.1 --port 8000 > "$RUNNER_TEMP/backend.log" 2>&1 &
@@ -551,7 +583,9 @@ jobs:
           DESCOPE_PROJECT_ID: ""
           DESCOPE_MANAGEMENT_KEY: ""
           REDIS_URL: redis://localhost:16379/0
+          CANONICAL_RBAC_PROVIDERS: keycloak
           JIT_ENABLED_PROVIDERS: keycloak
+          SYNC_PROVIDER: keycloak
           # The limiter runs before token validation, so its key is the client
           # address, shared by every request in this job. At the 60/minute
           # default, the every-protected-route refusal test would get 429s
@@ -568,8 +602,10 @@ jobs:
 
       - name: Run Keycloak E2E tests
         # The suite's session fixture fails every test, never skips, when
-        # keycloak-test, the backend or the SPA does not answer. The target
-        # reads the realm, user ids and passwords from the root's outputs.
+        # keycloak-test, the backend or the SPA does not answer, and first runs
+        # reconciliation passes until the backend holds the realm's role
+        # assignments. The target reads the realm, user ids and passwords from
+        # the root's outputs.
         run: >-
           make test-e2e-keycloak
           PYTEST_ARGS='--screenshot=only-on-failure --tracing=retain-on-failure --output=${{ runner.temp }}/playwright'
@@ -655,13 +691,21 @@ jobs:
       - name: Install frontend dependencies
         run: cd frontend && npm ci
 
-      - name: Start the local Zitadel and the test Postgres
+      - name: Start the local Zitadel, the test Postgres and OpenFGA
         # The issuer is a fixed *.localhost name; pin it to loopback rather than
         # depend on the runner's resolver.
         run: |
           echo "127.0.0.1 zitadel.localhost" | sudo tee -a /etc/hosts
           make zitadel-up
-          make test-up
+          make test-up-openfga
+
+      - name: Apply infra/openfga
+        # This backend syncs to Descope (SYNC_PROVIDER stays descope), so the
+        # root's backend_environment sets RELATIONSHIP_STORE=openfga itself: the
+        # FGA and document routes serve the Zitadel principals from OpenFGA.
+        run: |
+          terraform -chdir=infra/openfga init -input=false
+          terraform -chdir=infra/openfga apply -auto-approve -input=false -var api_url=http://localhost:18380
 
       - name: Apply infra/zitadel
         # Local state in infra/zitadel, which the later steps read the outputs from.
@@ -678,15 +722,15 @@ jobs:
           make zitadel-seed
 
       - name: Build frontend for the SPA application
-        # The root's frontend_environment, with no tenant scope template: a
-        # Zitadel user switches tenant on the client.
+        # The root's frontend_environment: a Zitadel user switches tenant on
+        # the client.
         run: |
           # Captured first: `eval "$(...)"` would drop a terraform or jq failure.
           set -o pipefail
           vars="$(terraform -chdir=infra/zitadel output -json frontend_environment \
             | jq -er 'to_entries[] | if (.key | test("^VITE_OIDC_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
           eval "$vars"
-          cd frontend && VITE_OIDC_TENANT_SCOPE_TEMPLATE= npm run build
+          cd frontend && npm run build
 
       # The internal endpoints' shared secrets, generated per run as in the
       # Descope E2E job: the shared suite's internal-endpoint tests compute
@@ -711,6 +755,9 @@ jobs:
           set -o pipefail
           vars="$(terraform -chdir=infra/zitadel output -json backend_environment \
             | jq -er 'to_entries[] | select(.key != "ZITADEL_ADMIN_TOKEN") | if (.key | test("^ZITADEL_[A-Z_]+$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
+          eval "$vars"
+          vars="$(terraform -chdir=infra/openfga output -json backend_environment \
+            | jq -er 'to_entries[] | if (.key | test("^(RELATIONSHIP_STORE|OPENFGA_[A-Z_]+)$")) then "export \(.key)=\(.value | @sh)" else error("unexpected key \(.key)") end')"
           eval "$vars"
           cd backend
           uvicorn app.main:app --host 127.0.0.1 --port 8000 > "$RUNNER_TEMP/backend.log" 2>&1 &

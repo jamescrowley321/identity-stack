@@ -103,7 +103,6 @@ from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.providers import (
     configured_providers,
-    refuse_ambiguous_authorization_source,
     refuse_canonical_descope_managed,
 )
 from app.middleware.security import SecurityHeadersMiddleware
@@ -155,12 +154,11 @@ def configure_middleware(app: FastAPI) -> None:
     # The one provider list (``PROVIDER_REGISTRATIONS``): Descope always, each
     # other provider when its issuer is set. Both middlewares select a provider
     # by the token's issuer. A provider configured without its required audience,
-    # a half-configured Keycloak, one that shares a name or an issuer with
-    # another, or Descope or Keycloak listed in ``CANONICAL_RBAC_PROVIDERS``
-    # raises here and stops startup.
+    # a half-configured Keycloak or Zitadel, one that shares a name or an issuer
+    # with another, or Descope listed in ``CANONICAL_RBAC_PROVIDERS`` raises here
+    # and stops startup.
     providers = configured_providers()
     refuse_canonical_descope_managed(providers, rbac.CANONICAL_RBAC_PROVIDERS)
-    refuse_ambiguous_authorization_source(providers, rbac.CANONICAL_RBAC_PROVIDERS)
     for provider in providers:
         if not provider.require_https:
             # Allowed only for a loopback address or a ``.localhost`` name, and

@@ -1,13 +1,18 @@
+import uuid
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import select
 
-from app.dependencies.auth import get_claims
-from app.dependencies.descope import require_descope_principal
+from app.dependencies.descope import NOT_A_DESCOPE_PRINCIPAL, is_descope_principal
 from app.dependencies.identity import get_tenant_service
-from app.dependencies.tenant import get_tenant_claims, get_tenant_id
+from app.dependencies.rbac import canonical_memberships
+from app.dependencies.tenant import get_descope_claims, get_tenant_id, get_tenant_memberships
+from app.dependencies.tenant_access import CanonicalMemberships, TenantMembership
+from app.errors.identity import NotFound
 from app.errors.problem_detail import result_to_response
 from app.logbook import logbook
 from app.models.database import get_async_session
@@ -19,19 +24,40 @@ logger = logbook(__name__)
 
 router = APIRouter(tags=["Tenants"])
 
+# The answer to a request for a tenant the caller holds no membership in.
+NOT_A_MEMBER = "Not a member of this tenant"
 
-def require_admin_role(claims: dict = Depends(get_claims)) -> dict:
-    """Require the caller to have an 'admin' or 'owner' project-level role."""
+
+class CurrentTenant(BaseModel):
+    """The request's tenant, in the same shape whichever provider's principal asks."""
+
+    id: str
+    name: str
+    domains: list[str]
+    created_at: str | None
+    updated_at: str | None
+
+
+class CurrentTenantResponse(BaseModel):
+    tenant_id: str
+    tenant: CurrentTenant
+
+
+def require_admin_role(claims: dict = Depends(get_descope_claims)) -> dict:
+    """Require the caller to have an 'admin' or 'owner' project-level role in its Descope ``roles`` claim.
+
+    A principal of a provider that is not Descope-managed is refused (403) before the claim is read.
+    """
     roles: list[str] = claims.get("roles", [])
     if not any(r in roles for r in ("admin", "owner")):
         raise HTTPException(status_code=403, detail="Admin or owner role required")
     return claims
 
 
-def _verify_tenant_membership(tenant_id: str, tenant_claims: dict) -> None:
-    """Verify the user is a member of the given tenant."""
-    if tenant_id not in tenant_claims:
-        raise HTTPException(status_code=403, detail="Not a member of this tenant")
+def _verify_tenant_membership(tenant_id: str, memberships: dict[str, TenantMembership]) -> None:
+    """Verify the caller is a member of the given tenant (memberships from ``get_tenant_memberships``)."""
+    if tenant_id not in memberships:
+        raise HTTPException(status_code=403, detail=NOT_A_MEMBER)
 
 
 class CreateTenantRequest(BaseModel):
@@ -64,37 +90,50 @@ async def create_tenant(
 @router.get("/tenants")
 async def list_user_tenants(
     request: Request,
-    tenant_claims: dict = Depends(get_tenant_claims),
+    memberships: dict[str, TenantMembership] = Depends(get_tenant_memberships),
 ):
-    """List all tenants the current user belongs to, with names from Descope."""
-    client = getattr(request.app.state, "descope_client", None)
-    # Build base list from JWT claims
+    """List every tenant the caller belongs to, from the tenant resolver's sources (conventions §18).
+
+    A canonical principal's tenants carry their canonical names. A Descope
+    principal's are named from the Descope Management API, falling back to the id.
+    """
+    client = getattr(request.app.state, "descope_client", None) if is_descope_principal(request) else None
     tenants = []
-    for tenant_id, info in tenant_claims.items():
+    for membership in memberships.values():
         entry = {
-            "id": tenant_id,
-            "name": tenant_id,  # fallback to ID
-            "roles": info.get("roles", []) if isinstance(info, dict) else [],
-            "permissions": info.get("permissions", []) if isinstance(info, dict) else [],
+            "id": membership.tenant_id,
+            "name": membership.name,
+            "roles": list(membership.roles),
+            "permissions": list(membership.permissions),
         }
-        # Try to load the tenant name from Descope
         if client:
             try:
-                tenant_data = await client.load_tenant(tenant_id)
+                tenant_data = await client.load_tenant(membership.tenant_id)
                 if tenant_data:
-                    entry["name"] = tenant_data.get("name", tenant_id)
-            except Exception:  # noqa: S110
-                pass  # keep the ID as fallback — non-critical for listing
+                    entry["name"] = tenant_data.get("name", membership.tenant_id)
+            except Exception as exc:
+                # Keep the id as the name: a name is not worth failing the list over.
+                logger.debug("Failed to load the name of tenant %s from Descope: %s", membership.tenant_id, exc)
         tenants.append(entry)
     return {"tenants": tenants}
 
 
-@router.get("/tenants/current", dependencies=[Depends(require_descope_principal)])
+@router.get("/tenants/current", response_model=CurrentTenantResponse)
 async def get_current_tenant(
     request: Request,
     tenant_id: str = Depends(get_tenant_id),
-):
-    """Get the current tenant context from the Descope Management API."""
+    memberships: CanonicalMemberships | None = Depends(canonical_memberships),
+    tenant_service: TenantService = Depends(get_tenant_service),
+) -> CurrentTenantResponse:
+    """Get the request's tenant (conventions §18).
+
+    A canonical principal's tenant is read from the canonical model; a Descope
+    principal's from the Descope Management API, by its Descope tenant id.
+    """
+    if memberships is not None:
+        return await _current_canonical_tenant(request, tenant_id, tenant_service)
+    if not is_descope_principal(request):
+        raise HTTPException(status_code=403, detail=NOT_A_DESCOPE_PRINCIPAL)
     client = getattr(request.app.state, "descope_client", None)
     if client is None:
         raise HTTPException(status_code=503, detail="Descope client not initialized")
@@ -102,7 +141,7 @@ async def get_current_tenant(
         tenant_data = await client.load_tenant(tenant_id)
         if not tenant_data:
             raise HTTPException(status_code=404, detail=f"Tenant {tenant_id} not found")
-        return {"tenant_id": tenant_id, "tenant": canonical_tenant(tenant_data)}
+        return CurrentTenantResponse(tenant_id=tenant_id, tenant=_descope_current_tenant(tenant_id, tenant_data))
     except HTTPException:
         raise
     except Exception as exc:
@@ -110,16 +149,59 @@ async def get_current_tenant(
         raise HTTPException(status_code=502, detail="Failed to load tenant from Descope") from exc
 
 
+def _descope_current_tenant(tenant_id: str, tenant_data: dict) -> CurrentTenant:
+    """A Descope tenant payload as a ``CurrentTenant``."""
+    named = canonical_tenant(tenant_data)
+    if not isinstance(named, dict):
+        named = {}
+    domains = tenant_data.get("selfProvisioningDomains")
+    return CurrentTenant(
+        id=tenant_id,
+        name=str(tenant_data.get("name") or tenant_id),
+        domains=[domain for domain in domains if isinstance(domain, str)] if isinstance(domains, list) else [],
+        created_at=named.get("created_at"),
+        updated_at=named.get("updated_at"),
+    )
+
+
+def _iso(value: object) -> str | None:
+    return value.isoformat() if isinstance(value, datetime) else None
+
+
+async def _current_canonical_tenant(request: Request, tenant_id: str, tenant_service: TenantService):
+    """The canonical tenant the resolver chose, as a ``CurrentTenantResponse``."""
+    try:
+        canonical_id = uuid.UUID(tenant_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=f"Tenant {tenant_id} not found") from exc
+    result = await tenant_service.get_tenant(tenant_id=canonical_id)
+    if result.is_error():
+        if isinstance(result.error, NotFound):
+            raise HTTPException(status_code=404, detail=f"Tenant {tenant_id} not found")
+        return result_to_response(result, request)
+    tenant = result.ok
+    return CurrentTenantResponse(
+        tenant_id=tenant_id,
+        tenant=CurrentTenant(
+            id=str(tenant["id"]),
+            name=tenant["name"],
+            domains=list(tenant["domains"]),
+            created_at=_iso(tenant.get("created_at")),
+            updated_at=_iso(tenant.get("updated_at")),
+        ),
+    )
+
+
 @router.get("/tenants/{tenant_id}/resources")
 async def list_tenant_resources(
     tenant_id: str,
-    tenant_claims: dict = Depends(get_tenant_claims),
+    memberships: dict[str, TenantMembership] = Depends(get_tenant_memberships),
     session: AsyncSession = Depends(get_async_session),
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ):
     """List resources scoped to a tenant. Only accessible if user is a member."""
-    _verify_tenant_membership(tenant_id, tenant_claims)
+    _verify_tenant_membership(tenant_id, memberships)
     statement = select(TenantResource).where(TenantResource.tenant_id == tenant_id).offset(offset).limit(limit)
     result = await session.execute(statement)
     resources = result.scalars().all()
@@ -130,11 +212,11 @@ async def list_tenant_resources(
 async def create_tenant_resource(
     tenant_id: str,
     body: CreateResourceRequest,
-    tenant_claims: dict = Depends(get_tenant_claims),
+    memberships: dict[str, TenantMembership] = Depends(get_tenant_memberships),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Create a resource scoped to a tenant. Only accessible if user is a member."""
-    _verify_tenant_membership(tenant_id, tenant_claims)
+    _verify_tenant_membership(tenant_id, memberships)
     resource = TenantResource(tenant_id=tenant_id, name=body.name, description=body.description)
     try:
         session.add(resource)

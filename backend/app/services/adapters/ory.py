@@ -20,12 +20,12 @@ is tested.
 from __future__ import annotations
 
 import uuid
-from typing import Protocol
+from typing import ClassVar, Protocol
 
 from expression import Error, Ok, Result
 from opentelemetry import trace
 
-from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.adapters.base import Capability, IdentityProviderAdapter, SyncError
 
 tracer = trace.get_tracer(__name__)
 
@@ -40,6 +40,8 @@ class OryIdentityClient(Protocol):
 
 class OrySyncAdapter(IdentityProviderAdapter):
     """Syncs canonical identity state to Ory. Roles/permissions stay canonical."""
+
+    capabilities: ClassVar[frozenset[Capability]] = frozenset()
 
     def __init__(self, client: OryIdentityClient, *, enable_organizations: bool = False) -> None:
         self._client = client
@@ -133,10 +135,10 @@ class OrySyncAdapter(IdentityProviderAdapter):
         # adapter does not resolve from a canonical user_id alone.
         return Ok(None)
 
-    async def delete_role(self, *, role_id: uuid.UUID) -> Result[None, SyncError]:
+    async def delete_role(self, *, role_id: uuid.UUID, data: dict | None = None) -> Result[None, SyncError]:
         return Ok(None)
 
-    async def delete_permission(self, *, permission_id: uuid.UUID) -> Result[None, SyncError]:
+    async def delete_permission(self, *, permission_id: uuid.UUID, data: dict | None = None) -> Result[None, SyncError]:
         return Ok(None)
 
     async def delete_tenant(self, *, tenant_id: uuid.UUID) -> Result[None, SyncError]:

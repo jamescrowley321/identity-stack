@@ -29,6 +29,14 @@ class NotFound(IdentityError):
 
 
 @dataclass(frozen=True, unsafe_hash=False)
+class CapabilityMissing(NotFound):
+    """The deployment lacks the capability a route serves (``app.dependencies.capabilities``).
+
+    404, not the provider's 403: no principal is refused, the route is not there.
+    """
+
+
+@dataclass(frozen=True, unsafe_hash=False)
 class Conflict(IdentityError):
     """Operation conflicts with existing state (e.g. duplicate name)."""
 
@@ -71,6 +79,23 @@ class ProviderError(IdentityError):
 @dataclass(frozen=True, unsafe_hash=False)
 class Forbidden(IdentityError):
     """Caller lacks permission for the requested operation."""
+
+
+@dataclass(frozen=True, unsafe_hash=False)
+class GrantRefused(Forbidden):
+    """The caller asked to grant something it does not hold itself (a machine credential's roles).
+
+    403 like ``Forbidden``, but its message is returned as it is: it names only the
+    roles the caller asked for.
+    """
+
+
+@dataclass(frozen=True, unsafe_hash=False)
+class MachinePrincipalRefused(Forbidden):
+    """A machine credential's token on a route that only a person may call (``/api/keys``).
+
+    403 like ``Forbidden``; its message names only the rule, so it is returned as it is.
+    """
 
 
 class IdentityErrorRaised(Exception):

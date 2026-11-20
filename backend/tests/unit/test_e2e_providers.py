@@ -2,11 +2,14 @@
 
 import base64
 import json
+import re
+from pathlib import Path
 
 import pytest
 
 from tests.e2e import not_applicable as na
 from tests.e2e.helpers import providers
+from tests.helpers import keycloak_model
 
 UNREACHABLE = "http://127.0.0.1:9"
 
@@ -104,22 +107,6 @@ class TestInternalEndpointSecretsFailTheRun:
 
         with pytest.raises(pytest.fail.Exception, match=r"unset: INTERNAL_IDENTITY_KEY\b"):
             cls(UNREACHABLE, UNREACHABLE).check_ready(None)
-
-
-class TestKeycloakAdminInTheSpa:
-    """The SPA is built for member-app: a page signed in as the Keycloak tenant admin cannot exist."""
-
-    def test_an_admin_context_fails_with_the_reason(self):
-        provider = providers.KeycloakProvider(UNREACHABLE, UNREACHABLE)
-
-        with pytest.raises(pytest.fail.Exception, match="tenant-admin-app, which no SPA build serves"):
-            provider.signed_in_context(None, providers.ADMIN, None)
-
-    def test_opening_the_app_as_admin_fails_with_the_reason(self):
-        provider = providers.KeycloakProvider(UNREACHABLE, UNREACHABLE)
-
-        with pytest.raises(pytest.fail.Exception, match="tenant-admin-app, which no SPA build serves"):
-            provider.open_app(None, providers.ADMIN)
 
 
 def _jwt(claims: dict) -> str:
@@ -271,43 +258,96 @@ class TestAFailedSignInIsNotRetried:
         assert calls == ["sign_in"]
 
 
-class TestZitadelSeedMissing:
-    """A Zitadel run whose linked user is not in both fixture tenants fails naming them and the seed step."""
+@pytest.fixture(params=[providers.KeycloakProvider, providers.ZitadelProvider], ids=["keycloak", "zitadel"])
+def two_tenant(request, monkeypatch):
+    provider = request.param(UNREACHABLE, UNREACHABLE)
+    monkeypatch.setattr(provider, "_signed_in_token", lambda: "token")
+    monkeypatch.setattr(type(provider), "_scope", property(lambda self: "openid organization"))
+    return provider
 
-    @pytest.fixture
-    def zitadel(self, monkeypatch):
-        provider = providers.ZitadelProvider(UNREACHABLE, UNREACHABLE)
-        monkeypatch.setattr(provider, "_signed_in_token", lambda: "token")
-        return provider
 
-    def _memberships(self, provider, monkeypatch, names):
+class TestSeedMissing:
+    """A run whose linked user is not in both tenants fails naming the user, its scope, the seed and the answer."""
+
+    def _memberships(self, provider, monkeypatch, keys):
+        """``GET /api/identity`` listing the fixture tenants ``keys`` under the names the provider gives them."""
         answer = {
-            "tenant_memberships": [{"tenant_name": name, "tenant_id": f"id-{name}"} for name in names],
+            "tenant_memberships": [
+                {"tenant_name": provider._tenant_name(key), "tenant_id": f"id-{key}"} for key in keys
+            ],
         }
         monkeypatch.setattr(provider, "_identity", lambda token, headers=None: answer)
+        return answer
 
     def _fixture_tenants(self, provider):
         return sorted({provider._tenant_key(providers.ADMIN), provider._tenant_key(providers.MEMBER)})
 
-    def test_both_tenants_present_give_their_ids(self, zitadel, monkeypatch):
-        tenants = self._fixture_tenants(zitadel)
-        self._memberships(zitadel, monkeypatch, tenants)
+    def test_both_tenants_present_give_their_ids(self, two_tenant, monkeypatch):
+        self._memberships(two_tenant, monkeypatch, self._fixture_tenants(two_tenant))
 
-        assert zitadel.headers(providers.ADMIN) == {"X-Tenant-ID": f"id-{zitadel._tenant_key(providers.ADMIN)}"}
-        assert zitadel.headers(providers.MEMBER) == {"X-Tenant-ID": f"id-{zitadel._tenant_key(providers.MEMBER)}"}
+        assert {principal: two_tenant.headers(principal) for principal in providers.PRINCIPALS} == {
+            principal: {"X-Tenant-ID": f"id-{two_tenant._tenant_key(principal)}"} for principal in providers.PRINCIPALS
+        }
 
     @pytest.mark.parametrize("principal", [providers.ADMIN, providers.MEMBER])
-    def test_an_unseeded_instance_fails_naming_the_seed(self, zitadel, monkeypatch, principal):
-        self._memberships(zitadel, monkeypatch, [])
-        missing = ", ".join(self._fixture_tenants(zitadel))
+    def test_an_unseeded_provider_fails_naming_the_seed(self, two_tenant, monkeypatch, principal):
+        answer = self._memberships(two_tenant, monkeypatch, [])
+        missing = ", ".join(self._fixture_tenants(two_tenant))
 
-        with pytest.raises(pytest.fail.Exception, match=rf"not a member of {missing}: run `make zitadel-seed`"):
-            zitadel.headers(principal)
+        with pytest.raises(pytest.fail.Exception) as failed:
+            two_tenant.headers(principal)
 
-    def test_one_missing_tenant_is_named(self, zitadel, monkeypatch):
-        admin_tenant = zitadel._tenant_key(providers.ADMIN)
-        member_tenant = zitadel._tenant_key(providers.MEMBER)
-        self._memberships(zitadel, monkeypatch, [admin_tenant])
+        assert str(failed.value) == (
+            f"the linked user {two_tenant._linked.key}, both principals (signed in with scope 'openid organization'), "
+            f"is not a member of {missing}: run `{two_tenant.seed_step}` first. GET /api/identity answered {answer}"
+        )
 
-        with pytest.raises(pytest.fail.Exception, match=rf"not a member of {member_tenant}: run `make zitadel-seed`"):
-            zitadel.tenant_id(None)
+    def test_the_lookup_fails_once_and_every_later_call_with_the_same_message(self, two_tenant, monkeypatch):
+        calls: list[str] = []
+        answer = {"tenant_memberships": []}
+
+        def identity(token, headers=None):
+            calls.append(token)
+            return answer
+
+        monkeypatch.setattr(two_tenant, "_identity", identity)
+        with pytest.raises(pytest.fail.Exception) as first:
+            two_tenant.headers(providers.ADMIN)
+        with pytest.raises(pytest.fail.Exception) as second:
+            two_tenant.tenant_id(None)
+
+        assert (calls, str(second.value)) == (["token"], f"{first.value} (found earlier in this run)")
+
+    def test_one_missing_tenant_is_named(self, two_tenant, monkeypatch):
+        admin_tenant = two_tenant._tenant_key(providers.ADMIN)
+        member_tenant = two_tenant._tenant_key(providers.MEMBER)
+        self._memberships(two_tenant, monkeypatch, [admin_tenant])
+
+        with pytest.raises(pytest.fail.Exception, match=rf"not a member of {member_tenant}: run `"):
+            two_tenant.tenant_id(None)
+
+
+def test_keycloak_tenants_carry_their_organizations_name_and_zitadels_the_fixture_key():
+    """Reconciliation gives a Keycloak tenant its organization's name; the Zitadel seed names a tenant after its key."""
+    from tests.helpers.identity_fixture import IDENTITIES
+
+    keycloak = providers.KeycloakProvider("http://backend", "http://frontend")
+    zitadel = providers.ZitadelProvider("http://backend", "http://frontend")
+
+    assert {key: (keycloak._tenant_name(key), zitadel._tenant_name(key)) for key in IDENTITIES.tenants} == {
+        key: (tenant.name, key) for key, tenant in IDENTITIES.tenants.items()
+    }
+
+
+def test_each_provider_names_its_own_seed():
+    assert {cls.name: cls.seed_step for cls in (providers.KeycloakProvider, providers.ZitadelProvider)} == {
+        na.KEYCLOAK: "make keycloak-seed",
+        na.ZITADEL: "make zitadel-seed",
+    }
+
+
+def test_the_keycloak_principals_sign_in_with_the_scope_the_spa_is_built_with():
+    outputs = (Path(__file__).resolve().parents[3] / "infra" / "keycloak" / "outputs.tf").read_text()
+    (scope,) = re.findall(r'VITE_OIDC_SCOPE\s*=\s*"([^"]*)"', outputs)
+
+    assert keycloak_model.SPA_SCOPE == scope

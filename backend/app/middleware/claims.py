@@ -151,8 +151,8 @@ class GatewayClaimsMiddleware(BaseHTTPMiddleware):
                 return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
 
             # Token binding: what the provider requires of a token beyond its
-            # audience (Keycloak: exactly one ``aud`` and the ``azp`` configured
-            # for it). The same rule as in standalone mode, on every route.
+            # audience (Keycloak and Zitadel: issued to the SPA, and an access
+            # token). The same rule as in standalone mode, on every route.
             unbound = binding_refusal(claims, provider)
             if unbound is not None:
                 logger.warning("GatewayClaims rejected: %s binding refused (%s)", provider.name, unbound)

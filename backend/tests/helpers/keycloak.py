@@ -27,7 +27,6 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 from tests.helpers.identity_fixture import IDENTITIES
-from tests.helpers.keycloak_model import DIRECTORY_CLIENT_ID, DIRECTORY_CLIENT_SECRET
 from tests.helpers.keycloak_target import KeycloakUser, keycloak_test_target
 
 # The imported realm unless the KEYCLOAK_TEST_* variables name the Terraform one (keycloak_target.py).
@@ -39,14 +38,10 @@ KEYCLOAK_ADMIN_REALM = "master"
 KEYCLOAK_ADMIN_CLIENT_ID = "admin-cli"
 KEYCLOAK_ADMIN_USERNAME = "admin"
 KEYCLOAK_ADMIN_PASSWORD = "admin"
-# The app clients register exact URIs: any other redirect is refused.
+# The public clients register exact URIs: any other redirect is refused.
 KEYCLOAK_REDIRECT_URI = "http://localhost:3000"
 KEYCLOAK_POST_LOGOUT_REDIRECT_URI = "http://localhost:3000/login"
 
-MEMBER_TYPE_CLIENT = "member"
-TENANT_ADMIN_TYPE_CLIENT = "tenant-admin"
-MEMBER_APP_CLIENT = "member-app"
-TENANT_ADMIN_APP_CLIENT = "tenant-admin-app"
 ACME_SCOPE = "openid organization:acme"
 GLOBEX_SCOPE = "openid organization:globex"
 BOTH_ORGANIZATIONS_SCOPE = "openid organization:acme organization:globex"
@@ -69,17 +64,17 @@ class KeycloakFlowError(Exception):
 
 # The fixture users (infra/fixtures/test-identities.json), by the case each stands on.
 CASES = IDENTITIES.cases
-# A member of ``acme`` alone, with both ``member`` client roles.
+# A member of ``acme`` alone.
 ALICE = TARGET.users[CASES.member.key]
 # In ``acme`` and ``globex``.
 BOB = TARGET.users[CASES.two_tenants.key]
-# In ``acme`` with no client role: her access token carries no ``aud``.
+# In ``acme`` with no role assignment.
 CAROL = TARGET.users[CASES.no_grant.key]
 # A tenant admin in ``acme`` only.
 DAVE = TARGET.users[CASES.tenant_admin.key]
-# A ``member`` user in ``acme`` whose one client role is ``documents:write``.
+# A ``member`` of ``acme``.
 ERIN = TARGET.users[CASES.write_only.key]
-# A tenant admin in ``acme`` only, whom tests move between organizations.
+# A tenant admin in ``acme`` only, whom tests add to other organizations.
 FRANK = TARGET.users[CASES.moving_admin.key]
 
 
@@ -87,6 +82,7 @@ FRANK = TARGET.users[CASES.moving_admin.key]
 class KeycloakTokens:
     access_token: str
     id_token: str
+    refresh_token: str
 
 
 def decode_unverified(token: str) -> tuple[dict, dict]:
@@ -182,7 +178,9 @@ class KeycloakTokenSource:
             if response.status_code != httpx.codes.OK:
                 raise KeycloakFlowError(f"token exchange failed: {response.status_code} {response.text[:500]}")
             body = response.json()
-            return KeycloakTokens(access_token=body["access_token"], id_token=body["id_token"])
+            return KeycloakTokens(
+                access_token=body["access_token"], id_token=body["id_token"], refresh_token=body["refresh_token"]
+            )
 
     def admin_access_token(self) -> str:
         """An access token from the ``master`` realm: Keycloak-signed, on another issuer."""
@@ -194,17 +192,6 @@ class KeycloakTokenSource:
                 "username": KEYCLOAK_ADMIN_USERNAME,
                 "password": KEYCLOAK_ADMIN_PASSWORD,
             },
-            timeout=_HTTP_TIMEOUT_SECONDS,
-        )
-        response.raise_for_status()
-        return response.json()["access_token"]
-
-    def directory_token(self) -> str:
-        """The organization lookup client's own service-account token, as the backend gets it."""
-        response = httpx.post(
-            f"{self.issuer}/protocol/openid-connect/token",
-            data={"grant_type": "client_credentials"},
-            auth=(DIRECTORY_CLIENT_ID, DIRECTORY_CLIENT_SECRET),
             timeout=_HTTP_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
@@ -240,8 +227,11 @@ class KeycloakTokenSource:
                 http.delete(f"/organizations/{target}/members/{user.id}").raise_for_status()
 
     @contextmanager
-    def joined(self, user: KeycloakUser, organization: str) -> Iterator[None]:
-        """Add ``user`` to ``organization``; remove them again afterwards."""
+    def joined(self, user: KeycloakUser, organization: str, *, role: str | None = None) -> Iterator[None]:
+        """Add ``user`` to ``organization``, and to its group for ``role`` if given; remove them afterwards.
+
+        Leaving the organization takes the user out of its groups too.
+        """
         with self._admin() as http:
             target = self._organization_id(http, organization)
             added = http.post(f"/organizations/{target}/members", json=user.id)
@@ -251,6 +241,13 @@ class KeycloakTokenSource:
                     "recreate keycloak-test (make test-down && make test-up-keycloak)"
                 )
             added.raise_for_status()
+            try:
+                if role is not None:
+                    group = self._organization_group_id(http, target, role)
+                    http.put(f"/organizations/{target}/groups/{group}/members/{user.id}").raise_for_status()
+            except BaseException:
+                http.delete(f"/organizations/{target}/members/{user.id}")
+                raise
         try:
             yield
         except BaseException as failure:
@@ -262,9 +259,40 @@ class KeycloakTokenSource:
             raise
         self._remove_member(target, user)
 
+    @staticmethod
+    def _organization_group_id(http: httpx.Client, organization_id: str, name: str) -> str:
+        response = http.get(f"/organizations/{organization_id}/groups")
+        response.raise_for_status()
+        matches = [group["id"] for group in response.json() if group["name"] == name]
+        if len(matches) != 1:
+            raise KeycloakFlowError(
+                f"expected one group {name!r} in organization {organization_id}, found {len(matches)}"
+            )
+        return matches[0]
+
     def _remove_member(self, organization_id: str, user: KeycloakUser) -> None:
         with self._admin() as http:
             http.delete(f"/organizations/{organization_id}/members/{user.id}").raise_for_status()
+
+    @contextmanager
+    def disabled(self, user: KeycloakUser) -> Iterator[None]:
+        """Disable ``user``'s account, as an administrator does in the console; enable it again afterwards."""
+        self._set_enabled(user, enabled=False)
+        try:
+            yield
+        except BaseException as failure:
+            try:
+                self._set_enabled(user, enabled=True)
+            except Exception as enabling:
+                failure.add_note(f"enabling {user.username} afterwards also failed: {enabling}")
+            raise
+        self._set_enabled(user, enabled=True)
+
+    def _set_enabled(self, user: KeycloakUser, *, enabled: bool) -> None:
+        with self._admin() as http:
+            response = http.get(f"/users/{user.id}")
+            response.raise_for_status()
+            http.put(f"/users/{user.id}", json={**response.json(), "enabled": enabled}).raise_for_status()
 
     def session_ids(self, user: KeycloakUser) -> set[str]:
         """The ids of the user's live sessions in the realm: a token's ``sid`` is one of them."""
@@ -272,21 +300,6 @@ class KeycloakTokenSource:
             response = http.get(f"/users/{user.id}/sessions")
             response.raise_for_status()
             return {session["id"] for session in response.json()}
-
-    @contextmanager
-    def directory_without(self, role: str) -> Iterator[None]:
-        """Take one ``realm-management`` role from the lookup client's service account; give it back afterwards."""
-        with self._admin() as http:
-            (client,) = http.get("/clients", params={"clientId": DIRECTORY_CLIENT_ID}).json()
-            account = http.get(f"/clients/{client['id']}/service-account-user").json()
-            (management,) = http.get("/clients", params={"clientId": "realm-management"}).json()
-            mapping = f"/users/{account['id']}/role-mappings/clients/{management['id']}"
-            (removed,) = [r for r in http.get(mapping).json() if r["name"] == role]
-            http.request("DELETE", mapping, json=[removed]).raise_for_status()
-            try:
-                yield
-            finally:
-                http.post(mapping, json=[removed]).raise_for_status()
 
     @contextmanager
     def client_attribute(self, client_id: str, name: str, value: str) -> Iterator[None]:

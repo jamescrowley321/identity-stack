@@ -105,7 +105,7 @@ class TestRolePayloads:
 
         assert result.ok == _role_payload(row)
         roles.adapter.sync_role.assert_awaited_once_with(
-            role_id=row.id, data={"name": "editor", "description": "Edits"}
+            role_id=row.id, data={"name": "editor", "description": "Edits", "tenant_id": str(TENANT_ID)}
         )
 
     async def test_create_role_persists_what_was_asked_for(self):
@@ -146,6 +146,7 @@ class TestRolePayloads:
             data={
                 "name": "editor",
                 "description": "Edits",
+                "tenant_id": str(TENANT_ID),
                 "permission_names": ["documents.read", "documents.write"],
             },
         )
@@ -210,7 +211,13 @@ class TestRolePayloads:
         )
         roles.adapter.sync_role.assert_awaited_once_with(
             role_id=row.id,
-            data={"name": "senior-editor", "description": "Senior", "permission_names": ["documents.read"]},
+            data={
+                "name": "senior-editor",
+                "description": "Senior",
+                "tenant_id": str(TENANT_ID),
+                "previous_name": "editor",
+                "permission_names": ["documents.read"],
+            },
         )
 
     async def test_update_role_description_only_skips_the_name_check(self):
@@ -225,7 +232,7 @@ class TestRolePayloads:
         assert result.ok == _role_payload(row)
         roles.repo.get_by_name.assert_not_awaited()
         roles.adapter.sync_role.assert_awaited_once_with(
-            role_id=row.id, data={"name": "editor", "description": "Senior"}
+            role_id=row.id, data={"name": "editor", "description": "Senior", "tenant_id": str(TENANT_ID)}
         )
 
     async def test_delete_role(self):
@@ -237,7 +244,9 @@ class TestRolePayloads:
         result = await roles.service.delete_role(role_id=row.id)
 
         assert result.ok == {"status": "deleted", "name": "editor"}
-        roles.adapter.delete_role.assert_awaited_once_with(role_id=row.id)
+        roles.adapter.delete_role.assert_awaited_once_with(
+            role_id=row.id, data={"name": "editor", "tenant_id": str(TENANT_ID)}
+        )
 
     async def test_delete_role_lost_to_a_concurrent_delete(self):
         roles = _Roles()
@@ -267,7 +276,12 @@ class TestRolePayloads:
         )
         roles.adapter.sync_role.assert_awaited_once_with(
             role_id=row.id,
-            data={"name": "editor", "description": "Edits", "permission_names": ["documents.read"]},
+            data={
+                "name": "editor",
+                "description": "Edits",
+                "tenant_id": str(TENANT_ID),
+                "permission_names": ["documents.read"],
+            },
         )
 
     async def test_assign_role(self):
@@ -549,7 +563,8 @@ class TestPermissionPayloads:
             entity_type="permission", entity_id=row.id, operation="update"
         )
         permissions.adapter.sync_permission.assert_awaited_once_with(
-            permission_id=row.id, data={"name": "documents.view", "description": "View"}
+            permission_id=row.id,
+            data={"name": "documents.view", "description": "View", "previous_name": "documents.read"},
         )
 
     async def test_delete_permission(self):
@@ -561,7 +576,9 @@ class TestPermissionPayloads:
         result = await permissions.service.delete_permission(permission_id=row.id)
 
         assert result.ok == {"status": "deleted", "name": "documents.read"}
-        permissions.adapter.delete_permission.assert_awaited_once_with(permission_id=row.id)
+        permissions.adapter.delete_permission.assert_awaited_once_with(
+            permission_id=row.id, data={"name": "documents.read"}
+        )
 
 
 @pytest.mark.anyio

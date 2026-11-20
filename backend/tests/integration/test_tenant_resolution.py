@@ -19,6 +19,8 @@ from app.dependencies.identity import get_identity_provisioning_service, get_ide
 from app.dependencies.rbac import get_rbac_session, require_role
 from app.dependencies.tenant import get_tenant_id
 from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER
+from app.errors.identity import IdentityErrorRaised
+from app.errors.problem_detail import identity_error_raised_handler
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.providers import descope_config, ory_config
 from app.middleware.rate_limit import limiter
@@ -44,6 +46,9 @@ ADMIN_ROUTE = "/api/probe/admin"
 OPERATOR_ROUTE = "/api/probe/operator"
 NO_TENANT_FROM_GET_TENANT_ID = {"detail": "No tenant context — select a tenant first"}
 DESCOPE_PRINCIPALS_ONLY = {"detail": "This route serves Descope principals only"}
+# Descope's access keys and FGA store serve Descope principals only (#678): to anyone
+# else their routes are not there.
+CAPABILITY_MISSING = (404, "/errors/capability-missing")
 
 
 def _build_app(db_session, *, issuer: str, audience: str) -> FastAPI:
@@ -65,6 +70,7 @@ def _build_app(db_session, *, issuer: str, audience: str) -> FastAPI:
     )
     for router in routers:
         app.include_router(router, prefix="/api")
+    app.add_exception_handler(IdentityErrorRaised, identity_error_raised_handler)
 
     @app.get(TENANT_ROUTE)
     async def tenant(tenant_id: str = Depends(get_tenant_id)):
@@ -231,18 +237,10 @@ async def test_ory_principal_is_refused_on_the_descope_backed_routes(db_session,
     # The tenant resolves for this caller, so each refusal below is the route's own.
     assert resolved.json() == {"tenant_id": tenant_id}
     refusals = {"create": created, "list": listed, "members": members, "keys": keys}
-    assert {name: response.status_code for name, response in refusals.items()} == {
-        "create": 403,
-        "list": 403,
-        "members": 403,
-        "keys": 403,
-    }
-    assert {name: response.json() for name, response in refusals.items()} == {
-        "create": DESCOPE_PRINCIPALS_ONLY,
-        "list": DESCOPE_PRINCIPALS_ONLY,
-        "members": DESCOPE_PRINCIPALS_ONLY,
-        "keys": DESCOPE_PRINCIPALS_ONLY,
-    }
+    assert (members.status_code, members.json()) == (403, DESCOPE_PRINCIPALS_ONLY)
+    assert {
+        name: (refusals[name].status_code, refusals[name].json()["type"]) for name in ("create", "list", "keys")
+    } == (dict.fromkeys(("create", "list", "keys"), CAPABILITY_MISSING))
     assert app.state.descope_client.mock_calls == []
     assert await _document_count(db_session) == documents_before
 
@@ -315,10 +313,13 @@ async def test_ory_admin_of_one_of_two_tenants_cannot_reach_project_wide_state(d
 
     # The caller is an admin of the tenant it names, so each refusal is the route's own.
     assert is_admin.json() == {"tenant_id": admin_tenant, "roles": ["admin"]}
-    assert {name: response.status_code for name, response in refusals.items()} == dict.fromkeys(refusals, 403)
-    assert {name: response.json() for name, response in refusals.items()} == dict.fromkeys(
-        refusals, DESCOPE_PRINCIPALS_ONLY
+    schema = {"read schema", "replace schema"}
+    assert {name: (refusals[name].status_code, refusals[name].json()["type"]) for name in schema} == dict.fromkeys(
+        schema, CAPABILITY_MISSING
     )
+    assert {
+        name: (response.status_code, response.json()) for name, response in refusals.items() if name not in schema
+    } == (dict.fromkeys(set(refusals) - schema, (403, DESCOPE_PRINCIPALS_ONLY)))
     assert app.state.descope_client.mock_calls == []
     assert await _role_count(db_session) == roles_before
     assert await _permission_count(db_session) == permissions_before

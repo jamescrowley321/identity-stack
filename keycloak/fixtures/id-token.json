@@ -1,0 +1,30 @@
+{
+  "header": {
+    "alg": "RS256",
+    "typ": "JWT",
+    "kid": "gWSNkGmbdDYdof641m-aKP-_hD8kmf2MRPojC35CLic"
+  },
+  "claims": {
+    "exp": 1795032710,
+    "iat": 1795032410,
+    "auth_time": 1795032410,
+    "jti": "1fa750e6-00b7-8279-5960-f36c035247c2",
+    "iss": "http://keycloak-test.localhost:18180/realms/identity-stack",
+    "aud": "identity-stack-spa",
+    "sub": "b0b00000-0000-4000-8000-000000000002",
+    "typ": "ID",
+    "azp": "identity-stack-spa",
+    "sid": "meUaZNxKZVdxCpkov7hT9vfk",
+    "at_hash": "5KkQGURTLWQf-oGyT7Uing",
+    "acr": "1",
+    "email_verified": true,
+    "organization": [
+      "acme"
+    ],
+    "name": "Bob Two-Orgs",
+    "preferred_username": "bob",
+    "given_name": "Bob",
+    "family_name": "Two-Orgs",
+    "email": "bob@globex.test"
+  }
+}

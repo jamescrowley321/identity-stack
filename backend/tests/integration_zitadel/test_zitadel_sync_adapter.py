@@ -19,7 +19,7 @@ from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
-from app.services.adapters.base import CREATED_IN_TENANT, SyncError
+from app.services.adapters.base import CREATED_IN_TENANT, PROVIDER_SYNC, SyncError
 from app.services.adapters.zitadel import ZitadelSyncAdapter
 from app.services.tenant import TenantService
 from app.services.user import UserService
@@ -175,3 +175,34 @@ async def test_with_zitadel_unreachable_every_call_answers_a_sync_error(db_sessi
         "sync_user": SyncError,
         "delete_user": SyncError,
     }
+
+
+async def test_the_owners_own_names_reach_their_zitadel_user_and_change_nothing_else(
+    db_session, zitadel_settings, zitadel
+):
+    """UserService.update_own_names with the caller's sub (OWN_PROFILE_OF): the profile's names save."""
+    await _zitadel_provider(db_session, zitadel_settings.base_url)
+    tenant_id = await _tenant(db_session, zitadel_settings, _unique("Pied Piper"))
+    email = f"{uuid.uuid4().hex[:8]}@piedpiper.test"
+    users = UserService(
+        repository=UserRepository(db_session),
+        adapter=_adapter(zitadel_settings, db_session),
+        assignment_repository=UserTenantRoleRepository(db_session),
+    )
+    created = await users.create_user(
+        tenant_id=tenant_id, email=email, user_name="richard", given_name="Richard", family_name="Hendricks"
+    )
+    assert created.is_ok(), created
+    user_id = uuid.UUID(str(created.ok["id"]))
+
+    renamed = await users.update_own_names(user_id=user_id, given_name="Rich", family_name="H", subject=str(user_id))
+
+    assert renamed.is_ok(), renamed
+    assert PROVIDER_SYNC not in renamed.ok
+    zitadel_user = _user_state(zitadel, user_id)
+    assert (
+        zitadel_user["human"]["profile"]["givenName"],
+        zitadel_user["human"]["profile"]["familyName"],
+        zitadel_user["human"]["email"]["email"],
+        zitadel_user["state"],
+    ) == ("Rich", "H", email, ACTIVE)

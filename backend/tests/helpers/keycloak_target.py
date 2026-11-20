@@ -6,8 +6,8 @@ ids fixed in the import and the fixture passwords in
 ``keycloak/fixtures/README.md``.
 
 The realm ``infra/keycloak/`` builds has the same users and clients, but
-Keycloak picks the user ids and the directory client secret, and Terraform
-generates the passwords. Five variables point the same tests at it, all or
+Keycloak picks the user ids and the admin client secret, and Terraform
+generates the passwords. Four variables point the same tests at it, all or
 none; ``infra/keycloak/scripts/check-against-compose.sh --integration-tests``
 sets them from the run's Terraform outputs:
 
@@ -15,8 +15,6 @@ sets them from the run's Terraform outputs:
 - ``KEYCLOAK_TEST_USER_IDS``: JSON map of username to id (``terraform output -json user_ids``).
 - ``KEYCLOAK_TEST_USER_PASSWORDS``: JSON map of username to password (output
   ``test_credentials``, under ``users``).
-- ``KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET``: ``KEYCLOAK_DIRECTORY_CLIENT_SECRET`` of output
-  ``backend_environment``.
 - ``KEYCLOAK_TEST_ADMIN_CLIENT_SECRET``: ``KEYCLOAK_ADMIN_CLIENT_SECRET`` of output
   ``backend_environment``.
 
@@ -43,7 +41,6 @@ class KeycloakUser:
 class KeycloakTestTarget:
     realm: str
     users: dict[str, KeycloakUser]
-    directory_client_secret: str = field(repr=False)
     admin_client_secret: str = field(repr=False)
 
 
@@ -53,7 +50,6 @@ class KeycloakTestTargetMisconfigured(Exception):
 
 IMPORT_REALM = "identity-stack"
 # Local fixture values from the realm import.
-IMPORT_DIRECTORY_CLIENT_SECRET = "local-only-directory-client"
 IMPORT_ADMIN_CLIENT_SECRET = "local-only-admin-client"
 REALM_IMPORT_PATH = Path(__file__).resolve().parents[3] / "keycloak" / "realm" / "identity-stack-realm.json"
 
@@ -74,13 +70,11 @@ IMPORT_USERS = import_users(json.loads(REALM_IMPORT_PATH.read_text()))
 REALM_VARIABLE = "KEYCLOAK_TEST_REALM"
 USER_IDS_VARIABLE = "KEYCLOAK_TEST_USER_IDS"
 USER_PASSWORDS_VARIABLE = "KEYCLOAK_TEST_USER_PASSWORDS"
-DIRECTORY_CLIENT_SECRET_VARIABLE = "KEYCLOAK_TEST_DIRECTORY_CLIENT_SECRET"
 ADMIN_CLIENT_SECRET_VARIABLE = "KEYCLOAK_TEST_ADMIN_CLIENT_SECRET"
 TARGET_VARIABLES = (
     REALM_VARIABLE,
     USER_IDS_VARIABLE,
     USER_PASSWORDS_VARIABLE,
-    DIRECTORY_CLIENT_SECRET_VARIABLE,
     ADMIN_CLIENT_SECRET_VARIABLE,
 )
 
@@ -90,9 +84,7 @@ def keycloak_test_target(environ: Mapping[str, str]) -> KeycloakTestTarget:
     values = {name: environ.get(name, "") for name in TARGET_VARIABLES}
     unset = [name for name, value in values.items() if not value]
     if len(unset) == len(TARGET_VARIABLES):
-        return KeycloakTestTarget(
-            IMPORT_REALM, IMPORT_USERS, IMPORT_DIRECTORY_CLIENT_SECRET, IMPORT_ADMIN_CLIENT_SECRET
-        )
+        return KeycloakTestTarget(IMPORT_REALM, IMPORT_USERS, IMPORT_ADMIN_CLIENT_SECRET)
     if unset:
         raise KeycloakTestTargetMisconfigured(f"set all of {', '.join(TARGET_VARIABLES)} or none; unset: {unset}")
 
@@ -101,7 +93,6 @@ def keycloak_test_target(environ: Mapping[str, str]) -> KeycloakTestTarget:
     return KeycloakTestTarget(
         realm=values[REALM_VARIABLE],
         users={name: KeycloakUser(name, passwords[name], ids[name]) for name in IMPORT_USERS},
-        directory_client_secret=values[DIRECTORY_CLIENT_SECRET_VARIABLE],
         admin_client_secret=values[ADMIN_CLIENT_SECRET_VARIABLE],
     )
 

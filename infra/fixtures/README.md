@@ -19,7 +19,7 @@ passwords and ids are each provider's own.
 | `bob` | `globex` | `acme`: `admin`, `globex`: `viewer` | `two_tenants`: a member of two tenants, with a different role in each |
 | `carol` | `acme` | `acme`: none | `no_grant`: a member with no grant |
 | `dave` | `acme` | `acme`: `admin` | `tenant_admin`: an admin of exactly one tenant |
-| `erin` | `acme` | `acme`: `member` | `write_only`: a member whose Keycloak client roles give `documents:write` alone |
+| `erin` | `acme` | `acme`: `member` | `write_only`: a member of one tenant, a second user beside `member` |
 | `frank` | `acme` | `acme`: `admin` | `moving_admin`: an admin whom tests move to another tenant and back |
 | `grace` | `unlinked` | `unlinked`: `member` | `unlinked_tenant`: the member of a tenant no canonical tenant names |
 
@@ -30,9 +30,9 @@ by no canonical tenant and has no Descope tenant.
 ## Who reads it
 
 - [`infra/keycloak`](../keycloak/README.md): an organization per tenant, a user per user, the
-  members, and the `type:tenant-admin` record of each tenant's admins. Client roles (Keycloak's
-  own fact) follow the canonical roles, with per-case exceptions kept in the root. The realm
-  import [`keycloak/realm/identity-stack-realm.json`](../../keycloak/realm/identity-stack-realm.json)
+  members, and each user's role in each tenant as membership of that organization's group for the
+  role (a record that grants nothing). The realm import
+  [`keycloak/realm/identity-stack-realm.json`](../../keycloak/realm/identity-stack-realm.json)
   is a file of its own, with fixed user ids; `make keycloak-terraform-check` compares it with the
   Terraform-built realm, and `backend/tests/unit/test_identity_fixture.py` with this fixture.
 - [`infra/zitadel`](../zitadel/README.md): an organization per tenant, the project granted to the

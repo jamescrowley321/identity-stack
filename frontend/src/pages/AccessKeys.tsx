@@ -1,6 +1,7 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { toast } from "sonner";
 import { useApiClient } from "@/hooks/useApiClient";
+import { useRBAC } from "@/hooks/useRBAC";
 import { PageHeader } from "@/components/layout/PageHeader";
 import {
   Card,
@@ -40,6 +41,9 @@ const EXPIRATION_OPTIONS = [
 
 const DEFAULT_EXPIRATION_DAYS = "90";
 
+// Roles the API refuses on any key (it would open every tenant's state to it).
+const ROLES_NOT_FOR_KEYS = new Set(["operator"]);
+
 interface AccessKey {
   id: string;
   name: string;
@@ -52,7 +56,19 @@ export default function AccessKeys() {
   const { apiFetch } = useApiClient();
   const [name, setName] = useState("");
   const [expirationDays, setExpirationDays] = useState(DEFAULT_EXPIRATION_DAYS);
+  // A key carries one role the user holds in this tenant: the API refuses a key
+  // with none, a role the user lacks, and operator.
+  const { roles } = useRBAC();
+  const grantable = useMemo(() => roles.filter((option) => !ROLES_NOT_FOR_KEYS.has(option)), [roles]);
+  const [chosenRole, setChosenRole] = useState<string | null>(null);
+  const role = useMemo(
+    () => (chosenRole !== null && grantable.includes(chosenRole) ? chosenRole : (grantable[0] ?? null)),
+    [chosenRole, grantable],
+  );
   const [newKeySecret, setNewKeySecret] = useState<string | null>(null);
+  // The client id a canonical provider's credential signs in with (client
+  // credentials grant); a Descope access key has none, its secret is the key.
+  const [newKeyClientId, setNewKeyClientId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   // The page is mounted afresh for each tenant, so once it has gone, a call it
@@ -96,14 +112,16 @@ export default function AccessKeys() {
   }, [loadKeys]);
 
   const handleCreate = useCallback(async () => {
-    if (!name.trim()) return;
+    if (!name.trim() || role === null) return;
     setNewKeySecret(null);
+    setNewKeyClientId(null);
     // Always send an expiry. Omitting it used to mean "never expires", which the
     // API now refuses.
     const days = Number(expirationDays) || Number(DEFAULT_EXPIRATION_DAYS);
     const body: Record<string, unknown> = {
       name: name.trim(),
       expire_time: Math.floor(Date.now() / 1000) + days * 86400,
+      role_names: [role],
     };
     try {
       const res = await apiFetch("/api/keys", {
@@ -122,6 +140,7 @@ export default function AccessKeys() {
           return;
         }
         setNewKeySecret(data.cleartext || null);
+        setNewKeyClientId(typeof data.key?.clientId === "string" ? data.key.clientId : null);
         setName("");
         setCopied(false);
         toast.success("Access key created");
@@ -138,7 +157,7 @@ export default function AccessKeys() {
     } catch {
       if (mounted.current) toast.error("Failed to create key");
     }
-  }, [name, expirationDays, apiFetch, loadKeys]);
+  }, [name, role, expirationDays, apiFetch, loadKeys]);
 
   const handleDeactivate = useCallback(
     async (keyId: string) => {
@@ -221,7 +240,19 @@ export default function AccessKeys() {
                   ))}
                 </SelectContent>
               </Select>
-              <Button onClick={handleCreate} disabled={!name.trim()}>
+              <Select value={role ?? undefined} onValueChange={setChosenRole}>
+                <SelectTrigger className="w-32" aria-label="Key role">
+                  <SelectValue placeholder="No role" />
+                </SelectTrigger>
+                <SelectContent>
+                  {grantable.map((option) => (
+                    <SelectItem key={option} value={option}>
+                      {option}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button onClick={handleCreate} disabled={!name.trim() || role === null}>
                 Create
               </Button>
             </div>
@@ -232,6 +263,12 @@ export default function AccessKeys() {
           <Alert>
             <AlertTitle>Key created!</AlertTitle>
             <AlertDescription className="space-y-2">
+              {newKeyClientId && (
+                <p>
+                  Client ID:{" "}
+                  <code className="rounded bg-muted px-1 text-xs font-mono">{newKeyClientId}</code>
+                </p>
+              )}
               <p>Copy the secret below — it will not be shown again.</p>
               <code className="block rounded bg-muted p-2 text-xs font-mono break-all">
                 {newKeySecret}

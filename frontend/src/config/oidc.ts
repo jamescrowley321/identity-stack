@@ -9,6 +9,8 @@
  * not a preferred IdP.
  */
 
+import { forgetTenantSelection } from "../contexts/tenantSelection";
+
 const DESCOPE_DEFAULT_BASE_URL = "https://api.descope.com";
 const DEFAULT_SCOPE = "openid profile email";
 
@@ -18,7 +20,6 @@ export interface OidcEnv {
   readonly VITE_OIDC_CLIENT_ID?: string;
   readonly VITE_OIDC_SCOPE?: string;
   readonly VITE_OIDC_REDIRECT_URI?: string;
-  readonly VITE_OIDC_TENANT_SCOPE_TEMPLATE?: string;
   readonly VITE_DESCOPE_PROJECT_ID?: string;
   readonly VITE_DESCOPE_BASE_URL?: string;
 }
@@ -57,61 +58,10 @@ export function buildOidcConfig(
     response_type: "code",
     automaticSilentRenew: true,
     onSigninCallback: () => {
+      // A new sign-in opens the tenant it named, not one chosen in an earlier session.
+      forgetTenantSelection();
       // Remove code/state from URL after successful code exchange
       window.history.replaceState({}, document.title, window.location.pathname);
     },
   };
-}
-
-/** Where the tenant id goes in `VITE_OIDC_TENANT_SCOPE_TEMPLATE`. */
-export const TENANT_PLACEHOLDER = "{tenant}";
-
-/** `VITE_OIDC_TENANT_SCOPE_TEMPLATE` is set but does not name the tenant exactly once. */
-export class TenantScopeTemplateInvalid extends Error {
-  constructor(template: string) {
-    super(
-      `VITE_OIDC_TENANT_SCOPE_TEMPLATE must contain ${TENANT_PLACEHOLDER} exactly once: ${JSON.stringify(template)}`,
-    );
-    this.name = "TenantScopeTemplateInvalid";
-  }
-}
-
-/** A tenant id that is not one RFC 6749 scope-token, so it cannot go in a scope. */
-export class TenantIdNotAScopeToken extends Error {
-  readonly tenantId: string;
-
-  constructor(tenantId: string) {
-    super(`Tenant id ${JSON.stringify(tenantId)} cannot be put in a scope`);
-    this.name = "TenantIdNotAScopeToken";
-    this.tenantId = tenantId;
-  }
-}
-
-// RFC 6749 §3.3: scope-token = 1*( %x21 / %x23-5B / %x5D-7E ). No space, so a
-// tenant id can never add a scope of its own.
-const SCOPE_TOKEN = /^[\x21\x23-\x5B\x5D-\x7E]+$/;
-
-/**
- * The scope of a sign-in to one tenant, for a provider that keeps the tenant
- * in the token, or `null` when unset.
- *
- * The template is the whole scope of that sign-in, with `{tenant}` where the
- * tenant id goes (e.g. `openid profile email organization:{tenant}`). It is the
- * only tenant-switch setting; the first sign-in still uses `VITE_OIDC_SCOPE`.
- * An empty value is unset, like the other `VITE_OIDC_*` variables. A template
- * that does not name the tenant exactly once is refused at startup.
- */
-export function readTenantScopeTemplate(env: OidcEnv): string | null {
-  const template = env.VITE_OIDC_TENANT_SCOPE_TEMPLATE;
-  if (!template) return null;
-  if (template.split(TENANT_PLACEHOLDER).length !== 2) {
-    throw new TenantScopeTemplateInvalid(template);
-  }
-  return template;
-}
-
-/** The template with the tenant id in place; refuses an id that is not a scope-token. */
-export function tenantScope(template: string, tenantId: string): string {
-  if (!SCOPE_TOKEN.test(tenantId)) throw new TenantIdNotAScopeToken(tenantId);
-  return template.replace(TENANT_PLACEHOLDER, () => tenantId);
 }

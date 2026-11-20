@@ -162,6 +162,14 @@ class ZitadelAdminApi:
             },
         )
 
+    async def set_human_names(self, user_id: str, given_name: str, family_name: str) -> None:
+        """Set a human user's given and family names (v2 UpdateHumanUser)."""
+        await self._call(
+            "PUT",
+            f"/v2/users/human/{_segment(user_id)}",
+            body={"profile": {"givenName": given_name, "familyName": family_name}},
+        )
+
     async def find_user(self, user_id: str) -> ZitadelUser | None:
         """The user's state (``USER_STATE_ACTIVE``, ...) and organization; None if Zitadel has no such user."""
         response = await self._send("GET", f"/v2/users/{_segment(user_id)}")

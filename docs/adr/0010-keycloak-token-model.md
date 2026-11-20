@@ -1,6 +1,6 @@
 # ADR-0010: A Keycloak token is one organization and one user type, and privilege does not cross organizations
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0011](0011-keycloak-canonical-authorization.md)
 - **Date:** 2026-11-16
 - **Rules:** [conventions §17](../conventions.md#17-authorization-fails-closed), [§18](../conventions.md#18-one-resolver-decides-the-tenant-and-the-grants) and [§28](../conventions.md#28-a-provider-is-one-registration)
 
@@ -109,3 +109,8 @@ local realm and are recorded in `keycloak/fixtures/README.md`.
   principal. Only the two `/api/access-checks` routes answer one today.
 - Adding a user type is configuration: its type client, its app client, its declaration
   and, for a portable type, its list.
+
+## Superseded by
+
+[ADR-0011](0011-keycloak-canonical-authorization.md) authorizes Keycloak principals from the
+canonical model, as Ory and Zitadel are, and removes the token model described here.

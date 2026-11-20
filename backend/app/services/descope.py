@@ -226,6 +226,16 @@ class DescopeManagementClient:
                 {"loginId": user_id, "attributeKey": attribute_key, "attributeValue": attribute_value},
             )
 
+    async def update_user_names(self, user_id: str, given_name: str, family_name: str) -> None:
+        """Set a user's given and family names (``/v1/mgmt/user/update/name``, which takes a userId too)."""
+        with tracer.start_as_current_span(
+            "DescopeManagementClient.update_user_names", record_exception=False, set_status_on_exception=False
+        ):
+            await self._request(
+                "/v1/mgmt/user/update/name",
+                {"loginId": user_id, "givenName": given_name, "middleName": "", "familyName": family_name},
+            )
+
     async def update_tenant_custom_attributes(self, tenant_id: str, custom_attributes: dict) -> None:
         """Update custom attributes on a tenant."""
         with tracer.start_as_current_span(

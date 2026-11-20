@@ -16,9 +16,13 @@ TOKEN_URL = f"{REALM}/protocol/openid-connect/token"
 GRANT = {"grant_type": "client_credentials"}
 # Local fixture values from the realm import.
 ADMIN_CLIENT = ("identity-stack-admin", "local-only-admin-client")
-DIRECTORY_CLIENT = ("identity-stack-directory", "local-only-directory-client")
+API_CLIENT = "identity-stack-api"
 TENANT = "7e5a0000-0000-4000-8000-000000000586"
 USER = "05e40000-0000-4000-8000-000000000586"
+ROLE = "40e00000-0000-4000-8000-000000000586"
+PERMISSION = "9e400000-0000-4000-8000-000000000586"
+ROLE_ATTRIBUTE = "identity-stack.role-id"
+PERMISSION_ATTRIBUTE = "identity-stack.permission-id"
 
 
 def main() -> None:
@@ -32,6 +36,12 @@ def main() -> None:
         if drop_token and isinstance(body, dict):
             body = {**body, "access_token": drop_token}
             body.pop("refresh_token", None)
+        if isinstance(body, list):
+            # A client's secret is not recorded, even a local fixture's.
+            body = [
+                {k: v for k, v in entry.items() if k != "secret"} if isinstance(entry, dict) else entry
+                for entry in body
+            ]
         entry = {
             "method": response.request.method,
             "url": str(response.request.url).replace(BASE, "{base}"),
@@ -51,26 +61,20 @@ def main() -> None:
     first = {"first": 0, "max": 1}
     bad = {"Authorization": "Bearer not-a-token"}
     keep("admin_api_bad_token", http.get(f"{ADMIN}/organizations", params=first, headers=bad))
-    directory_grant = http.post(TOKEN_URL, data=GRANT, auth=DIRECTORY_CLIENT)
-    directory_token = directory_grant.json()["access_token"]
-    keep("directory_token", directory_grant, drop_token="recorded-directory-token")
-    forbidden = {"name": "Forbidden", "alias": "forbidden"}
-    directory = {"Authorization": f"Bearer {directory_token}"}
-    keep("organization_create_forbidden", http.post(f"{ADMIN}/organizations", json=forbidden, headers=directory))
     keep("credential_check", http.get(f"{ADMIN}/organizations", params=first, headers=bearer))
-    keep("directory_credential_check", http.get(f"{ADMIN}/organizations", params=first, headers=directory))
 
-    # The startup role check: each client reads its own service account's realm-management roles.
-    for prefix, client, headers in (("", ADMIN_CLIENT, bearer), ("directory_", DIRECTORY_CLIENT, directory)):
-        by_name = {"username": f"service-account-{client[0]}", "exact": "true"}
-        account = keep(f"{prefix}service_account_find", http.get(f"{ADMIN}/users", params=by_name, headers=headers))
-        mappings_path = f"{ADMIN}/users/{account.json()[0]['id']}/role-mappings"
-        mappings = keep(f"{prefix}service_account_role_mappings", http.get(mappings_path, headers=headers))
-        # The read-only directory client is shown no client mappings at all ({}).
-        realm_management = mappings.json().get("clientMappings", {}).get("realm-management")
-        if realm_management is not None:
-            roles_path = f"{mappings_path}/clients/{realm_management['id']}/composite"
-            keep(f"{prefix}service_account_roles", http.get(roles_path, headers=headers))
+    # The startup check: the service account's own realm-management roles, then the API client.
+    by_name = {"username": f"service-account-{ADMIN_CLIENT[0]}", "exact": "true"}
+    account = keep("service_account_find", http.get(f"{ADMIN}/users", params=by_name, headers=bearer))
+    mappings_path = f"{ADMIN}/users/{account.json()[0]['id']}/role-mappings"
+    mappings = keep("service_account_role_mappings", http.get(mappings_path, headers=bearer))
+    realm_management = mappings.json()["clientMappings"]["realm-management"]
+    roles_path = f"{mappings_path}/clients/{realm_management['id']}/composite"
+    keep("service_account_roles", http.get(roles_path, headers=bearer))
+    api_client = keep("api_client_find", http.get(f"{ADMIN}/clients", params={"clientId": API_CLIENT}, headers=bearer))
+    keep("api_client_find_none", http.get(f"{ADMIN}/clients", params={"clientId": "no-such-client"}, headers=bearer))
+    # A client the service account may not read: Keycloak answers as if it were not there.
+    keep("other_client_find", http.get(f"{ADMIN}/clients", params={"clientId": "identity-stack-spa"}, headers=bearer))
 
     def admin(method: str, path: str, **kwargs) -> httpx.Response:
         return http.request(method, f"{ADMIN}{path}", headers=bearer, **kwargs)
@@ -97,23 +101,72 @@ def main() -> None:
     keep("user_create_email_taken", admin("POST", "/users", json=taken_email))
     keep("user_update", admin("PUT", f"/users/{user['id']}", json={"email": "renamed@recorded.test", "enabled": False}))
 
+    keep("organization_get", admin("GET", path))
+    keep(
+        "organizations_list",
+        admin("GET", "/organizations", params={"briefRepresentation": "true", "first": "0", "max": "100"}),
+    )
+
+    # The API client's roles: a permission, and a role whose composite it is.
+    client_path = f"/clients/{api_client.json()[0]['id']}"
+    brief_false = {"briefRepresentation": "false"}
+    keep("client_roles", admin("GET", f"{client_path}/roles", params=brief_false))
+    permission = {
+        "name": "recorded:read",
+        "description": "Recorded",
+        "attributes": {PERMISSION_ATTRIBUTE: [PERMISSION]},
+    }
+    keep("client_role_create_permission", admin("POST", f"{client_path}/roles", json=permission))
+    role = {"name": "recorded-role", "description": "Recorded role", "attributes": {ROLE_ATTRIBUTE: [ROLE]}}
+    keep("client_role_create_role", admin("POST", f"{client_path}/roles", json=role))
+    keep("client_role_create_taken", admin("POST", f"{client_path}/roles", json=role))
+    roles = keep("client_roles_created", admin("GET", f"{client_path}/roles", params=brief_false)).json()
+    role_id = next(entry["id"] for entry in roles if entry["name"] == "recorded-role")
+    permission_id = next(entry["id"] for entry in roles if entry["name"] == "recorded:read")
+    by_id = f"/roles-by-id/{role_id}"
+    keep("role_composites_none", admin("GET", f"{by_id}/composites"))
+    keep("composites_add", admin("POST", f"{by_id}/composites", json=[{"id": permission_id}]))
+    keep("role_composites", admin("GET", f"{by_id}/composites"))
+    keep("composites_remove", admin("DELETE", f"{by_id}/composites", json=[{"id": permission_id}]))
+    renamed_role = {**role, "name": "recorded-role-renamed"}
+    keep("role_update", admin("PUT", by_id, json=renamed_role))
+
     members = f"{path}/members"
     keep("member_add", admin("POST", members, json=user["id"]))
     keep("member_add_again", admin("POST", members, json=user["id"]))
-    # A realm admin's grant markers listing the member, then the adapter trimming them as the membership ends.
-    found = admin("GET", path).json()
-    marked = {"type:tenant-admin": [user["id"], "another-member"], "type:viewer": [user["id"]], "note": ["kept"]}
-    keep("organization_mark", admin("PUT", path, json={**found, "attributes": marked}))
-    keep("organization_get_marked", admin("GET", path))
-    trimmed = {"type:tenant-admin": ["another-member"], "note": ["kept"]}
-    keep("organization_trim", admin("PUT", path, json={**found, "attributes": trimmed}))
-    keep("organization_get", admin("GET", path))
+    keep("member_organizations", admin("GET", f"/organizations/members/{user['id']}/organizations"))
+
+    # The organization's group for the role: created, renamed, given the member and emptied again.
+    groups = f"{path}/groups"
+    paged = {"briefRepresentation": "false", "first": "0", "max": "100"}
+    keep("organization_groups_none", admin("GET", groups, params=paged))
+    group = {"name": "recorded-role", "attributes": {ROLE_ATTRIBUTE: [ROLE]}}
+    keep("organization_group_create", admin("POST", groups, json=group))
+    keep("organization_group_create_taken", admin("POST", groups, json=group))
+    group_id = keep("organization_groups", admin("GET", groups, params=paged)).json()[0]["id"]
+    keep(
+        "organization_group_update",
+        admin("PUT", f"{groups}/{group_id}", json={**group, "name": "recorded-role-renamed"}),
+    )
+    group_member = f"{groups}/{group_id}/members/{user['id']}"
+    keep("group_member_add", admin("PUT", group_member))
+    keep("group_member_add_again", admin("PUT", group_member))
+    keep("group_member_remove", admin("DELETE", group_member))
+    keep("group_member_remove_again", admin("DELETE", group_member))
+
     keep("member_remove", admin("DELETE", f"{members}/{user['id']}"))
     keep("member_remove_again", admin("DELETE", f"{members}/{user['id']}"))
+    keep("member_organizations_none", admin("GET", f"/organizations/members/{user['id']}/organizations"))
+    keep("organization_group_delete", admin("DELETE", f"{groups}/{group_id}"))
+    keep("organization_group_delete_again", admin("DELETE", f"{groups}/{group_id}"))
+    keep("role_delete", admin("DELETE", by_id))
+    keep("role_delete_again", admin("DELETE", by_id))
+    admin("DELETE", f"/roles-by-id/{permission_id}").raise_for_status()
 
     keep("user_delete", admin("DELETE", f"/users/{user['id']}"))
     keep("user_delete_again", admin("DELETE", f"/users/{user['id']}"))
     keep("user_get_none", admin("GET", f"/users/{user['id']}"))
+    keep("member_organizations_unknown_user", admin("GET", f"/organizations/members/{user['id']}/organizations"))
     keep("organization_delete", admin("DELETE", path))
     keep("organization_delete_again", admin("DELETE", path))
     keep("member_add_unknown_organization", admin("POST", members, json=user["id"]))

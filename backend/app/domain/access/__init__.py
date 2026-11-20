@@ -5,6 +5,7 @@ docs/adr/0008-layered-architecture-with-a-functional-domain-core.md.
 """
 
 from app.domain.access.commands import (
+    ActOnMember,
     AssignRole,
     CreatePermission,
     CreateRole,
@@ -12,11 +13,13 @@ from app.domain.access.commands import (
     DeleteRole,
     MapNamedPermissions,
     MapPermission,
+    MemberAction,
     UnassignRole,
     UpdatePermission,
     UpdateRole,
 )
 from app.domain.access.decisions import (
+    act_on_member,
     assign_role,
     create_permission,
     create_role,
@@ -30,10 +33,13 @@ from app.domain.access.decisions import (
 )
 from app.domain.access.errors import (
     AccessError,
+    ActingOnSelf,
     AssignmentNotFound,
     InvalidName,
     NameFault,
     NameSubject,
+    NotATenantMember,
+    OwnerRequired,
     PermissionAlreadyMapped,
     PermissionNameNotFound,
     PermissionNameTaken,
@@ -57,19 +63,27 @@ from app.domain.access.events import (
 )
 from app.domain.access.values import (
     MAX_NAME_LENGTH,
+    OPERATOR_ROLE,
+    OWNER_ROLE,
     Assignment,
+    MemberClearance,
     Permission,
     PermissionName,
     Role,
     RoleName,
+    TenantMember,
     permission_name,
     role_name,
 )
 
 __all__ = [
     "MAX_NAME_LENGTH",
+    "OPERATOR_ROLE",
+    "OWNER_ROLE",
     "AccessError",
     "AccessEvent",
+    "ActOnMember",
+    "ActingOnSelf",
     "AssignRole",
     "Assignment",
     "AssignmentNotFound",
@@ -80,8 +94,12 @@ __all__ = [
     "InvalidName",
     "MapNamedPermissions",
     "MapPermission",
+    "MemberAction",
+    "MemberClearance",
     "NameFault",
     "NameSubject",
+    "NotATenantMember",
+    "OwnerRequired",
     "Permission",
     "PermissionAlreadyMapped",
     "PermissionCreated",
@@ -103,9 +121,11 @@ __all__ = [
     "RoleOutOfScope",
     "RoleUnassigned",
     "RoleUpdated",
+    "TenantMember",
     "UnassignRole",
     "UpdatePermission",
     "UpdateRole",
+    "act_on_member",
     "assign_role",
     "create_permission",
     "create_role",
@@ -113,8 +133,8 @@ __all__ = [
     "delete_role",
     "map_named_permissions",
     "map_permission",
-    "role_name",
     "permission_name",
+    "role_name",
     "unassign_role",
     "update_permission",
     "update_role",

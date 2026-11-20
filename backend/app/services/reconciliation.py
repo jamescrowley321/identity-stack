@@ -1,9 +1,13 @@
-"""ReconciliationService — domain orchestration for drift detection/resolution.
+"""ReconciliationService — drift detection and resolution, one pass per configured provider.
 
-Detects and resolves drift between canonical Postgres state and Descope.
-Middle layer of onion architecture: orchestrates repositories and Descope client.
-All methods return Result[T, IdentityError]. OTel spans on every method.
+Each provider the canonical model is pushed to has a pass that reads that
+provider's state and repairs what the push (``app/services/adapters/``) and the
+inbound sync missed. ``ReconciliationService`` runs every configured pass in
+turn, each in its own transaction, and reports each one. A pass is a
+``ProviderReconciliation``: Descope's is ``DescopeReconciliation`` below,
+Keycloak's ``app.services.keycloak_reconciliation.KeycloakReconciliation``.
 
+Descope (AC-3.2.x):
 AC-3.2.1: Reconciliation logic (diff + upsert)
 AC-3.2.2: Advisory lock for concurrency safety
 AC-3.2.3: Descope outage handling (abort on failure)
@@ -13,8 +17,12 @@ AC-3.2.5: Failed sync retry (drift detection covers prior failures)
 
 from __future__ import annotations
 
+import enum
+from abc import abstractmethod
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from expression import Error, Ok, Result
 from opentelemetry import trace
@@ -30,6 +38,7 @@ from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.permission import PermissionRepository
 from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
+from app.repositories.sync_ledger import ReconciliationRunRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
 from app.services.cache_invalidation import CacheInvalidationPublisher
@@ -51,12 +60,138 @@ _DESCOPE_STATUS_MAP: dict[str, UserStatus] = {
 }
 
 
+class PassStatus(enum.StrEnum):
+    """How a provider's pass ended (``reconciliation_runs.status``)."""
+
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class PassOutcome:
+    """What a pass did: its counts, and how many of them changed the canonical model or the provider."""
+
+    stats: dict[str, int]
+    changes: int
+
+
+class ProviderReconciliation(Protocol):
+    """One provider's reconciliation pass. It commits its own changes and never raises for a provider outage."""
+
+    provider: str
+
+    @abstractmethod
+    async def reconcile(self) -> Result[PassOutcome, IdentityError]: ...
+
+
 class ReconciliationService:
-    """Domain service for drift detection and resolution between Postgres and Descope.
+    """Runs the reconciliation pass of every configured provider and reports each.
+
+    ``descope_client`` and the repositories build Descope's pass (the arguments
+    this service has always taken); ``passes`` are the other providers'. With a
+    ``run_repository``, each pass's outcome is recorded (``reconciliation_runs``)
+    for ``GET /api/sync/status``.
+    """
+
+    def __init__(
+        self,
+        *,
+        session: AsyncSession,
+        acquire_lock: Callable[[], Coroutine[Any, Any, None]],
+        descope_client: DescopeManagementClient | None = None,
+        user_repository: UserRepository | None = None,
+        role_repository: RoleRepository | None = None,
+        permission_repository: PermissionRepository | None = None,
+        tenant_repository: TenantRepository | None = None,
+        idp_link_repository: IdPLinkRepository | None = None,
+        provider_repository: ProviderRepository | None = None,
+        publisher: CacheInvalidationPublisher | None = None,
+        passes: Sequence[ProviderReconciliation] = (),
+        run_repository: ReconciliationRunRepository | None = None,
+    ) -> None:
+        self._session = session
+        self._publisher = CacheInvalidationPublisher() if publisher is None else publisher
+        self._runs = run_repository
+        self._passes: list[ProviderReconciliation] = []
+        if descope_client is not None:
+            self._passes.append(
+                DescopeReconciliation(
+                    session=session,
+                    acquire_lock=acquire_lock,
+                    descope_client=descope_client,
+                    user_repository=user_repository or UserRepository(session),
+                    role_repository=role_repository or RoleRepository(session),
+                    permission_repository=permission_repository or PermissionRepository(session),
+                    tenant_repository=tenant_repository or TenantRepository(session),
+                    idp_link_repository=idp_link_repository or IdPLinkRepository(session),
+                    provider_repository=provider_repository or ProviderRepository(session),
+                )
+            )
+        self._passes.extend(passes)
+
+    async def run(self) -> Result[dict, IdentityError]:
+        """Run every configured pass, in order; each commits on its own.
+
+        The answer reports each provider under ``providers``, and ``stats`` sums
+        their counts. It is an error only when every pass failed: with one pass,
+        that pass's error.
+        """
+        with tracer.start_as_current_span("ReconciliationService.run") as span:
+            span.set_attribute("reconciliation.providers", len(self._passes))
+            reports: dict[str, dict] = {}
+            totals: dict[str, int] = {}
+            errors: list[IdentityError] = []
+            for provider_pass in self._passes:
+                try:
+                    result = await provider_pass.reconcile()
+                except Exception as exc:
+                    # A pass that raises is that pass failing: the others still run, and it is recorded.
+                    logger.error("Reconciliation: the %s pass raised", provider_pass.provider, exc_info=True)
+                    await self._session.rollback()
+                    result = Error(
+                        ProviderError(message=f"The {provider_pass.provider} pass failed: {type(exc).__name__}")
+                    )
+                if result.is_error():
+                    errors.append(result.error)
+                    reports[provider_pass.provider] = {"status": PassStatus.FAILED, "error": result.error.message}
+                    await self._record(provider_pass.provider, PassStatus.FAILED, {}, result.error.message)
+                    continue
+                outcome = result.ok
+                reports[provider_pass.provider] = {"status": PassStatus.COMPLETED, "stats": outcome.stats}
+                for key, value in outcome.stats.items():
+                    totals[key] = totals.get(key, 0) + value
+                if outcome.changes > 0:
+                    await self._publisher.publish_batch(operation="reconcile", stats=outcome.stats)
+                await self._record(provider_pass.provider, PassStatus.COMPLETED, outcome.stats, None)
+            if errors and len(errors) == len(self._passes):
+                span.set_attribute("reconciliation.status", "aborted")
+                return Error(errors[0])
+            status = "completed" if not errors else "partial"
+            span.set_attribute("reconciliation.status", status)
+            logger.info("Reconciliation %s: %s", status, totals)
+            return Ok({"status": status, "stats": totals, "providers": reports})
+
+    async def _record(self, provider: str, status: PassStatus, stats: dict, error: str | None) -> None:
+        """Keep the pass's outcome for the sync status; a failure to keep it is logged, never the pass's."""
+        if self._runs is None:
+            return
+        try:
+            await self._session.rollback()
+            await self._runs.record(provider, status=status.value, stats=stats, error=error)
+            await self._session.commit()
+        except Exception:
+            logger.warning("Reconciliation: the outcome of the %s pass was not recorded", provider, exc_info=True)
+            await self._session.rollback()
+
+
+class DescopeReconciliation:
+    """Descope's pass: makes the canonical model hold Descope's tenants, permissions, roles and users.
 
     Orchestrates repositories for canonical state and DescopeManagementClient for
     Descope state. No direct SQLAlchemy imports — advisory lock injected via callable.
     """
+
+    provider = "descope"
 
     def __init__(
         self,
@@ -70,7 +205,6 @@ class ReconciliationService:
         tenant_repository: TenantRepository,
         idp_link_repository: IdPLinkRepository,
         provider_repository: ProviderRepository,
-        publisher: CacheInvalidationPublisher | None = None,
     ) -> None:
         self._session = session
         self._acquire_lock = acquire_lock
@@ -81,15 +215,14 @@ class ReconciliationService:
         self._tenant_repo = tenant_repository
         self._link_repo = idp_link_repository
         self._provider_repo = provider_repository
-        self._publisher = CacheInvalidationPublisher() if publisher is None else publisher
 
-    async def run(self) -> Result[dict, IdentityError]:
+    async def reconcile(self) -> Result[PassOutcome, IdentityError]:
         """Execute a full reconciliation pass.
 
         AC-3.2.2: Acquires a Postgres advisory lock to prevent concurrent runs.
         AC-3.2.3: Aborts without modifying canonical state on Descope fetch failure.
         """
-        with tracer.start_as_current_span("ReconciliationService.run") as span:
+        with tracer.start_as_current_span("DescopeReconciliation.reconcile") as span:
             # AC-3.2.2: Advisory lock — prevents concurrent reconciliation
             try:
                 await self._acquire_lock()
@@ -157,11 +290,8 @@ class ReconciliationService:
             span.set_attribute("reconciliation.status", "completed")
             span.set_attribute("reconciliation.total_changes", total_changes)
 
-            if total_changes > 0:
-                await self._publisher.publish_batch(operation="reconcile", stats=stats)
-
-            logger.info("Reconciliation completed: %s", stats)
-            return Ok({"status": "completed", "stats": stats})
+            logger.info("Descope reconciliation completed: %s", stats)
+            return Ok(PassOutcome(stats=stats, changes=total_changes))
 
     async def _reconcile_tenants(
         self,
