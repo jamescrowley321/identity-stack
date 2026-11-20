@@ -32,10 +32,12 @@ def _mgmt_url(path: str) -> str:
 # Login-id prefixes for users the E2E suite creates as fixtures. Anything
 # matching these is disposable by construction — the suffix is a random uuid4
 # fragment, so a surviving one can only be litter from an earlier run.
-# Login-id prefix of the test users the run signs in as (``auth.create_test_user``):
-# one per sign-in, swept with the rest.
-SIGN_IN_USER_PREFIX = "e2e-signin-"
-LEAKED_USER_PREFIXES = ("e2e-invite-", "e2e-lifecycle-", SIGN_IN_USER_PREFIX)
+# Login-id prefix of the test users the run signs in as (``auth.ensure_test_user``):
+# one per role set, kept across runs and never swept, as Descope allows a project
+# five test users. ``e2e-signin-`` and ``e2e-admin-`` were one per sign-in for a
+# while and are swept as leaks.
+PERSON_USER_PREFIX = "e2e-person-"
+LEAKED_USER_PREFIXES = ("e2e-invite-", "e2e-lifecycle-", "e2e-signin-", "e2e-admin-")
 
 # Name prefix for the throwaway owner+admin key `get_admin_session_token` mints
 # once per session. The suffix is a uuid4 fragment, so a survivor can only be

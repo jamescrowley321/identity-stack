@@ -27,7 +27,7 @@ from tests.e2e.helpers.descope_mgmt import (  # noqa: F401 - re-exported for cal
     E2E_TEST_TENANT_ID,
     LEAKED_ACCESS_KEY_PREFIX,
     LEAKED_USER_PREFIXES,
-    SIGN_IN_USER_PREFIX,
+    PERSON_USER_PREFIX,
     _auth_header,
     _mgmt_url,
     sweep_leaked_e2e_access_keys,
@@ -179,30 +179,40 @@ ADMIN_ROLES = ("owner", "admin")
 MEMBER_ROLES = ("viewer",)
 
 
-def create_test_user(role_names: tuple[str, ...], tenant_id: str = "") -> str:
-    """A new Descope test user holding ``role_names`` in the test tenant and nothing else. Returns its login id.
+def ensure_person(role_names: tuple[str, ...], tenant_id: str = "") -> str:
+    """The Descope test user holding exactly ``role_names`` in the test tenant, created when missing.
 
-    Its one tenant is a session's ``dct``. The login id carries ``SIGN_IN_USER_PREFIX``,
-    so the run's user sweep removes it. A new user per sign-in: another run's sweep
-    may delete an earlier one, which a re-sign-in would trip on.
+    Returns its login id. One user per role set, kept across runs like
+    ``E2E_TEST_EMAIL`` and never swept: Descope allows a project five test users.
+    One found with any other tenants or roles is deleted and made again, so a
+    session's one tenant is the test tenant (its ``dct``) and its roles are these.
     """
-    import uuid
-
     tenant_id = tenant_id or E2E_TEST_TENANT_ID
     if not DESCOPE_MANAGEMENT_KEY:
         raise RuntimeError("DESCOPE_MANAGEMENT_KEY must be set")
     if not tenant_id:
         raise RuntimeError("E2E_TEST_TENANT_ID must be set")
     domain = E2E_TEST_EMAIL.rpartition("@")[2] or "example.com"
-    login_id = f"{SIGN_IN_USER_PREFIX}{uuid.uuid4().hex[:8]}@{domain}"
+    login_id = f"{PERSON_USER_PREFIX}{'-'.join(role_names)}@{domain}"
+    wanted = [{"tenantId": tenant_id, "roleNames": sorted(role_names)}]
     with httpx.Client(timeout=30) as client:
+        loaded = client.get(_mgmt_url("/v1/mgmt/user"), headers=_auth_header(), params={"loginId": login_id})
+        if loaded.status_code == HTTPStatus.OK:
+            user = loaded.json().get("user", {})
+            held = [
+                {"tenantId": t.get("tenantId"), "roleNames": sorted(t.get("roleNames") or [])}
+                for t in user.get("userTenants") or []
+            ]
+            if user.get("test") and held == wanted:
+                return login_id
+            client.post(_mgmt_url("/v1/mgmt/user/delete"), headers=_auth_header(), json={"loginId": login_id})
         created = client.post(
             _mgmt_url("/v1/mgmt/user/create/test"),
             headers=_auth_header(),
             json={
                 "loginId": login_id,
                 "email": login_id,
-                "name": "E2E Sign-in",
+                "name": "E2E Person",
                 "verifiedEmail": True,
                 "userTenants": [{"tenantId": tenant_id, "roleNames": list(role_names)}],
             },
@@ -228,14 +238,46 @@ def otp_for_test_user(login_id: str) -> str:
     return code
 
 
+def enchanted_link_for_test_user(login_id: str) -> str:
+    """An enchanted link a test user signs in with (Descope sends no message to a test user)."""
+    with httpx.Client(timeout=30) as client:
+        generated = client.post(
+            _mgmt_url("/v1/mgmt/tests/generate/enchantedlink"),
+            headers=_auth_header(),
+            json={"loginId": login_id, "URI": ""},
+        )
+    if generated.status_code != HTTPStatus.OK:
+        raise RuntimeError(
+            f"Generating a test user's enchanted link failed: HTTP {generated.status_code} {generated.text[:200]}"
+        )
+    link = generated.json().get("link", "")
+    if not link:
+        raise RuntimeError("Generating a test user's enchanted link returned no link")
+    return link
+
+
+def verify_enchanted_link(link: str) -> int:
+    """Verify an enchanted link's token at Descope, as clicking it does. Returns the HTTP status."""
+    from urllib.parse import parse_qs, urlsplit
+
+    token = parse_qs(urlsplit(link).query).get("t", [""])[0]
+    with httpx.Client(timeout=30) as client:
+        verified = client.post(
+            f"{DESCOPE_BASE_URL}/v1/auth/enchantedlink/verify",
+            headers={"Authorization": f"Bearer {DESCOPE_PROJECT_ID}"},
+            json={"token": token},
+        )
+    return verified.status_code
+
+
 def get_user_session_token(role_names: tuple[str, ...]) -> str:
-    """A Descope USER session of a new test user holding ``role_names`` in the test tenant.
+    """A Descope USER session of the test user holding ``role_names`` in the test tenant (``ensure_person``).
 
     The run's ``ADMIN`` (``ADMIN_ROLES``) and ``MEMBER`` (``MEMBER_ROLES``) are people:
     an access-key session is a machine, which the backend refuses on ``/api/keys``
     and the role and member routes before any role is read (#699).
     """
-    login_id = create_test_user(role_names)
+    login_id = ensure_person(role_names)
     code = otp_for_test_user(login_id)
     with httpx.Client(timeout=30) as client:
         verified = client.post(

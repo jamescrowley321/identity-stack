@@ -4,7 +4,7 @@ The backend takes a Descope token that names no authentication method (``amr``) 
 an access key's, a machine's. The SPA signs in through Descope's OIDC authorization
 code flow and sends that flow's access token (``useApiClient``), so this signs a
 new owner+admin test user in exactly that way: the SPA's Sign In button, Descope's
-hosted sign-up-or-in flow with a test OTP, the SPA's code exchange. The access
+hosted sign-up-or-in flow with a test user's enchanted link, the SPA's code exchange. The access
 token it keeps must carry ``amr`` and be served the admin's routes.
 """
 
@@ -14,9 +14,16 @@ import warnings
 
 import pytest
 from playwright.sync_api import Browser, expect
+from playwright.sync_api import Error as PlaywrightError
 
 from app.dependencies.rbac import MACHINE_PRINCIPAL_REFUSED
-from tests.e2e.helpers.auth import ADMIN_ROLES, _decode_jwt_payload, create_test_user, otp_for_test_user
+from tests.e2e.helpers.auth import (
+    ADMIN_ROLES,
+    _decode_jwt_payload,
+    enchanted_link_for_test_user,
+    ensure_person,
+    verify_enchanted_link,
+)
 from tests.e2e.not_applicable import descope_credentials_missing
 
 pytestmark = pytest.mark.skipif(
@@ -28,47 +35,62 @@ _HOSTED_FLOW = re.compile(r"^https://[^/]*descope[^/]*/")
 _TIMEOUT_MS = 30_000
 
 
+def _back_at_the_spa(frontend_url: str) -> re.Pattern[str]:
+    return re.compile(rf"^{re.escape(frontend_url)}/")
+
+
 def _screen(page) -> str:
-    """What the hosted flow shows, for a failure message: its buttons and its inputs, no values."""
-    buttons = page.get_by_role("button").all_inner_texts()
-    inputs = page.locator("input").evaluate_all("els => els.map(e => [e.type, e.name, e.placeholder])")
-    return f"url={page.url.split('?')[0]} buttons={buttons} inputs={inputs}"
+    """What the hosted flow shows, for a failure message: its text, buttons and inputs, no input values."""
+    try:
+        text = re.sub(r"\s+", " ", page.locator("body").inner_text())[:300]
+        buttons = page.get_by_role("button").all_inner_texts()
+        inputs = page.locator("input").evaluate_all("els => els.map(e => [e.type, e.name, e.placeholder])")
+    except PlaywrightError as exc:
+        return f"url={page.url.split('?')[0]} (unreadable: {exc!r})"
+    return f"url={page.url.split('?')[0]} text={text!r} buttons={buttons} inputs={inputs}"
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def oidc_access_token(browser: Browser, frontend_url: str) -> str:
     """The access token the SPA holds after a test user signs in through Descope's hosted flow."""
-    login_id = create_test_user(ADMIN_ROLES)
+    login_id = ensure_person(ADMIN_ROLES)
     context = browser.new_context(viewport={"width": 1280, "height": 720})
     page = context.new_page()
+    progress = []
     try:
         page.goto(f"{frontend_url}/login")
         page.get_by_role("button", name="Sign In").click()
         page.wait_for_url(_HOSTED_FLOW, timeout=_TIMEOUT_MS)
 
+        # The project's sign-up-or-in flow: an email, then an enchanted link the page waits on.
         email = page.locator("input[type=email]")
         expect(email, _screen(page)).to_be_visible(timeout=_TIMEOUT_MS)
         email.fill(login_id)
-        page.get_by_role("button", name="Continue", exact=True).click()
+        page.locator("descope-button").filter(has_text=re.compile(r"^\s*Continue\s*$")).click()
+        expect(page.get_by_text("verification link"), "no link screen after the email").to_be_visible(
+            timeout=_TIMEOUT_MS
+        )
+        progress.append("link screen")
 
-        code_input = page.locator("input:not([type=email]):visible").first
-        expect(code_input, "no code screen after the email").to_be_visible(timeout=_TIMEOUT_MS)
-        code = otp_for_test_user(login_id)
-        code_input.click()
-        page.keyboard.type(code)
-        submit = page.get_by_role("button", name=re.compile(r"^(Submit|Continue|Verify)", re.IGNORECASE))
-        # The code screen may submit itself once the last digit is in.
-        if not page.url.startswith(frontend_url) and submit.count() and submit.first.is_visible():
-            submit.first.click()
+        link = enchanted_link_for_test_user(login_id)
+        progress.append(f"link host {link.split('/')[2] if '://' in link else '(none)'}")
+        progress.append(f"verify {verify_enchanted_link(link)}")
+        try:
+            page.wait_for_url(_back_at_the_spa(frontend_url), timeout=_TIMEOUT_MS)
+        except PlaywrightError:
+            # Not completed by the verification alone: open the link, as a click in the email would.
+            progress.append("opening the link")
+            context.new_page().goto(link)
+            page.wait_for_url(_back_at_the_spa(frontend_url), timeout=_TIMEOUT_MS)
+        progress.append("back at the SPA")
 
-        page.wait_for_url(re.compile(rf"^{re.escape(frontend_url)}/"), timeout=_TIMEOUT_MS)
         stored = page.wait_for_function(
             """() => Object.keys(sessionStorage).filter(k => k.startsWith("oidc.user:"))
                 .map(k => JSON.parse(sessionStorage.getItem(k)).access_token).find(Boolean) || null""",
             timeout=_TIMEOUT_MS,
         ).json_value()
     except Exception as exc:
-        raise AssertionError(f"signing in through the hosted flow failed: {_screen(page)}") from exc
+        raise AssertionError(f"signing in through the hosted flow failed after {progress}: {_screen(page)}") from exc
     finally:
         context.close()
     assert isinstance(stored, str) and stored, "the SPA holds no access token after sign-in"
