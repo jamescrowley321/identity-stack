@@ -8,11 +8,13 @@ admin client itself is opened once at startup (``main.lifespan``,
 from __future__ import annotations
 
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import TypeVar
 
+import sqlalchemy as sa
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction
 
 from app.logbook import logbook
 from app.models.identity.user import LINK_ORIGIN, LINKED_AT_SIGN_IN, LINKED_BY_BACKEND, IdPLink
@@ -22,6 +24,7 @@ from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
 from app.services.adapters.keycloak import (
+    ORGANIZATION_HOLD_SECONDS,
     PROVIDER_NAME,
     KeycloakLinks,
     KeycloakSyncAdapter,
@@ -37,6 +40,16 @@ logger = logbook(__name__)
 DATABASE_FAILURES = (SQLAlchemyError, OSError)
 
 T = TypeVar("T")
+
+# Namespaces the advisory-lock key of a Keycloak organization (hashed with its alias).
+ORGANIZATION_LOCK_NAMESPACE = "keycloak-organization:"
+# How long a push waits for an organization's lock (``lock_timeout``, whole milliseconds):
+# longer than one holder may keep it (``ORGANIZATION_HOLD_SECONDS``, the deadline of its
+# Keycloak calls) plus a margin for its database work, so a push queued behind one holder
+# gets the lock. Bounded all the same: each waiter holds its session's connection. A push
+# queued behind several holders can still give up, a failed push.
+ORGANIZATION_LOCK_MARGIN_SECONDS = 5
+ORGANIZATION_LOCK_TIMEOUT_MS = round((ORGANIZATION_HOLD_SECONDS + ORGANIZATION_LOCK_MARGIN_SECONDS) * 1000)
 
 # The link origins the adapter follows to a Keycloak account, as the Zitadel
 # adapter's: a sign-in's, and the backend's own (an account the adapter created,
@@ -121,6 +134,43 @@ class RepositoryKeycloakLinks(KeycloakLinks):
 
         return await self._read("the role read", read)
 
+    @asynccontextmanager
+    async def organization_lock(self, alias: str) -> AsyncIterator[None]:
+        """A Postgres advisory lock per organization alias, on the request's session.
+
+        A transaction lock taken in a savepoint and released by rolling the savepoint
+        back, whether the body succeeded or raised: rolling back to a savepoint
+        releases the locks taken after it and expires no row the body did not change.
+        The wait is bounded by ``ORGANIZATION_LOCK_TIMEOUT_MS`` (``lock_timeout``, local
+        to the savepoint). A wait that runs out, or any database failure taking the
+        lock, is ``LocalDatabaseError``. A failure releasing it is logged: the lock ends
+        with the request's transaction at the latest.
+        """
+        try:
+            savepoint = await self._session.begin_nested()
+        except DATABASE_FAILURES as exc:
+            raise LocalDatabaseError(failed("the organization lock", exc)) from exc
+        try:
+            await self._session.execute(
+                sa.select(sa.func.set_config("lock_timeout", f"{ORGANIZATION_LOCK_TIMEOUT_MS}ms", True))
+            )
+            await self._session.execute(
+                sa.select(
+                    sa.func.pg_advisory_xact_lock(sa.func.hashtextextended(ORGANIZATION_LOCK_NAMESPACE + alias, 0))
+                )
+            )
+        except DATABASE_FAILURES as exc:
+            await _release(savepoint, alias)
+            raise LocalDatabaseError(failed("the organization lock", exc)) from exc
+        except BaseException:
+            # A cancellation mid-wait: leave no savepoint holding the lock or lock_timeout.
+            await _release(savepoint, alias)
+            raise
+        try:
+            yield
+        finally:
+            await _release(savepoint, alias)
+
     async def link_organization(self, tenant_id: uuid.UUID, alias: str) -> None:
         """Record ``alias`` as the tenant's organization. A tenant linked to anything else is refused."""
         try:
@@ -185,6 +235,18 @@ class RepositoryKeycloakLinks(KeycloakLinks):
         except DATABASE_FAILURES as exc:
             # The write's own failure is what the push reports.
             logger.warning("Keycloak link write: the rollback failed too: %s", type(exc).__name__)
+
+
+async def _release(savepoint: AsyncSessionTransaction, alias: str) -> None:
+    """Roll the organization lock's savepoint back, which releases the lock; a failure is logged, never raised."""
+    try:
+        await savepoint.rollback()
+    except DATABASE_FAILURES as exc:
+        logger.warning(
+            "Keycloak organization lock for %s not released before the request's transaction ends: %s",
+            alias,
+            type(exc).__name__,
+        )
 
 
 def build_keycloak_sync_adapter(api: KeycloakAdminApi, session: AsyncSession) -> KeycloakSyncAdapter:

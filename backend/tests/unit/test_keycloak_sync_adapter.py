@@ -7,11 +7,16 @@ in-memory ``KeycloakLinks``.
 """
 
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
+import anyio
 import httpx
 import pytest
 from expression import Ok
 
+from app.dependencies.keycloak_sync import ORGANIZATION_LOCK_TIMEOUT_MS
+from app.services.adapters import keycloak
 from app.services.adapters.base import (
     CREATED_IN_TENANT,
     LAST_ROLE_IN_TENANT,
@@ -22,6 +27,7 @@ from app.services.adapters.base import (
     TenantAttributes,
 )
 from app.services.adapters.keycloak import (
+    ORGANIZATION_HOLD_SECONDS,
     PERMISSION_ATTRIBUTE,
     ROLE_ATTRIBUTE,
     KeycloakSyncAdapter,
@@ -80,6 +86,31 @@ def renamed_client_roles(old: str, new: str) -> httpx.Response:
             {**role, "name": new} if role["name"] == old else role for role in RECORDED["client_roles_created"]["body"]
         ],
     )
+
+
+# A deadline under the organization lock a test runs past at once.
+SHORT_HOLD_SECONDS = 0.05
+# How long the test itself lets that push run.
+TEST_DEADLINE_SECONDS = 5
+
+
+class RecordingLinks(Links):
+    """In-memory links counting the alias reads and recording which organizations were locked."""
+
+    def __init__(self, **fields) -> None:
+        super().__init__(**fields)
+        self.alias_reads = 0
+        self.locked: list[str] = []
+
+    async def organization_alias(self, tenant_id: uuid.UUID) -> str | None:
+        self.alias_reads += 1
+        return await super().organization_alias(tenant_id)
+
+    @asynccontextmanager
+    async def organization_lock(self, alias: str) -> AsyncIterator[None]:
+        self.locked.append(alias)
+        async with super().organization_lock(alias):
+            yield
 
 
 def adapter(api: RecordedAdminApi, links: Links | None = None) -> KeycloakSyncAdapter:
@@ -145,6 +176,27 @@ class TestTenants:
             "name": "Renamed",
             "domains": [{"name": "recorded.test"}],
             "enabled": False,
+        }
+
+    async def test_an_update_without_domains_sends_none_back(self):
+        """Keycloak keeps the domains a PUT leaves out: sent back as read, they would undo a change since the read."""
+        found = {
+            **FOUND_ORGANIZATION,
+            "description": "Set by the realm admin",
+            "domains": [{"name": "recorded.test", "verified": False}],
+            "attributes": {"plan_tier": ['"pro"']},
+        }
+        api = RecordedAdminApi(["token", httpx.Response(200, json=[found]), NO_CONTENT])
+
+        result = await adapter(api, Links(aliases={TENANT: TENANT_ID})).sync_tenant(
+            tenant_id=TENANT, data={"name": "Renamed"}
+        )
+
+        assert result == Ok(None)
+        assert sent_to(api, "PUT", ORGANIZATION).body == {
+            **FOUND_ORGANIZATION,
+            "name": "Renamed",
+            "description": "Set by the realm admin",
         }
 
     async def test_a_linked_tenant_reaches_the_organization_it_is_linked_to(self):
@@ -846,6 +898,40 @@ class TestCustomAttributes:
             "redirectUrl": None,
             "attributes": {"plan_tier": ['"enterprise"']},
         }
+
+    async def test_one_alias_read_names_both_the_lock_and_the_organization_written(self):
+        """Read twice, a link changed between the reads would lock one organization and write another."""
+        linked = {**self.ORGANIZATION, "alias": "acme-alias"}
+        api = RecordedAdminApi(
+            ["token", httpx.Response(200, json=[linked]), httpx.Response(200, json=linked), NO_CONTENT]
+        )
+        links = RecordingLinks(aliases={TENANT: "acme-alias"})
+
+        result = await adapter(api, links).set_tenant_attributes(tenant=TENANT_ID, attributes={"plan_tier": "pro"})
+
+        assert result == Ok(None)
+        assert (links.alias_reads, links.locked, api.sent[1].query["q"]) == (1, ["acme-alias"], "alias:acme-alias")
+
+    async def test_a_write_past_its_deadline_under_the_lock_is_unanswered_and_releases_the_lock(self, monkeypatch):
+        monkeypatch.setattr(keycloak, "ORGANIZATION_HOLD_SECONDS", SHORT_HOLD_SECONDS)
+        api = RecordedAdminApi(["token", ONE_ORGANIZATION])
+        links = Links(aliases={TENANT: TENANT_ID})
+        sync = adapter(api, links)
+
+        async def never_answers(organization_id: str) -> dict:
+            await anyio.sleep_forever()
+
+        monkeypatch.setattr(sync._api, "get_organization", never_answers)
+
+        # Bounded by the test too: without the adapter's deadline the push would never return.
+        with anyio.fail_after(TEST_DEADLINE_SECONDS):
+            result = await sync.set_tenant_attributes(tenant=TENANT_ID, attributes={"plan_tier": "pro"})
+
+        error = refused(result, "set_tenant_attributes")
+        assert (error.context.get(UNANSWERED), links.locks[TENANT_ID].locked(), writes(api)) == (True, False, [])
+
+    def test_the_lock_wait_outlasts_a_holders_deadline(self):
+        assert ORGANIZATION_LOCK_TIMEOUT_MS > ORGANIZATION_HOLD_SECONDS * 1000
 
     async def test_a_tenant_id_that_is_no_canonical_id_is_refused(self):
         api = RecordedAdminApi(["token"])
