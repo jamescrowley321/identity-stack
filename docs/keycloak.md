@@ -6,7 +6,8 @@ authorized from the canonical model ([ADR-0011](adr/0011-keycloak-canonical-auth
 runs prove, the Keycloak version they ran against, and every limit found. Running Keycloak
 locally and configuring the backend for it: [local-development.md](local-development.md#local-keycloak).
 
-Tested against `quay.io/keycloak/keycloak:26.8.2`, the image `docker-compose.test.yml` pins,
+Tested against `quay.io/keycloak/keycloak:26.8.2`, the image `docker-compose.test.yml` pins
+(Apache-2.0, run unmodified),
 with the realm imported from [`keycloak/realm/identity-stack-realm.json`](../keycloak/realm/identity-stack-realm.json)
 and with the same realm built by [`infra/keycloak/`](../infra/keycloak/README.md). The realm's
 users, clients and organizations are listed in
