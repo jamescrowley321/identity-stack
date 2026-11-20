@@ -108,6 +108,8 @@ _MARK_KIND = {
     "role_assignment": MEMBERSHIP,
 }
 
+ALREADY_RUNNING = "A Keycloak reconciliation pass is already running, or pending pushes are being pushed"
+
 # Refusals that mean Keycloak has nothing to change: the tenant is another
 # provider's organization.
 _NOTHING_TO_PUSH = frozenset({Refusal.TENANT_LINKED_ELSEWHERE})
@@ -187,8 +189,34 @@ class KeycloakReconciliation:
             # different ages would leave Keycloak with the older one and no mark.
             async with self._hold_pass() as held:
                 if not held:
-                    return Error(Conflict(message="A Keycloak reconciliation pass is already running"))
+                    return Error(Conflict(message=ALREADY_RUNNING))
                 return await self._reconcile(run_id, stats, span)
+
+    async def push_pending(self, interval_seconds: float) -> Result[dict[str, int], IdentityError]:
+        """The second half alone: push the marks that are due, so a push that failed is retried (#612).
+
+        A mark is due ``interval_seconds`` after it was marked, then backed off after
+        each failed push (``PendingPushRepository.list_due``). Reads nothing of the
+        realm. ``hold_pass`` is the push retry's lock here: one push at a time, and
+        ``Conflict`` while a pass or another retry pushes.
+        """
+        with tracer.start_as_current_span("KeycloakReconciliation.push_pending") as span:
+            run_id = str(uuid.uuid4())
+            stats = {"pushed": 0, "push_failed": 0, "pending": 0}
+            async with self._hold_pass() as held:
+                if not held:
+                    return Error(Conflict(message="Keycloak's pending pushes are already being pushed"))
+                provider = await self._providers.get_by_name(PROVIDER_NAME)
+                if provider is None:
+                    await self._session.rollback()
+                    return Error(NotFound(message=f"No {PROVIDER_NAME!r} provider row: run the Keycloak seed first"))
+                marks = await self._ledger.list_due(interval_seconds)
+                await self._push_out(provider.id, run_id, stats, marks)
+                stats["pending"] = await self._ledger.count()
+                await self._session.rollback()
+            for key, value in stats.items():
+                span.set_attribute(f"reconciliation.{key}", value)
+            return Ok(stats)
 
     async def _reconcile(self, run_id: str, stats: dict[str, int], span) -> Result[PassOutcome, IdentityError]:
         try:
@@ -211,7 +239,7 @@ class KeycloakReconciliation:
             return Error(pulled.error)
         # After a conflict too: the pushes do not depend on the first half, and a write that
         # keeps conflicting must not keep every pending change from being delivered.
-        await self._push_out(provider_id, run_id, stats)
+        await self._push_out(provider_id, run_id, stats, await self._ledger.list_all())
         stats["pending"] = await self._ledger.count()
         await self._session.rollback()
         for key, value in stats.items():
@@ -480,9 +508,8 @@ class KeycloakReconciliation:
 
     # --- Postgres into Keycloak ------------------------------------------------------
 
-    async def _push_out(self, provider_id: uuid.UUID, run_id: str, stats: dict[str, int]) -> None:
-        """Push each marked entity's current state; remove its mark once every push for it is delivered."""
-        marks = await self._ledger.list_all()
+    async def _push_out(self, provider_id: uuid.UUID, run_id: str, stats: dict[str, int], marks: list) -> None:
+        """Push each of ``marks``' current state; remove its mark once every push for it is delivered."""
         await self._session.commit()
         order = {kind: position for position, kind in enumerate(PUSH_ORDER)}
         for mark in sorted(marks, key=lambda entry: (order.get(entry.kind, len(order)), entry.key)):

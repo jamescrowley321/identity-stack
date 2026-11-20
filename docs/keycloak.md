@@ -176,9 +176,11 @@ adapter does not own (an organization's description) made between the adapter's 
 is overwritten.
 
 Keycloak answers a missing organization membership with its generic 404 (`HTTP 404 Not Found`),
-the answer a route that does not match gets too. Ending a membership counts that 404 as done only
-once the user's organizations are read (`GET /organizations/members/{id}/organizations`) and the
-organization is not among them, or the realm has no such user; otherwise it is an error.
+the answer a route that does not match and a user the realm lacks get too; only a missing
+organization has its own (`Organization not found.`), which counts as done. Ending a membership
+counts the generic 404 as done only once the user's organizations are read
+(`GET /organizations/members/{id}/organizations`) and the organization is not among them, or the
+realm has no such user; otherwise it is an error, and the revocation reports `provider_sync: failed`.
 
 Every failure comes back to the service as an error (`SyncError`), with the HTTP status, the
 adapter's own refusal (`Refusal`) when it refused the push itself, and `unanswered` when Keycloak
@@ -188,8 +190,21 @@ link) is such an error too, with no status: Keycloak was not asked. A push that 
 (ending a membership, a deactivation) and fails is logged as an `ERROR` beginning
 `IdP revocation failed`, and the service's answer carries `"provider_sync": "failed"`: Keycloak
 still holds what the canonical change took away until the push is made again: the change stays
-[pending](#reconciliation), and the next reconciliation pass pushes it, ending the membership or
-disabling the account, and keeps it pending until a push is delivered. Authorization
+[pending](#reconciliation), and the **push retry** pushes it again, ending the membership or
+disabling the account, and keeps it pending until a push is delivered. The push retry is a
+background task of every worker that, every `KEYCLOAK_PUSH_RETRY_INTERVAL_SECONDS` (60), runs the
+second half of a [reconciliation pass](#reconciliation) alone for the pending pushes that are due:
+each is pushed from the current canonical state, and its mark removed once delivered; a push that
+fails again records a `failed` sync event and stays pending. A mark is due once it is one interval
+old (an inline push may still be delivering a younger one; a mark whose inline push succeeded is
+pushed once more, which writes nothing, and removed). After n `failed` sync events of its entity
+since it was marked, it waits `interval × 2^(n−1)` from the last, at most `interval × 64`, so a
+push Keycloak keeps refusing is retried less and less often; a new canonical change of the entity
+starts it again. The cadence is read from the database, so it is per mark whatever the number of
+workers. A turn reads nothing of the realm. It holds a pending-push lock, so one worker pushes at a
+time; a turn skips while a pass pushes, and a reconciliation run started during a turn waits up to
+10 seconds for it, then answers 409. A failed revocation is therefore applied within about one
+interval of Keycloak answering again, with no reconciliation run. Authorization
 never reads it: a removed membership is refused on the next request from the canonical model.
 `DELETE /api/roles/{name}` returns that answer; `POST /api/roles/remove` builds its own and does not
 show it, so alert on the log. The unit tests replay answers recorded from Keycloak 26.8.2
@@ -378,7 +393,9 @@ and they raise the `seq` of an entity already marked.
 
 One pass runs at a time: a pass holds a Postgres session lock on a connection of its own from start
 to end (its second half commits after each push, which a transaction lock would not survive), and a
-pass started while another holds it answers 409.
+pass started while another holds it answers 409. It then takes the pending-push lock too, waiting up to
+10 seconds for a [push retry](#admin-adapter) turn in progress (409 after that), so two pushes of
+one entity never overlap.
 
 1. **Keycloak into Postgres.** In one transaction holding the reconciliation lock and the pull's lock,
    the pass reads the marks, then the realm: the organizations, the members and role groups (with their
@@ -411,7 +428,8 @@ pass started while another holds it answers 409.
    membership, is pushed from its current canonical state through `KeycloakSyncAdapter`, whose pushes
    are idempotent: a tenant, a permission, a role with its permissions, a user's profile then status, or
    every role group of a membership (a membership with no role left is ended, the case of
-   [identity-stack#612](https://github.com/jamescrowley321/identity-stack/issues/612)). An entity whose
+   [identity-stack#612](https://github.com/jamescrowley321/identity-stack/issues/612); the
+   [push retry](#admin-adapter) runs this half alone between runs). An entity whose
    row is gone is deleted in Keycloak. When every push for it is delivered its mark is removed; when one
    fails, the mark stays for the next pass and a `failed` sync event (`detail.source` `reconciliation`)
    records the operation and the error. A tenant linked to another provider's organization, and its
