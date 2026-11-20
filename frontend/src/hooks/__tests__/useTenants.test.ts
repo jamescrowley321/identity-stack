@@ -114,6 +114,21 @@ describe("useTenants", () => {
     expect(descope.result.current.tenants).toEqual(oryTenants);
   });
 
+  it("does not offer a suspended tenant (#689)", () => {
+    mockUseIdentityContext.mockReturnValue({
+      identity: {
+        ...oryIdentity,
+        tenant_memberships: [
+          { tenant_id: "t1", tenant_name: "Acme", status: "active" },
+          { tenant_id: "t2", tenant_name: "Beta", status: "suspended" },
+        ],
+      },
+      currentTenantId: "t1",
+    });
+    const { result } = renderHook(() => useTenants());
+    expect(Object.fromEntries(result.current.tenants.map((t) => [t.id, t.name]))).toEqual({ t1: "Acme" });
+  });
+
   it("falls back to tenant_id when tenant_name is empty", () => {
     mockUseIdentityContext.mockReturnValue({
       identity: {

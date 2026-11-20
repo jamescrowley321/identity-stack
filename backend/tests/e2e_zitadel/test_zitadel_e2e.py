@@ -118,7 +118,12 @@ def test_a_first_login_creates_a_member_of_the_home_tenant_only(
     assert body["user"]["email"] == email
     assert database.user_ids_with_email(email) == [body["user"]["id"]]
     assert body["tenant_memberships"] == [
-        {"tenant_id": tenant_id, "tenant_name": home, "external_org_id": zitadel.organization_ids[home]}
+        {
+            "tenant_id": tenant_id,
+            "tenant_name": home,
+            "status": "active",
+            "external_org_id": zitadel.organization_ids[home],
+        }
     ]
     assert body["roles"] == [{"tenant_id": tenant_id, "role_name": "member", "permissions": []}]
     assert body["linked_idps"] == [{"provider_name": "zitadel", "external_sub": zitadel.user_ids[NEWCOMER.key]}]

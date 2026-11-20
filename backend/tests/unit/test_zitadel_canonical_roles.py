@@ -19,6 +19,7 @@ from starlette.datastructures import Headers
 from app.dependencies import rbac
 from app.dependencies.rbac import require_permission, require_role
 from app.middleware.providers import zitadel_config
+from tests.helpers.canonical_payload import active_memberships
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "zitadel"
 ISSUER = "http://zitadel.localhost:8480"
@@ -77,6 +78,7 @@ def canonical(monkeypatch):
                 {
                     "user": {"id": "canonical-user-1", "status": status},
                     "roles": [{"tenant_id": TENANT, "role_name": role, "permissions": permissions}],
+                    "tenant_memberships": active_memberships([{"tenant_id": TENANT}]),
                 }
             )
         )

@@ -25,12 +25,13 @@ from fastapi.testclient import TestClient
 from app.dependencies import rbac
 from app.dependencies.identity import get_tenant_service
 from app.dependencies.rbac import get_rbac_session
-from app.dependencies.tenant_access import SELECT_A_TENANT_FIRST, TENANT_SELECTOR_HEADER
+from app.dependencies.tenant_access import SELECT_A_TENANT_FIRST, TENANT_SELECTOR_HEADER, TenantRefusal
 from app.main import app as shipped_app
 from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.providers import descope_config, keycloak_config, ory_config, zitadel_config
 from app.models.database import get_async_session
-from app.models.tenant import TenantResource
+from app.models.identity.tenant import TenantStatus
+from app.models.tenant import TenantIdSpace, TenantResource
 from app.routers.tenants import NOT_A_MEMBER
 
 DESCOPE_PROJECT = "P2tenantroutes"
@@ -56,6 +57,9 @@ _BOUND = {
 }
 
 REFUSED_NOT_A_MEMBER = {"detail": NOT_A_MEMBER}
+# Whose tenant ids each provider's principal names (#690): Descope's are its own,
+# however they are spelled; here they are spelled as the canonical tenants' UUIDs.
+SPACE = {"descope": TenantIdSpace.descope, **{provider: TenantIdSpace.canonical for provider in CANONICAL}}
 CREATED = datetime(2026, 11, 18, tzinfo=timezone.utc)
 DOMAINS = {ACME: ["acme.test"], GLOBEX: ["globex.test"]}
 
@@ -98,6 +102,7 @@ class _CanonicalStore:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.status = {ACME: TenantStatus.active, GLOBEX: TenantStatus.active}
 
     async def resolve(self, *, provider: str, sub: str):
         self.calls.append((provider, sub))
@@ -109,7 +114,8 @@ class _CanonicalStore:
                     {"tenant_id": GLOBEX, "role_name": "member", "permissions": []},
                 ],
                 "tenant_memberships": [
-                    {"tenant_id": tenant_id, "tenant_name": name} for tenant_id, name in NAMES.items()
+                    {"tenant_id": tenant_id, "tenant_name": name, "status": self.status[tenant_id].value}
+                    for tenant_id, name in NAMES.items()
                 ],
             }
         )
@@ -218,7 +224,15 @@ class TestEveryProvidersPrincipal:
 
         assert response.status_code == 200
         (added,) = [call.args[0] for call in stubs.session.add.call_args_list]
-        assert (added.tenant_id, added.name) == (GLOBEX, "Plans")
+        assert (added.tenant_space, added.tenant_id, added.name) == (SPACE[provider], GLOBEX, "Plans")
+        assert "tenant_space" not in response.json()
+
+    def test_it_reads_resources_only_in_its_own_id_space(self, client, stubs, provider):
+        client.get(f"/api/tenants/{ACME}/resources", headers=_headers(provider, ACME))
+
+        (statement,) = [call.args[0] for call in stubs.session.execute.await_args_list]
+        filters = {clause.left.name: clause.right.value for clause in statement.whereclause.clauses}
+        assert filters == {"tenant_space": SPACE[provider], "tenant_id": ACME}
 
     def test_it_creates_no_resource_in_another_tenant(self, client, stubs, provider):
         response = client.post(
@@ -267,6 +281,46 @@ class TestACanonicalPrincipal:
 
         assert (response.status_code, response.json()) == (403, {"detail": SELECT_A_TENANT_FIRST})
         stubs.tenant_service.get_tenant.assert_not_awaited()
+
+
+@pytest.mark.parametrize("provider", sorted(CANONICAL))
+class TestASuspendedCanonicalTenant:
+    """#689: Globex is suspended; its member is still served Acme and refused Globex."""
+
+    @pytest.fixture(autouse=True)
+    def _globex_suspended(self, stubs):
+        stubs.store.status[GLOBEX] = TenantStatus.suspended
+
+    def test_it_is_not_listed(self, client, provider):
+        response = client.get("/api/tenants", headers=_headers(provider))
+
+        assert response.status_code == 200
+        assert {tenant["id"]: tenant for tenant in response.json()["tenants"]} == {ACME: EXPECTED_TENANTS[ACME]}
+
+    def test_it_is_not_the_current_tenant(self, client, stubs, provider):
+        response = client.get("/api/tenants/current", headers=_headers(provider, GLOBEX))
+
+        assert (response.status_code, response.json()) == (403, {"detail": TenantRefusal.SUSPENDED})
+        stubs.tenant_service.get_tenant.assert_not_awaited()
+
+    def test_the_active_tenant_is_current_without_a_selection(self, client, provider):
+        response = client.get("/api/tenants/current", headers=_headers(provider))
+
+        assert (response.status_code, response.json()["tenant_id"]) == (200, ACME)
+
+    def test_its_resources_are_not_read(self, client, stubs, provider):
+        response = client.get(f"/api/tenants/{GLOBEX}/resources", headers=_headers(provider, GLOBEX))
+
+        assert (response.status_code, response.json()) == (403, {"detail": TenantRefusal.SUSPENDED})
+        stubs.session.execute.assert_not_awaited()
+
+    def test_no_resource_is_created_in_it(self, client, stubs, provider):
+        response = client.post(
+            f"/api/tenants/{GLOBEX}/resources", headers=_headers(provider, GLOBEX), json={"name": "Plans"}
+        )
+
+        assert (response.status_code, response.json()) == (403, {"detail": TenantRefusal.SUSPENDED})
+        stubs.session.add.assert_not_called()
 
 
 class TestADescopePrincipal:

@@ -16,10 +16,17 @@ On a route whose state belongs to no tenant (``require_global_role``) the reques
 chooses nothing: a caller with several memberships is refused, whatever the
 header or a ``dct`` claim on the token names.
 
+A canonical tenant that is not active (``suspended``) is served to no member: a
+request for it is refused (403, ``TenantRefusal.SUSPENDED``), it is no sole
+membership, and ``canonical_tenant_memberships`` does not list it. On a route
+whose state belongs to no tenant the membership still counts, since that state
+is not the suspended tenant's: an operator keeps the operator role.
+
 Anything else is 403. Nothing here does I/O: the canonical memberships are loaded
 by ``app.dependencies.rbac`` and passed in.
 """
 
+import enum
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -40,6 +47,12 @@ NO_TENANT_CONTEXT = "No tenant context"
 SELECT_A_TENANT_FIRST = "No tenant context — select a tenant first"
 
 
+class TenantRefusal(enum.StrEnum):
+    """Why the resolver refused a tenant the caller belongs to."""
+
+    SUSPENDED = "This tenant is suspended"
+
+
 @dataclass(frozen=True)
 class CanonicalGrant:
     """One role the canonical model gives the caller in one tenant, with that role's permissions."""
@@ -55,6 +68,9 @@ class CanonicalMemberships:
 
     ``tenants`` names tenants the caller belongs to beside those its grants name:
     a machine credential belongs to its tenant whether or not it holds a role there.
+    ``active_tenants`` names the tenants whose canonical status is ``active``: any
+    other membership is not served (``servable_tenant_ids``), and a tenant whose
+    status was not read is not either.
     ``user_id`` is the caller's canonical user id: the subject OpenFGA keys their relations on.
     """
 
@@ -62,11 +78,17 @@ class CanonicalMemberships:
     # Tenant id -> the canonical tenant's name, for the tenants the grants name.
     tenant_names: Mapping[str, str] = field(default_factory=dict)
     tenants: frozenset[str] = frozenset()
+    active_tenants: frozenset[str] = frozenset()
     user_id: str | None = None
 
     @property
     def tenant_ids(self) -> frozenset[str]:
         return self.tenants | frozenset(grant.tenant_id for grant in self.grants)
+
+    @property
+    def servable_tenant_ids(self) -> frozenset[str]:
+        """The memberships a tenant-scoped request may be served from: those in an active tenant."""
+        return self.tenant_ids & self.active_tenants
 
 
 @dataclass(frozen=True)
@@ -80,9 +102,10 @@ class TenantMembership:
 
 
 def canonical_tenant_memberships(memberships: CanonicalMemberships) -> dict[str, TenantMembership]:
-    """Every tenant the caller's canonical grants name, keyed by tenant id.
+    """Every active tenant the caller's canonical grants name, keyed by tenant id.
 
-    A tenant without a recorded name is named by its id.
+    A tenant without a recorded name is named by its id. A suspended tenant is
+    left out: it is served to no member, so it is not offered as one.
     """
     return {
         tenant_id: TenantMembership(
@@ -96,7 +119,7 @@ def canonical_tenant_memberships(memberships: CanonicalMemberships) -> dict[str,
                 for permission in grant.permissions
             ),
         )
-        for tenant_id in sorted(memberships.tenant_ids)
+        for tenant_id in sorted(memberships.servable_tenant_ids)
     }
 
 
@@ -240,8 +263,12 @@ def _canonical_tenant(
     by_header, by_claim = _selected_tenants(request, claims)
     selected = set(by_header) | by_claim
     if not selected:
-        # Nothing selected: only a sole membership is unambiguous.
-        return next(iter(tenant_ids)) if len(tenant_ids) == 1 else None
+        # Nothing selected: only a sole membership is unambiguous. A tenant-scoped
+        # request counts only the servable ones, so a suspended tenant does not
+        # make an active sole membership ambiguous; with none servable, a sole
+        # suspended membership is returned for the caller to refuse by name.
+        candidates = (memberships.servable_tenant_ids or tenant_ids) if request_selects else tenant_ids
+        return next(iter(candidates)) if len(candidates) == 1 else None
     if not request_selects and len(tenant_ids) != 1:
         logger.warning(
             "tenant selection refused: provider=%s sub=%r named one of several tenants "
@@ -286,7 +313,9 @@ def resolve_tenant_access(
     provider. ``request_selects`` is off for a route whose state belongs to no
     tenant: there neither the ``X-Tenant-ID`` header nor a ``dct`` claim may
     choose among several memberships. Raises 403 with ``no_tenant_detail`` on
-    every branch that does not end at exactly one tenant.
+    every branch that does not end at exactly one tenant, and with
+    ``TenantRefusal.SUSPENDED`` when ``request_selects`` is on and that tenant is
+    not active.
     """
     if memberships is None:
         claimed = _claims_source(request, claims)
@@ -297,6 +326,12 @@ def resolve_tenant_access(
     tenant_id = _canonical_tenant(request, claims, memberships, request_selects=request_selects)
     if tenant_id is None:
         raise HTTPException(status_code=403, detail=no_tenant_detail)
+    if request_selects and tenant_id not in memberships.servable_tenant_ids:
+        logger.warning(
+            "tenant resolution refused: provider=%s sub=%r asked for a tenant that is not active",
+            *_caller(request, claims),
+        )
+        raise HTTPException(status_code=403, detail=TenantRefusal.SUSPENDED)
     grants = [grant for grant in memberships.grants if grant.tenant_id == tenant_id]
     return TenantAccess(
         tenant_id=tenant_id,

@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.errors.identity import NotFound
+from app.models.identity.tenant import TenantStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
@@ -117,6 +118,7 @@ def _make_tenant(**overrides):
     tenant.name = overrides.get("name", "Acme Corp")
     tenant.external_org_id = overrides.get("external_org_id")
     tenant.external_org_provider_id = overrides.get("external_org_provider_id")
+    tenant.status = overrides.get("status", TenantStatus.active)
     return tenant
 
 
@@ -278,11 +280,53 @@ class TestMembershipOrganization:
         assert result.is_ok()
         by_id = {m["tenant_id"]: m for m in result.ok["tenant_memberships"]}
         assert by_id == {
-            str(acme.id): {"tenant_id": str(acme.id), "tenant_name": "Acme", "external_org_id": "acme"},
-            str(globex.id): {"tenant_id": str(globex.id), "tenant_name": "Globex", "external_org_id": "globex"},
-            str(elsewhere.id): {"tenant_id": str(elsewhere.id), "tenant_name": "Initech", "external_org_id": None},
-            str(unlinked.id): {"tenant_id": str(unlinked.id), "tenant_name": "Umbrella", "external_org_id": None},
+            str(acme.id): {
+                "tenant_id": str(acme.id),
+                "tenant_name": "Acme",
+                "status": "active",
+                "external_org_id": "acme",
+            },
+            str(globex.id): {
+                "tenant_id": str(globex.id),
+                "tenant_name": "Globex",
+                "status": "active",
+                "external_org_id": "globex",
+            },
+            str(elsewhere.id): {
+                "tenant_id": str(elsewhere.id),
+                "tenant_name": "Initech",
+                "status": "active",
+                "external_org_id": None,
+            },
+            str(unlinked.id): {
+                "tenant_id": str(unlinked.id),
+                "tenant_name": "Umbrella",
+                "status": "active",
+                "external_org_id": None,
+            },
         }
+
+    async def test_a_suspended_tenant_is_listed_with_its_status(self):
+        service, user_repo, idp_link_repo, provider_repo, assignment_repo, role_repo, tenant_repo = _build_service()
+
+        user_id = uuid.uuid4()
+        acme = _make_tenant(name="Acme")
+        globex = _make_tenant(name="Globex", status=TenantStatus.suspended)
+        tenants = {tenant.id: tenant for tenant in (acme, globex)}
+
+        provider_repo.get_by_name.return_value = _make_provider(name="keycloak")
+        idp_link_repo.get_by_provider_name_and_sub.return_value = _make_link(user_id=user_id)
+        user_repo.get.return_value = _make_user(id=user_id)
+        assignment_repo.list_by_user.return_value = [_make_assignment(tenant_id=tid) for tid in tenants]
+        role_repo.get.return_value = _make_role(name="member")
+        role_repo.get_permissions.return_value = []
+        tenant_repo.get.side_effect = lambda tid: tenants[tid]
+        idp_link_repo.get_by_user.return_value = []
+
+        result = await service.resolve(provider="keycloak", sub="kc-sub-bob")
+
+        by_id = {m["tenant_id"]: m["status"] for m in result.ok["tenant_memberships"]}
+        assert by_id == {str(acme.id): "active", str(globex.id): "suspended"}
 
 
 @pytest.mark.anyio

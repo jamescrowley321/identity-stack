@@ -11,12 +11,12 @@ from app.dependencies.descope import NOT_A_DESCOPE_PRINCIPAL, is_descope_princip
 from app.dependencies.identity import get_tenant_service
 from app.dependencies.rbac import canonical_memberships
 from app.dependencies.tenant import get_descope_claims, get_tenant_id, get_tenant_memberships
-from app.dependencies.tenant_access import CanonicalMemberships, TenantMembership
+from app.dependencies.tenant_access import CanonicalMemberships, TenantMembership, TenantRefusal
 from app.errors.identity import NotFound
 from app.errors.problem_detail import result_to_response
 from app.logbook import logbook
 from app.models.database import get_async_session
-from app.models.tenant import TenantResource
+from app.models.tenant import TenantIdSpace, TenantResource
 from app.services.canonical import canonical_tenant
 from app.services.tenant import TenantService
 
@@ -54,10 +54,31 @@ def require_admin_role(claims: dict = Depends(get_descope_claims)) -> dict:
     return claims
 
 
-def _verify_tenant_membership(tenant_id: str, memberships: dict[str, TenantMembership]) -> None:
-    """Verify the caller is a member of the given tenant (memberships from ``get_tenant_memberships``)."""
+def _resource_tenant_space(
+    tenant_id: str,
+    memberships: dict[str, TenantMembership],
+    canonical: CanonicalMemberships | None,
+) -> TenantIdSpace:
+    """The id space of the path's tenant, once the caller is shown to be served in it.
+
+    ``memberships`` is ``get_tenant_memberships``; ``canonical`` is the caller's
+    canonical memberships, ``None`` for a Descope principal. A canonical principal's
+    tenant is a canonical tenant and a Descope principal's a Descope tenant, and
+    resources are read and written in that space only (#690): a Descope tenant
+    whose custom id is a canonical tenant's UUID names none of its resources.
+    403 when the caller is no member, and ``TenantRefusal.SUSPENDED`` for its
+    canonical tenant that is not active (#689), as the tenant resolver answers.
+    """
+    if canonical is not None and tenant_id in canonical.tenant_ids - canonical.servable_tenant_ids:
+        raise HTTPException(status_code=403, detail=TenantRefusal.SUSPENDED)
     if tenant_id not in memberships:
         raise HTTPException(status_code=403, detail=NOT_A_MEMBER)
+    return TenantIdSpace.descope if canonical is None else TenantIdSpace.canonical
+
+
+def _resource_body(resource: TenantResource) -> dict:
+    """A resource as the routes answer it: its id space is the caller's, so it is not repeated."""
+    return resource.model_dump(exclude={"tenant_space"})
 
 
 class CreateTenantRequest(BaseModel):
@@ -196,16 +217,22 @@ async def _current_canonical_tenant(request: Request, tenant_id: str, tenant_ser
 async def list_tenant_resources(
     tenant_id: str,
     memberships: dict[str, TenantMembership] = Depends(get_tenant_memberships),
+    canonical: CanonicalMemberships | None = Depends(canonical_memberships),
     session: AsyncSession = Depends(get_async_session),
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ):
     """List resources scoped to a tenant. Only accessible if user is a member."""
-    _verify_tenant_membership(tenant_id, memberships)
-    statement = select(TenantResource).where(TenantResource.tenant_id == tenant_id).offset(offset).limit(limit)
+    space = _resource_tenant_space(tenant_id, memberships, canonical)
+    statement = (
+        select(TenantResource)
+        .where(TenantResource.tenant_space == space, TenantResource.tenant_id == tenant_id)
+        .offset(offset)
+        .limit(limit)
+    )
     result = await session.execute(statement)
     resources = result.scalars().all()
-    return {"resources": [r.model_dump() for r in resources]}
+    return {"resources": [_resource_body(r) for r in resources]}
 
 
 @router.post("/tenants/{tenant_id}/resources")
@@ -213,11 +240,12 @@ async def create_tenant_resource(
     tenant_id: str,
     body: CreateResourceRequest,
     memberships: dict[str, TenantMembership] = Depends(get_tenant_memberships),
+    canonical: CanonicalMemberships | None = Depends(canonical_memberships),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Create a resource scoped to a tenant. Only accessible if user is a member."""
-    _verify_tenant_membership(tenant_id, memberships)
-    resource = TenantResource(tenant_id=tenant_id, name=body.name, description=body.description)
+    space = _resource_tenant_space(tenant_id, memberships, canonical)
+    resource = TenantResource(tenant_space=space, tenant_id=tenant_id, name=body.name, description=body.description)
     try:
         session.add(resource)
         await session.commit()
@@ -235,4 +263,4 @@ async def create_tenant_resource(
     except Exception:
         logger.warning("DB refresh failed for tenant resource after successful commit")
 
-    return resource.model_dump()
+    return _resource_body(resource)

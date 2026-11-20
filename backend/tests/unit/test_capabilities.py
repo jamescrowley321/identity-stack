@@ -43,6 +43,7 @@ from app.services.adapters.ory import OrySyncAdapter
 from app.services.adapters.zitadel import ZitadelSyncAdapter
 from app.services.relationship_store import RelationshipStoreKind
 from app.services.user import UserService
+from tests.helpers.canonical_payload import active_memberships
 from tests.unit.test_descope_backed_routes import (
     DESCOPE_ISSUER,
     DESCOPE_MEMBER,
@@ -608,7 +609,11 @@ class TestKeycloakTenantSettingsNeedAnAdminRole:
     def _held(self, monkeypatch, role: str) -> None:
         resolver = AsyncMock()
         resolver.resolve.return_value = Ok(
-            {"user": CANONICAL_USER, "roles": [{"tenant_id": TENANT, "role_name": role, "permissions": []}]}
+            {
+                "user": CANONICAL_USER,
+                "roles": [{"tenant_id": TENANT, "role_name": role, "permissions": []}],
+                "tenant_memberships": active_memberships([{"tenant_id": TENANT}]),
+            }
         )
         monkeypatch.setattr(rbac, "IdentityResolutionService", lambda **_: resolver)
 
