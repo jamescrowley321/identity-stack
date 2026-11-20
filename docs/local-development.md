@@ -145,6 +145,7 @@ client ([docs/keycloak.md](keycloak.md#admin-adapter)):
 SYNC_PROVIDER=keycloak
 KEYCLOAK_ADMIN_CLIENT_ID=identity-stack-admin
 KEYCLOAK_ADMIN_CLIENT_SECRET=local-only-admin-client   # local fixture value
+KEYCLOAK_REGISTRATION_TOKEN_KEYS=<Fernet.generate_key() output>   # seals machine clients' registration tokens
 ```
 
 Register the provider row once, and link canonical tenants to the realm's organizations, so
