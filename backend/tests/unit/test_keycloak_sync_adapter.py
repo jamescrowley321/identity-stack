@@ -147,6 +147,27 @@ class TestTenants:
             "enabled": False,
         }
 
+    async def test_an_update_without_domains_sends_none_back(self):
+        """Keycloak keeps the domains a PUT leaves out: sent back as read, they would undo a change since the read."""
+        found = {
+            **FOUND_ORGANIZATION,
+            "description": "Set by the realm admin",
+            "domains": [{"name": "recorded.test", "verified": False}],
+            "attributes": {"plan_tier": ['"pro"']},
+        }
+        api = RecordedAdminApi(["token", httpx.Response(200, json=[found]), NO_CONTENT])
+
+        result = await adapter(api, Links(aliases={TENANT: TENANT_ID})).sync_tenant(
+            tenant_id=TENANT, data={"name": "Renamed"}
+        )
+
+        assert result == Ok(None)
+        assert sent_to(api, "PUT", ORGANIZATION).body == {
+            **FOUND_ORGANIZATION,
+            "name": "Renamed",
+            "description": "Set by the realm admin",
+        }
+
     async def test_a_linked_tenant_reaches_the_organization_it_is_linked_to(self):
         api = RecordedAdminApi(["token", "organization_find_none", "organization_create"])
         links = Links(aliases={TENANT: "acme-alias"})

@@ -1,7 +1,12 @@
 """The Keycloak sync adapter's canonical side in memory, for tests that need no database."""
 
 import uuid
+from collections import defaultdict
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+
+import anyio
 
 
 @dataclass
@@ -14,6 +19,8 @@ class MemoryKeycloakLinks:
     linked_users: dict[uuid.UUID, tuple[str, str]] = field(default_factory=dict)
     roles: dict[uuid.UUID, tuple[str, uuid.UUID | None]] = field(default_factory=dict)
     failure: Exception | None = None
+    # The organization locks, by alias, as Postgres holds them across the service's workers.
+    locks: defaultdict[str, anyio.Lock] = field(default_factory=lambda: defaultdict(anyio.Lock))
 
     def _fail(self) -> None:
         if self.failure is not None:
@@ -46,3 +53,9 @@ class MemoryKeycloakLinks:
     async def role(self, role_id: uuid.UUID) -> tuple[str, uuid.UUID | None] | None:
         self._fail()
         return self.roles.get(role_id)
+
+    @asynccontextmanager
+    async def organization_lock(self, alias: str) -> AsyncIterator[None]:
+        self._fail()
+        async with self.locks[alias]:
+            yield
