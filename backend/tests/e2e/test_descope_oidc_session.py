@@ -25,10 +25,21 @@ from tests.e2e.helpers.auth import (
 )
 from tests.e2e.not_applicable import descope_credentials_missing
 
-pytestmark = pytest.mark.skipif(
-    descope_credentials_missing("DESCOPE_MANAGEMENT_KEY", "E2E_TEST_TENANT_ID", "DESCOPE_PROJECT_ID"),
-    reason="DESCOPE_MANAGEMENT_KEY/E2E_TEST_TENANT_ID/DESCOPE_PROJECT_ID not set",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        descope_credentials_missing("DESCOPE_MANAGEMENT_KEY", "E2E_TEST_TENANT_ID", "DESCOPE_PROJECT_ID"),
+        reason="DESCOPE_MANAGEMENT_KEY/E2E_TEST_TENANT_ID/DESCOPE_PROJECT_ID not set",
+    ),
+    # Open question (#699): does the SPA's Descope OIDC access token carry ``amr``? The
+    # project's hosted sign-up-or-in flow signs in by enchanted link, and a test user's
+    # generated link neither completes the hosted page's pending sign-in nor continues
+    # its flow when opened there, so no run reaches the SPA's token yet.
+    pytest.mark.xfail(
+        strict=False,
+        reason="open question: no automated sign-in through Descope's hosted enchanted-link flow yet, "
+        "so the SPA OIDC access token's amr is unproven (#699)",
+    ),
+]
 
 _HOSTED_FLOW = re.compile(r"^https://[^/]*descope[^/]*/")
 _TIMEOUT_MS = 30_000
