@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from cryptography.fernet import Fernet
 from expression import Error, Ok
 from fastapi import FastAPI
 
@@ -26,6 +27,7 @@ from app.models.identity.role import Role
 from app.models.identity.user import User, UserStatus
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.permission import PermissionRepository
+from app.repositories.registration_tokens import KEYS_VARIABLE as REGISTRATION_TOKEN_KEYS_VARIABLE
 from app.repositories.role import RoleRepository
 from app.repositories.user import UserRepository
 from app.services.adapters.base import (
@@ -155,6 +157,12 @@ class FakeApp:
         self.state = FakeState()
 
 
+@pytest.fixture(autouse=True)
+def registration_token_keys(monkeypatch) -> None:
+    """A Keycloak sync provider needs the key its machine clients' registration tokens are sealed under (#698)."""
+    monkeypatch.setenv(REGISTRATION_TOKEN_KEYS_VARIABLE, Fernet.generate_key().decode())
+
+
 class TestStartup:
     async def test_descope_opens_nothing(self, monkeypatch):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", "descope")
@@ -184,6 +192,23 @@ class TestStartup:
         assert app.state.keycloak_admin._http is client
         assert api.timeout == main.KEYCLOAK_ADMIN_TIMEOUT_SECONDS
         await client.aclose()
+
+    @pytest.mark.parametrize("unset_value", [None, ""])
+    async def test_no_registration_token_key_stops_startup_before_any_call(self, monkeypatch, unset_value):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        set_settings(monkeypatch)
+        if unset_value is None:
+            monkeypatch.delenv(REGISTRATION_TOKEN_KEYS_VARIABLE)
+        else:
+            monkeypatch.setenv(REGISTRATION_TOKEN_KEYS_VARIABLE, unset_value)
+        api = RecordedAdminApi([])
+        monkeypatch.setattr(main, "outbound_client", recorded_client(api))
+
+        with pytest.raises(RuntimeError) as refused:
+            await main._start_sync_provider(FakeApp())
+
+        assert str(refused.value) == f"SYNC_PROVIDER is keycloak but {REGISTRATION_TOKEN_KEYS_VARIABLE} is not set"
+        assert api.sent == []
 
     async def test_a_wrong_credential_stops_startup_and_closes_the_client(self, monkeypatch):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
@@ -1006,6 +1031,22 @@ class TestLifespan:
         assert served == []
         assert api.sent == []
         assert [client.is_closed for client in started] == [True, True]
+
+    async def test_no_registration_token_key_stops_startup_before_serving(self, monkeypatch, started):
+        """Keycloak machine clients' registration tokens are sealed under it, never stored in plain text (#698)."""
+        set_settings(monkeypatch)
+        monkeypatch.delenv(REGISTRATION_TOKEN_KEYS_VARIABLE)
+        api = RecordedAdminApi([])
+        self.build_into(monkeypatch, started, api)
+        served = []
+
+        with pytest.raises(RuntimeError) as refused:
+            async with main.lifespan(FastAPI()):
+                served.append(True)
+
+        assert str(refused.value) == f"SYNC_PROVIDER is keycloak but {REGISTRATION_TOKEN_KEYS_VARIABLE} is not set"
+        assert served == []
+        assert api.sent == []
 
     async def test_a_refused_start_also_shuts_down_telemetry_and_disposes_the_engine(self, monkeypatch, started):
         """Both were started before the sync provider: a startup it stops leaves neither open."""

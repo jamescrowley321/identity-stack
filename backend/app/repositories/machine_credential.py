@@ -12,6 +12,7 @@ from app.domain import credentials
 from app.models.identity.machine_credential import MachineCredentialRole, MachineCredentialRow, MachineCredentialStatus
 from app.models.identity.role import Permission, Role, RolePermission
 from app.repositories.base import RepositoryConflictError
+from app.repositories.registration_tokens import RegistrationTokenCipher, RegistrationTokenKeysNotConfigured
 
 
 def credential_from_row(row: MachineCredentialRow, role_names: tuple[str, ...]) -> credentials.MachineCredential:
@@ -30,7 +31,9 @@ def credential_from_row(row: MachineCredentialRow, role_names: tuple[str, ...]) 
     )
 
 
-def credential_to_row(credential: credentials.MachineCredential, *, registration_token: str) -> MachineCredentialRow:
+def credential_to_row(
+    credential: credentials.MachineCredential, *, sealed_registration_token: str
+) -> MachineCredentialRow:
     return MachineCredentialRow(
         id=credential.id,
         tenant_id=credential.tenant_id,
@@ -39,7 +42,7 @@ def credential_to_row(credential: credentials.MachineCredential, *, registration
         client_id=credential.client_id,
         subject=credential.subject,
         external_id=credential.external_id,
-        registration_token=registration_token,
+        registration_token=sealed_registration_token,
         status=MachineCredentialStatus(credential.status.value),
         expires_at=credential.expires_at,
         created_at=credential.created_at,
@@ -47,10 +50,21 @@ def credential_to_row(credential: credentials.MachineCredential, *, registration
 
 
 class MachineCredentialRepository:
-    """The ``machine_credentials`` rows of one provider and their roles."""
+    """The ``machine_credentials`` rows of one provider and their roles.
 
-    def __init__(self, session: AsyncSession) -> None:
+    Registration tokens are sealed with ``cipher`` before they are written and
+    opened when read (#698); a repository built without one cannot write or read
+    a token, so none is ever stored in plain text.
+    """
+
+    def __init__(self, session: AsyncSession, *, cipher: RegistrationTokenCipher | None = None) -> None:
         self._session = session
+        self._cipher = cipher
+
+    def _token_cipher(self) -> RegistrationTokenCipher:
+        if self._cipher is None:
+            raise RegistrationTokenKeysNotConfigured("this repository was built without a registration token cipher")
+        return self._cipher
 
     async def roles_named(self, tenant_id: uuid.UUID, names: tuple[str, ...]) -> dict[str, uuid.UUID]:
         """The id of each named role a credential of the tenant may hold: the tenant's own, else a global one."""
@@ -91,7 +105,8 @@ class MachineCredentialRepository:
         registration_token: str,
     ) -> None:
         """Add the credential and its roles. Raises RepositoryConflictError on a taken client id or subject."""
-        self._session.add(credential_to_row(credential, registration_token=registration_token))
+        sealed = self._token_cipher().seal(registration_token)
+        self._session.add(credential_to_row(credential, sealed_registration_token=sealed))
         try:
             await self._session.flush()
             for role_id in role_ids:
@@ -154,8 +169,13 @@ class MachineCredentialRepository:
         await self._session.flush()
 
     async def registration_token(self, credential_id: uuid.UUID) -> str:
+        """The credential's registration token, opened; ``""`` when none is stored.
+
+        Raises ``RegistrationTokenUnreadable`` when it does not open under any configured key.
+        """
+        cipher = self._token_cipher()
         stmt = sa.select(MachineCredentialRow.registration_token).where(MachineCredentialRow.id == credential_id)
-        return (await self._session.execute(stmt)).scalar_one_or_none() or ""
+        return cipher.open((await self._session.execute(stmt)).scalar_one_or_none() or "")
 
     async def delete(self, credential_id: uuid.UUID) -> bool:
         """Delete the credential and its roles. True when a row was deleted."""

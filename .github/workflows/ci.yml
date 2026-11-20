@@ -556,6 +556,11 @@ jobs:
             echo "::add-mask::$value"
             echo "$name=$value" >> "$GITHUB_ENV"
           done
+          # A Fernet key (32 url-safe base64 bytes): seals the machine clients'
+          # registration tokens (KEYCLOAK_REGISTRATION_TOKEN_KEYS, #698).
+          value="$(openssl rand -base64 32 | tr '+/' '-_')"
+          echo "::add-mask::$value"
+          echo "KEYCLOAK_REGISTRATION_TOKEN_KEYS=$value" >> "$GITHUB_ENV"
 
       - name: Start backend
         # The root's backend_environment, admin client included: the backend

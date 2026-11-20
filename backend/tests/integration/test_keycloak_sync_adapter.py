@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 import pytest_asyncio
+from cryptography.fernet import Fernet
 from expression import Ok
 from fastapi import FastAPI
 from sqlalchemy import select
@@ -30,6 +31,7 @@ from app.models.identity.tenant import Tenant
 from app.models.identity.user import LINK_ORIGIN, LINKED_BY_BACKEND, IdPLink, User
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.permission import PermissionRepository
+from app.repositories.registration_tokens import KEYS_VARIABLE as REGISTRATION_TOKEN_KEYS_VARIABLE
 from app.repositories.role import RoleRepository
 from app.services.adapters.base import (
     CREATED_IN_TENANT,
@@ -73,6 +75,7 @@ def environment(monkeypatch, keycloak_token_source: KeycloakTokenSource) -> Keyc
     monkeypatch.setenv(ADMIN_CLIENT_ID_VARIABLE, ADMIN_CLIENT_ID)
     monkeypatch.setenv(ADMIN_CREDENTIAL_VARIABLE, ADMIN_CLIENT_SECRET)
     monkeypatch.setenv(API_CLIENT_VARIABLE, API_AUDIENCE)
+    monkeypatch.setenv(REGISTRATION_TOKEN_KEYS_VARIABLE, Fernet.generate_key().decode())
     return keycloak_token_source
 
 

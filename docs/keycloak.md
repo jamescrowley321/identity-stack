@@ -243,7 +243,9 @@ client and the `sub` of the client's tokens) and a client the adapter registers 
   the attributes `identity-stack.credential-id`, `identity-stack.tenant-id` and
   `identity-stack.organization` (the alias of the tenant's organization, which owns it). A tenant
   with no organization is refused. The secret is returned once and never stored; the registration
-  access token Keycloak answers is stored on the row, for the delete.
+  access token Keycloak answers is stored on the row, for the delete, sealed with Fernet under
+  `KEYCLOAK_REGISTRATION_TOKEN_KEYS` ([environment-variables.md](environment-variables.md)):
+  Keycloak answers that token with the client's secret, so the database holds only ciphertext.
 - **Deactivated and activated** by disabling and enabling the client's service account
   (`manage-users`): Keycloak 26.8.2 answers a disabled one's grant 401 `invalid_request`.
 - **Deleted** with the registration access token (`DELETE .../clients-registrations/default/{client id}`);
