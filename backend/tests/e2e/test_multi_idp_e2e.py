@@ -5,11 +5,11 @@ AC-4.4.5: E2E regression — IdP link management + provider config endpoints.
 Auth tiers:
   - Tier 1: Unauthenticated (api_context) → 401
   - Tier 2: Authenticated non-admin (auth_api_context) → 403
-  - Tier 3: Admin (admin_api_context) → success for IdP links, 403 for providers (requires operator)
+  - Tier 3: Admin (admin_api_context) → 403 for providers and IdP links (both require operator)
 
-Provider endpoints require the ``operator`` role, which is distinct from
-``owner``/``admin``. E2E tests validate auth enforcement; CRUD success
-for providers is covered by unit + integration tests.
+Provider and IdP link endpoints require the ``operator`` role, which is distinct
+from ``owner``/``admin`` (#722). E2E tests validate auth enforcement; CRUD success
+is covered by unit + integration tests.
 """
 
 import os
@@ -130,47 +130,22 @@ class TestIdPLinkAuthEnforcement:
 
 
 class TestIdPLinkCrudAdmin:
-    """Admin-level IdP link operations via /api/users/{user_id}/idp-links."""
+    """A tenant admin manages no IdP link: a link signs in as the user in every tenant (#722)."""
 
-    def test_list_idp_links_for_user(self, admin_api_context: APIRequestContext, backend_url: str):
-        """GET /users/{id}/idp-links returns structured response.
-
-        Uses a dummy user_id — may return empty list or 404 depending on whether
-        the user exists. Either way it should NOT return 401/403 (auth passes).
-        """
+    def test_list_idp_links_refused(self, admin_api_context: APIRequestContext, backend_url: str):
         resp = admin_api_context.get(f"{backend_url}/api/users/{DUMMY_UUID}/idp-links")
-        # Admin auth should pass — result depends on whether user exists
-        assert resp.status in (200, 404), f"Expected 200 or 404, got {resp.status}"
-        if resp.status == 200:
-            body = resp.json()
-            assert "idp_links" in body
-            assert isinstance(body["idp_links"], list)
+        assert resp.status == 403, f"Expected 403, got {resp.status}"
 
-    def test_create_idp_link_nonexistent_user(self, admin_api_context: APIRequestContext, backend_url: str):
-        """POST /users/{id}/idp-links with nonexistent user → 404."""
-        fake_user_id = str(uuid.uuid4())
-        fake_provider_id = str(uuid.uuid4())
+    def test_create_idp_link_refused(self, admin_api_context: APIRequestContext, backend_url: str):
         resp = admin_api_context.post(
-            f"{backend_url}/api/users/{fake_user_id}/idp-links",
-            data={
-                "provider_id": fake_provider_id,
-                "external_sub": f"ext-{uuid.uuid4().hex[:8]}",
-            },
+            f"{backend_url}/api/users/{uuid.uuid4()}/idp-links",
+            data={"provider_id": str(uuid.uuid4()), "external_sub": f"ext-{uuid.uuid4().hex[:8]}"},
         )
-        # User doesn't exist → 404 from service
-        assert resp.status == 404, f"Expected 404 for nonexistent user, got {resp.status}"
-        body = resp.json()
-        assert "type" in body  # RFC 9457 problem detail
-        assert "detail" in body
+        assert resp.status == 403, f"Expected 403, got {resp.status}"
 
-    def test_delete_idp_link_nonexistent(self, admin_api_context: APIRequestContext, backend_url: str):
-        """DELETE /users/{id}/idp-links/{link_id} with nonexistent IDs → 404."""
-        fake_user_id = str(uuid.uuid4())
-        fake_link_id = str(uuid.uuid4())
-        resp = admin_api_context.delete(
-            f"{backend_url}/api/users/{fake_user_id}/idp-links/{fake_link_id}",
-        )
-        assert resp.status == 404, f"Expected 404, got {resp.status}"
+    def test_delete_idp_link_refused(self, admin_api_context: APIRequestContext, backend_url: str):
+        resp = admin_api_context.delete(f"{backend_url}/api/users/{uuid.uuid4()}/idp-links/{uuid.uuid4()}")
+        assert resp.status == 403, f"Expected 403, got {resp.status}"
 
 
 # =============================================================================

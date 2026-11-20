@@ -42,20 +42,6 @@ def get_tenant_id(
     return access.tenant_id
 
 
-def get_canonical_tenant_id(
-    tenant_id: Annotated[str, Depends(get_tenant_id)],
-    memberships: Annotated[CanonicalMemberships | None, Depends(canonical_memberships)] = None,
-) -> str | None:
-    """The resolver's tenant (``get_tenant_id``) when it is a canonical tenant id, else ``None``.
-
-    Only a principal of a provider in ``CANONICAL_RBAC_PROVIDERS`` is given a
-    canonical tenant id. Any other principal's tenant is its provider's own id
-    (Descope's ``dct``), which names no canonical tenant even when it is spelled
-    like one, so it is ``None`` here and the route refuses it (conventions §18).
-    """
-    return tenant_id if memberships is not None else None
-
-
 def get_tenant_access(
     request: Request,
     memberships: Annotated[CanonicalMemberships | None, Depends(canonical_memberships)] = None,

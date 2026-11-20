@@ -355,7 +355,6 @@ application against them:
 | `RELATIONSHIP_STORE_ROUTES` | `/api/fga/*`, `/api/documents*` | `capabilities.served` |
 | `ADAPTER_CAPABILITY_ROUTES` | The profile's custom attributes, the tenant settings | `capabilities.served` |
 | `PROVIDER_NEUTRAL_ROUTES` | `GET /api/tenants/current`, `GET /api/roles/me`, the two `/api/access-checks` permission routes | Nothing behind them hands an id to a provider |
-| `CANONICAL_TENANT_ROUTES` | `/api/users/{user_id}/idp-links` | `get_canonical_tenant_id`: only a canonical tenant id, else refused |
 
 Adding a route to `PROVIDER_NEUTRAL_ROUTES` is a reviewed decision, with its reason.
 `GET /api/roles/me` answers the caller's own roles and permissions in the resolver's tenant: a
@@ -513,7 +512,10 @@ answer (`store_error_response`).
 **State that belongs to no tenant.** A route over state that belongs to no tenant and that
 Descope does not hold **MUST** be gated by `app.dependencies.rbac.require_global_role`, not
 `require_role`, and be listed in `GLOBAL_ROLE_ROUTES`: `GET /api/users` (every tenant's users),
-`/api/providers`, `/api/sync/status` and `/api/events/recent`, and the changes to the role and
+`/api/providers`, `/api/sync/status` and `/api/events/recent`, the
+`/api/users/{user_id}/idp-links` routes (a link signs its login in as the person, with every
+grant they hold in every tenant, so a tenant's owner or admin making one would take over the
+person's other tenants (#722); a user the canonical model does not hold is 404), and the changes to the role and
 permission definitions above (`require_definitions_role`). One role in one tenant opens all of that state,
 so on these routes the request chooses nothing. A canonical principal is decided by their sole
 membership, and one with several memberships is refused, whether they send the `X-Tenant-ID`
@@ -570,14 +572,6 @@ configuration at startup (`refuse_canonical_descope_managed`).
   answers for one tenant. On OpenFGA the schema is read-only: `infra/openfga` holds the model,
   and `PUT /api/fga/schema` answers 409. A Descope principal who
   holds the role in their current tenant is served there, as before the resolver (#593).
-- The `/api/users/{user_id}/idp-links` routes are gated by `require_role("owner", "admin")`
-  and hold the target user to the caller's tenant through
-  `app.dependencies.tenant.get_canonical_tenant_id`: the resolver's tenant for a principal of
-  a provider in `CANONICAL_RBAC_PROVIDERS`, and `None` for any other. A Descope principal's
-  `dct` is Descope's own tenant id and names no canonical tenant, even when it is spelled as
-  one's UUID, so `_require_user_in_tenant` refuses it, and a target user with no membership in
-  the canonical tenant, with the same 404 (`User not found in tenant`), which does not reveal
-  whether the user exists (#590, #722). The writes also refuse a machine credential (below).
 
 *Enforcement:* review, plus tests (`test_tenant_resolution.py`, `test_rbac_dependencies.py`,
 `test_tenant_dependencies.py`, `test_descope_claim_routes.py`, which sends Keycloak, Ory

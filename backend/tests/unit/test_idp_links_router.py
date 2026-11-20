@@ -1,15 +1,13 @@
 """Unit tests for the IdP links router (Story 4.2).
 
 Tests cover:
-- Auth enforcement: unauthenticated → 401, wrong role → 403
-- Tenant scoping: user not in caller's tenant → 404
+- Auth enforcement: unauthenticated → 401, anyone but an operator → 403
+- A user that does not exist → 404
 - Happy paths: list links, create link (201), delete link (204)
 - Error handling: NotFound → 404, Conflict → 409
 - Input validation: invalid UUID → 422, empty external_sub rejected, metadata limits
 
-The caller's tenant is ``get_canonical_tenant_id``'s, overridden here with a
-canonical tenant; how the resolver gives it to each provider's principal, and
-refuses a Descope principal, is ``test_idp_links_canonical.py``'s (#722).
+Every provider's operators and tenant admins are ``test_idp_links_canonical.py``'s (#722).
 """
 
 import uuid
@@ -21,7 +19,6 @@ from fastapi import Depends
 from httpx import ASGITransport, AsyncClient
 
 from app.dependencies.identity import get_idp_link_service
-from app.dependencies.tenant import get_canonical_tenant_id
 from app.errors.identity import Conflict, NotFound
 from app.main import app
 from app.models.database import get_async_session
@@ -59,14 +56,6 @@ def _override_services(mock_idp_link_service, mock_session):
 
 
 TENANT_ID = "51c5957b-684a-453f-8ab1-8f239999c4d8"
-
-
-@pytest.fixture(autouse=True)
-def _canonical_tenant():
-    """The tenant resolver's canonical tenant for the caller (tests of a Descope principal drop it)."""
-    app.dependency_overrides[get_canonical_tenant_id] = lambda: TENANT_ID
-    yield
-    app.dependency_overrides.pop(get_canonical_tenant_id, None)
 
 
 @pytest.fixture
@@ -124,18 +113,18 @@ SAMPLE_LINK = {
 }
 
 
-def _mock_tenant_check_pass():
-    """Patch UserTenantRoleRepository so _verify_user_in_tenant passes."""
+def _mock_user_exists():
+    """Patch UserRepository so _require_user finds the user."""
     mock_repo_instance = AsyncMock()
-    mock_repo_instance.list_by_user_tenant.return_value = [MagicMock()]  # non-empty → passes
-    return patch("app.routers.idp_links.UserTenantRoleRepository", return_value=mock_repo_instance)
+    mock_repo_instance.get.return_value = MagicMock()
+    return patch("app.routers.idp_links.UserRepository", return_value=mock_repo_instance)
 
 
-def _mock_tenant_check_fail():
-    """Patch UserTenantRoleRepository so _require_user_in_tenant fails (user not in tenant)."""
+def _mock_user_missing():
+    """Patch UserRepository so _require_user finds no user (404)."""
     mock_repo_instance = AsyncMock()
-    mock_repo_instance.list_by_user_tenant.return_value = []  # empty → 404
-    return patch("app.routers.idp_links.UserTenantRoleRepository", return_value=mock_repo_instance)
+    mock_repo_instance.get.return_value = None
+    return patch("app.routers.idp_links.UserRepository", return_value=mock_repo_instance)
 
 
 # --- Auth enforcement ---
@@ -172,9 +161,9 @@ async def test_list_links_rejected_for_viewer(mock_validate, client):
 
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_link_rejected_for_operator(mock_validate, client):
-    """Admin/owner-only endpoints reject operator role."""
-    mock_validate.return_value = OPERATOR_CLAIMS
+async def test_create_link_rejected_for_admin(mock_validate, client):
+    """A tenant's admin is refused: a link signs in as the user in every tenant (#722)."""
+    mock_validate.return_value = ADMIN_CLAIMS
     response = await client.post(
         f"/api/users/{USER_ID}/idp-links",
         headers=AUTH_HEADER,
@@ -194,25 +183,25 @@ async def test_delete_link_rejected_without_tenant(mock_validate, client):
     assert response.status_code == 403
 
 
-# --- Tenant scoping ---
+# --- A user that does not exist ---
 
 
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_list_links_user_not_in_tenant_returns_404(mock_validate, client):
-    """User not in caller's tenant → 404 (does not leak user existence)."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    with _mock_tenant_check_fail():
+async def test_list_links_user_missing_returns_404(mock_validate, client):
+    """A user the canonical model does not hold → 404."""
+    mock_validate.return_value = OPERATOR_CLAIMS
+    with _mock_user_missing():
         response = await client.get(f"/api/users/{USER_ID}/idp-links", headers=AUTH_HEADER)
     assert response.status_code == 404
 
 
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_link_user_not_in_tenant_returns_404(mock_validate, client):
-    """User not in caller's tenant → 404 on create."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    with _mock_tenant_check_fail():
+async def test_create_link_user_missing_returns_404(mock_validate, client):
+    """A user the canonical model does not hold → 404 on create."""
+    mock_validate.return_value = OPERATOR_CLAIMS
+    with _mock_user_missing():
         response = await client.post(
             f"/api/users/{USER_ID}/idp-links",
             headers=AUTH_HEADER,
@@ -223,10 +212,10 @@ async def test_create_link_user_not_in_tenant_returns_404(mock_validate, client)
 
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_delete_link_user_not_in_tenant_returns_404(mock_validate, client):
-    """User not in caller's tenant → 404 on delete."""
-    mock_validate.return_value = ADMIN_CLAIMS
-    with _mock_tenant_check_fail():
+async def test_delete_link_user_missing_returns_404(mock_validate, client):
+    """A user the canonical model does not hold → 404 on delete."""
+    mock_validate.return_value = OPERATOR_CLAIMS
+    with _mock_user_missing():
         response = await client.delete(
             f"/api/users/{USER_ID}/idp-links/{LINK_ID}",
             headers=AUTH_HEADER,
@@ -240,11 +229,11 @@ async def test_delete_link_user_not_in_tenant_returns_404(mock_validate, client)
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_list_user_idp_links(mock_validate, mock_idp_link_service, client):
-    mock_validate.return_value = ADMIN_CLAIMS
+    mock_validate.return_value = OPERATOR_CLAIMS
     links = [SAMPLE_LINK, {**SAMPLE_LINK, "external_sub": "ext-sub-456"}]
     mock_idp_link_service.get_user_idp_links.return_value = Ok(links)
 
-    with _mock_tenant_check_pass():
+    with _mock_user_exists():
         response = await client.get(f"/api/users/{USER_ID}/idp-links", headers=AUTH_HEADER)
     assert response.status_code == 200
     data = response.json()
@@ -256,10 +245,10 @@ async def test_list_user_idp_links(mock_validate, mock_idp_link_service, client)
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_list_user_idp_links_empty(mock_validate, mock_idp_link_service, client):
-    mock_validate.return_value = ADMIN_CLAIMS
+    mock_validate.return_value = OPERATOR_CLAIMS
     mock_idp_link_service.get_user_idp_links.return_value = Ok([])
 
-    with _mock_tenant_check_pass():
+    with _mock_user_exists():
         response = await client.get(f"/api/users/{USER_ID}/idp-links", headers=AUTH_HEADER)
     assert response.status_code == 200
     assert response.json()["idp_links"] == []
@@ -267,23 +256,23 @@ async def test_list_user_idp_links_empty(mock_validate, mock_idp_link_service, c
 
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_list_links_owner_allowed(mock_validate, mock_idp_link_service, client):
-    """Owner role is also allowed for IdP link endpoints."""
+async def test_list_links_owner_rejected(mock_validate, mock_idp_link_service, client):
+    """A tenant's owner is refused too: only an operator manages links (#722)."""
     mock_validate.return_value = OWNER_CLAIMS
-    mock_idp_link_service.get_user_idp_links.return_value = Ok([])
 
-    with _mock_tenant_check_pass():
+    with _mock_user_exists():
         response = await client.get(f"/api/users/{USER_ID}/idp-links", headers=AUTH_HEADER)
-    assert response.status_code == 200
+    assert response.status_code == 403
+    assert mock_idp_link_service.mock_calls == []
 
 
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_create_idp_link(mock_validate, mock_idp_link_service, client):
-    mock_validate.return_value = ADMIN_CLAIMS
+    mock_validate.return_value = OPERATOR_CLAIMS
     mock_idp_link_service.create_idp_link.return_value = Ok(SAMPLE_LINK)
 
-    with _mock_tenant_check_pass():
+    with _mock_user_exists():
         response = await client.post(
             f"/api/users/{USER_ID}/idp-links",
             headers=AUTH_HEADER,
@@ -298,11 +287,11 @@ async def test_create_idp_link(mock_validate, mock_idp_link_service, client):
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_create_idp_link_with_metadata(mock_validate, mock_idp_link_service, client):
-    mock_validate.return_value = ADMIN_CLAIMS
+    mock_validate.return_value = OPERATOR_CLAIMS
     metadata = {"source": "migration"}
     mock_idp_link_service.create_idp_link.return_value = Ok({**SAMPLE_LINK, "metadata_": metadata})
 
-    with _mock_tenant_check_pass():
+    with _mock_user_exists():
         response = await client.post(
             f"/api/users/{USER_ID}/idp-links",
             headers=AUTH_HEADER,
@@ -318,10 +307,10 @@ async def test_create_idp_link_with_metadata(mock_validate, mock_idp_link_servic
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_delete_idp_link(mock_validate, mock_idp_link_service, client):
-    mock_validate.return_value = ADMIN_CLAIMS
+    mock_validate.return_value = OPERATOR_CLAIMS
     mock_idp_link_service.delete_idp_link.return_value = Ok({"status": "deleted", "link_id": LINK_ID})
 
-    with _mock_tenant_check_pass():
+    with _mock_user_exists():
         response = await client.delete(
             f"/api/users/{USER_ID}/idp-links/{LINK_ID}",
             headers=AUTH_HEADER,
@@ -336,10 +325,10 @@ async def test_delete_idp_link(mock_validate, mock_idp_link_service, client):
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_create_link_user_not_found(mock_validate, mock_idp_link_service, client):
-    mock_validate.return_value = ADMIN_CLAIMS
+    mock_validate.return_value = OPERATOR_CLAIMS
     mock_idp_link_service.create_idp_link.return_value = Error(NotFound(message=f"User '{USER_ID}' not found"))
 
-    with _mock_tenant_check_pass():
+    with _mock_user_exists():
         response = await client.post(
             f"/api/users/{USER_ID}/idp-links",
             headers=AUTH_HEADER,
@@ -352,10 +341,10 @@ async def test_create_link_user_not_found(mock_validate, mock_idp_link_service, 
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_create_link_conflict(mock_validate, mock_idp_link_service, client):
     """Duplicate user+provider → 409."""
-    mock_validate.return_value = ADMIN_CLAIMS
+    mock_validate.return_value = OPERATOR_CLAIMS
     mock_idp_link_service.create_idp_link.return_value = Error(Conflict(message="IdP link already exists"))
 
-    with _mock_tenant_check_pass():
+    with _mock_user_exists():
         response = await client.post(
             f"/api/users/{USER_ID}/idp-links",
             headers=AUTH_HEADER,
@@ -367,10 +356,10 @@ async def test_create_link_conflict(mock_validate, mock_idp_link_service, client
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_delete_link_not_found(mock_validate, mock_idp_link_service, client):
-    mock_validate.return_value = ADMIN_CLAIMS
+    mock_validate.return_value = OPERATOR_CLAIMS
     mock_idp_link_service.delete_idp_link.return_value = Error(NotFound(message=f"IdP link '{LINK_ID}' not found"))
 
-    with _mock_tenant_check_pass():
+    with _mock_user_exists():
         response = await client.delete(
             f"/api/users/{USER_ID}/idp-links/{LINK_ID}",
             headers=AUTH_HEADER,
@@ -384,7 +373,7 @@ async def test_delete_link_not_found(mock_validate, mock_idp_link_service, clien
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_list_links_invalid_user_uuid(mock_validate, client):
-    mock_validate.return_value = ADMIN_CLAIMS
+    mock_validate.return_value = OPERATOR_CLAIMS
     response = await client.get("/api/users/not-a-uuid/idp-links", headers=AUTH_HEADER)
     assert response.status_code == 422
 
@@ -392,7 +381,7 @@ async def test_list_links_invalid_user_uuid(mock_validate, client):
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_create_link_invalid_user_uuid(mock_validate, client):
-    mock_validate.return_value = ADMIN_CLAIMS
+    mock_validate.return_value = OPERATOR_CLAIMS
     response = await client.post(
         "/api/users/not-a-uuid/idp-links",
         headers=AUTH_HEADER,
@@ -404,7 +393,7 @@ async def test_create_link_invalid_user_uuid(mock_validate, client):
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_delete_link_invalid_user_uuid(mock_validate, client):
-    mock_validate.return_value = ADMIN_CLAIMS
+    mock_validate.return_value = OPERATOR_CLAIMS
     response = await client.delete(
         "/api/users/not-a-uuid/idp-links/{LINK_ID}",
         headers=AUTH_HEADER,
@@ -415,8 +404,8 @@ async def test_delete_link_invalid_user_uuid(mock_validate, client):
 @pytest.mark.anyio
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_delete_link_invalid_link_uuid(mock_validate, client):
-    mock_validate.return_value = ADMIN_CLAIMS
-    with _mock_tenant_check_pass():
+    mock_validate.return_value = OPERATOR_CLAIMS
+    with _mock_user_exists():
         response = await client.delete(
             f"/api/users/{USER_ID}/idp-links/not-a-uuid",
             headers=AUTH_HEADER,
@@ -428,7 +417,7 @@ async def test_delete_link_invalid_link_uuid(mock_validate, client):
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_create_link_empty_external_sub_rejected(mock_validate, client):
     """external_sub requires min_length=1."""
-    mock_validate.return_value = ADMIN_CLAIMS
+    mock_validate.return_value = OPERATOR_CLAIMS
     response = await client.post(
         f"/api/users/{USER_ID}/idp-links",
         headers=AUTH_HEADER,
@@ -441,7 +430,7 @@ async def test_create_link_empty_external_sub_rejected(mock_validate, client):
 @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
 async def test_create_link_metadata_too_many_keys_rejected(mock_validate, client):
     """metadata with >20 keys is rejected."""
-    mock_validate.return_value = ADMIN_CLAIMS
+    mock_validate.return_value = OPERATOR_CLAIMS
     metadata = {f"key{i}": f"val{i}" for i in range(21)}
     response = await client.post(
         f"/api/users/{USER_ID}/idp-links",
@@ -449,68 +438,6 @@ async def test_create_link_metadata_too_many_keys_rejected(mock_validate, client
         json={"provider_id": PROVIDER_ID, "external_sub": "ext-sub", "metadata": metadata},
     )
     assert response.status_code == 422
-
-
-# --- A Descope principal has no canonical tenant (#722) ---
-
-# Descope issues opaque tenant ids like "T3Bj8QOcyflY8V0bvSu1eEoHmjk6". Whatever
-# its `dct`, it names no canonical tenant, so the guard answers 404, never 500.
-
-DESCOPE_TENANT_ID = "T3Bj8QOcyflY8V0bvSu1eEoHmjk6"
-
-DESCOPE_ADMIN_CLAIMS = {
-    "sub": "admin1",
-    "dct": DESCOPE_TENANT_ID,
-    "tenants": {
-        DESCOPE_TENANT_ID: {"roles": ["admin"], "permissions": []},
-    },
-}
-
-
-@pytest.mark.anyio
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_list_links_non_uuid_tenant_returns_404_not_500(mock_validate, client):
-    app.dependency_overrides.pop(get_canonical_tenant_id)
-    """A Descope-shaped `dct` cannot match a canonical UUID FK → 404, never 500."""
-    mock_validate.return_value = DESCOPE_ADMIN_CLAIMS
-    response = await client.get(f"/api/users/{USER_ID}/idp-links", headers=AUTH_HEADER)
-    assert response.status_code == 404
-    body = response.json()
-    assert body["detail"] == "User not found in tenant"
-    assert "type" in body, f"tenant-guard 404 must be an RFC 9457 problem detail, got {body}"
-
-
-@pytest.mark.anyio
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_create_link_non_uuid_tenant_returns_404_not_500(mock_validate, client):
-    app.dependency_overrides.pop(get_canonical_tenant_id)
-    """Create under a Descope-shaped `dct` → 404, never 500."""
-    mock_validate.return_value = DESCOPE_ADMIN_CLAIMS
-    response = await client.post(
-        f"/api/users/{USER_ID}/idp-links",
-        headers=AUTH_HEADER,
-        json={"provider_id": PROVIDER_ID, "external_sub": "ext-sub"},
-    )
-    assert response.status_code == 404
-    body = response.json()
-    assert body["detail"] == "User not found in tenant"
-    assert "type" in body, f"tenant-guard 404 must be an RFC 9457 problem detail, got {body}"
-
-
-@pytest.mark.anyio
-@patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
-async def test_delete_link_non_uuid_tenant_returns_404_not_500(mock_validate, client):
-    app.dependency_overrides.pop(get_canonical_tenant_id)
-    """Delete under a Descope-shaped `dct` → 404, never 500."""
-    mock_validate.return_value = DESCOPE_ADMIN_CLAIMS
-    response = await client.delete(
-        f"/api/users/{USER_ID}/idp-links/{LINK_ID}",
-        headers=AUTH_HEADER,
-    )
-    assert response.status_code == 404
-    body = response.json()
-    assert body["detail"] == "User not found in tenant"
-    assert "type" in body, f"tenant-guard 404 must be an RFC 9457 problem detail, got {body}"
 
 
 # --- The guard is fail-closed by construction ---
@@ -521,16 +448,16 @@ async def test_guard_raises_rather_than_returning_a_response():
     """The point of the change: there is no return value a caller could drop.
 
     While it handed back ``Response | None``, a route that called the guard and
-    ignored the result silently lost tenant isolation — no type error, no failing
+    ignored the result silently lost the check — no type error, no failing
     test. Raising removes the thing that can be forgotten, so assert on the
     mechanism and not merely on the 404 the existing tests already cover.
     """
     from app.errors.identity import IdentityErrorRaised
     from app.errors.identity import NotFound as NotFoundError
-    from app.routers.idp_links import _require_user_in_tenant
+    from app.routers.idp_links import _require_user
 
-    with pytest.raises(IdentityErrorRaised) as exc_info:
-        await _require_user_in_tenant(uuid.UUID(USER_ID), None, AsyncMock())
+    with pytest.raises(IdentityErrorRaised) as exc_info, _mock_user_missing():
+        await _require_user(uuid.UUID(USER_ID), AsyncMock())
 
     assert isinstance(exc_info.value.error, NotFoundError)
 
@@ -538,10 +465,10 @@ async def test_guard_raises_rather_than_returning_a_response():
 @pytest.mark.anyio
 async def test_guard_returns_none_when_the_check_passes():
     """The success path must stay falsy-but-unused, not a response to propagate."""
-    from app.routers.idp_links import _require_user_in_tenant
+    from app.routers.idp_links import _require_user
 
-    with _mock_tenant_check_pass():
-        assert await _require_user_in_tenant(uuid.UUID(USER_ID), TENANT_ID, AsyncMock()) is None
+    with _mock_user_exists():
+        assert await _require_user(uuid.UUID(USER_ID), AsyncMock()) is None
 
 
 @pytest.mark.anyio
@@ -555,17 +482,17 @@ async def test_a_route_that_ignores_the_guard_still_refuses(mock_validate, clien
     """
     from app.errors.identity import IdentityErrorRaised
     from app.errors.problem_detail import identity_error_raised_handler
-    from app.routers.idp_links import _require_user_in_tenant
+    from app.routers.idp_links import _require_user
 
     @app.get("/api/__test_forgetful_route/{user_id}")
-    async def _forgetful(user_id: str, tenant_id=Depends(get_canonical_tenant_id), session=Depends(get_async_session)):
-        await _require_user_in_tenant(uuid.UUID(user_id), tenant_id, session)
-        return {"leaked": "tenant isolation bypassed"}
+    async def _forgetful(user_id: str, session=Depends(get_async_session)):
+        await _require_user(uuid.UUID(user_id), session)
+        return {"leaked": "a missing user's links"}
 
     app.add_exception_handler(IdentityErrorRaised, identity_error_raised_handler)
-    mock_validate.return_value = ADMIN_CLAIMS
+    mock_validate.return_value = OPERATOR_CLAIMS
     try:
-        with _mock_tenant_check_fail():
+        with _mock_user_missing():
             response = await client.get(f"/api/__test_forgetful_route/{USER_ID}", headers=AUTH_HEADER)
         assert response.status_code == 404
         assert "leaked" not in response.text

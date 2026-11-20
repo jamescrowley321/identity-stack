@@ -184,17 +184,11 @@ class TestAdminEndpoints:
         assert resp.status == 403, f"/api/providers returned {resp.status}: {resp.text()[:200]}"
 
     def test_idp_links_responds(self, admin_api_context: APIRequestContext, backend_url: str):
-        """IdP links endpoint responds (200/403/404 depending on user existence)."""
+        """IdP links are an operator's (#722): a tenant admin is refused, whoever the user."""
         fake_user = "00000000-0000-0000-0000-000000000000"
         resp = admin_api_context.get(f"{backend_url}/api/users/{fake_user}/idp-links")
-        # Exactly 404. This user id deliberately does not exist, so 200 would mean
-        # the tenant guard resolved a user it should not have — cross-tenant
-        # disclosure passing as a green test. 404 rather than 403 is deliberate:
-        # it does not leak whether the user exists.
-        assert resp.status == 404, f"/api/users/{{id}}/idp-links returned {resp.status}: {resp.text()[:200]}"
-        problem = resp.json()
-        assert problem.get("status") == 404, f"not an RFC 9457 problem detail: {problem}"
-        assert problem.get("title"), f"problem detail has no title: {problem}"
+        # Gated on `operator`, which the admin fixture lacks. Deterministic 403.
+        assert resp.status == 403, f"/api/users/{{id}}/idp-links returned {resp.status}: {resp.text()[:200]}"
 
     def test_sync_status_responds(self, admin_api_context: APIRequestContext, backend_url: str):
         """Sync status endpoint responds (200 with operator role, 403 otherwise)."""

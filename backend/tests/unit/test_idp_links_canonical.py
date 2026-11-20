@@ -1,13 +1,13 @@
-"""The IdP-link routes hold the target user to the tenant resolver's canonical tenant (#722, conventions §18).
+"""Only an operator manages IdP links (#722, conventions §18).
 
-A link decides which provider account signs in as a person. The routes check the
-target user's canonical memberships in the caller's tenant, and only a principal
-authorized from the canonical model has a canonical tenant: a Descope principal's
-``dct`` is Descope's own tenant id, refused even when it is spelled as a canonical
-tenant's UUID.
+A link signs its login in as the person, with every grant they hold in every
+tenant. A tenant's owner or admin making one for a user of their tenant would take
+over that user's other tenants (and an operator's, or an owner's, grants), so the
+routes are gated by ``require_global_role("operator")``. A Descope principal's
+``dct`` spelled as a canonical tenant's UUID grants it nothing here either.
 
 Requests go through the shipped gateway middleware and the shipped routers. Only
-the canonical identity store, the assignment rows and the link service are stubs.
+the canonical identity store, the user rows and the link service are stubs.
 """
 
 import base64
@@ -25,7 +25,7 @@ from slowapi.errors import RateLimitExceeded
 from app.dependencies import rbac
 from app.dependencies.identity import get_idp_link_service
 from app.dependencies.rbac import INSUFFICIENT_PERMISSIONS, get_rbac_session
-from app.dependencies.tenant_access import NO_TENANT_CONTEXT, TENANT_SELECTOR_HEADER
+from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER
 from app.errors.identity import IdentityErrorRaised
 from app.errors.problem_detail import identity_error_raised_handler
 from app.main import app as shipped_app
@@ -44,10 +44,14 @@ GLOBEX = "22222222-2222-4222-8222-222222222222"
 # A tenant the caller holds no membership in.
 INITECH = "33333333-3333-4333-8333-333333333333"
 
-# A user of Acme, and a user of Globex only.
+# Targets: a member of Acme only, a member of Acme and Globex, and Acme's owner.
 ALICE = uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 BOB = uuid.UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
-MEMBERSHIPS = {(ALICE, uuid.UUID(ACME)), (BOB, uuid.UUID(GLOBEX))}
+OWEN = uuid.UUID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
+USERS = {ALICE, BOB, OWEN}
+TARGETS = {"single-tenant member": ALICE, "multi-tenant member": BOB, "owner": OWEN}
+# A user the canonical model does not hold.
+NOBODY = uuid.UUID("ffffffff-ffff-4fff-8fff-ffffffffffff")
 
 PROVIDER_ID = uuid.UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
 LINK_ID = uuid.UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
@@ -66,7 +70,7 @@ _BOUND = {
     "zitadel": {"aud": ["project-1"], "client_id": "spa-1"},
 }
 
-NOT_IN_TENANT = {"status": 404, "detail": "User not found in tenant"}
+NOT_FOUND = {"status": 404, "detail": "User not found"}
 
 
 def _segment(value: object) -> str:
@@ -78,12 +82,12 @@ def _jwt(claims: dict) -> str:
     return f"{_segment({'alg': 'RS256'})}.{_segment({'exp': int(time.time()) + 300, **claims})}.sig"
 
 
-def _canonical_headers(provider: str, tenant: str) -> dict[str, str]:
+def _canonical_headers(provider: str, tenant: str | None = None) -> dict[str, str]:
     (issuer,) = CANONICAL[provider].accepted_issuers
-    return {
-        "Authorization": f"Bearer {_jwt({'iss': issuer, 'sub': SUB, **_BOUND[provider]})}",
-        TENANT_SELECTOR_HEADER: tenant,
-    }
+    headers = {"Authorization": f"Bearer {_jwt({'iss': issuer, 'sub': SUB, **_BOUND[provider]})}"}
+    if tenant is not None:
+        headers[TENANT_SELECTOR_HEADER] = tenant
+    return headers
 
 
 def _descope_headers(role: str) -> dict[str, str]:
@@ -97,40 +101,55 @@ def _descope_headers(role: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {_jwt(claims)}"}
 
 
+def _grant(tenant_id: str, role: str) -> dict:
+    return {"tenant_id": tenant_id, "role_name": role, "permissions": []}
+
+
+OPERATOR = [_grant(ACME, "operator")]
+# What a tenant's owner or admin holds: none of it is operator.
+NOT_OPERATORS = {
+    "admin": [_grant(ACME, "admin")],
+    "owner": [_grant(ACME, "owner")],
+    "admin of two tenants": [_grant(ACME, "admin"), _grant(GLOBEX, "admin")],
+}
+
+
 class _CanonicalStore:
-    """The canonical caller is an admin of Acme and a member of Globex."""
-
-    async def resolve(self, *, provider: str, sub: str):
-        return Ok(
-            {
-                "user": {"id": "canonical-user-1", "status": "active"},
-                "roles": [
-                    {"tenant_id": ACME, "role_name": "admin", "permissions": []},
-                    {"tenant_id": GLOBEX, "role_name": "member", "permissions": []},
-                ],
-                "tenant_memberships": [],
-            }
-        )
-
-
-class _Assignments:
-    """Stands in for UserTenantRoleRepository: a row for each of ``MEMBERSHIPS``; lookups are recorded."""
+    """Stands in for IdentityResolutionService: the caller holds ``roles``."""
 
     def __init__(self) -> None:
-        self.lookups: list[tuple[uuid.UUID, uuid.UUID]] = []
+        self.roles: list[dict] = OPERATOR
 
-    def __call__(self, _session) -> "_Assignments":
+    async def resolve(self, *, provider: str, sub: str):
+        return Ok({"user": {"id": "canonical-user-1", "status": "active"}, "roles": self.roles})
+
+
+class _Users:
+    """Stands in for UserRepository: holds ``USERS``; lookups are recorded."""
+
+    def __init__(self) -> None:
+        self.lookups: list[uuid.UUID] = []
+
+    def __call__(self, _session) -> "_Users":
         return self
 
-    async def list_by_user_tenant(self, user_id: uuid.UUID, tenant_id: uuid.UUID) -> list[object]:
-        self.lookups.append((user_id, tenant_id))
-        return [object()] if (user_id, tenant_id) in MEMBERSHIPS else []
+    async def get(self, user_id: uuid.UUID) -> object | None:
+        self.lookups.append(user_id)
+        return object() if user_id in USERS else None
 
 
 @pytest.fixture
-def assignments(monkeypatch) -> _Assignments:
-    rows = _Assignments()
-    monkeypatch.setattr(idp_links, "UserTenantRoleRepository", rows)
+def store(monkeypatch) -> _CanonicalStore:
+    canonical = _CanonicalStore()
+    monkeypatch.setattr(rbac, "CANONICAL_RBAC_PROVIDERS", frozenset(CANONICAL))
+    monkeypatch.setattr(rbac, "IdentityResolutionService", lambda **_: canonical)
+    return canonical
+
+
+@pytest.fixture
+def users(monkeypatch) -> _Users:
+    rows = _Users()
+    monkeypatch.setattr(idp_links, "UserRepository", rows)
     return rows
 
 
@@ -144,9 +163,7 @@ def links() -> AsyncMock:
 
 
 @pytest.fixture
-def client(monkeypatch, assignments, links) -> TestClient:
-    monkeypatch.setattr(rbac, "CANONICAL_RBAC_PROVIDERS", frozenset(CANONICAL))
-    monkeypatch.setattr(rbac, "IdentityResolutionService", lambda **_: _CanonicalStore())
+def client(store, users, links) -> TestClient:
     limiter.reset()
     app = FastAPI()
     app.state.limiter = limiter
@@ -180,78 +197,61 @@ def _delete(client: TestClient, user: uuid.UUID, headers: dict[str, str]):
 ROUTES = {"list": _list, "create": _create, "delete": _delete}
 
 
-def _problem(response) -> dict:
-    body = response.json()
-    return {"status": response.status_code, "detail": body["detail"]}
+@pytest.mark.parametrize("provider", sorted(CANONICAL))
+class TestAnOperator:
+    @pytest.mark.parametrize("target", sorted(TARGETS))
+    def test_lists_a_users_links(self, client, users, links, provider, target):
+        response = _list(client, TARGETS[target], _canonical_headers(provider))
+
+        assert (response.status_code, response.json()) == (200, {"idp_links": [LINK]})
+        assert users.lookups == [TARGETS[target]]
+        links.get_user_idp_links.assert_awaited_once_with(user_id=TARGETS[target])
+
+    @pytest.mark.parametrize("target", sorted(TARGETS))
+    def test_adds_a_link(self, client, users, links, provider, target):
+        response = _create(client, TARGETS[target], _canonical_headers(provider))
+
+        assert (response.status_code, response.json()) == (201, LINK)
+        links.create_idp_link.assert_awaited_once_with(
+            user_id=TARGETS[target], provider_id=PROVIDER_ID, external_sub="ext-1", external_email="", metadata=None
+        )
+
+    @pytest.mark.parametrize("target", sorted(TARGETS))
+    def test_deletes_a_link(self, client, users, links, provider, target):
+        response = _delete(client, TARGETS[target], _canonical_headers(provider))
+
+        assert (response.status_code, response.content) == (204, b"")
+        links.delete_idp_link.assert_awaited_once_with(link_id=LINK_ID, user_id=TARGETS[target])
+
+    @pytest.mark.parametrize("route", sorted(ROUTES))
+    def test_a_user_that_does_not_exist_is_not_found(self, client, users, links, provider, route):
+        response = ROUTES[route](client, NOBODY, _canonical_headers(provider))
+
+        assert {"status": response.status_code, "detail": response.json()["detail"]} == NOT_FOUND
+        assert users.lookups == [NOBODY]
+        assert links.mock_calls == []
 
 
 @pytest.mark.parametrize("provider", sorted(CANONICAL))
-class TestACanonicalAdmin:
-    def test_lists_the_links_of_a_user_of_its_tenant(self, client, assignments, links, provider):
-        response = _list(client, ALICE, _canonical_headers(provider, ACME))
+@pytest.mark.parametrize("caller", sorted(NOT_OPERATORS))
+@pytest.mark.parametrize("target", sorted(TARGETS))
+@pytest.mark.parametrize("route", sorted(ROUTES))
+def test_a_tenants_owner_or_admin_is_refused(client, store, users, links, provider, caller, target, route):
+    """Even for a user of their own tenant: the link would sign in as that user everywhere."""
+    store.roles = NOT_OPERATORS[caller]
 
-        assert (response.status_code, response.json()) == (200, {"idp_links": [LINK]})
-        assert assignments.lookups == [(ALICE, uuid.UUID(ACME))]
-        links.get_user_idp_links.assert_awaited_once_with(user_id=ALICE)
+    response = ROUTES[route](client, TARGETS[target], _canonical_headers(provider, ACME))
 
-    def test_adds_a_link_for_a_user_of_its_tenant(self, client, assignments, links, provider):
-        response = _create(client, ALICE, _canonical_headers(provider, ACME))
-
-        assert (response.status_code, response.json()) == (201, LINK)
-        assert assignments.lookups == [(ALICE, uuid.UUID(ACME))]
-        links.create_idp_link.assert_awaited_once_with(
-            user_id=ALICE, provider_id=PROVIDER_ID, external_sub="ext-1", external_email="", metadata=None
-        )
-
-    def test_deletes_a_link_of_a_user_of_its_tenant(self, client, assignments, links, provider):
-        response = _delete(client, ALICE, _canonical_headers(provider, ACME))
-
-        assert (response.status_code, response.content) == (204, b"")
-        assert assignments.lookups == [(ALICE, uuid.UUID(ACME))]
-        links.delete_idp_link.assert_awaited_once_with(link_id=LINK_ID, user_id=ALICE)
-
-    @pytest.mark.parametrize("route", sorted(ROUTES))
-    def test_a_user_of_another_tenant_is_not_found(self, client, assignments, links, provider, route):
-        response = ROUTES[route](client, BOB, _canonical_headers(provider, ACME))
-
-        assert _problem(response) == NOT_IN_TENANT
-        assert assignments.lookups == [(BOB, uuid.UUID(ACME))]
-        assert links.mock_calls == []
-
-    @pytest.mark.parametrize("route", sorted(ROUTES))
-    def test_where_it_is_only_a_member_it_is_refused(self, client, assignments, links, provider, route):
-        response = ROUTES[route](client, BOB, _canonical_headers(provider, GLOBEX))
-
-        assert (response.status_code, response.json()["detail"]) == (403, INSUFFICIENT_PERMISSIONS)
-        assert assignments.lookups == []
-        assert links.mock_calls == []
-
-    @pytest.mark.parametrize("route", sorted(ROUTES))
-    def test_naming_a_tenant_it_is_not_in_is_refused(self, client, assignments, links, provider, route):
-        response = ROUTES[route](client, ALICE, _canonical_headers(provider, INITECH))
-
-        # require_role resolves the tenant first and refuses it.
-        assert (response.status_code, response.json()["detail"]) == (403, NO_TENANT_CONTEXT)
-        assert assignments.lookups == []
-        assert links.mock_calls == []
+    assert response.status_code == 403
+    assert users.lookups == []
+    assert links.mock_calls == []
 
 
-class TestADescopePrincipal:
-    @pytest.mark.parametrize("route", sorted(ROUTES))
-    def test_a_dct_spelled_as_a_canonical_tenant_id_reaches_no_user_of_that_tenant(
-        self, client, assignments, links, route
-    ):
-        """Before #722 the guard parsed ``dct`` as a canonical UUID and found Alice's Acme membership."""
-        response = ROUTES[route](client, ALICE, _descope_headers("admin"))
+@pytest.mark.parametrize("route", sorted(ROUTES))
+def test_a_descope_admin_whose_dct_is_a_canonical_tenant_id_is_refused(client, users, links, route):
+    """Before #722 the guard parsed ``dct`` as a canonical UUID and found Alice's Acme membership."""
+    response = ROUTES[route](client, ALICE, _descope_headers("admin"))
 
-        assert _problem(response) == NOT_IN_TENANT
-        assert assignments.lookups == []
-        assert links.mock_calls == []
-
-    @pytest.mark.parametrize("route", sorted(ROUTES))
-    def test_without_owner_or_admin_it_is_refused(self, client, assignments, links, route):
-        response = ROUTES[route](client, ALICE, _descope_headers("member"))
-
-        assert (response.status_code, response.json()["detail"]) == (403, INSUFFICIENT_PERMISSIONS)
-        assert assignments.lookups == []
-        assert links.mock_calls == []
+    assert (response.status_code, response.json()["detail"]) == (403, INSUFFICIENT_PERMISSIONS)
+    assert users.lookups == []
+    assert links.mock_calls == []
