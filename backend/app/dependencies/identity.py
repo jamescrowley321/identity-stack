@@ -89,6 +89,10 @@ _RECONCILIATION_PASS_LOCK_ID = 73_82_69_67_80  # "RECONP"
 _PENDING_PUSH_LOCK_ID = 80_85_83_72  # "PUSH"
 
 
+_WAIT_FOR_LOCK = text("SELECT pg_advisory_lock(:lock_id)")
+_TRY_LOCK = text("SELECT pg_try_advisory_lock(:lock_id)")
+
+
 @asynccontextmanager
 async def _session_locks(take: list[tuple[int, bool]]) -> AsyncIterator[bool]:
     """Take each ``(lock id, wait)`` in turn on a connection of its own; ``False`` when a lock not waited for is held.
@@ -100,8 +104,7 @@ async def _session_locks(take: list[tuple[int, bool]]) -> AsyncIterator[bool]:
         held: list[int] = []
         try:
             for lock_id, wait in take:
-                function = "pg_advisory_lock" if wait else "pg_try_advisory_lock"
-                result = await connection.execute(text(f"SELECT {function}(:lock_id)"), {"lock_id": lock_id})
+                result = await connection.execute(_WAIT_FOR_LOCK if wait else _TRY_LOCK, {"lock_id": lock_id})
                 await connection.commit()
                 if not wait and not result.scalar():
                     break
