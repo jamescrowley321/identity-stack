@@ -78,6 +78,7 @@ select = ["E", "F", "I", "W", "S", "TID251", "G004", "G010"]
 "tests/**" = ["S101", "S105", "S106", "TID251"]  # assert, hardcoded passwords OK in tests; house bans cover app/ only
 "tests/unit/test_provider_terraform_roots.py" = ["S603"]  # runs the CI step's jq filter and the make target under test
 "tests/unit/repositories/test_machine_credential_registration_tokens.py" = ["S603"]  # runs the alembic CLI across the revision under test
+"tests/integration/test_tenant_resource_id_space_migration.py" = ["S603"]  # runs alembic, as the conftest does, to move the schema down and up
 "app/knobs.py" = ["TID251"]  # the settings module: the one reader of os.environ
 "app/outbound.py" = ["TID251"]  # the HTTP client helper: the one importer of httpx
 "app/logbook.py" = ["TID251"]  # the logging helper: the one caller of logging.getLogger

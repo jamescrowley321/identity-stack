@@ -34,8 +34,8 @@ const oryIdentity: CanonicalIdentity = {
     { tenant_id: "t2", role_name: "viewer", permissions: ["docs.read"] },
   ],
   tenant_memberships: [
-    { tenant_id: "t1", tenant_name: "Acme" },
-    { tenant_id: "t2", tenant_name: "Beta" },
+    { tenant_id: "t1", tenant_name: "Acme", status: "active" },
+    { tenant_id: "t2", tenant_name: "Beta", status: "active" },
   ],
   linked_idps: [{ provider_name: "ory", external_sub: "ory|abc123" }],
 };
@@ -60,8 +60,8 @@ const descopeIdentity: CanonicalIdentity = {
     { tenant_id: "t2", role_name: "viewer", permissions: ["docs.read"] },
   ],
   tenant_memberships: [
-    { tenant_id: "t1", tenant_name: "Acme" },
-    { tenant_id: "t2", tenant_name: "Beta" },
+    { tenant_id: "t1", tenant_name: "Acme", status: "active" },
+    { tenant_id: "t2", tenant_name: "Beta", status: "active" },
   ],
   linked_idps: [{ provider_name: "descope", external_sub: "descope|xyz789" }],
 };
@@ -114,11 +114,26 @@ describe("useTenants", () => {
     expect(descope.result.current.tenants).toEqual(oryTenants);
   });
 
+  it("does not offer a suspended tenant (#689)", () => {
+    mockUseIdentityContext.mockReturnValue({
+      identity: {
+        ...oryIdentity,
+        tenant_memberships: [
+          { tenant_id: "t1", tenant_name: "Acme", status: "active" },
+          { tenant_id: "t2", tenant_name: "Beta", status: "suspended" },
+        ],
+      },
+      currentTenantId: "t1",
+    });
+    const { result } = renderHook(() => useTenants());
+    expect(Object.fromEntries(result.current.tenants.map((t) => [t.id, t.name]))).toEqual({ t1: "Acme" });
+  });
+
   it("falls back to tenant_id when tenant_name is empty", () => {
     mockUseIdentityContext.mockReturnValue({
       identity: {
         ...oryIdentity,
-        tenant_memberships: [{ tenant_id: "t1", tenant_name: "" }],
+        tenant_memberships: [{ tenant_id: "t1", tenant_name: "", status: "active" }],
         roles: [{ tenant_id: "t1", role_name: "admin", permissions: [] }],
       },
       currentTenantId: "t1",
@@ -131,7 +146,7 @@ describe("useTenants", () => {
     mockUseIdentityContext.mockReturnValue({
       identity: {
         ...oryIdentity,
-        tenant_memberships: [{ tenant_id: "t3", tenant_name: "Gamma" }],
+        tenant_memberships: [{ tenant_id: "t3", tenant_name: "Gamma", status: "active" }],
         roles: [],
       },
       currentTenantId: "t3",
@@ -173,7 +188,7 @@ describe("useTenants", () => {
     mockUseIdentityContext.mockReturnValue({
       identity: {
         ...oryIdentity,
-        tenant_memberships: [{ tenant_id: "t1", tenant_name: "Acme" }],
+        tenant_memberships: [{ tenant_id: "t1", tenant_name: "Acme", status: "active" }],
         roles: [{ tenant_id: "t1", role_name: "admin" }],
       } as unknown as CanonicalIdentity,
       currentTenantId: "t1",
@@ -194,7 +209,7 @@ describe("useTenants", () => {
     mockUseIdentityContext.mockReturnValue({
       identity: {
         ...oryIdentity,
-        tenant_memberships: [{ tenant_id: "t1", tenant_name: "Acme" }],
+        tenant_memberships: [{ tenant_id: "t1", tenant_name: "Acme", status: "active" }],
         roles: [
           { tenant_id: "t1", role_name: "admin", permissions: ["docs.read"] },
           { tenant_id: "orphan", role_name: "owner", permissions: ["all"] },

@@ -28,7 +28,7 @@ function identityWithRoles(
       status: "active",
     },
     roles: roles.map((role_name) => ({ tenant_id: "t1", role_name, permissions })),
-    tenant_memberships: [{ tenant_id: "t1", tenant_name: "Acme" }],
+    tenant_memberships: [{ tenant_id: "t1", tenant_name: "Acme", status: "active" }],
     linked_idps: [{ provider_name: provider, external_sub: `${provider}|1` }],
   };
 }

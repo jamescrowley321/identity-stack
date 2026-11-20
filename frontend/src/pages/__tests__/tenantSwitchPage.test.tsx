@@ -35,8 +35,8 @@ const identity: CanonicalIdentity = {
     { tenant_id: "tenant-globex", role_name: "admin", permissions: [] },
   ],
   tenant_memberships: [
-    { tenant_id: "tenant-acme", tenant_name: "Acme" },
-    { tenant_id: "tenant-globex", tenant_name: "Globex" },
+    { tenant_id: "tenant-acme", tenant_name: "Acme", status: "active" },
+    { tenant_id: "tenant-globex", tenant_name: "Globex", status: "active" },
   ],
   linked_idps: [{ provider_name: "zitadel", external_sub: "zitadel-sub-1" }],
 };

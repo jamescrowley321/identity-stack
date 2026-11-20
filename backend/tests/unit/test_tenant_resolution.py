@@ -25,9 +25,15 @@ from fastapi.testclient import TestClient
 from starlette.datastructures import Headers
 
 from app.dependencies import rbac
-from app.dependencies.rbac import RbacSessionOverrideError, get_rbac_session, require_permission, require_role
-from app.dependencies.tenant import get_tenant_id
-from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER, resolve_tenant_access
+from app.dependencies.rbac import (
+    RbacSessionOverrideError,
+    get_rbac_session,
+    require_global_role,
+    require_permission,
+    require_role,
+)
+from app.dependencies.tenant import get_tenant_id, get_tenant_memberships
+from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER, TenantRefusal, resolve_tenant_access
 from app.errors.identity import NotFound
 from app.middleware.claims import GatewayClaimsMiddleware
 from app.middleware.providers import (
@@ -36,6 +42,7 @@ from app.middleware.providers import (
     descope_config,
     ory_config,
 )
+from tests.helpers.canonical_payload import active_memberships
 
 DESCOPE_PROJECT = "P123"
 DESCOPE_ISSUER = f"https://api.descope.com/{DESCOPE_PROJECT}"
@@ -122,14 +129,30 @@ class _CanonicalStore:
         self.result = Error(NotFound("no identity"))
         self.calls: list[tuple[str, str]] = []
 
-    def holds(self, *grants: tuple[str, str, list[str]], status: str = "active") -> None:
+    def holds(
+        self,
+        *grants: tuple[str, str, list[str]],
+        status: str = "active",
+        tenant_status: dict[str, str | None] | None = None,
+    ) -> None:
+        """``tenant_status`` sets a tenant's status by id; ``None`` leaves it out of the membership."""
+        roles = [
+            {"tenant_id": tenant_id, "role_name": role, "permissions": list(permissions)}
+            for tenant_id, role, permissions in grants
+        ]
+        statuses = tenant_status or {}
+        memberships = [
+            {key: value for key, value in membership.items() if key != "status"}
+            | ({"status": statuses[membership["tenant_id"]]} if statuses[membership["tenant_id"]] else {})
+            if membership["tenant_id"] in statuses
+            else membership
+            for membership in active_memberships(roles)
+        ]
         self.result = Ok(
             {
                 "user": {"id": "canonical-user-1", "status": status},
-                "roles": [
-                    {"tenant_id": tenant_id, "role_name": role, "permissions": list(permissions)}
-                    for tenant_id, role, permissions in grants
-                ],
+                "roles": roles,
+                "tenant_memberships": memberships,
             }
         )
 
@@ -172,6 +195,14 @@ def _app(
     @app.get("/permissions")
     async def permissions(held: list[str] = Depends(require_permission("documents.read"))):
         return {"permissions": sorted(held)}
+
+    @app.get("/global")
+    async def global_state(held: list[str] = Depends(require_global_role("operator"))):
+        return {"roles": sorted(held)}
+
+    @app.get("/memberships")
+    async def memberships(listed=Depends(get_tenant_memberships)):
+        return {"tenants": sorted(listed)}
 
     async def _session():
         if opened is not None:
@@ -269,6 +300,63 @@ class TestGetTenantIdFailsClosedOnTheCanonicalPath:
 
         assert response.status_code == 401
         assert response.json() == {"detail": "Token missing subject"}
+
+
+NOT_ACTIVE = {"detail": TenantRefusal.NOT_ACTIVE}
+
+
+class TestASuspendedTenantIsServedToNoMember:
+    """#689: a canonical tenant that is not active is refused on every tenant-scoped dependency."""
+
+    @pytest.mark.parametrize("path", ["/tenant", "/roles", "/admin", "/permissions"])
+    def test_a_sole_suspended_membership_is_refused(self, client, store, path):
+        store.holds((TENANT_A, "admin", ["documents.read"]), tenant_status={TENANT_A: "suspended"})
+
+        response = _get(client, path, _ory())
+
+        assert (response.status_code, response.json()) == (403, NOT_ACTIVE)
+
+    @pytest.mark.parametrize("path", ["/tenant", "/roles", "/admin", "/permissions"])
+    def test_selecting_a_suspended_tenant_is_refused(self, client, store, path):
+        store.holds(
+            (TENANT_A, "admin", ["documents.read"]),
+            (TENANT_B, "admin", ["documents.read"]),
+            tenant_status={TENANT_B: "suspended"},
+        )
+
+        response = _get(client, path, _ory(), selector=TENANT_B)
+
+        assert (response.status_code, response.json()) == (403, NOT_ACTIVE)
+
+    def test_an_active_membership_beside_a_suspended_one_is_the_sole_one(self, client, store):
+        store.holds((TENANT_A, "member", []), (TENANT_B, "admin", []), tenant_status={TENANT_B: "suspended"})
+
+        response = _get(client, "/roles", _ory())
+
+        assert (response.status_code, response.json()) == (200, {"tenant_id": TENANT_A, "roles": ["member"]})
+
+    @pytest.mark.parametrize("status", [None, "anything-else"], ids=["absent", "unknown"])
+    def test_a_tenant_whose_status_is_not_active_is_not_served(self, client, store, status):
+        store.holds((TENANT_A, "admin", []), tenant_status={TENANT_A: status})
+
+        response = _get(client, "/admin", _ory(), selector=TENANT_A)
+
+        assert (response.status_code, response.json()) == (403, NOT_ACTIVE)
+
+    def test_the_membership_list_leaves_it_out(self, client, store):
+        store.holds((TENANT_A, "member", []), (TENANT_B, "admin", []), tenant_status={TENANT_B: "suspended"})
+
+        response = _get(client, "/memberships", _ory())
+
+        assert (response.status_code, response.json()) == (200, {"tenants": [TENANT_A]})
+
+    def test_an_operator_whose_tenant_is_suspended_keeps_state_that_belongs_to_no_tenant(self, client, store):
+        """Global state is not the suspended tenant's: the operator can still see and repair it."""
+        store.holds((TENANT_A, "operator", []), tenant_status={TENANT_A: "suspended"})
+
+        response = _get(client, "/global", _ory())
+
+        assert (response.status_code, response.json()) == (200, {"roles": ["operator"]})
 
 
 class TestTenantSelector:

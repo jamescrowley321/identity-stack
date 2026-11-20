@@ -23,6 +23,7 @@ from app.errors.identity import NotFound
 from app.main import app as shipped_app
 from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.providers import ProviderTokenConfig, descope_config, keycloak_config
+from tests.helpers.canonical_payload import active_memberships
 from tests.helpers.keycloak_model import API_AUDIENCE, SPA_CLIENT_ID
 from tests.helpers.local_op import RS256, LocalProvider, local_provider
 
@@ -60,13 +61,15 @@ class _CanonicalStore:
         self.calls: list[tuple[str, str]] = []
 
     def holds(self, *grants: tuple[str, str, list[str]], status: str = "active") -> None:
+        roles = [
+            {"tenant_id": tenant_id, "role_name": role, "permissions": list(permissions)}
+            for tenant_id, role, permissions in grants
+        ]
         self.result = Ok(
             {
                 "user": {"id": "canonical-user-1", "status": status},
-                "roles": [
-                    {"tenant_id": tenant_id, "role_name": role, "permissions": list(permissions)}
-                    for tenant_id, role, permissions in grants
-                ],
+                "roles": roles,
+                "tenant_memberships": active_memberships(roles),
             }
         )
 

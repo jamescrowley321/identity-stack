@@ -329,6 +329,17 @@ tenant, role or permission claim itself. The resolver takes its sources in this 
    the organization the sign-in named, else the first membership.
 3. **The caller's sole canonical membership**, when the request selects nothing.
 
+A canonical tenant whose status is not `active` (`suspended`) **MUST NOT** be served to its
+members: the resolver refuses a request for it (403, `TenantRefusal.NOT_ACTIVE`), it is no
+sole membership, `get_tenant_memberships` and the SPA's selector leave it out, and the
+`/api/tenants/{tenant_id}/resources` routes refuse it the same way (#689). A tenant whose
+status was not read is not served either. On a route whose state belongs to no tenant
+(`require_global_role`) the membership still counts: that state is not the suspended
+tenant's, so an operator keeps it. `TenantResource` rows carry their tenant's id space
+(`TenantIdSpace`): a canonical principal's resources are read and written as canonical, a
+Descope principal's as Descope, so a Descope tenant created with a canonical tenant's UUID
+as its id names none of that tenant's resources (#690).
+
 Anything else is 403, including an extractor that raises, and one whose answer is not a
 `TenantClaims` with a non-empty string for the tenant and lists of strings for the roles
 and the permissions. Roles and permissions **MUST** be resolved from the canonical model

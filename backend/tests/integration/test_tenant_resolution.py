@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 from app.dependencies.identity import get_identity_provisioning_service, get_identity_resolution_service
 from app.dependencies.rbac import get_rbac_session, require_role
 from app.dependencies.tenant import get_tenant_id
-from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER
+from app.dependencies.tenant_access import TENANT_SELECTOR_HEADER, TenantRefusal
 from app.errors.identity import IdentityErrorRaised
 from app.errors.problem_detail import identity_error_raised_handler
 from app.middleware.auth import TokenValidationMiddleware
@@ -29,14 +29,15 @@ from app.models.document import Document
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.role import Permission, Role
-from app.models.identity.tenant import Tenant
+from app.models.identity.tenant import Tenant, TenantStatus
+from app.models.tenant import TenantIdSpace, TenantResource
 from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
-from app.routers import accesskeys, canonical_users, documents, fga, permissions, roles, users
+from app.routers import accesskeys, canonical_users, documents, fga, permissions, roles, tenants, users
 from app.routers.protected import canonical_identity
 from app.services.identity_provisioning import IdentityProvisioningService
 from app.services.identity_resolution import IdentityResolutionService
@@ -67,6 +68,7 @@ def _build_app(db_session, *, issuer: str, audience: str) -> FastAPI:
         permissions.router,
         fga.router,
         canonical_users.router,
+        tenants.router,
     )
     for router in routers:
         app.include_router(router, prefix="/api")
@@ -346,3 +348,55 @@ async def test_ory_operator_of_one_of_two_tenants_cannot_list_every_tenants_user
     assert named.json() == {"detail": "No tenant context"}
     assert unnamed.status_code == 403
     assert unnamed.json() == {"detail": "No tenant context"}
+
+
+@pytest.mark.asyncio
+async def test_a_suspended_tenant_is_served_to_none_of_its_members(db_session, ory_token_source):
+    """#689: the member of an active and a suspended tenant is served the active one only."""
+    app = _build_app(db_session, issuer=ory_token_source.issuer, audience=ory_token_source.audience)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        headers, active = await _provisioned_ory_user(db_session, client, ory_token_source, "tenant-suspended")
+        suspended = await _add_membership(db_session, user_email=await _email_of(client, headers), role_name="admin")
+        tenant = await db_session.get(Tenant, uuid.UUID(suspended))
+        tenant.status = TenantStatus.suspended
+        await db_session.flush()
+        in_suspended = {**headers, TENANT_SELECTOR_HEADER: suspended}
+
+        unselected = await client.get(TENANT_ROUTE, headers=headers)
+        selected = await client.get(TENANT_ROUTE, headers=in_suspended)
+        admin = await client.get(ADMIN_ROUTE, headers=in_suspended)
+        resources = await client.get(f"/api/tenants/{suspended}/resources", headers=in_suspended)
+        listed = await client.get("/api/tenants", headers=headers)
+
+    assert (unselected.status_code, unselected.json()) == (200, {"tenant_id": active})
+    for refused in (selected, admin, resources):
+        assert (refused.status_code, refused.json()) == (403, {"detail": TenantRefusal.NOT_ACTIVE})
+    assert [entry["id"] for entry in listed.json()["tenants"]] == [active]
+
+
+@pytest.mark.asyncio
+async def test_a_descope_tenant_spelled_as_a_canonical_id_shares_none_of_its_resources(db_session, ory_token_source):
+    """#690: a Descope tenant's row with the canonical tenant's UUID is neither read nor in the way."""
+    app = _build_app(db_session, issuer=ory_token_source.issuer, audience=ory_token_source.audience)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        headers, tenant_id = await _provisioned_ory_user(db_session, client, ory_token_source, "tenant-space")
+        db_session.add(TenantResource(tenant_space=TenantIdSpace.descope, tenant_id=tenant_id, name="Ledger"))
+        await db_session.flush()
+        route = f"/api/tenants/{tenant_id}/resources"
+
+        before = await client.get(route, headers=headers)
+        created = await client.post(route, headers=headers, json={"name": "Ledger"})
+        after = await client.get(route, headers=headers)
+
+    assert (before.status_code, before.json()) == (200, {"resources": []})
+    assert created.status_code == 200, created.text
+    assert [(entry["tenant_id"], entry["name"]) for entry in after.json()["resources"]] == [(tenant_id, "Ledger")]
+    stored = (
+        await db_session.execute(
+            select(TenantResource.tenant_space, TenantResource.name).where(TenantResource.tenant_id == tenant_id)
+        )
+    ).all()
+    assert sorted(tuple(row) for row in stored) == [
+        (TenantIdSpace.canonical, "Ledger"),
+        (TenantIdSpace.descope, "Ledger"),
+    ]

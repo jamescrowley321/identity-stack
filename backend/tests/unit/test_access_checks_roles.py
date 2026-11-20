@@ -20,6 +20,7 @@ from app.dependencies import rbac
 from app.dependencies.rbac import get_rbac_session
 from app.middleware.providers import zitadel_config
 from app.routers import access_checks
+from tests.helpers.canonical_payload import active_memberships
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "zitadel"
 ISSUER = "http://zitadel.localhost:8480"
@@ -67,6 +68,7 @@ def client(monkeypatch) -> TestClient:
                     {"tenant_id": ACME, "role_name": "admin", "permissions": []},
                     {"tenant_id": GLOBEX, "role_name": "viewer", "permissions": []},
                 ],
+                "tenant_memberships": active_memberships([{"tenant_id": ACME}, {"tenant_id": GLOBEX}]),
             }
         )
     )

@@ -34,6 +34,8 @@ TOKEN = "eyJhbGciOiJIUzUxMiJ9.registration-token.signature"
 KEY = Fernet.generate_key().decode()
 CIPHER = RegistrationTokenCipher([KEY])
 BEFORE_SEALING = "010_machine_credentials"
+# The revision under test. Later revisions move the schema, so the tests stop here, not at head.
+SEALING = "011_seal_registration_tokens"
 
 
 def _credential(tenant_id: uuid.UUID) -> credentials.MachineCredential:
@@ -162,8 +164,9 @@ class TestMigration:
         finally:
             async with async_engine.begin() as conn:
                 await conn.execute(sa.delete(Tenant).where(Tenant.id == tenant_id))
-            restored = _alembic(postgres_url, "upgrade", "head", key=None)
+            restored = _alembic(postgres_url, "upgrade", SEALING, key=None)
             assert restored.returncode == 0, restored.stderr
+            assert _alembic(postgres_url, "stamp", "head", key=None).returncode == 0
 
     async def _token(self, async_engine, credential_id: uuid.UUID) -> str:
         async with async_engine.connect() as conn:
@@ -173,7 +176,7 @@ class TestMigration:
     async def test_the_upgrade_seals_a_stored_token_and_the_downgrade_opens_it(
         self, async_engine, postgres_url, plain_text_row
     ):
-        sealed = _alembic(postgres_url, "upgrade", "head", key=KEY)
+        sealed = _alembic(postgres_url, "upgrade", SEALING, key=KEY)
         assert sealed.returncode == 0, sealed.stderr
         stored = await self._token(async_engine, plain_text_row)
         assert TOKEN not in stored
@@ -186,7 +189,7 @@ class TestMigration:
     async def test_the_upgrade_refuses_to_leave_a_token_in_plain_text_without_a_key(
         self, async_engine, postgres_url, plain_text_row
     ):
-        refused = _alembic(postgres_url, "upgrade", "head", key=None)
+        refused = _alembic(postgres_url, "upgrade", SEALING, key=None)
 
         assert refused.returncode != 0
         assert KEYS_VARIABLE in refused.stderr
@@ -200,14 +203,14 @@ class TestMigration:
         self, async_engine, postgres_url, plain_text_row
     ):
         """A backend of this revision sealed it while the database was still at 010: it is not sealed twice."""
-        upgraded = _alembic(postgres_url, "upgrade", "head", key=KEY)
+        upgraded = _alembic(postgres_url, "upgrade", SEALING, key=KEY)
 
         assert upgraded.returncode == 0, upgraded.stderr
         assert await self._token(async_engine, plain_text_row) == self.SEALED
 
     @pytest.mark.parametrize("plain_text_row", [SEALED_UNDER_ANOTHER_KEY], indirect=True)
     async def test_the_downgrade_leaves_a_token_no_key_opens_as_it_is(self, async_engine, postgres_url, plain_text_row):
-        assert _alembic(postgres_url, "stamp", "head", key=None).returncode == 0
+        assert _alembic(postgres_url, "stamp", SEALING, key=None).returncode == 0
 
         downgraded = _alembic(postgres_url, "downgrade", BEFORE_SEALING, key=KEY)
 

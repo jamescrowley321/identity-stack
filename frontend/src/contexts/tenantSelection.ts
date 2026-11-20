@@ -84,6 +84,19 @@ export function signInOrganization(
 export interface SelectableMembership {
   tenant_id: string;
   external_org_id?: string | null;
+  status?: string;
+}
+
+/** The canonical status of a tenant that is served to its members. */
+export const ACTIVE_TENANT_STATUS = "active";
+
+/**
+ * The memberships the selector offers: a tenant whose status is not active
+ * (`suspended`) is served to no member, so it is not offered (#689). A membership
+ * without a status is not offered either: the API serves it to no one.
+ */
+export function servableMemberships<T extends SelectableMembership>(memberships: T[]): T[] {
+  return memberships.filter((m) => m.status === ACTIVE_TENANT_STATUS);
 }
 
 /**
