@@ -193,12 +193,18 @@ still holds what the canonical change took away until the push is made again: th
 [pending](#reconciliation), and the **push retry** pushes it again, ending the membership or
 disabling the account, and keeps it pending until a push is delivered. The push retry is a
 background task of every worker that, every `KEYCLOAK_PUSH_RETRY_INTERVAL_SECONDS` (60), runs the
-second half of a [reconciliation pass](#reconciliation) alone: each pending push is pushed from
-the current canonical state, and its mark removed once delivered; a push that fails again records
-a `failed` sync event and stays pending for the next turn. It reads nothing of the realm. It holds
-a pending-push lock, so one worker pushes at a time; a turn skips while a pass pushes, and a
-reconciliation run started during a turn waits for it. A failed revocation is therefore applied within one interval of Keycloak answering
-again, with no reconciliation run. Authorization
+second half of a [reconciliation pass](#reconciliation) alone for the pending pushes that are due:
+each is pushed from the current canonical state, and its mark removed once delivered; a push that
+fails again records a `failed` sync event and stays pending. A mark is due once it is one interval
+old (an inline push may still be delivering a younger one; a mark whose inline push succeeded is
+pushed once more, which writes nothing, and removed). After n `failed` sync events of its entity
+since it was marked, it waits `interval × 2^(n−1)` from the last, at most `interval × 64`, so a
+push Keycloak keeps refusing is retried less and less often; a new canonical change of the entity
+starts it again. The cadence is read from the database, so it is per mark whatever the number of
+workers. A turn reads nothing of the realm. It holds a pending-push lock, so one worker pushes at a
+time; a turn skips while a pass pushes, and a reconciliation run started during a turn waits up to
+10 seconds for it, then answers 409. A failed revocation is therefore applied within about one
+interval of Keycloak answering again, with no reconciliation run. Authorization
 never reads it: a removed membership is refused on the next request from the canonical model.
 `DELETE /api/roles/{name}` returns that answer; `POST /api/roles/remove` builds its own and does not
 show it, so alert on the log. The unit tests replay answers recorded from Keycloak 26.8.2
@@ -445,8 +451,9 @@ and they raise the `seq` of an entity already marked.
 
 One pass runs at a time: a pass holds a Postgres session lock on a connection of its own from start
 to end (its second half commits after each push, which a transaction lock would not survive), and a
-pass started while another holds it answers 409. It then takes the pending-push lock too, waiting for a
-[push retry](#admin-adapter) turn in progress, so two pushes of one entity never overlap.
+pass started while another holds it answers 409. It then takes the pending-push lock too, waiting up to
+10 seconds for a [push retry](#admin-adapter) turn in progress (409 after that), so two pushes of
+one entity never overlap.
 
 1. **Keycloak into Postgres.** In one transaction holding the reconciliation lock and the pull's lock,
    the pass reads the marks, then the realm: the organizations, the members and role groups (with their

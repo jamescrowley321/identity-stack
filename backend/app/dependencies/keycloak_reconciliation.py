@@ -3,9 +3,9 @@
 Used when ``SYNC_PROVIDER`` is ``keycloak`` (``app.dependencies.identity``), on the
 admin client ``main.lifespan`` opened (``app.state.keycloak_admin``). ``main.lifespan``
 also starts ``run_keycloak_push_retry`` as a background task: every
-``KEYCLOAK_PUSH_RETRY_INTERVAL_SECONDS`` it pushes the pending pushes again, so a
-push that failed (a membership removal, a deactivation) reaches Keycloak without
-waiting for a reconciliation run (#612). Every worker runs the loop; the
+``KEYCLOAK_PUSH_RETRY_INTERVAL_SECONDS`` it pushes the pending pushes that are due
+(backed off per mark), so a push that failed (a membership removal, a deactivation)
+reaches Keycloak without waiting for a reconciliation run (#612). Every worker runs the loop; the
 pending-push lock (``hold_push_retry``) lets one push at a time, and a pass waits for it.
 """
 
@@ -101,11 +101,14 @@ async def _no_reconciliation_lock() -> None:
 
 
 async def retry_keycloak_pushes(
-    api: KeycloakAdminApi, session: AsyncSession, hold_pass: Callable[[], AbstractAsyncContextManager[bool]]
+    api: KeycloakAdminApi,
+    session: AsyncSession,
+    hold_pass: Callable[[], AbstractAsyncContextManager[bool]],
+    interval_seconds: float,
 ) -> None:
-    """Push the pending pushes once; a pass already running pushes them itself."""
+    """Push the pending pushes that are due once; a pass already running pushes them itself."""
     reconciliation = build_keycloak_reconciliation(api, session, _no_reconciliation_lock, hold_pass)
-    result = await reconciliation.push_pending()
+    result = await reconciliation.push_pending(interval_seconds)
     if result.is_error():
         if not isinstance(result.error, Conflict):
             logger.warning("Keycloak push retry: %s", result.error.message)
@@ -124,7 +127,7 @@ async def run_keycloak_push_retry(
         await asyncio.sleep(interval_seconds)
         try:
             async with factory() as session:
-                await retry_keycloak_pushes(api, session, hold_pass)
+                await retry_keycloak_pushes(api, session, hold_pass, interval_seconds)
         except asyncio.CancelledError:
             raise
         except Exception:

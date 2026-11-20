@@ -13,10 +13,14 @@ from sqlalchemy.dialects.postgresql import insert
 
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.role import Permission, Role, RolePermission
+from app.models.identity.sync_event import SyncEvent, SyncEventVerb
 from app.models.identity.sync_ledger import PendingPush, ReconciliationRun
 from app.models.identity.tenant import Tenant
 from app.models.identity.user import IdPLink, User
 from app.repositories.base import BaseRepository
+
+# A mark whose push keeps failing waits ``interval * 2 ** n`` before the next retry, n at most this.
+MAX_BACKOFF_DOUBLINGS = 6
 
 # The transaction setting a canonical write that brings the canonical model to the
 # provider's state sets (migration 009): such a write marks nothing pending.
@@ -33,6 +37,50 @@ class PendingPushRepository(BaseRepository[PendingPush]):
         """Every mark as committed now (never a copy the session already holds)."""
         stmt = (
             sa.select(PendingPush).order_by(PendingPush.kind, PendingPush.key).execution_options(populate_existing=True)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
+    async def list_due(self, interval_seconds: float) -> list[PendingPush]:
+        """The marks a push retry pushes now: marked at least ``interval_seconds`` ago, and backed off.
+
+        A mark is backed off by the ``failed`` sync events of its entity since it was
+        marked: after n of them the next retry waits ``interval * 2 ** (n - 1)`` from
+        the last, at most ``interval * 2 ** MAX_BACKOFF_DOUBLINGS``. Read from the
+        database, so every worker sees the same cadence per mark.
+        """
+        failures = (
+            sa.select(
+                PendingPush.kind,
+                PendingPush.key,
+                sa.func.count().label("failures"),
+                sa.func.max(SyncEvent.occurred_at).label("last_failure"),
+            )
+            .join(
+                SyncEvent,
+                sa.and_(
+                    SyncEvent.subject_type == PendingPush.kind,
+                    SyncEvent.subject_id == PendingPush.key,
+                    SyncEvent.occurred_at >= PendingPush.marked_at,
+                ),
+            )
+            .where(SyncEvent.verb == SyncEventVerb.failed)
+            .group_by(PendingPush.kind, PendingPush.key)
+            .subquery()
+        )
+        now = sa.func.clock_timestamp()
+        backoff = interval_seconds * sa.func.power(2, sa.func.least(failures.c.failures - 1, MAX_BACKOFF_DOUBLINGS))
+        stmt = (
+            sa.select(PendingPush)
+            .outerjoin(failures, sa.and_(failures.c.kind == PendingPush.kind, failures.c.key == PendingPush.key))
+            .where(
+                PendingPush.marked_at <= now - sa.func.make_interval(0, 0, 0, 0, 0, 0, interval_seconds),
+                sa.or_(
+                    failures.c.failures.is_(None),
+                    failures.c.last_failure <= now - sa.func.make_interval(0, 0, 0, 0, 0, 0, backoff),
+                ),
+            )
+            .order_by(PendingPush.kind, PendingPush.key)
+            .execution_options(populate_existing=True)
         )
         return list((await self._session.execute(stmt)).scalars().all())
 
