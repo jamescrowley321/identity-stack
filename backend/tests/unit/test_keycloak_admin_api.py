@@ -12,7 +12,9 @@ from app.services.keycloak_admin import (
     ADMIN_CLIENT_ID_VARIABLE,
     ADMIN_CREDENTIAL_VARIABLE,
     API_CLIENT_VARIABLE,
+    GENERIC_NOT_FOUND_ANSWER,
     ISSUER_VARIABLE,
+    ORGANIZATION_NOT_FOUND_ANSWER,
     KeycloakAdminError,
     KeycloakAdminNotConfigured,
     KeycloakAdminRolesMissing,
@@ -286,6 +288,16 @@ class TestReadsById:
 class TestRemoveMember:
     """A 404 ends a membership only once the user is confirmed not to be a member (#619)."""
 
+    async def test_keycloak_answers_a_missing_membership_as_it_answers_any_404(self):
+        """Recorded: no body tells a missing membership from an unmatched route or a user the realm lacks."""
+        bodies = {
+            name: RECORDED[name]["body"]
+            for name in ("member_remove_again", "member_remove_unmatched_route", "member_remove_unknown_user")
+        }
+
+        assert bodies == dict.fromkeys(bodies, GENERIC_NOT_FOUND_ANSWER)
+        assert RECORDED["member_remove_unknown_organization"]["body"] == ORGANIZATION_NOT_FOUND_ANSWER
+
     async def test_a_removed_member_is_removed(self):
         api = RecordedAdminApi(["token", "member_remove"])
 
@@ -310,14 +322,16 @@ class TestRemoveMember:
         assert refused.value.status == 404
 
     async def test_the_generic_404_for_a_user_the_realm_lacks_counts(self):
-        api = RecordedAdminApi(["token", "member_remove_again", "member_organizations_unknown_user", "user_get_none"])
+        api = RecordedAdminApi(
+            ["token", "member_remove_unknown_user", "member_organizations_unknown_user", "user_get_none"]
+        )
 
         await api.api().remove_member(ORGANIZATION_ID, KEYCLOAK_USER_ID)
 
         assert api.script == []
 
     async def test_the_generic_404_twice_for_a_user_the_realm_has_is_an_error(self):
-        api = RecordedAdminApi(["token", "member_remove_again", "member_organizations_unknown_user", "user_get"])
+        api = RecordedAdminApi(["token", "member_remove_unknown_user", "member_organizations_unknown_user", "user_get"])
 
         with pytest.raises(KeycloakAdminError) as refused:
             await api.api().remove_member(ORGANIZATION_ID, RECORDED["user_get"]["body"]["id"])
@@ -325,7 +339,7 @@ class TestRemoveMember:
         assert refused.value.status == 404
 
     async def test_an_organization_gone_is_removed(self):
-        api = RecordedAdminApi(["token", httpx.Response(404, json={"errorMessage": "Organization not found."})])
+        api = RecordedAdminApi(["token", "member_remove_unknown_organization"])
 
         await api.api().remove_member(ORGANIZATION_ID, KEYCLOAK_USER_ID)
 

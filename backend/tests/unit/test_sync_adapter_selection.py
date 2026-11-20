@@ -174,6 +174,7 @@ class TestStartup:
     async def test_keycloak_checks_the_credential_and_keeps_the_client(self, monkeypatch):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
         set_settings(monkeypatch)
+        monkeypatch.delenv("KEYCLOAK_PUSH_RETRY_INTERVAL_SECONDS", raising=False)
         api = RecordedAdminApi(["token", *ROLE_CHECK])
         monkeypatch.setattr(main, "outbound_client", recorded_client(api))
         app = FakeApp()
@@ -183,7 +184,23 @@ class TestStartup:
         assert api.script == []
         assert app.state.keycloak_admin._http is client
         assert api.timeout == main.KEYCLOAK_ADMIN_TIMEOUT_SECONDS
+        assert app.state.keycloak_push_retry_seconds == 60.0
         await client.aclose()
+
+    async def test_a_push_retry_interval_out_of_range_stops_startup(self, monkeypatch):
+        monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")
+        set_settings(monkeypatch)
+        monkeypatch.setenv("KEYCLOAK_PUSH_RETRY_INTERVAL_SECONDS", "0")
+        api = RecordedAdminApi([])
+        monkeypatch.setattr(main, "outbound_client", recorded_client(api))
+
+        with pytest.raises(RuntimeError) as refused:
+            await main._start_sync_provider(FakeApp())
+
+        assert str(refused.value) == (
+            "SYNC_PROVIDER is keycloak but KEYCLOAK_PUSH_RETRY_INTERVAL_SECONDS must be a positive number of seconds"
+        )
+        assert api.sent == []
 
     async def test_a_wrong_credential_stops_startup_and_closes_the_client(self, monkeypatch):
         monkeypatch.setattr(identity, "SYNC_PROVIDER", "keycloak")

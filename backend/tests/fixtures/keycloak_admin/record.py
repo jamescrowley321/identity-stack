@@ -157,6 +157,8 @@ def main() -> None:
     keep("member_remove", admin("DELETE", f"{members}/{user['id']}"))
     keep("member_remove_again", admin("DELETE", f"{members}/{user['id']}"))
     keep("member_organizations_none", admin("GET", f"/organizations/members/{user['id']}/organizations"))
+    # A route that does not match gets the same generic 404 as the membership that is not there.
+    keep("member_remove_unmatched_route", admin("DELETE", f"{path}/member/{user['id']}"))
     keep("organization_group_delete", admin("DELETE", f"{groups}/{group_id}"))
     keep("organization_group_delete_again", admin("DELETE", f"{groups}/{group_id}"))
     keep("role_delete", admin("DELETE", by_id))
@@ -167,9 +169,11 @@ def main() -> None:
     keep("user_delete_again", admin("DELETE", f"/users/{user['id']}"))
     keep("user_get_none", admin("GET", f"/users/{user['id']}"))
     keep("member_organizations_unknown_user", admin("GET", f"/organizations/members/{user['id']}/organizations"))
+    keep("member_remove_unknown_user", admin("DELETE", f"{members}/{user['id']}"))
     keep("organization_delete", admin("DELETE", path))
     keep("organization_delete_again", admin("DELETE", path))
     keep("member_add_unknown_organization", admin("POST", members, json=user["id"]))
+    keep("member_remove_unknown_organization", admin("DELETE", f"{members}/{user['id']}"))
 
     json.dump(out, sys.stdout, indent=2, sort_keys=True)
     print()
