@@ -31,7 +31,7 @@ from app.services.keycloak_events import (
     UserDeleted,
     UserUpdated,
 )
-from app.services.keycloak_reconciliation import KeycloakReconciliation, _mark_of
+from app.services.keycloak_reconciliation import ALREADY_RUNNING, KeycloakReconciliation, _mark_of
 
 PROVIDER_ID = uuid.uuid4()
 
@@ -141,12 +141,19 @@ class FakeLedger:
     later: dict[tuple[str, str], int] = field(default_factory=dict)
     cleared: list[tuple[str, str, int]] = field(default_factory=list)
     origin: list[bool] = field(default_factory=list)
+    # The marks ``list_due`` answers (``PendingPushRepository.list_due``), and the intervals it was asked with.
+    due: set[tuple[str, str]] = field(default_factory=set)
+    due_asked: list[float] = field(default_factory=list)
 
     async def list_all(self):
         return [
             SimpleNamespace(kind=kind, key=key, seq=seq, snapshot=None)
             for (kind, key), seq in sorted({**self.marks, **self.later}.items())
         ]
+
+    async def list_due(self, interval_seconds):
+        self.due_asked.append(interval_seconds)
+        return [mark for mark in await self.list_all() if (mark.kind, mark.key) in self.due]
 
     async def seqs(self, keys):
         current = {**self.marks, **self.later}
@@ -368,7 +375,7 @@ class TestTheRealmRead:
 
         result = await _pass(hold_pass=_held(False), inbound=inbound).reconcile()
 
-        assert result.error == Conflict(message="A Keycloak reconciliation pass is already running")
+        assert result.error == Conflict(message=ALREADY_RUNNING)
         assert inbound.applied == []
 
     async def test_an_account_a_paged_list_missed_is_not_deleted(self):
@@ -458,6 +465,42 @@ class TestTheRealmRead:
             AssignmentChanged("kept", account("grouped"), "admin", str(admin.id), added=True),
             AssignmentChanged("kept", account("ungrouped"), "admin", str(admin.id), added=False),
         ]
+
+
+@pytest.mark.anyio
+class TestPushPending:
+    """The push retry's turn: the due marks alone, nothing of the realm read."""
+
+    async def test_only_the_due_marks_are_pushed(self):
+        due_tenant, later_tenant = _tenant(), _tenant()
+        ledger = FakeLedger(
+            marks={("tenant", str(due_tenant.id)): 1, ("tenant", str(later_tenant.id)): 2},
+            due={("tenant", str(due_tenant.id))},
+        )
+        adapter = AsyncMock()
+        adapter.sync_tenant.return_value = Ok(None)
+        inbound = RecordingInbound()
+
+        result = await _pass(
+            state=FakeState(tenants_=[due_tenant, later_tenant]), ledger=ledger, adapter=adapter, inbound=inbound
+        ).push_pending(60.0)
+
+        assert result.ok == {"pushed": 1, "push_failed": 0, "pending": 1}
+        assert ledger.due_asked == [60.0]
+        assert ledger.cleared == [("tenant", str(due_tenant.id), 1)]
+        assert [call.kwargs["tenant_id"] for call in adapter.sync_tenant.await_args_list] == [due_tenant.id]
+        assert inbound.applied == []
+
+    async def test_a_turn_while_another_pushes(self):
+        ledger = FakeLedger(marks={("tenant", str(uuid.uuid4())): 1}, due={("tenant", "x")})
+
+        result = await _pass(hold_pass=_held(False), ledger=ledger).push_pending(60.0)
+
+        assert isinstance(result.error, Conflict)
+        assert ledger.due_asked == []
+
+    async def test_no_provider_row(self):
+        assert isinstance((await _pass(provider=False).push_pending(60.0)).error, NotFound)
 
 
 @pytest.mark.anyio
