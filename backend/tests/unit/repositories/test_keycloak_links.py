@@ -8,11 +8,17 @@ admin-made link names whatever account the admin typed in and is not followed.
 import uuid
 
 import pytest
+from sqlalchemy import text
 
-from app.dependencies.keycloak_sync import FOLLOWED_LINK_ORIGINS, RepositoryKeycloakLinks
+from app.dependencies import keycloak_sync
+from app.dependencies.keycloak_sync import (
+    FOLLOWED_LINK_ORIGINS,
+    ORGANIZATION_LOCK_NAMESPACE,
+    RepositoryKeycloakLinks,
+)
 from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.user import LINK_ORIGIN, LINKED_AT_SIGN_IN, LINKED_BY_BACKEND, IdPLink, User, UserStatus
-from app.services.adapters.keycloak import PROVIDER_NAME
+from app.services.adapters.keycloak import PROVIDER_NAME, LocalDatabaseError
 
 pytestmark = pytest.mark.asyncio
 
@@ -56,3 +62,44 @@ async def test_an_admin_made_link_is_not_followed(db_session, metadata):
     links = RepositoryKeycloakLinks(db_session)
 
     assert (await links.linked_subject(user.id), await links.has_link(user.id)) == (None, True)
+
+
+# A wait the contended lock gives up quickly, so the test does not take the default.
+SHORT_LOCK_TIMEOUT_MS = 200
+
+
+async def _try_lock(connection, alias: str) -> bool:
+    """Whether another connection takes the organization's lock now (held until its transaction ends)."""
+    statement = text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))")
+    return (await connection.execute(statement, {"key": ORGANIZATION_LOCK_NAMESPACE + alias})).scalar_one()
+
+
+async def test_the_organization_lock_is_held_for_the_body_and_released_after_it(db_session, async_engine):
+    alias = f"org-{uuid.uuid4().hex[:8]}"
+    links = RepositoryKeycloakLinks(db_session)
+
+    async with async_engine.connect() as other:
+        async with links.organization_lock(alias):
+            async with other.begin():
+                held_during = not await _try_lock(other, alias)
+        async with other.begin():
+            free_after = await _try_lock(other, alias)
+
+    assert (held_during, free_after) == (True, True)
+
+
+async def test_a_lock_another_push_holds_too_long_is_a_database_error_and_the_session_stays_usable(
+    db_session, async_engine, monkeypatch
+):
+    monkeypatch.setattr(keycloak_sync, "ORGANIZATION_LOCK_TIMEOUT_MS", SHORT_LOCK_TIMEOUT_MS)
+    alias = f"org-{uuid.uuid4().hex[:8]}"
+    links = RepositoryKeycloakLinks(db_session)
+    entered = False
+
+    async with async_engine.connect() as other, other.begin():
+        assert await _try_lock(other, alias)
+        with pytest.raises(LocalDatabaseError):
+            async with links.organization_lock(alias):
+                entered = True
+
+    assert (entered, (await db_session.execute(text("SELECT 1"))).scalar_one()) == (False, 1)

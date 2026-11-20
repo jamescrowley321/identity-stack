@@ -9,6 +9,7 @@ nothing. Every tenant, user and client role is new to the test, named by a fresh
 id, and removed afterwards whatever the outcome.
 """
 
+import asyncio
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from unittest.mock import AsyncMock
@@ -18,7 +19,8 @@ import pytest
 import pytest_asyncio
 from expression import Ok
 from fastapi import FastAPI
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import main
 from app.dependencies import identity
@@ -272,6 +274,30 @@ class TestTenants:
 
         assert updated == Ok(None)
         assert {key: organization.get(key) for key in ("name", *kept)} == {"name": f"Renamed {tenant_id}", **kept}
+
+    async def test_a_rename_keeps_a_domain_added_between_its_read_and_its_write(
+        self, sync, realm, monkeypatch, tenant_id
+    ):
+        """A sync without ``self_provisioning_domains`` sends no domains: a domain added since its read stays."""
+        held_domain, added_domain = f"{tenant_id.hex}.test", f"added-{tenant_id.hex}.test"
+        await sync.sync_tenant(
+            tenant_id=tenant_id, data={"name": f"Sync {tenant_id}", "self_provisioning_domains": [held_domain]}
+        )
+        find = sync._api.find_organization
+
+        async def find_then_add_a_domain(alias: str) -> dict | None:
+            found = await find(alias)
+            held = realm.get(f"/organizations/{found['id']}").raise_for_status().json()
+            domains = [*held["domains"], {"name": added_domain}]
+            realm.put(f"/organizations/{found['id']}", json={**held, "domains": domains}).raise_for_status()
+            return found
+
+        monkeypatch.setattr(sync._api, "find_organization", find_then_add_a_domain)
+
+        assert await sync.sync_tenant(tenant_id=tenant_id, data={"name": f"Renamed {tenant_id}"}) == Ok(None)
+        organization = find_organization(realm, tenant_id)
+        domains = sorted(entry["name"] for entry in organization["domains"])
+        assert (organization["name"], domains) == (f"Renamed {tenant_id}", sorted([held_domain, added_domain]))
 
     async def test_a_domain_another_organization_holds_is_an_error(self, sync, tenant_id):
         result = await sync.sync_tenant(
@@ -800,6 +826,88 @@ class TestCanonicalLinks:
         assert [(link.provider_id, link.external_sub, link.metadata_) for link in links] == [
             (provider.id, find_user(realm, user_id)["id"], {LINK_ORIGIN: LINKED_BY_BACKEND})
         ]
+
+
+# How long the test waits for the suspension to finish or to queue behind the attribute write.
+CONCURRENT_PUSH_WAIT_SECONDS = 10.0
+
+
+async def _queued_or_done(task: asyncio.Task, watcher: AsyncSession, pid: int) -> None:
+    """Return once ``task`` finished or the backend ``pid`` waits for an advisory lock."""
+    waiting = text("SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = :pid AND locktype = 'advisory' AND NOT granted)")
+    async with asyncio.timeout(CONCURRENT_PUSH_WAIT_SECONDS):
+        while not task.done() and not (await watcher.execute(waiting, {"pid": pid})).scalar_one():
+            await asyncio.sleep(0.05)
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def committed_tenant(async_engine, environment, tenant_id) -> AsyncIterator[async_sessionmaker]:
+    """The tenant, committed and linked to its organization, for pushes on sessions of their own."""
+    sessions = async_sessionmaker(bind=async_engine, class_=AsyncSession, expire_on_commit=False)
+    async with sessions() as setup:
+        provider = (await setup.execute(select(Provider).where(Provider.name == PROVIDER_NAME))).scalar_one_or_none()
+        created_provider = provider is None
+        if created_provider:
+            provider = Provider(name=PROVIDER_NAME, type=ProviderType.oidc, issuer_url=environment.issuer)
+            setup.add(provider)
+            await setup.flush()
+        setup.add(
+            Tenant(
+                id=tenant_id,
+                name=f"Race {tenant_id}",
+                external_org_id=str(tenant_id),
+                external_org_provider_id=provider.id,
+            )
+        )
+        await setup.commit()
+    yield sessions
+    async with sessions() as cleanup:
+        await cleanup.delete(await cleanup.get(Tenant, tenant_id))
+        if created_provider:
+            await cleanup.delete(await cleanup.get(Provider, provider.id))
+        await cleanup.commit()
+
+
+class TestConcurrentOrganizationWrites:
+    """Two pushes to one organization over Postgres, each on its own session, as two workers make them."""
+
+    async def test_a_suspension_during_an_attribute_write_stays(self, committed_tenant, realm, tenant_id):
+        """The attribute write sends ``enabled`` back as read: a suspension between its read and its PUT must stay."""
+        sessions = committed_tenant
+        name = f"Race {tenant_id}"
+        async with (
+            httpx.AsyncClient(timeout=ADMIN_TIMEOUT_SECONDS) as http,
+            sessions() as writer_session,
+            sessions() as suspender_session,
+            sessions() as watcher,
+        ):
+            writer = KeycloakSyncAdapter(await connect_keycloak_admin(http), RepositoryKeycloakLinks(writer_session))
+            suspender = KeycloakSyncAdapter(
+                await connect_keycloak_admin(http), RepositoryKeycloakLinks(suspender_session)
+            )
+            assert await suspender.sync_tenant(tenant_id=tenant_id, data={"name": name, "status": "active"}) == Ok(None)
+            suspender_pid = (await suspender_session.execute(text("SELECT pg_backend_pid()"))).scalar_one()
+            suspensions: list[asyncio.Task] = []
+            read = writer._api.get_organization
+
+            async def read_then_suspend(organization_id: str) -> dict | None:
+                found = await read(organization_id)
+                suspension = asyncio.create_task(
+                    suspender.sync_tenant(tenant_id=tenant_id, data={"name": name, "status": "suspended"})
+                )
+                suspensions.append(suspension)
+                await _queued_or_done(suspension, watcher, suspender_pid)
+                return found
+
+            writer._api.get_organization = read_then_suspend
+
+            written = await writer.set_tenant_attributes(tenant=str(tenant_id), attributes={"plan_tier": "pro"})
+            suspended = await asyncio.gather(*suspensions)
+
+        organization = find_organization(realm, tenant_id)
+        held = realm.get(f"/organizations/{organization['id']}").raise_for_status().json()
+        assert (written, suspended) == (Ok(None), [Ok(None)])
+        assert (held["enabled"], held.get("attributes")) == (False, {"plan_tier": ['"pro"']})
 
 
 class TestDeletingARole:
