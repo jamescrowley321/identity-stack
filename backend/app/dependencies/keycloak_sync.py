@@ -24,6 +24,7 @@ from app.repositories.provider import ProviderRepository
 from app.repositories.role import RoleRepository
 from app.repositories.tenant import TenantRepository
 from app.services.adapters.keycloak import (
+    ORGANIZATION_HOLD_SECONDS,
     PROVIDER_NAME,
     KeycloakLinks,
     KeycloakSyncAdapter,
@@ -43,9 +44,12 @@ T = TypeVar("T")
 # Namespaces the advisory-lock key of a Keycloak organization (hashed with its alias).
 ORGANIZATION_LOCK_NAMESPACE = "keycloak-organization:"
 # How long a push waits for an organization's lock (``lock_timeout``, whole milliseconds):
-# each waiter holds its session's connection, so the wait is bounded before the
-# waiters hold the pool long enough to stall other routes.
-ORGANIZATION_LOCK_TIMEOUT_MS = 20_000
+# longer than one holder may keep it (``ORGANIZATION_HOLD_SECONDS``, the deadline of its
+# Keycloak calls) plus a margin for its database work, so a push queued behind one holder
+# gets the lock. Bounded all the same: each waiter holds its session's connection. A push
+# queued behind several holders can still give up, a failed push.
+ORGANIZATION_LOCK_MARGIN_SECONDS = 5
+ORGANIZATION_LOCK_TIMEOUT_MS = round((ORGANIZATION_HOLD_SECONDS + ORGANIZATION_LOCK_MARGIN_SECONDS) * 1000)
 
 # The link origins the adapter follows to a Keycloak account, as the Zitadel
 # adapter's: a sign-in's, and the backend's own (an account the adapter created,
