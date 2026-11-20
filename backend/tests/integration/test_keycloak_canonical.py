@@ -268,7 +268,12 @@ class TestFirstSignIn:
         assert [tuple(row) for row in assignments] == [(realm.acme.id, "member")]
         body = response.json()
         assert body["tenant_memberships"] == [
-            {"tenant_id": str(realm.acme.id), "tenant_name": realm.acme.name, "external_org_id": "acme"}
+            {
+                "tenant_id": str(realm.acme.id),
+                "tenant_name": realm.acme.name,
+                "status": "active",
+                "external_org_id": "acme",
+            }
         ]
 
         # The provisioned member is authorized from those rows.

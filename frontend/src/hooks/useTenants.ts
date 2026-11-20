@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { useIdentityContext } from "../contexts/IdentityContext";
+import { servableMemberships } from "../contexts/tenantSelection";
 
 export interface TenantInfo {
   id: string;
@@ -15,7 +16,8 @@ export interface TenantInfo {
  *
  * - `currentTenantId`: the active tenant (client-side selection from
  *   IdentityContext; defaults to the first membership).
- * - `tenants`: every tenant the user belongs to. `tenant_memberships` is the
+ * - `tenants`: every active tenant the user belongs to (a suspended one is
+ *   served to no member, so it is not offered). `tenant_memberships` is the
  *   source of id + display name; roles and permissions are aggregated across
  *   all of that tenant's role assignments (permissions de-duped).
  */
@@ -29,7 +31,7 @@ export function useTenants() {
     // skew): a missing list must fail closed (empty) rather than throw
     // `undefined.map` in render, which — with no ErrorBoundary — would blank
     // the whole app tree.
-    const memberships = identity.tenant_memberships ?? [];
+    const memberships = servableMemberships(identity.tenant_memberships ?? []);
     const allRoles = identity.roles ?? [];
 
     const tenants: TenantInfo[] = memberships.map((membership) => {

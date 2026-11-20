@@ -32,8 +32,8 @@ AUTHORIZATION_FACTORIES = (require_role, require_permission, require_fga)
 MEMBER_ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/api/tenants"): "lists the caller's own memberships (get_tenant_memberships)",
     ("GET", "/api/tenants/current"): "reads the caller's current tenant",
-    ("GET", "/api/tenants/{tenant_id}/resources"): "_verify_tenant_membership checks the path tenant",
-    ("POST", "/api/tenants/{tenant_id}/resources"): "_verify_tenant_membership checks the path tenant",
+    ("GET", "/api/tenants/{tenant_id}/resources"): "_resource_tenant_space checks the path tenant",
+    ("POST", "/api/tenants/{tenant_id}/resources"): "_resource_tenant_space checks the path tenant",
     ("GET", "/api/roles/me"): "reads the caller's own roles in the resolver's tenant",
     ("GET", "/api/tenants/current/settings"): "any member may read settings; PATCH requires admin/owner",
     ("POST", "/api/documents"): "any member may create a document; the creator becomes its FGA owner",

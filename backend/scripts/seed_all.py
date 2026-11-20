@@ -33,7 +33,7 @@ from sqlalchemy import func  # noqa: E402
 from sqlmodel import select  # noqa: E402
 
 from app.models.database import get_session_factory  # noqa: E402
-from app.models.tenant import TenantResource  # noqa: E402
+from app.models.tenant import TenantIdSpace, TenantResource  # noqa: E402
 from app.services.descope import DescopeManagementClient  # noqa: E402
 
 # Re-use existing seed logic
@@ -75,6 +75,7 @@ async def seed_tenant_resources(tenant_ids: list[str]) -> None:
             for res_def in DEMO_RESOURCES:
                 result = await session.execute(
                     select(TenantResource).where(
+                        TenantResource.tenant_space == TenantIdSpace.descope,
                         TenantResource.tenant_id == tid,
                         TenantResource.name == res_def["name"],
                     )
@@ -84,6 +85,7 @@ async def seed_tenant_resources(tenant_ids: list[str]) -> None:
                     continue
 
                 resource = TenantResource(
+                    tenant_space=TenantIdSpace.descope,
                     tenant_id=tid,
                     name=res_def["name"],
                     description=res_def["description"],

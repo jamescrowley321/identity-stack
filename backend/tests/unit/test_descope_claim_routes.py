@@ -46,6 +46,7 @@ from app.middleware.providers import (
 )
 from app.models.database import get_async_session
 from app.routers.tenants import NOT_A_MEMBER
+from tests.helpers.canonical_payload import active_memberships
 
 DESCOPE_PROJECT = "P2descopeclaimroutes"
 TENANT = "11111111-1111-4111-8111-111111111111"
@@ -103,6 +104,7 @@ class _CanonicalStore:
             {
                 "user": {"id": "canonical-user-1", "status": "active"},
                 "roles": [{"tenant_id": TENANT, "role_name": "owner", "permissions": ["settings:manage"]}],
+                "tenant_memberships": active_memberships([{"tenant_id": TENANT}]),
             }
         )
 
