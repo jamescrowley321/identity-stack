@@ -50,6 +50,10 @@
         {
           "id": "9a010000-0000-4000-8000-000000000004",
           "name": "viewer"
+        },
+        {
+          "id": "9a010000-0000-4000-8000-000000000005",
+          "name": "operator"
         }
       ],
       "members": [
@@ -91,6 +95,13 @@
           "groups": [
             "9a010000-0000-4000-8000-000000000002"
           ]
+        },
+        {
+          "username": "helen",
+          "membershipType": "UNMANAGED",
+          "groups": [
+            "9a010000-0000-4000-8000-000000000005"
+          ]
         }
       ]
     },
@@ -120,6 +131,10 @@
         {
           "id": "9a020000-0000-4000-8000-000000000004",
           "name": "viewer"
+        },
+        {
+          "id": "9a020000-0000-4000-8000-000000000005",
+          "name": "operator"
         }
       ],
       "members": [
@@ -158,6 +173,10 @@
         {
           "id": "9a030000-0000-4000-8000-000000000004",
           "name": "viewer"
+        },
+        {
+          "id": "9a030000-0000-4000-8000-000000000005",
+          "name": "operator"
         }
       ],
       "members": [
@@ -209,6 +228,9 @@
         },
         {
           "name": "settings:manage"
+        },
+        {
+          "name": "operator"
         },
         {
           "name": "owner",
@@ -594,6 +616,22 @@
         {
           "type": "password",
           "value": "local-only-grace",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "id": "0e1e0000-0000-4000-8000-000000000008",
+      "username": "helen",
+      "enabled": true,
+      "email": "helen@acme.test",
+      "emailVerified": true,
+      "firstName": "Helen",
+      "lastName": "Operator",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-only-helen",
           "temporary": false
         }
       ]

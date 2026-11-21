@@ -351,3 +351,46 @@ def test_the_keycloak_principals_sign_in_with_the_scope_the_spa_is_built_with():
     (scope,) = re.findall(r'VITE_OIDC_SCOPE\s*=\s*"([^"]*)"', outputs)
 
     assert keycloak_model.SPA_SCOPE == scope
+
+
+class TestOperatorPrincipal:
+    def test_descope_reuses_the_admin_token_and_failure_cache(self, monkeypatch):
+        provider = providers.DescopeProvider(UNREACHABLE, UNREACHABLE)
+        calls = []
+        monkeypatch.setattr(provider, "_new_token", lambda principal: calls.append(principal) or "admin-token")
+
+        assert provider.access_token(providers.OPERATOR, None) == provider.access_token(providers.ADMIN, None)
+        assert calls == [providers.ADMIN]
+        assert provider.headers(providers.OPERATOR) == provider.headers(providers.ADMIN) == {}
+
+    def test_keycloak_operator_is_separate_and_does_not_select_a_tenant(self, monkeypatch):
+        provider = providers.KeycloakProvider(UNREACHABLE, UNREACHABLE)
+        linked = _jwt({"exp": 2_000_000_000, "sub": "linked"})
+        operator = _jwt({"exp": 2_000_000_000, "sub": "operator"})
+        calls = []
+        monkeypatch.setattr(provider, "_sign_in", lambda: calls.append("linked") or linked)
+        monkeypatch.setattr(provider, "_sign_in_operator", lambda: calls.append("operator") or operator)
+
+        assert provider.access_token(providers.ADMIN, None) == linked
+        assert provider.access_token(providers.OPERATOR, None) == operator
+        assert provider.access_token(providers.OPERATOR, None) == operator
+        assert provider.headers(providers.OPERATOR) == {}
+        assert calls == ["linked", "operator"]
+
+    def test_keycloak_failed_operator_login_does_not_poison_admin(self, monkeypatch):
+        provider = providers.KeycloakProvider(UNREACHABLE, UNREACHABLE)
+        calls = []
+        monkeypatch.setattr(provider, "_sign_in_operator", TestAFailedSignInIsNotRetried._failing(calls))
+        monkeypatch.setattr(provider, "_sign_in", lambda: _jwt({"exp": 2_000_000_000}))
+
+        with pytest.raises(RuntimeError, match="invalid_client"):
+            provider.access_token(providers.OPERATOR, None)
+        with pytest.raises(providers.EarlierSignInFailed):
+            provider.access_token(providers.OPERATOR, None)
+        assert provider.access_token(providers.ADMIN, None)
+        assert calls == ["sign_in"]
+
+    def test_zitadel_operator_is_not_silently_a_tenant_admin(self):
+        provider = providers.ZitadelProvider(UNREACHABLE, UNREACHABLE)
+        with pytest.raises(pytest.fail.Exception, match="Zitadel.*operator.*#710"):
+            provider.access_token(providers.OPERATOR, None)
