@@ -6,15 +6,20 @@ those rows loaded and the session usable: the committed change answers with
 ``provider_sync: failed`` (or logs), it does not raise.
 """
 
+import asyncio
 import logging
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 from sqlalchemy import delete, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker, create_async_engine
 
-from app.dependencies.keycloak_sync import RepositoryKeycloakLinks
+from app.dependencies import keycloak_sync
+from app.dependencies.keycloak_sync import ORGANIZATION_LOCK_NAMESPACE, RepositoryKeycloakLinks, UncommittedWorkLost
 from app.models.identity.assignment import UserTenantRole
 from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.role import Role
@@ -25,8 +30,9 @@ from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
 from app.repositories.tenant import TenantRepository
 from app.repositories.user import UserRepository
+from app.services.adapters import keycloak as keycloak_adapter
 from app.services.adapters.base import PROVIDER_SYNC, PROVIDER_SYNC_FAILED
-from app.services.adapters.keycloak import PROVIDER_NAME, KeycloakSyncAdapter, LinkRefused
+from app.services.adapters.keycloak import PROVIDER_NAME, KeycloakSyncAdapter, LinkRefused, LocalDatabaseError
 from app.services.memberships import restore_memberships
 from app.services.user import UserService
 
@@ -194,3 +200,309 @@ async def test_a_link_a_sign_in_wrote_meanwhile_counts_as_written_or_is_refused(
         async with sessions(async_engine)() as cleanup:
             await cleanup.execute(delete(IdPLink).where(IdPLink.external_sub == sub))
             await cleanup.commit()
+
+
+async def dropping_read(self, user_id: uuid.UUID, provider_name: str, *origins) -> str | None:
+    """The request's connection drops under the read: Postgres ends its backend, as a failover or reset does."""
+    await self._session.execute(text("SELECT pg_terminate_backend(pg_backend_pid())"))
+    return None
+
+
+CONNECTION_LOST = "the IdP link read failed in the service's database: the connection was lost (DBAPIError)"
+
+
+async def test_restoring_memberships_whose_connection_drops_logs_each_and_leaves_the_session_usable(
+    async_engine, members, monkeypatch, caplog
+):
+    tenant, role, users = members
+    monkeypatch.setattr(IdPLinkRepository, "sub_made_by", dropping_read)
+    caplog.set_level(logging.WARNING, logger="app.services.memberships")
+
+    async with sessions(async_engine)() as session:
+        await restore_memberships(
+            UserTenantRoleRepository(session), adapter(session), [(user.id, tenant.id) for user in users]
+        )
+        still_answers = (await session.execute(text("SELECT 1"))).scalar_one()
+
+    logged = [record.getMessage() for record in caplog.records if record.name == "app.services.memberships"]
+    expected = f"IdP sync failed for role {role.id} (restore_membership): {CONNECTION_LOST}"
+    assert (logged, still_answers) == ([expected, expected], 1)
+
+
+async def test_a_deactivation_whose_connection_drops_answers_provider_sync_failed(async_engine, members, monkeypatch):
+    tenant, _role, users = members
+    user = users[0]
+    monkeypatch.setattr(IdPLinkRepository, "sub_made_by", dropping_read)
+
+    async with sessions(async_engine)() as session:
+        service = UserService(repository=UserRepository(session), adapter=adapter(session), publisher=AsyncMock())
+        result = await service.deactivate_user(tenant_id=tenant.id, user_id=user.id)
+        still_answers = (await session.execute(text("SELECT 1"))).scalar_one()
+
+    assert result.is_ok()
+    assert (result.ok["id"], result.ok["status"], result.ok[PROVIDER_SYNC], still_answers) == (
+        user.id,
+        UserStatus.inactive,
+        PROVIDER_SYNC_FAILED,
+        1,
+    )
+
+
+async def test_a_lost_connection_under_an_unflushed_change_rolls_it_back_and_says_so(
+    async_engine, members, monkeypatch
+):
+    tenant, _role, users = members
+    monkeypatch.setattr(IdPLinkRepository, "sub_made_by", dropping_read)
+
+    async with sessions(async_engine)() as session:
+        row = await TenantRepository(session).get(tenant.id)
+        row.name = "renamed, not committed"
+        with pytest.raises(UncommittedWorkLost) as lost:
+            await RepositoryKeycloakLinks(session).linked_subject(users[0].id)
+        await session.commit()
+    async with sessions(async_engine)() as check:
+        held = (await TenantRepository(check).get(tenant.id)).name
+
+    assert (str(lost.value), held) == (
+        f"{CONNECTION_LOST}; the request's uncommitted changes were rolled back",
+        tenant.name,
+    )
+
+
+@pytest.mark.parametrize("flushed", [False, True], ids=["pending", "flushed"])
+async def test_a_lost_connection_under_an_uncommitted_row_rolls_it_back_and_says_so(
+    async_engine, members, monkeypatch, flushed
+):
+    _tenant, _role, users = members
+    monkeypatch.setattr(IdPLinkRepository, "sub_made_by", dropping_read)
+    added = Tenant(id=uuid.uuid4(), name=f"tenant-{uuid.uuid4().hex[:8]}")
+
+    async with sessions(async_engine)() as session:
+        session.add(added)
+        if flushed:
+            await session.flush()
+        with pytest.raises(UncommittedWorkLost):
+            await RepositoryKeycloakLinks(session).linked_subject(users[0].id)
+        await session.commit()
+    async with sessions(async_engine)() as check:
+        held = await TenantRepository(check).get(added.id)
+
+    assert held is None
+
+
+async def dropping_update(self, entity):
+    await self._session.execute(text("SELECT pg_terminate_backend(pg_backend_pid())"))
+    return entity
+
+
+async def test_a_link_write_that_loses_the_connection_leaves_the_requests_rows_as_committed(
+    async_engine, members, keycloak_provider, monkeypatch
+):
+    tenant, _role, _users = members
+    monkeypatch.setattr(TenantRepository, "update", dropping_update)
+
+    async with sessions(async_engine)() as session:
+        row = await TenantRepository(session).get(tenant.id)
+        with pytest.raises(LocalDatabaseError) as failure:
+            await RepositoryKeycloakLinks(session).link_organization(tenant.id, "organization")
+        loaded = (row.name, row.external_org_id, row.external_org_provider_id)
+        still_answers = (await session.execute(text("SELECT 1"))).scalar_one()
+
+    assert (str(failure.value), loaded, still_answers) == (
+        "the tenant link write failed in the service's database: the connection was lost (DBAPIError)",
+        (tenant.name, None, None),
+        1,
+    )
+
+
+async def test_a_push_whose_pooled_connection_went_stale_after_the_commit_is_a_sync_error(async_engine, members):
+    """The push's first statement finds the connection dead (no pre-ping): a sync error, not UncommittedWorkLost."""
+    tenant, _role, users = members
+    pooled = create_async_engine(async_engine.url, pool_size=1, max_overflow=0)
+    try:
+        async with sessions(pooled)() as session, async_engine.connect() as other:
+            user = await UserRepository(session).get(users[0].id)
+            pid = (await session.execute(text("SELECT pg_backend_pid()"))).scalar_one()
+            await session.commit()
+            await other.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+            result = await adapter(session).sync_tenant(tenant_id=tenant.id, data={"name": "organization"})
+            after = (user.email, (await session.execute(text("SELECT 1"))).scalar_one())
+    finally:
+        await pooled.dispose()
+
+    assert result.is_error()
+    assert result.error.message.startswith(
+        "the tenant link read failed in the service's database: "
+        f"{keycloak_sync.DatabaseFailure.CONNECTION_LOST.value} ("
+    )
+    assert result.error.message.endswith(")")
+    assert after == (users[0].email, 1)
+
+
+def tenant_read_running(*statements: str):
+    """A tenant read that runs ``statements`` in the request's session (the read's savepoint)."""
+
+    async def read(self, tenant_id: uuid.UUID) -> Tenant | None:
+        for statement in statements:
+            await self._session.execute(text(statement))
+        return None
+
+    return read
+
+
+HELD_LOCK_KEY = 632_633
+
+
+@pytest.fixture
+async def held_lock(async_engine):
+    """An advisory lock another session holds for the test."""
+    async with async_engine.connect() as holder:
+        await holder.execute(text("SELECT pg_advisory_lock(:key)"), {"key": HELD_LOCK_KEY})
+        yield
+        await holder.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": HELD_LOCK_KEY})
+
+
+@pytest.mark.parametrize(
+    ("statements", "named"),
+    [
+        pytest.param(
+            ("SET LOCAL lock_timeout = '50ms'", f"SELECT pg_advisory_xact_lock({HELD_LOCK_KEY})"),
+            "a lock was not taken within lock_timeout (DBAPIError)",
+            id="lock_timeout",
+        ),
+        pytest.param(
+            ("SET LOCAL statement_timeout = '50ms'", "SELECT pg_sleep(5)"),
+            "the statement was canceled (DBAPIError)",
+            id="statement_timeout",
+        ),
+        pytest.param(("SELECT * FROM no_such_table",), "ProgrammingError", id="other"),
+    ],
+)
+async def test_a_tenant_link_read_that_fails_is_named_by_its_sqlstate_and_leaves_the_session_usable(
+    async_engine, held_lock, monkeypatch, statements, named
+):
+    monkeypatch.setattr(TenantRepository, "get", tenant_read_running(*statements))
+    tenant_id = uuid.uuid4()
+
+    async with sessions(async_engine)() as session:
+        result = await adapter(session).sync_tenant(tenant_id=tenant_id, data={"name": "organization"})
+        still_answers = (await session.execute(text("SELECT 1"))).scalar_one()
+
+    assert result.is_error()
+    assert (result.error.message, still_answers) == (
+        f"the tenant link read failed in the service's database: {named}",
+        1,
+    )
+
+
+# --- the organization lock (a push that reads an organization and sends it back) ---
+
+
+@asynccontextmanager
+async def organization_held(async_engine, tenant: Tenant) -> AsyncIterator[AsyncConnection]:
+    """The lock of the tenant's organization (its alias: the tenant id), held by another connection."""
+    async with async_engine.connect() as holder, holder.begin():
+        statement = text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))")
+        await holder.execute(statement, {"key": ORGANIZATION_LOCK_NAMESPACE + str(tenant.id)})
+        yield holder
+
+
+async def _waiting_for(connection, tenant: Tenant) -> int:
+    """The backend that waits on the tenant's organization lock, once one does."""
+    statement = text(
+        "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+        " AND ((classid::bigint << 32) | objid::bigint) = hashtextextended(:key, 0)"
+    )
+    with anyio.fail_after(10):
+        while (
+            pid := (await connection.execute(statement, {"key": ORGANIZATION_LOCK_NAMESPACE + str(tenant.id)})).scalar()
+        ) is None:
+            await asyncio.sleep(0.02)
+    return pid
+
+
+def _lock_warnings(caplog) -> list[str]:
+    return [record.getMessage() for record in caplog.records if record.name == "app.dependencies.keycloak_sync"]
+
+
+async def test_a_connection_lost_waiting_on_the_organization_lock_is_a_sync_error_and_the_session_stays_usable(
+    async_engine, members, caplog
+):
+    tenant, _role, users = members
+    caplog.set_level(logging.WARNING, logger="app.dependencies.keycloak_sync")
+
+    async with organization_held(async_engine, tenant) as holder, sessions(async_engine)() as session:
+        user = await UserRepository(session).get(users[0].id)
+        await session.commit()
+
+        async def kill_the_waiter() -> None:
+            pid = await _waiting_for(holder, tenant)
+            await holder.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+
+        result, _ = await asyncio.gather(
+            adapter(session).sync_tenant(tenant_id=tenant.id, data={"name": "organization"}), kill_the_waiter()
+        )
+        after = (user.email, (await session.execute(text("SELECT 1"))).scalar_one())
+
+    assert result.is_error()
+    assert (result.error.message, after, _lock_warnings(caplog)) == (
+        "the organization lock failed in the service's database: the connection was lost (DBAPIError)",
+        (users[0].email, 1),
+        [],
+    )
+
+
+async def test_an_organization_lock_wait_that_runs_out_is_named_a_lock_timeout(
+    async_engine, members, monkeypatch, caplog
+):
+    tenant, _role, _users = members
+    monkeypatch.setattr(keycloak_sync, "ORGANIZATION_LOCK_TIMEOUT_MS", 100)
+    caplog.set_level(logging.WARNING, logger="app.dependencies.keycloak_sync")
+
+    async with organization_held(async_engine, tenant), sessions(async_engine)() as session:
+        result = await adapter(session).sync_tenant(tenant_id=tenant.id, data={"name": "organization"})
+        still_answers = (await session.execute(text("SELECT 1"))).scalar_one()
+
+    assert result.is_error()
+    assert (result.error.message, still_answers, _lock_warnings(caplog)) == (
+        "the organization lock failed in the service's database: a lock was not taken within lock_timeout (DBAPIError)",
+        1,
+        [],
+    )
+
+
+async def test_a_push_cancelled_waiting_on_the_organization_lock_leaves_the_session_usable(async_engine, members):
+    tenant, _role, users = members
+
+    async with organization_held(async_engine, tenant), sessions(async_engine)() as session:
+        user = await UserRepository(session).get(users[0].id)
+        await session.commit()
+        with anyio.move_on_after(0.3) as waited:
+            await adapter(session).sync_tenant(tenant_id=tenant.id, data={"name": "organization"})
+        after = (user.email, (await session.execute(text("SELECT 1"))).scalar_one())
+
+    assert (waited.cancelled_caught, after) == (True, (users[0].email, 1))
+
+
+async def test_keycloak_calls_past_the_deadline_under_the_lock_leave_the_session_usable(
+    async_engine, members, monkeypatch
+):
+    tenant, _role, users = members
+    monkeypatch.setattr(keycloak_adapter, "ORGANIZATION_HOLD_SECONDS", 0.1)
+
+    async def slow_find(alias: str) -> dict:
+        await anyio.sleep(5)
+        return {"id": "organization-id"}
+
+    async with sessions(async_engine)() as session:
+        user = await UserRepository(session).get(users[0].id)
+        await session.commit()
+        api = AsyncMock()
+        api.find_organization.side_effect = slow_find
+        result = await KeycloakSyncAdapter(api, RepositoryKeycloakLinks(session)).sync_tenant(
+            tenant_id=tenant.id, data={"name": "organization"}
+        )
+        after = (user.email, (await session.execute(text("SELECT 1"))).scalar_one())
+
+    assert result.is_error()
+    assert (result.error.context["status"], after) == (None, (users[0].email, 1))

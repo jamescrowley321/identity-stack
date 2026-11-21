@@ -10,11 +10,14 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from enum import StrEnum
 from typing import TypeVar
 
+import anyio
 import sqlalchemy as sa
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.logbook import logbook
 from app.models.identity.user import LINK_ORIGIN, LINKED_AT_SIGN_IN, LINKED_BY_BACKEND, IdPLink
@@ -51,6 +54,9 @@ ORGANIZATION_LOCK_NAMESPACE = "keycloak-organization:"
 ORGANIZATION_LOCK_MARGIN_SECONDS = 5
 ORGANIZATION_LOCK_TIMEOUT_MS = round((ORGANIZATION_HOLD_SECONDS + ORGANIZATION_LOCK_MARGIN_SECONDS) * 1000)
 
+# Every row the session had loaded, with its loaded values: what a rollback expires.
+Loaded = list[tuple[object, dict[str, object]]]
+
 # The link origins the adapter follows to a Keycloak account, as the Zitadel
 # adapter's: a sign-in's, and the backend's own (an account the adapter created,
 # or one an operator's seed names). An admin-made link is not followed: the admin
@@ -59,18 +65,61 @@ ORGANIZATION_LOCK_TIMEOUT_MS = round((ORGANIZATION_HOLD_SECONDS + ORGANIZATION_L
 FOLLOWED_LINK_ORIGINS = frozenset({LINKED_AT_SIGN_IN, LINKED_BY_BACKEND})
 
 
+class DatabaseFailure(StrEnum):
+    """What a database failure under a push was, as its message names it."""
+
+    CONNECTION_LOST = "the connection was lost"
+    LOCK_TIMEOUT = "a lock was not taken within lock_timeout"
+    QUERY_CANCELED = "the statement was canceled"
+
+
+# SQLSTATEs (Postgres, appendix A) a failure is named by.
+_FAILURE_BY_SQLSTATE = {
+    "55P03": DatabaseFailure.LOCK_TIMEOUT,  # lock_not_available
+    "57014": DatabaseFailure.QUERY_CANCELED,  # query_canceled: statement_timeout, a cancel request
+}
+
+
+def connection_lost(exc: BaseException) -> bool:
+    """``exc`` dropped the session's connection: SQLAlchemy invalidated it, and the transaction with it."""
+    return isinstance(exc, DBAPIError) and exc.connection_invalidated
+
+
+def database_failure(exc: BaseException) -> DatabaseFailure | None:
+    """The kind of ``exc``, from the driver's SQLSTATE; ``None`` for any other failure."""
+    if connection_lost(exc):
+        return DatabaseFailure.CONNECTION_LOST
+    if isinstance(exc, DBAPIError):
+        return _FAILURE_BY_SQLSTATE.get(getattr(exc.orig, "sqlstate", None))
+    return None
+
+
 def failed(what: str, exc: BaseException) -> str:
-    """A LocalDatabaseError's message: the exception's type only, never the statement or its parameters."""
-    return f"{what} failed in the service's database: {type(exc).__name__}"
+    """A LocalDatabaseError's message: the failure's kind and type, never the statement or its parameters."""
+    kind = database_failure(exc)
+    detail = type(exc).__name__ if kind is None else f"{kind.value} ({type(exc).__name__})"
+    return f"{what} failed in the service's database: {detail}"
+
+
+class UncommittedWorkLost(Exception):
+    """A push's database failure rolled back changes the request had not committed.
+
+    Not a ``LocalDatabaseError``: the adapter does not turn it into a sync error,
+    so the request fails rather than answer for changes that were not made.
+    """
 
 
 class RepositoryKeycloakLinks(KeycloakLinks):
     """The adapter's canonical side, in the request's session.
 
     Reads run in a savepoint of the request's transaction: a failure rolls back
-    the savepoint only, so the rows the request loaded stay loaded. Each write
-    commits, and one that fails is rolled back: the service has already committed
-    its own change. A database failure is ``LocalDatabaseError``; a write the
+    the savepoint only, so the rows the request loaded stay loaded. A read that
+    loses the connection rolls back the transaction the loss ended, so the
+    request's later statements run on a new connection. Each write commits, and
+    one that fails is rolled back: the service has already committed its own
+    change. After either rollback the rows the request loaded stay loaded; when
+    the request had changes it had not committed, the rollback undid them and
+    ``UncommittedWorkLost`` is raised. A database failure is ``LocalDatabaseError``; a write the
     canonical side refuses is ``LinkRefused``.
     """
 
@@ -82,10 +131,14 @@ class RepositoryKeycloakLinks(KeycloakLinks):
         self._roles = RoleRepository(session)
 
     async def _read(self, what: str, read: Callable[[], Awaitable[T]]) -> T:
+        loaded: Loaded | None = None
         try:
+            loaded = await self._loaded()
             async with self._session.begin_nested():
                 return await read()
         except DATABASE_FAILURES as exc:
+            if connection_lost(exc):
+                await self._recover(loaded, what, exc)
             raise LocalDatabaseError(failed(what, exc)) from exc
 
     async def _provider_id(self) -> uuid.UUID | None:
@@ -144,11 +197,17 @@ class RepositoryKeycloakLinks(KeycloakLinks):
         The wait is bounded by ``ORGANIZATION_LOCK_TIMEOUT_MS`` (``lock_timeout``, local
         to the savepoint). A wait that runs out, or any database failure taking the
         lock, is ``LocalDatabaseError``. A failure releasing it is logged: the lock ends
-        with the request's transaction at the latest.
+        with the request's transaction at the latest. A lost connection (a failure, or
+        a cancellation mid-statement) rolls back the request's transaction instead, as
+        a read's does, so the request's later statements run on a new connection.
         """
+        loaded: Loaded | None = None
         try:
+            loaded = await self._loaded()
             savepoint = await self._session.begin_nested()
         except DATABASE_FAILURES as exc:
+            if connection_lost(exc):
+                await self._recover(loaded, "the organization lock", exc)
             raise LocalDatabaseError(failed("the organization lock", exc)) from exc
         try:
             await self._session.execute(
@@ -160,20 +219,25 @@ class RepositoryKeycloakLinks(KeycloakLinks):
                 )
             )
         except DATABASE_FAILURES as exc:
-            await _release(savepoint, alias)
+            if connection_lost(exc):
+                await self._recover(loaded, "the organization lock", exc)
+            else:
+                await self._release(savepoint, alias, loaded)
             raise LocalDatabaseError(failed("the organization lock", exc)) from exc
         except BaseException:
             # A cancellation mid-wait: leave no savepoint holding the lock or lock_timeout.
-            await _release(savepoint, alias)
+            await self._release(savepoint, alias, loaded)
             raise
         try:
             yield
         finally:
-            await _release(savepoint, alias)
+            await self._release(savepoint, alias, loaded)
 
     async def link_organization(self, tenant_id: uuid.UUID, alias: str) -> None:
         """Record ``alias`` as the tenant's organization. A tenant linked to anything else is refused."""
+        loaded: Loaded | None = None
         try:
+            loaded = await self._loaded()
             provider_id = await self._provider_id()
             if provider_id is None:
                 raise LinkRefused(f"no {PROVIDER_NAME!r} provider row: run the Keycloak seed first")
@@ -189,15 +253,17 @@ class RepositoryKeycloakLinks(KeycloakLinks):
             await self._tenants.update(tenant)
             await self._tenants.commit()
         except RepositoryConflictError as exc:
-            await self._rollback()
+            await self._recover(loaded, "the tenant link write", exc)
             raise LinkRefused(f"tenant {tenant_id} could not be linked: another write conflicts") from exc
         except DATABASE_FAILURES as exc:
-            await self._rollback()
+            await self._recover(loaded, "the tenant link write", exc)
             raise LocalDatabaseError(failed("the tenant link write", exc)) from exc
 
     async def link_user(self, user_id: uuid.UUID, sub: str, email: str) -> None:
         """Link the user to the account the adapter created; the same link already there counts as written."""
+        loaded: Loaded | None = None
         try:
+            loaded = await self._loaded()
             provider_id = await self._provider_id()
             if provider_id is None:
                 raise LinkRefused(f"no {PROVIDER_NAME!r} provider row: run the Keycloak seed first")
@@ -218,7 +284,7 @@ class RepositoryKeycloakLinks(KeycloakLinks):
             await self._idp_links.commit()
         except RepositoryConflictError as exc:
             # A sign-in or a concurrent push wrote a link first: the same one counts as written.
-            await self._rollback()
+            await self._recover(loaded, "the IdP link write", exc)
             existing = await self._read(
                 "the IdP link read", lambda: self._idp_links.get_by_provider_and_sub(provider_id, sub)
             )
@@ -226,27 +292,94 @@ class RepositoryKeycloakLinks(KeycloakLinks):
                 return
             raise LinkRefused("the user or the Keycloak account already has another link") from exc
         except DATABASE_FAILURES as exc:
-            await self._rollback()
+            await self._recover(loaded, "the IdP link write", exc)
             raise LocalDatabaseError(failed("the IdP link write", exc)) from exc
+
+    async def _loaded(self) -> Loaded | None:
+        """The rows the session has loaded, to put back after a rollback; ``None`` with work not committed.
+
+        Work not committed is a change not flushed yet, or any write the open
+        transaction made (Postgres assigns a transaction id at its first write,
+        whether the ORM or a statement of the request's made it). With no
+        transaction open, as after the service's commit, there is none to ask
+        about: no statement is run, so a stale connection fails the push's own
+        statement, not this one.
+        """
+        session = self._session.sync_session
+        if session.new or session.deleted or any(session.is_modified(row) for row in session.dirty):
+            return None
+        if self._session.in_transaction() and await self._providers.transaction_has_written():
+            return None
+        return [
+            (row, {attr.key: attr.loaded_value for attr in state.attrs if attr.key not in state.unloaded})
+            for state in session.identity_map.all_states()
+            if (row := state.obj()) is not None
+        ]
+
+    async def _recover(self, loaded: Loaded | None, what: str, exc: BaseException) -> None:
+        """Roll back the request's transaction and put back the rows ``loaded`` holds.
+
+        A rollback expires every loaded row, and an expired row cannot load
+        again outside an await. With no work of the request's uncommitted, a
+        loaded row holds what the database holds. ``loaded`` is ``None`` when
+        there was such work (or it could not be told): the rollback undid it,
+        and ``UncommittedWorkLost`` says so.
+        """
+        await self._rollback()
+        if loaded is None:
+            raise UncommittedWorkLost(
+                f"{failed(what, exc)}; the request's uncommitted changes were rolled back"
+            ) from exc
+        _put_back(loaded)
+
+    async def _release(self, savepoint: AsyncSessionTransaction, alias: str, loaded: Loaded | None) -> None:
+        """Roll the organization lock's savepoint back, which releases the lock; never raises.
+
+        Shielded: it runs as a cancellation unwinds, too. When the savepoint
+        cannot be rolled back (the connection lost, or a cancellation
+        mid-statement left it unusable), the request's transaction is rolled
+        back whole, which releases the lock as well, and the rows ``loaded``
+        holds are put back. With work not committed, that the rollback undid it
+        is logged: the cancellation or the push's own error is what propagates.
+        """
+        with anyio.CancelScope(shield=True):
+            if await self._savepoint_rolled_back(savepoint, alias):
+                return
+            await self._rollback()
+            if loaded is None:
+                logger.warning(
+                    "Keycloak organization lock for %s: the request's uncommitted changes were rolled back", alias
+                )
+            else:
+                _put_back(loaded)
+
+    async def _savepoint_rolled_back(self, savepoint: AsyncSessionTransaction, alias: str) -> bool:
+        """Roll ``savepoint`` back; ``False`` when its connection is lost or the rollback fails."""
+        try:
+            if (await self._session.connection()).invalidated:
+                return False
+            if savepoint.is_active:
+                await savepoint.rollback()
+        except DATABASE_FAILURES as exc:
+            logger.info(
+                "Keycloak organization lock for %s: the savepoint rollback failed: %s", alias, type(exc).__name__
+            )
+            return False
+        return True
 
     async def _rollback(self) -> None:
         try:
             await self._session.rollback()
         except DATABASE_FAILURES as exc:
-            # The write's own failure is what the push reports.
-            logger.warning("Keycloak link write: the rollback failed too: %s", type(exc).__name__)
+            # The failure that called for the rollback is what the push reports.
+            logger.warning("Keycloak link: the rollback failed too: %s", type(exc).__name__)
 
 
-async def _release(savepoint: AsyncSessionTransaction, alias: str) -> None:
-    """Roll the organization lock's savepoint back, which releases the lock; a failure is logged, never raised."""
-    try:
-        await savepoint.rollback()
-    except DATABASE_FAILURES as exc:
-        logger.warning(
-            "Keycloak organization lock for %s not released before the request's transaction ends: %s",
-            alias,
-            type(exc).__name__,
-        )
+def _put_back(loaded: Loaded) -> None:
+    """Put each row's loaded values back as committed, which a rollback expired."""
+    for row, values in loaded:
+        for key, value in values.items():
+            set_committed_value(row, key, value)
 
 
 def build_keycloak_sync_adapter(api: KeycloakAdminApi, session: AsyncSession) -> KeycloakSyncAdapter:
