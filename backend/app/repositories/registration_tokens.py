@@ -29,7 +29,12 @@ class RegistrationTokenUnreadable(RuntimeError):
 
 
 class RegistrationTokenCipher:
-    """Seals and opens registration tokens. An empty token (none stored) stays empty."""
+    """Seals and opens registration tokens. An empty token (none stored) stays empty.
+
+    The first key seals; every key opens (MultiFernet). The cipher keeps its
+    MultiFernet instance and the primary ``Fernet`` so helpers can use the
+    first key directly without relying on MultiFernet internals.
+    """
 
     def __init__(self, keys: list[str]) -> None:
         if not keys:
@@ -41,12 +46,32 @@ class RegistrationTokenCipher:
                 f"{KEYS_VARIABLE} holds a value that is not a Fernet key (32 url-safe base64-encoded bytes)"
             ) from exc
         self._fernet = MultiFernet(fernets)
+        self._primary = fernets[0]
 
     def __repr__(self) -> str:
         return "RegistrationTokenCipher(<keys hidden>)"
 
     def seal(self, token: str) -> str:
+        """Seal with the configured MultiFernet (first key seals; all keys open)."""
         return self._fernet.encrypt(token.encode()).decode() if token else ""
+
+    def primary_seal(self, token: str) -> str:
+        """Seal with the first configured key only.
+
+        Used by data-migration tools that need to place every token under the
+        current primary key without depending on MultiFernet internals.
+        """
+        return self._primary.encrypt(token.encode()).decode() if token else ""
+
+    def opens_with_primary(self, sealed: str) -> bool:
+        """Whether the sealed value can be opened by the first configured key alone."""
+        if not sealed:
+            return False
+        try:
+            self._primary.decrypt(sealed.encode())
+        except InvalidToken:
+            return False
+        return True
 
     def open(self, sealed: str) -> str:
         if not sealed:

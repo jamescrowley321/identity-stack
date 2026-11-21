@@ -278,10 +278,67 @@ people hold which roles or relations, or belong to its tenant.
 
 | Limit | What happens |
 |---|---|
-| The registration access token on each row is stored in plaintext (`machine_credentials.registration_token`): the backend has no encryption key for data at rest. With it, Keycloak's client registration endpoint returns the client's secret and changes the client (its flows, redirect URIs, secret). | Keep the database like a secret store. A token of a machine client whose `sub` is not the credential's grants nothing. Encrypting it at rest is a follow-up. |
+| The registration access token on each row holds the client's secret at rest (`machine_credentials.registration_token`): Keycloak's client registration endpoint returns the client's secret and changes the client (its flows, redirect URIs, secret). | The token is sealed with Fernet under `KEYCLOAK_REGISTRATION_TOKEN_KEYS` before it is written and opened only to delete the client; neither the keys nor the tokens are ever logged. Keep the database like a secret store: a token of a machine client whose `sub` is not the credential's grants nothing. |
 | `allowedProtocolMapperTypesForClientAdministrators` lets the admin client add an `oidc-audience-mapper` to the API client too, which Keycloak refuses without it (probed, `keycloak/fixtures/README.md`). | It is the one type named, and the API client has no flow on, so no token of it reaches the SPA's users. |
 | Keycloak logs that the `default` client registration provider is deprecated (`KC-SERVICES0112`) on each registration. | It works on 26.8.2. A Keycloak that removes it fails the create with a provider error; the alternative is an Admin API path that does not grant `manage` on every client. |
 | Keycloak has no expiry for a client. | The backend refuses a credential's tokens after its expiry; the client stays until the credential is deleted. |
+
+### Rotating `KEYCLOAK_REGISTRATION_TOKEN_KEYS`
+
+`KEYCLOAK_REGISTRATION_TOKEN_KEYS` is a comma-separated list of Fernet keys. The first seals and
+every listed key opens, so a new key goes first and the old ones stay listed while any row is
+still sealed under them. A safe rotation needs both a clean reseal run and a rollout that puts
+**every writer** of machine credentials on the new first key.
+
+The reseal script, `python -m scripts.reseal_keycloak_registration_tokens` (run from `backend/`
+with `DATABASE_URL` and `KEYCLOAK_REGISTRATION_TOKEN_KEYS` set), reads every non-empty
+`machine_credentials.registration_token` for the `keycloak` provider and:
+
+1. **First pass (reseal):** for each token that does *not* open under the first key, it tries to
+   open it under the configured key set and, when it can, reseals it under the first key using a
+   compare-and-set on the stored ciphertext (`WHERE id = ? AND registration_token = ?`). Tokens
+   that open under no configured key are counted as unreadable and left untouched, so delete
+   keeps `UNREADABLE_REGISTRATION_TOKEN` semantics.
+2. **Commit:** all reseal updates are made in *one* database transaction. The script calls
+   `commit()` once after the first pass. Writes to the same rows from the backend may block on
+   row locks until that commit; reads continue under MVCC snapshots.
+3. **Second pass (classification):** it reads the tokens again and classifies them as primary
+   (open under the first key), non-primary (still open only under a later key) or unreadable. A
+   token that changed between the snapshot and the reseal update and remained non-primary is
+   reported as a compare-and-set conflict.
+
+The script prints a summary and exits with:
+
+- **1** when `KEYCLOAK_REGISTRATION_TOKEN_KEYS` is unset or invalid, without touching any row.
+- **0** only when `remaining_non_primary`, `remaining_unreadable` and `cas_conflicts` are all
+  zero.
+- **2** otherwise (`INCOMPLETE: safe completion not established`).
+
+A clean scan (exit 0) shows that, at the end of the run, no stored registration token opens only
+under a non-primary key and none is unreadable under the configured key set. It does **not** prove
+that all running backend instances are using the new first key or that no new old-key tokens can
+appear afterwards.
+
+A safe rolling rotation therefore runs as:
+
+1. **Generate a new Fernet key B** out of band and keep it secret. Never log or commit the key.
+2. **Set `KEYCLOAK_REGISTRATION_TOKEN_KEYS` to `B,A`** (or `B,A,...`) on every backend instance,
+   with B first and all old keys still listed. Roll this configuration out to **all writers of
+   machine credentials** and verify that each instance has restarted on the new value.
+3. **Run the reseal script** once against the production database, in the same environment
+   (`KEYCLOAK_REGISTRATION_TOKEN_KEYS=B,A`). Inspect its summary:
+   - When it exits 2 or reports any `remaining_non_primary`, `remaining_unreadable` or
+     `cas_conflicts`, keep A listed, resolve the misconfiguration or concurrent writer and repeat
+     after the rollout is fixed.
+   - When it exits 0 and reports all three as zero, the database holds no tokens that open only
+     under non-primary keys under the current key set.
+4. **Only after both a clean reseal run and a confirmed rollout** of `KEYCLOAK_REGISTRATION_TOKEN_KEYS=B,...`
+   to all writers may old keys be removed from `KEYCLOAK_REGISTRATION_TOKEN_KEYS` (for example,
+   to `B` alone). Redeploy that configuration to every backend instance.
+
+The tool never reveals registration tokens or keys: it works only with ciphertext in the
+database, log messages name counts and configuration variables, and the keys and tokens are
+never printed or logged.
 
 ## Event pull
 
