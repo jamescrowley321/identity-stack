@@ -212,15 +212,10 @@ RELATION_WRITE_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("DELETE", "/api/documents/{document_id}/share/{target_user_id}"),
     }
 )
-# (method, path) of the writes that decide which provider account signs in as a person.
-IDP_LINK_WRITE_ROUTES: frozenset[tuple[str, str]] = frozenset(
-    {("POST", "/api/users/{user_id}/idp-links"), ("DELETE", "/api/users/{user_id}/idp-links/{link_id}")}
-)
-
 # (method, path) of every route a machine credential's token is refused on
 # (``refuse_machine_principal``): no credential manages credentials, people's roles or
 # sign-in links, the definitions, a tenant's members or anyone's relations (#680, #683).
-MACHINE_REFUSED_ROUTES = PER_PROVIDER_ROUTES | SYNC_PROVIDER_ROUTES | RELATION_WRITE_ROUTES | IDP_LINK_WRITE_ROUTES
+MACHINE_REFUSED_ROUTES = PER_PROVIDER_ROUTES | SYNC_PROVIDER_ROUTES | RELATION_WRITE_ROUTES
 
 _NO_PRINCIPAL = "takes no principal: guarded by a shared secret, not a token"
 # (method, path) -> why a write a machine credential's token may reach changes no
@@ -311,11 +306,6 @@ GLOBAL_ROLE_ROUTES: frozenset[tuple[str, str]] = frozenset(
 # (method, path) -> why a route gated by ``require_role`` or ``require_permission``
 # takes no tenant from ``get_tenant_id`` and carries no guard.
 SELF_SCOPED_ROLE_ROUTES: dict[tuple[str, str], str] = {
-    ("GET", "/api/users/{user_id}/idp-links"): "_require_user_in_tenant holds the user to the token's dct (#590)",
-    ("POST", "/api/users/{user_id}/idp-links"): "_require_user_in_tenant holds the user to the token's dct (#590)",
-    ("DELETE", "/api/users/{user_id}/idp-links/{link_id}"): (
-        "_require_user_in_tenant holds the user to the token's dct (#590)"
-    ),
     ("GET", "/api/access-checks/admin-role"): (
         "answers back the roles require_role resolved in the request's tenant: the handler calls no provider "
         "and reads no table"

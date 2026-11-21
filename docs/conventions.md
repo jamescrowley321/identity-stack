@@ -290,8 +290,6 @@ handler **MUST NOT** read the `dct` claim to find its tenant. It takes the tenan
 - Exception: `routers/protected.py::canonical_identity`, which checks principal, identity
   and claims together for one 401, and hands the request's provider to first-login
   provisioning.
-- Exception: `routers/idp_links.py::_require_user_in_tenant`, a raising guard that answers
-  404 rather than 401/403 so it does not reveal whether a user exists.
 
 *Enforcement:* test (`test_router_code_does_not_read_request_state`).
 
@@ -464,12 +462,13 @@ one role, only roles its creator holds in the tenant, and never `operator`
 so `require_global_role` would serve it every tenant's state. Such a token **MUST** be refused
 (`refuse_machine_principal`, 403 `MachinePrincipalRefused`) on every route that changes
 people's roles, memberships, credentials or relations: the `/api/keys` routes, so no credential
-mints its successor; every route of the sync provider's registers above; the relationship
+mints its successor; every route of the sync provider's registers above; and the relationship
 store's writes (`PUT /api/fga/schema`, `POST` and `DELETE /api/fga/relations`, a document's
-share and revoke), so no credential makes anyone a document's owner; and the IdP-link writes,
-which decide which account signs in as a person. `MACHINE_REFUSED_ROUTES` in
-`test_descope_backed_routes.py` lists them, and every other write of the application **MUST** be
-listed in `MACHINE_PERMITTED_WRITES` there with why a machine may make it. A Descope access-key
+share and revoke), so no credential makes anyone a document's owner. `MACHINE_REFUSED_ROUTES` in
+`test_descope_backed_routes.py` lists these HTTP routes, and every other write of the application
+**MUST** be listed in `MACHINE_PERMITTED_WRITES` there with why a machine may make it. Manual
+IdP-link management is not exposed as HTTP endpoints, and machine credentials never reach the
+internal IdP-link writes that decide which account signs in as a person. A Descope access-key
 session is not such a token: Descope has no `machine_client` reader (#699).
 
 **Capabilities.** A route that serves an optional capability of the sync adapter (`Capability`
@@ -571,9 +570,6 @@ configuration at startup (`refuse_canonical_descope_managed`).
   answers for one tenant. On OpenFGA the schema is read-only: `infra/openfga` holds the model,
   and `PUT /api/fga/schema` answers 409. A Descope principal who
   holds the role in their current tenant is served there, as before the resolver (#593).
-- Exception: the `/api/users/{user_id}/idp-links` routes are gated by `require_role` and
-  take no tenant from `get_tenant_id`. `_require_user_in_tenant` reads `dct` itself and
-  answers 404 without one (#590).
 
 *Enforcement:* review, plus tests (`test_tenant_resolution.py`, `test_rbac_dependencies.py`,
 `test_tenant_dependencies.py`, `test_descope_claim_routes.py`, which sends Keycloak, Ory
@@ -582,8 +578,8 @@ and to the tenant routes, which must not read them, `test_tenant_routes_canonica
 which serves each provider's principal its own tenants and resources and refuses another
 tenant's, `test_capabilities.py`, which holds each capability to its routes and its
 dependency first on each, `test_machine_principal.py`, which shows a machine token gets its
-credential's grants and nothing else and is refused on every `/api/keys`, role, member,
-relation-write and IdP-link-write route, and `test_descope_backed_routes.py`, which walks every route
+credential's grants and nothing else and is refused on every `/api/keys`, role, member and
+relation-write route, and `test_descope_backed_routes.py`, which walks every route
 of the application against its registers, calls each guarded route as a canonical
 principal, and calls each `require_global_role` route as an operator of one of several
 tenants who names it). `test_keycloak_canonical_authorization.py` shows a Keycloak
@@ -597,7 +593,7 @@ fails on a writer of `request.state.claims` that records no provider.
 
 SQL statements against the canonical model **MUST** be built in `app/repositories/`, and
 services **MUST NOT** build them. Routers and dependencies **SHOULD NOT** build statements
-either. They **SHOULD** construct a repository, as `routers/idp_links.py` does.
+either. They **SHOULD** construct a repository.
 
 - Exception: `routers/tenants.py`, which reads and writes the demo `TenantResource` table.
 - Exception: `routers/documents.py`, which reads and writes the demo `Document` table.
@@ -728,7 +724,7 @@ migration, one entry per context:
 
 - Exception: Directory (#515): `routers/canonical_users.py`, `routers/tenants.py`,
   `services/tenant.py`, `services/user.py`.
-- Exception: Federation (#516): `routers/idp_links.py`, `routers/providers.py`,
+- Exception: Federation (#516): `routers/providers.py`,
   `services/identity_provisioning.py`, `services/idp_link.py`, `services/provider.py`.
 - Exception: Documents and fine-grained authorization (#517): `routers/documents.py`,
   `routers/fga.py`.

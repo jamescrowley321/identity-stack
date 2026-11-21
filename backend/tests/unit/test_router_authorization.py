@@ -19,6 +19,7 @@ import pytest
 from fastapi import Depends, FastAPI
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
+from fastapi.testclient import TestClient
 
 from app.dependencies.fga import require_fga
 from app.dependencies.rbac import require_permission, require_role
@@ -73,6 +74,32 @@ def application() -> FastAPI:
     from app.main import app
 
     return app
+
+
+def test_manual_idp_link_routes_are_not_exposed(application):
+    """Identity linking remains internal until there is a safe manual workflow."""
+    exposed = {route.path for route in application.routes if isinstance(route, APIRoute)}
+    assert exposed.isdisjoint({"/api/users/{user_id}/idp-links", "/api/users/{user_id}/idp-links/{link_id}"})
+
+
+def test_manual_idp_link_paths_refuse_requests(application):
+    """Legacy manual IdP-link paths return only 4xx errors, not management responses.
+
+    Middleware may answer 401 for missing or invalid auth, and the router answers 404
+    for a path with no route; both are acceptable as long as no 2xx status is returned.
+    """
+    client = TestClient(application)
+    paths = [
+        "/api/users/00000000-0000-0000-0000-000000000000/idp-links",
+        "/api/users/00000000-0000-0000-0000-000000000000/idp-links/00000000-0000-0000-0000-000000000000",
+    ]
+    for path in paths:
+        for method in ("get", "post", "delete"):
+            response = getattr(client, method)(path)
+            assert response.status_code in (401, 404), (
+                f"{method.upper()} {path} returned {response.status_code}, "
+                "expected 401 or 404 with no manual IdP-link management",
+            )
 
 
 def test_every_tenant_scoped_route_declares_authorization(application):

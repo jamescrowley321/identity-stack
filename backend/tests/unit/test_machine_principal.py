@@ -223,15 +223,13 @@ ROLE_AND_MEMBER_ROUTES = [
 ]
 DOCUMENT = uuid.UUID(int=11)
 RELATION = {"resource_type": "document", "resource_id": str(DOCUMENT), "relation": "owner", "target": "bob"}
-# The writes that change who holds a relation, or which account signs in as a person.
+# The writes that change who holds a relation. Manual IdP-link writes are no longer exposed.
 RELATION_AND_LINK_ROUTES = [
     ("POST", "/api/fga/relations", RELATION),
     ("DELETE", "/api/fga/relations", RELATION),
     ("PUT", "/api/fga/schema", {"schema": "model\n  schema 1.1"}),
     ("POST", f"/api/documents/{DOCUMENT}/share", {"user_id": str(uuid.UUID(int=9)), "relation": "editor"}),
     ("DELETE", f"/api/documents/{DOCUMENT}/share/{uuid.UUID(int=9)}", None),
-    ("POST", f"/api/users/{uuid.UUID(int=9)}/idp-links", {"provider_id": str(uuid.UUID(int=3)), "external_sub": "x"}),
-    ("DELETE", f"/api/users/{uuid.UUID(int=9)}/idp-links/{uuid.UUID(int=4)}", None),
 ]
 
 

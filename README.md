@@ -242,7 +242,7 @@ The backend owns a canonical Postgres identity store; identity providers are syn
 |------|--------|-------------|
 | Providers | `GET`/`POST /api/providers`, `PATCH /api/providers/{id}`, `GET /api/providers/{id}/capabilities` | Register, list and deactivate IdP configurations; read a provider's capabilities (requires `operator`) |
 | Canonical Users | `GET /api/users` | List canonical users, optionally filtered by status (requires `operator`) |
-| IdP Links | `GET`/`POST /api/users/{id}/idp-links`, `DELETE /api/users/{id}/idp-links/{link_id}` | List, create and delete a canonical user's links to external identities (requires owner/admin) |
+| IdP Links | n/a (internal) | Links between canonical users and external identities; created by trusted provisioning, sync and seeding flows. Manual HTTP IdP-link endpoints are currently disabled. |
 | Sync Status | `GET /api/sync/status`, `GET /api/events/recent` | Per-provider sync state, each provider's last reconciliation pass, pending pushes and recent inbound sync events (requires `operator`) |
 | Reconciliation | `POST /api/internal/reconciliation/run` | Run a full reconciliation between Postgres and the provider it is pushed to, Descope or Keycloak (guarded by `DESCOPE_FLOW_SYNC_SECRET`) |
 | Internal sync | `POST /api/internal/users/sync`, `POST /api/internal/webhooks/descope`, `GET /api/internal/identity` | Flow sync, Descope webhooks and identity resolution, each guarded by a shared secret (see [docs/architecture.md](docs/architecture.md#sync-flows)) |
@@ -287,7 +287,7 @@ API endpoints are rate limited via [slowapi](https://github.com/laurentS/slowapi
 
 | Tier | Limit | Endpoints |
 |------|-------|-----------|
-| Auth-sensitive | 10/minute | Every route decorated with `@limiter.limit(RATE_LIMIT_AUTH)`: logout, `POST /api/validate-id-token`, the internal sync endpoints, and most write routes (keys, member invites, roles, permissions, providers, IdP links, documents, FGA) |
+| Auth-sensitive | 10/minute | Every route decorated with `@limiter.limit(RATE_LIMIT_AUTH)`: logout, `POST /api/validate-id-token`, the internal sync endpoints, and most write routes (keys, member invites, roles, permissions, providers, documents, FGA) |
 | Default | 60/minute | All other API endpoints |
 | Exempt | No limit | `GET /api/health` |
 
