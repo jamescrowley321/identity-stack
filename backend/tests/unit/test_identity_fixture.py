@@ -19,6 +19,7 @@ from tests.helpers.identity_fixture import (
     IdentityFixtureInvalid,
     load_identity_fixture,
 )
+from tests.helpers.keycloak_fixture import KEYCLOAK_IDENTITIES
 from tests.helpers.keycloak_target import REALM_IMPORT_PATH, import_users
 
 RAW = json.loads(FIXTURE_PATH.read_text())
@@ -26,7 +27,7 @@ REALM = json.loads(REALM_IMPORT_PATH.read_text())
 
 
 def _members(tenant: str) -> set[str]:
-    return {key for key, user in IDENTITIES.users.items() if tenant in user.roles}
+    return {key for key, user in KEYCLOAK_IDENTITIES.users.items() if tenant in user.roles}
 
 
 def _with(path: tuple, value) -> dict:
@@ -87,7 +88,7 @@ def test_the_realm_import_has_the_fixture_users_with_their_names_and_emails():
     }
 
     assert imported == {
-        key: (user.email, user.first_name, user.last_name, True) for key, user in IDENTITIES.users.items()
+        key: (user.email, user.first_name, user.last_name, True) for key, user in KEYCLOAK_IDENTITIES.users.items()
     }
 
 
@@ -139,7 +140,7 @@ def test_the_realm_import_records_each_members_role_as_membership_of_the_organiz
     assert imported == {
         tenant: {
             key: [user.roles[tenant]] if user.roles[tenant] else []
-            for key, user in IDENTITIES.users.items()
+            for key, user in KEYCLOAK_IDENTITIES.users.items()
             if tenant in user.roles
         }
         for tenant in IDENTITIES.tenants
@@ -195,3 +196,13 @@ def test_a_fixture_missing_a_case_is_refused():
 def test_a_fixture_that_is_not_an_object_is_refused():
     with pytest.raises(IdentityFixtureInvalid, match="must be a JSON object"):
         load_identity_fixture([])
+
+
+def test_keycloak_operator_is_scoped_and_has_one_operator_membership():
+    from tests.helpers.keycloak_fixture import KEYCLOAK_IDENTITIES, OPERATOR
+
+    assert OPERATOR.key not in IDENTITIES.users
+    assert OPERATOR.roles == {OPERATOR.home: "operator"}
+    assert IDENTITIES.tenants[OPERATOR.home].canonical
+    assert KEYCLOAK_IDENTITIES.users == {**IDENTITIES.users, OPERATOR.key: OPERATOR}
+    assert IDENTITIES.cases.tenant_admin.roles == {IDENTITIES.cases.tenant_admin.home: "admin"}

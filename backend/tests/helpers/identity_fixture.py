@@ -16,7 +16,7 @@ from pathlib import Path
 
 FIXTURE_PATH = Path(__file__).resolve().parents[3] / "infra" / "fixtures" / "test-identities.json"
 # The canonical roles a fixture user can hold in a tenant; None is a member with no grant.
-CANONICAL_ROLES = frozenset({"owner", "admin", "member", "viewer"})
+CANONICAL_ROLES = frozenset({"owner", "admin", "member", "viewer", "operator"})
 # Keys a root already uses beside the fixture's tenants: infra/zitadel's organization_ids
 # output names its project-owning organization ``platform``.
 RESERVED_TENANT_KEYS = frozenset({"platform"})

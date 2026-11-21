@@ -110,7 +110,7 @@ git -C "$repo" ls-files -z --cached --others --exclude-standard -- ':(glob)infra
   (cd "$repo" && while IFS= read -r -d '' file; do [ -e "$file" ] || continue; cp "$file" "$tfdir/"; done)
 git -C "$repo/infra" ls-files -z --cached --others --exclude-standard -- ':(glob)modules/*/*.tf' |
   (cd "$repo/infra" && while IFS= read -r -d '' file; do [ -e "$file" ] || continue; cp --parents "$file" "$work/"; done)
-cp "$root/.terraform.lock.hcl" "$tfdir/"
+cp "$root/.terraform.lock.hcl" "$root/test-identities.json" "$tfdir/"
 cp "$repo/infra/fixtures/test-identities.json" "$work/fixtures/"
 
 delete_leftover_realm

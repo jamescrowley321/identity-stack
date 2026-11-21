@@ -1,6 +1,6 @@
 """Every fixture user signs in through the SPA and gets exactly what the shared fixture gives them.
 
-The fixture (``infra/fixtures/test-identities.json``) says, for each user, which
+The shared fixture and ``infra/keycloak/test-identities.json`` say, for each user, which
 tenants they belong to and their canonical role in each. ``infra/keycloak`` builds
 the realm from it, and the suite's set-up has taken the realm in
 (``conftest.py``). For each user, signed in from the SPA's own Sign In:
@@ -28,6 +28,7 @@ from playwright.sync_api import Page, expect
 from tests.e2e_keycloak.browser_login import sign_in
 from tests.helpers.identity_fixture import IDENTITIES, FixtureUser
 from tests.helpers.keycloak import TARGET
+from tests.helpers.keycloak_fixture import KEYCLOAK_IDENTITIES
 
 IDENTITY = "/api/identity"
 DOCUMENTS_READ = "documents:read"
@@ -91,9 +92,9 @@ def _sidebar(page: Page):
     return page.locator("[data-sidebar=sidebar]")
 
 
-@pytest.mark.parametrize("key", sorted(IDENTITIES.users))
+@pytest.mark.parametrize("key", sorted(KEYCLOAK_IDENTITIES.users))
 def test_every_fixture_user_gets_exactly_their_fixture_tenants_and_roles(key: str, page: Page, frontend_url: str, api):
-    user = IDENTITIES.users[key]
+    user = KEYCLOAK_IDENTITIES.users[key]
     expected = expected_roles(user)
     token = _signed_in(page, frontend_url, user)
     identity = api(token).get(IDENTITY)

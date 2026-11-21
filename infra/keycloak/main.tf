@@ -29,10 +29,11 @@ locals {
     "settings:manage",
   ])
   roles = {
-    owner  = sort(local.permissions)
-    admin  = sort(setsubtract(local.permissions, ["billing:manage"]))
-    member = ["documents:read", "documents:write", "members:invite", "projects:read", "projects:update"]
-    viewer = ["documents:read", "projects:read"]
+    owner    = sort(local.permissions)
+    admin    = sort(setsubtract(local.permissions, ["billing:manage"]))
+    member   = ["documents:read", "documents:write", "members:invite", "projects:read", "projects:update"]
+    viewer   = ["documents:read", "projects:read"]
+    operator = []
   }
 
   spa_client_id   = "identity-stack-spa"
@@ -49,7 +50,9 @@ locals {
 
   # The test tenants and users (infra/fixtures/test-identities.json): every
   # tenant is an organization, every user a realm user.
-  fixture = jsondecode(file("${path.module}/../fixtures/test-identities.json"))
+  shared_fixture   = jsondecode(file("${path.module}/../fixtures/test-identities.json"))
+  keycloak_fixture = jsondecode(file("${path.module}/test-identities.json"))
+  fixture          = merge(local.shared_fixture, { users = merge(local.shared_fixture.users, local.keycloak_fixture.users) })
 
   # Fixture users. Keycloak picks their ids: the provider cannot set one, so
   # a token's sub differs from the import's fixed ids.
@@ -280,7 +283,7 @@ resource "keycloak_role" "role" {
   realm_id        = keycloak_realm.this.id
   client_id       = keycloak_openid_client.api.id
   name            = each.key
-  composite_roles = [for permission in each.value : keycloak_role.permission[permission].id]
+  composite_roles = length(each.value) > 0 ? [for permission in each.value : keycloak_role.permission[permission].id] : null
 }
 
 # --- Public clients ----------------------------------------------------------------

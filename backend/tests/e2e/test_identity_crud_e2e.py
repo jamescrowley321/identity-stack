@@ -230,11 +230,13 @@ class TestTenantAuthEnforcement:
 class TestPermissionCrudCanonical:
     """Admin permission CRUD verifying canonical fields (id, created_at, updated_at)."""
 
-    def test_permission_create_returns_canonical_fields(self, admin_api_context: APIRequestContext, backend_url: str):
+    def test_permission_create_returns_canonical_fields(
+        self, operator_api_context: APIRequestContext, backend_url: str
+    ):
         """POST /permissions returns response with id (UUID), created_at, updated_at."""
         perm_name = unique_name("canon-perm")
         try:
-            resp = admin_api_context.post(
+            resp = operator_api_context.post(
                 f"{backend_url}/api/permissions",
                 data={"name": perm_name, "description": "canonical field test"},
             )
@@ -251,20 +253,20 @@ class TestPermissionCrudCanonical:
             assert body["name"] == perm_name
         finally:
             with contextlib.suppress(Exception):
-                admin_api_context.delete(f"{backend_url}/api/permissions/{perm_name}")
+                operator_api_context.delete(f"{backend_url}/api/permissions/{perm_name}")
 
-    def test_permission_list_returns_canonical_fields(self, admin_api_context: APIRequestContext, backend_url: str):
+    def test_permission_list_returns_canonical_fields(self, operator_api_context: APIRequestContext, backend_url: str):
         """GET /permissions returns list with canonical fields per item."""
         perm_name = unique_name("list-perm")
         try:
             # Create a permission so the list is non-empty
-            resp = admin_api_context.post(
+            resp = operator_api_context.post(
                 f"{backend_url}/api/permissions",
                 data={"name": perm_name, "description": "list test"},
             )
             assert resp.status == 201
 
-            resp = admin_api_context.get(f"{backend_url}/api/permissions")
+            resp = operator_api_context.get(f"{backend_url}/api/permissions")
             assert resp.status == 200, f"List failed: {resp.status}"
 
             body = resp.json()
@@ -281,21 +283,23 @@ class TestPermissionCrudCanonical:
             uuid.UUID(str(match["id"]))
         finally:
             with contextlib.suppress(Exception):
-                admin_api_context.delete(f"{backend_url}/api/permissions/{perm_name}")
+                operator_api_context.delete(f"{backend_url}/api/permissions/{perm_name}")
 
-    def test_permission_update_returns_canonical_fields(self, admin_api_context: APIRequestContext, backend_url: str):
+    def test_permission_update_returns_canonical_fields(
+        self, operator_api_context: APIRequestContext, backend_url: str
+    ):
         """PUT /permissions/{name} returns updated resource with canonical fields."""
         perm_name = unique_name("upd-perm")
         new_name = perm_name + "-renamed"
         cleanup_name = perm_name
         try:
-            resp = admin_api_context.post(
+            resp = operator_api_context.post(
                 f"{backend_url}/api/permissions",
                 data={"name": perm_name, "description": "update test"},
             )
             assert resp.status == 201
 
-            resp = admin_api_context.put(
+            resp = operator_api_context.put(
                 f"{backend_url}/api/permissions/{perm_name}",
                 data={"new_name": new_name, "description": "updated"},
             )
@@ -308,17 +312,17 @@ class TestPermissionCrudCanonical:
             assert body["name"] == new_name
         finally:
             with contextlib.suppress(Exception):
-                admin_api_context.delete(f"{backend_url}/api/permissions/{cleanup_name}")
+                operator_api_context.delete(f"{backend_url}/api/permissions/{cleanup_name}")
 
 
 class TestRoleCrudCanonical:
     """Admin role CRUD verifying canonical fields (id, created_at, updated_at)."""
 
-    def test_role_create_returns_canonical_fields(self, admin_api_context: APIRequestContext, backend_url: str):
+    def test_role_create_returns_canonical_fields(self, operator_api_context: APIRequestContext, backend_url: str):
         """POST /roles returns response with id (UUID), created_at, updated_at."""
         role_name = unique_name("canon-role")
         try:
-            resp = admin_api_context.post(
+            resp = operator_api_context.post(
                 f"{backend_url}/api/roles",
                 data={"name": role_name, "description": "canonical field test"},
             )
@@ -333,19 +337,19 @@ class TestRoleCrudCanonical:
             assert body["name"] == role_name
         finally:
             with contextlib.suppress(Exception):
-                admin_api_context.delete(f"{backend_url}/api/roles/{role_name}")
+                operator_api_context.delete(f"{backend_url}/api/roles/{role_name}")
 
-    def test_role_list_returns_canonical_fields(self, admin_api_context: APIRequestContext, backend_url: str):
+    def test_role_list_returns_canonical_fields(self, operator_api_context: APIRequestContext, backend_url: str):
         """GET /roles returns list with canonical fields per item."""
         role_name = unique_name("list-role")
         try:
-            resp = admin_api_context.post(
+            resp = operator_api_context.post(
                 f"{backend_url}/api/roles",
                 data={"name": role_name, "description": "list test"},
             )
             assert resp.status == 201
 
-            resp = admin_api_context.get(f"{backend_url}/api/roles")
+            resp = operator_api_context.get(f"{backend_url}/api/roles")
             assert resp.status == 200, f"List failed: {resp.status}"
 
             body = resp.json()
@@ -361,21 +365,21 @@ class TestRoleCrudCanonical:
             uuid.UUID(str(match["id"]))
         finally:
             with contextlib.suppress(Exception):
-                admin_api_context.delete(f"{backend_url}/api/roles/{role_name}")
+                operator_api_context.delete(f"{backend_url}/api/roles/{role_name}")
 
-    def test_role_update_returns_canonical_fields(self, admin_api_context: APIRequestContext, backend_url: str):
+    def test_role_update_returns_canonical_fields(self, operator_api_context: APIRequestContext, backend_url: str):
         """PUT /roles/{name} returns updated resource with canonical fields."""
         role_name = unique_name("upd-role")
         new_name = role_name + "-renamed"
         cleanup_name = role_name
         try:
-            resp = admin_api_context.post(
+            resp = operator_api_context.post(
                 f"{backend_url}/api/roles",
                 data={"name": role_name, "description": "update test"},
             )
             assert resp.status == 201
 
-            resp = admin_api_context.put(
+            resp = operator_api_context.put(
                 f"{backend_url}/api/roles/{role_name}",
                 data={"new_name": new_name, "description": "updated"},
             )
@@ -388,7 +392,7 @@ class TestRoleCrudCanonical:
             assert body["name"] == new_name
         finally:
             with contextlib.suppress(Exception):
-                admin_api_context.delete(f"{backend_url}/api/roles/{cleanup_name}")
+                operator_api_context.delete(f"{backend_url}/api/roles/{cleanup_name}")
 
 
 class TestMemberCrud:

@@ -164,3 +164,19 @@ class TestInternalEndpointSecrets:
 
     def test_the_descope_run_still_skips_instead(self):
         assert na.missing_internal_endpoint_secrets(na.DESCOPE, {}) == []
+
+
+def test_definition_crud_runs_for_keycloak_and_descope_but_not_zitadel():
+    paths = [
+        "test_identity_crud_e2e.py::TestPermissionCrudCanonical::test_permission_create_returns_canonical_fields",
+        "test_identity_crud_e2e.py::TestRoleCrudCanonical::test_role_create_returns_canonical_fields",
+        "test_identity_repository_api.py::test_full_lifecycle_chain",
+        "test_rbac_api.py::test_runtime_permission_create_and_delete",
+        "test_rbac_api.py::test_runtime_role_create_and_delete",
+        "test_rbac_api.py::test_permission_crud_lifecycle",
+        "test_rbac_api.py::test_role_crud_lifecycle",
+    ]
+    for path in paths:
+        assert na.reason_not_applicable(na.SUITE + path, na.KEYCLOAK) is None
+        assert na.reason_not_applicable(na.SUITE + path, na.DESCOPE) is None
+        assert na.reason_not_applicable(na.SUITE + path, na.ZITADEL) == na.DEFINITIONS_NOT_SYNCED
