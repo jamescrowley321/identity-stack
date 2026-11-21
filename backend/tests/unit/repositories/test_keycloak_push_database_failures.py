@@ -331,10 +331,12 @@ async def test_a_push_whose_pooled_connection_went_stale_after_the_commit_is_a_s
         await pooled.dispose()
 
     assert result.is_error()
-    assert (result.error.message, after) == (
-        "the tenant link read failed in the service's database: the connection was lost (DBAPIError)",
-        (users[0].email, 1),
+    assert result.error.message.startswith(
+        "the tenant link read failed in the service's database: "
+        f"{keycloak_sync.DatabaseFailure.CONNECTION_LOST.value} ("
     )
+    assert result.error.message.endswith(")")
+    assert after == (users[0].email, 1)
 
 
 def tenant_read_running(*statements: str):
