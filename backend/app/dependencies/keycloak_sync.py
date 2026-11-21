@@ -298,14 +298,17 @@ class RepositoryKeycloakLinks(KeycloakLinks):
     async def _loaded(self) -> Loaded | None:
         """The rows the session has loaded, to put back after a rollback; ``None`` with work not committed.
 
-        Work not committed is a change not flushed yet, or any write the
+        Work not committed is a change not flushed yet, or any write the open
         transaction made (Postgres assigns a transaction id at its first write,
-        whether the ORM or a statement of the request's made it).
+        whether the ORM or a statement of the request's made it). With no
+        transaction open, as after the service's commit, there is none to ask
+        about: no statement is run, so a stale connection fails the push's own
+        statement, not this one.
         """
         session = self._session.sync_session
         if session.new or session.deleted or any(session.is_modified(row) for row in session.dirty):
             return None
-        if await self._providers.transaction_has_written():
+        if self._session.in_transaction() and await self._providers.transaction_has_written():
             return None
         return [
             (row, {attr.key: attr.loaded_value for attr in state.attrs if attr.key not in state.unloaded})

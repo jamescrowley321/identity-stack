@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock
 import anyio
 import pytest
 from sqlalchemy import delete, text
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.dependencies import keycloak_sync
 from app.dependencies.keycloak_sync import ORGANIZATION_LOCK_NAMESPACE, RepositoryKeycloakLinks, UncommittedWorkLost
@@ -312,6 +312,28 @@ async def test_a_link_write_that_loses_the_connection_leaves_the_requests_rows_a
         "the tenant link write failed in the service's database: the connection was lost (DBAPIError)",
         (tenant.name, None, None),
         1,
+    )
+
+
+async def test_a_push_whose_pooled_connection_went_stale_after_the_commit_is_a_sync_error(async_engine, members):
+    """The push's first statement finds the connection dead (no pre-ping): a sync error, not UncommittedWorkLost."""
+    tenant, _role, users = members
+    pooled = create_async_engine(async_engine.url, pool_size=1, max_overflow=0)
+    try:
+        async with sessions(pooled)() as session, async_engine.connect() as other:
+            user = await UserRepository(session).get(users[0].id)
+            pid = (await session.execute(text("SELECT pg_backend_pid()"))).scalar_one()
+            await session.commit()
+            await other.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+            result = await adapter(session).sync_tenant(tenant_id=tenant.id, data={"name": "organization"})
+            after = (user.email, (await session.execute(text("SELECT 1"))).scalar_one())
+    finally:
+        await pooled.dispose()
+
+    assert result.is_error()
+    assert (result.error.message, after) == (
+        "the tenant link read failed in the service's database: the connection was lost (DBAPIError)",
+        (users[0].email, 1),
     )
 
 
