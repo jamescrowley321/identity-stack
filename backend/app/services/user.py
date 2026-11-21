@@ -31,7 +31,9 @@ from app.services.adapters.base import (
     IdentityProviderAdapter,
     SyncError,
 )
+from app.services.adapters.keycloak import KeycloakSyncAdapter
 from app.services.cache_invalidation import CacheInvalidationPublisher
+from app.services.keycloak_membership_lock import hold_keycloak_membership_lock
 from app.services.memberships import restore_memberships
 
 logger = logbook(__name__)
@@ -384,6 +386,22 @@ class UserService:
 
             return Ok(result_dict)
 
+    async def _guard_membership_push(
+        self,
+        user_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        push: Callable[[], Awaitable[Result[None, SyncError]]],
+    ) -> Result[None, SyncError]:
+        if not isinstance(self._adapter, KeycloakSyncAdapter):
+            return await push()
+        session = getattr(self._assignment_repository, "_session", None)
+        if session is None:
+            return await push()
+        async with hold_keycloak_membership_lock(session, user_id, tenant_id) as locked:
+            if not locked:
+                return Error(SyncError(message="Keycloak membership lock not acquired", operation="sync_user"))
+            return await push()
+
     async def remove_user_from_tenant(
         self,
         *,
@@ -419,10 +437,14 @@ class UserService:
 
             # Best-effort sync: notify IdP of membership removal
             payload: dict = {"status": "removed", "user_id": str(user_id)}
-            pushed = await self._adapter.sync_user(
-                user_id=user_id,
-                data={"email": user.email, "status": user.status.value, "left_tenant_id": str(tenant_id)},
-            )
+
+            async def _push() -> Result[None, SyncError]:
+                return await self._adapter.sync_user(
+                    user_id=user_id,
+                    data={"email": user.email, "status": user.status.value, "left_tenant_id": str(tenant_id)},
+                )
+
+            pushed = await self._guard_membership_push(user_id, tenant_id, _push)
             if self._revocation_failed(pushed, user_id, "remove_user_from_tenant"):
                 payload[PROVIDER_SYNC] = PROVIDER_SYNC_FAILED
             elif self._adapter.ends_memberships is True and pushed.is_ok():

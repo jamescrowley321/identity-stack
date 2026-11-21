@@ -231,6 +231,7 @@ QUERY_BUILDERS_OUTSIDE_REPOSITORIES = {
     "routers/tenants.py": "the demo TenantResource table",
     "routers/documents.py": "the demo Document table",
     "dependencies/identity.py": "the reconciliation advisory lock",
+    "services/keycloak_membership_lock.py": "the Keycloak membership advisory lock",
     "main.py": "the startup connectivity probe, SELECT 1",
 }
 

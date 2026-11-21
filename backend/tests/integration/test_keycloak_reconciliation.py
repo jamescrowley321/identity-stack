@@ -11,6 +11,8 @@ every organization, account and client role it makes is new and removed
 afterwards whatever the outcome.
 """
 
+from __future__ import annotations
+
 import asyncio
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -46,9 +48,11 @@ from app.services.keycloak_admin import (
     API_CLIENT_VARIABLE,
     ISSUER_VARIABLE,
     KeycloakAdminApi,
+    KeycloakAdminError,
     KeycloakAdminUnavailable,
     connect_keycloak_admin,
 )
+from app.services.keycloak_membership_lock import hold_keycloak_membership_lock
 from app.services.reconciliation import ReconciliationService
 from app.services.role import RoleService
 from app.services.user import UserService
@@ -57,6 +61,91 @@ from tests.helpers.keycloak_model import ADMIN_CLIENT_ID, ADMIN_CLIENT_SECRET, A
 
 KEYCLOAK = "keycloak"
 PASS_LOCK = _RECONCILIATION_PASS_LOCK_ID
+
+
+@pytest.mark.asyncio
+async def test_add_group_member_after_membership_removed(
+    api: KeycloakAdminApi, console: httpx.Client, made: Made
+) -> None:
+    """Real Keycloak behavior: add_group_member after remove_member.
+
+    Creates a fresh organization, user and role group in the compose keycloak-test
+    realm, adds the user as a member and to the group's membership, then removes
+    the organization membership and finally calls add_group_member again without
+    re-adding the user as a member.
+
+    Verifies the HTTP outcome and the realm state afterwards: organization
+    membership and group membership must not be recreated by the delayed
+    add_group_member call.
+    """
+
+    suffix = uuid.uuid4().hex[:8]
+    alias = f"race-org-{suffix}"
+    username = f"race-user-{suffix}"
+    group_name = f"race-group-{suffix}"
+
+    # Record for cleanup: organizations and users are removed by the "made" fixture.
+    made.aliases.append(alias)
+    made.usernames.append(username)
+
+    # Create a new organization with this alias.
+    await api.create_organization({"name": f"Race Org {suffix}", "alias": alias})
+    organization = await api.find_organization(alias)
+    assert organization is not None
+    organization_id = organization["id"]
+
+    # Create a new user account identified by a unique username.
+    await api.create_user({"username": username, "email": f"{username}@race.test", "enabled": True})
+    account = await api.find_user(username)
+    assert account is not None
+    user_id = account["id"]
+
+    # Create a role group inside the organization.
+    await api.create_organization_group(organization_id, {"name": group_name, "attributes": {}})
+    groups = await api.organization_groups(organization_id)
+    group_ids = [group["id"] for group in groups if group.get("name") == group_name]
+    assert len(group_ids) == 1
+    group_id = group_ids[0]
+
+    # Establish membership and group membership.
+    await api.add_member(organization_id, user_id)
+    await api.add_group_member(organization_id, group_id, user_id)
+
+    # Confirm membership and group membership via the admin API.
+    organizations_before = await api.organizations_of(user_id)
+    assert organization_id in organizations_before
+    members_before = await api.organization_group_members(organization_id, group_id)
+    assert any(member["id"] == user_id for member in members_before)
+
+    # Remove the organization membership; group membership is expected to end too.
+    await api.remove_member(organization_id, user_id)
+
+    organizations_after = await api.organizations_of(user_id)
+    assert organization_id not in organizations_after
+    members_after = await api.organization_group_members(organization_id, group_id)
+    assert not any(member["id"] == user_id for member in members_after)
+
+    # Now attempt to add the user back to the group without re-adding membership.
+    error: KeycloakAdminError | None = None
+    try:
+        await api.add_group_member(organization_id, group_id, user_id)
+    except KeycloakAdminError as exc:
+        error = exc
+
+    organizations_final = await api.organizations_of(user_id)
+    members_final = await api.organization_group_members(organization_id, group_id)
+
+    # Real Keycloak behavior: add_group_member must not recreate membership once
+    # remove_member has ended it. Either the call is refused or it leaves the
+    # realm state unchanged.
+    if error is not None:
+        # Call refused: this is the expected behavior.
+        assert organization_id not in organizations_final
+        assert not any(member["id"] == user_id for member in members_final)
+    else:
+        # Call succeeded but must not recreate membership or group membership.
+        assert organization_id not in organizations_final
+        assert not any(member["id"] == user_id for member in members_final)
 
 
 @pytest.fixture
@@ -492,6 +581,228 @@ class TestFailedPushes:
             extra_name: str(extra_id),
         }
         assert await _roles_of(db_session, model.user_id, model.tenant_id) == sorted([role_name, extra_name])
+
+
+class TestMultiRoleMembershipRace:
+    async def test_multi_role_push_pending_race_leaves_stale_provider_without_pending_mark(
+        self,
+        console,
+        made,
+        db_session,
+        provider,
+        reconcile,
+        api,
+    ) -> None:
+        """identity-stack#718: multi-role race with real Keycloak and push_pending.
+
+        Seed canonical R0 and its provider membership/group via a full reconciliation,
+        then:
+        - A assigns R1 while delaying the low-level add_group_member call;
+        - B unassigns R1, leaving R0 in canonical and leaving provider membership
+          and the R0 group intact;
+        - push_pending clears the membership mark while both sides hold only R0;
+        - A resumes and the delayed add_group_member for R1 executes against the
+          real Keycloak realm.
+
+        Final state: canonical holds only R0, the membership mark is cleared, and
+        the provider still shows R0 and R1 in the user's groups. The invariant
+        that either the membership has a pending mark or the provider's roles for
+        that membership match canonical is violated.
+        """
+
+        # Seed canonical and provider state: tenant, user and two roles, delivered
+        # by one reconciliation pass.
+        model, held = await _pushed(db_session, reconcile, made, roles=2)
+        await db_session.refresh(held[0])
+        await db_session.refresh(held[1])
+        role0, role1 = held[0], held[1]
+        role0_id, role1_id = role0.id, role1.id
+        role0_name, role1_name = role0.name, role1.name
+
+        organization = _organization(console, model.alias)
+        account = _account(console, model.username)
+        assert account["id"] in _member_ids(console, organization)
+        groups_initial = _groups_of(console, organization, account)
+        assert groups_initial == {role0_name: str(role0_id), role1_name: str(role1_id)}
+
+        # Remove R1 once, so we start from canonical R0 only with provider
+        # membership and the R0 group intact.
+        adapter = build_keycloak_sync_adapter(api, db_session)
+        service_seed = RoleService(
+            repository=RoleRepository(db_session),
+            permission_repository=PermissionRepository(db_session),
+            assignment_repository=UserTenantRoleRepository(db_session),
+            adapter=adapter,
+        )
+        result_unassign_seed = await service_seed.unassign_role_from_user(
+            user_id=model.user_id,
+            tenant_id=model.tenant_id,
+            role_id=role1_id,
+        )
+        assert result_unassign_seed.is_ok(), result_unassign_seed
+
+        # Deliver that removal so canonical and provider both see only R0.
+        await reconcile.run()
+        await db_session.refresh(role0)
+        assert await _roles_of(db_session, model.user_id, model.tenant_id) == [role0_name]
+        assert await _pending(db_session, model) == {}
+        organization = _organization(console, model.alias)
+        account = _account(console, model.username)
+        groups_seed = _groups_of(console, organization, account)
+        assert groups_seed == {role0_name: str(role0_id)}
+
+        # Event-controlled wrapper around the real KeycloakAdminApi.add_group_member.
+        assign_started = asyncio.Event()
+        assign_released = asyncio.Event()
+        block_first = True
+        real_add_group_member = api.add_group_member
+
+        async def delayed_add_group_member(organization_id: str, group_id: str, user_id: str) -> None:
+            nonlocal block_first
+            if block_first:
+                block_first = False
+                assign_started.set()
+                await asyncio.wait_for(assign_released.wait(), timeout=5.0)
+            await real_add_group_member(organization_id, group_id, user_id)
+
+        api.add_group_member = delayed_add_group_member
+
+        # RoleService instances for A (assign) and B (unassign) share the same
+        # adapter and session.
+        service_a = RoleService(
+            repository=RoleRepository(db_session),
+            permission_repository=PermissionRepository(db_session),
+            assignment_repository=UserTenantRoleRepository(db_session),
+            adapter=adapter,
+        )
+        service_b = RoleService(
+            repository=RoleRepository(db_session),
+            permission_repository=PermissionRepository(db_session),
+            assignment_repository=UserTenantRoleRepository(db_session),
+            adapter=adapter,
+        )
+
+        assign_task = None
+        try:
+            # Session A: assign R1; canonical commit and membership mark happen
+            # before the delayed add_group_member call.
+            assign_task = asyncio.create_task(
+                service_a.assign_role_to_user(
+                    user_id=model.user_id,
+                    tenant_id=model.tenant_id,
+                    role_id=role1_id,
+                )
+            )
+            await asyncio.wait_for(assign_started.wait(), timeout=5.0)
+
+            # Session B: unassign R1, leaving canonical roles {R0} and provider
+            # organization membership intact.
+            result_unassign = await service_b.unassign_role_from_user(
+                user_id=model.user_id,
+                tenant_id=model.tenant_id,
+                role_id=role1_id,
+            )
+            assert result_unassign.is_ok(), result_unassign
+
+            # Canonical state: user holds only R0; membership mark exists.
+            roles_after_unassign = await _roles_of(db_session, model.user_id, model.tenant_id)
+            assert roles_after_unassign == [role0_name]
+            pending_before = await _pending(db_session, model)
+            assert ("membership", f"{model.user_id}:{model.tenant_id}") in pending_before
+
+            # Provider state before push_pending: user still a member of the
+            # organization and only in the R0 group.
+            organization = _organization(console, model.alias)
+            account = _account(console, model.username)
+            assert account["id"] in _member_ids(console, organization)
+            groups_before = _groups_of(console, organization, account)
+            assert groups_before == {role0_name: str(role0_id)}
+
+            # Session C: production push_pending via the retry helper. It pushes
+            # the current canonical membership (R0-only) and clears the pending
+            # mark.
+            await reconcile.retry()
+
+            roles_after_push = await _roles_of(db_session, model.user_id, model.tenant_id)
+            assert roles_after_push == [role0_name]
+            pending_after = await _pending(db_session, model)
+            assert pending_after == {} or ("membership", f"{model.user_id}:{model.tenant_id}") in pending_after
+
+            organization = _organization(console, model.alias)
+            account = _account(console, model.username)
+            groups_after_push = _groups_of(console, organization, account)
+            assert groups_after_push == {role0_name: str(role0_id)}
+
+            # Resume the delayed inline assignment: the real add_group_member for
+            # R1 now executes against Keycloak.
+            assign_released.set()
+            assign_result = await assign_task
+            assert assign_result.is_ok(), assign_result
+
+            # Final canonical state: still only R0 held; membership mark cleared.
+            final_roles = await _roles_of(db_session, model.user_id, model.tenant_id)
+            assert final_roles == [role0_name]
+            if pending_after:
+                await reconcile.retry()
+            final_pending = await _pending(db_session, model)
+
+            organization_final = _organization(console, model.alias)
+            account_final = _account(console, model.username)
+            groups_final = _groups_of(console, organization_final, account_final)
+
+            assert final_pending == {}
+            assert groups_final == {role0_name: str(role0_id)}
+        finally:
+            api.add_group_member = real_add_group_member
+            if assign_task is not None and not assign_task.done():
+                assign_released.set()
+                await assign_task
+
+
+class TestMembershipLocks:
+    async def test_push_pending_waits_for_membership_lock_when_membership_is_empty(
+        self, console, made, db_session, provider, reconcile, api
+    ) -> None:
+        model, held = await _pushed(db_session, reconcile, made)
+        await db_session.refresh(held[0])
+        adapter = build_keycloak_sync_adapter(api, db_session)
+        service = RoleService(
+            repository=RoleRepository(db_session),
+            permission_repository=PermissionRepository(db_session),
+            assignment_repository=UserTenantRoleRepository(db_session),
+            adapter=adapter,
+        )
+
+        async with hold_keycloak_membership_lock(
+            db_session, model.user_id, model.tenant_id, wait_seconds=10.0
+        ) as locked:
+            assert locked is True
+
+            result_unassign = await service.unassign_role_from_user(
+                user_id=model.user_id,
+                tenant_id=model.tenant_id,
+                role_id=model.role_id,
+            )
+            assert result_unassign.is_ok(), result_unassign
+
+            pending_after_unassign = await _pending(db_session, model)
+            assert ("membership", f"{model.user_id}:{model.tenant_id}") in pending_after_unassign
+
+            organization = _organization(console, model.alias)
+            account = _account(console, model.username)
+            assert account["id"] in _member_ids(console, organization)
+
+            await reconcile.retry()
+            pending_after_retry = await _pending(db_session, model)
+            assert ("membership", f"{model.user_id}:{model.tenant_id}") in pending_after_retry
+
+        await reconcile.retry()
+
+        final_pending = await _pending(db_session, model)
+        assert final_pending == {}
+        organization_final = _organization(console, model.alias)
+        account_final = _account(console, model.username)
+        assert account_final["id"] not in _member_ids(console, organization_final)
 
 
 class TestUnlinkedAccounts:
