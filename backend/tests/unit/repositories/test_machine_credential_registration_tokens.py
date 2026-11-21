@@ -13,7 +13,9 @@ import pytest_asyncio
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
 from expression import Error, Ok
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import scripts.reseal_keycloak_registration_tokens as reseal_script_module
 from app.domain import credentials
 from app.models.identity.machine_credential import MachineCredentialRow
 from app.models.identity.tenant import Tenant
@@ -26,6 +28,7 @@ from app.repositories.registration_tokens import (
 )
 from app.services.adapters.base import MachineCredentialPush
 from app.services.machine_credentials import UNSEALED_REGISTRATION_TOKEN, CanonicalMachineCredentials
+from scripts.reseal_keycloak_registration_tokens import ResealSummary, reseal_keycloak_registration_tokens
 
 pytestmark = pytest.mark.asyncio
 
@@ -159,6 +162,25 @@ def _alembic(postgres_url: str, *args: str, key: str | None) -> subprocess.Compl
     )
 
 
+def _reseal_script(postgres_url: str, key: str | None) -> subprocess.CompletedProcess:
+    """Run the reseal script as the operator would, against the test database.
+
+    The environment names the database and optionally KEYCLOAK_REGISTRATION_TOKEN_KEYS.
+    """
+    env = {**os.environ, "DATABASE_URL": postgres_url}
+    env.pop(KEYS_VARIABLE, None)
+    if key is not None:
+        env[KEYS_VARIABLE] = key
+    return subprocess.run(
+        [sys.executable, "-m", "scripts.reseal_keycloak_registration_tokens"],
+        cwd=BACKEND,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
 class TestMigration:
     """``011_seal_registration_tokens`` seals the tokens 010 stored in plain text, and the downgrade opens them.
 
@@ -271,3 +293,348 @@ class TestMigration:
 
         assert downgraded.returncode == 0, downgraded.stderr
         assert await self._token(async_engine, plain_text_row) == self.SEALED_UNDER_ANOTHER_KEY
+
+
+class TestResealScript:
+    """Resealing Keycloak registration tokens under the current first key (#717)."""
+
+    NEW_KEY = Fernet.generate_key().decode()
+
+    async def _insert_sealed_row(self, async_engine, sealed: str) -> tuple[uuid.UUID, uuid.UUID]:
+        """Insert a machine credential row with the given stored registration_token.
+
+        Returns the credential id and tenant id so the test can clean the row up.
+        """
+        credential_id = uuid.uuid4()
+        tenant_id = uuid.uuid4()
+        async with async_engine.begin() as conn:
+            await conn.execute(sa.insert(Tenant).values(id=tenant_id, name=f"reseal-{tenant_id}"))
+            row = MachineCredentialRow(
+                id=credential_id,
+                tenant_id=tenant_id,
+                provider="keycloak",
+                name="reseal",
+                client_id=f"machine-{credential_id}",
+                subject=f"sub-{credential_id}",
+                external_id=f"kc-{credential_id}",
+                registration_token=sealed,
+                expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+            )
+            values = {column.name: getattr(row, column.name) for column in MachineCredentialRow.__table__.columns}
+            await conn.execute(sa.insert(MachineCredentialRow).values(values))
+        return credential_id, tenant_id
+
+    async def _registration_token(self, async_engine, credential_id: uuid.UUID) -> str:
+        async with async_engine.connect() as conn:
+            stmt = sa.select(MachineCredentialRow.registration_token).where(MachineCredentialRow.id == credential_id)
+            return (await conn.execute(stmt)).scalar_one()
+
+    async def _remove_row(self, async_engine, credential_id: uuid.UUID, tenant_id: uuid.UUID) -> None:
+        async with async_engine.begin() as conn:
+            await conn.execute(sa.delete(MachineCredentialRow).where(MachineCredentialRow.id == credential_id))
+            await conn.execute(sa.delete(Tenant).where(Tenant.id == tenant_id))
+
+    def _session_factory(self, async_engine) -> async_sessionmaker[AsyncSession]:
+        return async_sessionmaker(bind=async_engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def test_a_token_sealed_under_A_is_resealed_for_drop_to_B_only(self, async_engine):
+        """A -> B,A rotation -> reseal -> drop A: the token still opens under B."""
+        sealed_under_a = RegistrationTokenCipher([KEY]).seal(TOKEN)
+        credential_id, tenant_id = await self._insert_sealed_row(async_engine, sealed_under_a)
+        try:
+            rotated_cipher = RegistrationTokenCipher([self.NEW_KEY, KEY])
+            summary = await reseal_keycloak_registration_tokens(self._session_factory(async_engine), rotated_cipher)
+
+            stored = await self._registration_token(async_engine, credential_id)
+            assert stored != sealed_under_a
+            assert RegistrationTokenCipher([self.NEW_KEY]).open(stored) == TOKEN
+            assert summary == ResealSummary(
+                examined=1,
+                resealed=1,
+                unreadable=0,
+                remaining_non_primary=0,
+                remaining_unreadable=0,
+                cas_conflicts=0,
+            )
+        finally:
+            await self._remove_row(async_engine, credential_id, tenant_id)
+
+    async def test_reseal_is_idempotent_when_run_twice(self, async_engine):
+        sealed_under_a = RegistrationTokenCipher([KEY]).seal(TOKEN)
+        credential_id, tenant_id = await self._insert_sealed_row(async_engine, sealed_under_a)
+        try:
+            rotated_cipher = RegistrationTokenCipher([self.NEW_KEY, KEY])
+            factory = self._session_factory(async_engine)
+
+            first = await reseal_keycloak_registration_tokens(factory, rotated_cipher)
+            second = await reseal_keycloak_registration_tokens(factory, rotated_cipher)
+
+            stored = await self._registration_token(async_engine, credential_id)
+            assert RegistrationTokenCipher([self.NEW_KEY]).open(stored) == TOKEN
+            assert first.examined == second.examined == 1
+            assert (first.resealed, second.resealed) == (1, 0)
+            assert (first.unreadable, second.unreadable) == (0, 0)
+            assert (first.remaining_non_primary, second.remaining_non_primary) == (0, 0)
+            assert (first.remaining_unreadable, second.remaining_unreadable) == (0, 0)
+            assert (first.cas_conflicts, second.cas_conflicts) == (0, 0)
+        finally:
+            await self._remove_row(async_engine, credential_id, tenant_id)
+
+    async def test_script_refuses_invalid_configuration_without_changing_tokens(self, async_engine, postgres_url):
+        """The operator script fails on invalid KEYCLOAK_REGISTRATION_TOKEN_KEYS and touches no tokens."""
+        sealed_under_a = RegistrationTokenCipher([KEY]).seal(TOKEN)
+        credential_id, tenant_id = await self._insert_sealed_row(async_engine, sealed_under_a)
+        try:
+            invalid = "not-a-fernet-key-but-maybe-a-secret"
+
+            result = _reseal_script(postgres_url, key=invalid)
+
+            assert result.returncode != 0
+            assert "ERROR:" in result.stdout
+            assert KEYS_VARIABLE in result.stdout or KEYS_VARIABLE in result.stderr
+            combined = result.stdout + result.stderr
+            assert TOKEN not in combined
+            assert invalid not in combined
+
+            stored = await self._registration_token(async_engine, credential_id)
+            assert stored == sealed_under_a
+        finally:
+            await self._remove_row(async_engine, credential_id, tenant_id)
+
+    async def test_cas_conflict_is_reported_and_leaves_non_primary_token(self, async_engine, monkeypatch):
+        """A concurrent writer changing the token mid-run is reported and leaves a non-primary token."""
+        sealed_under_a = RegistrationTokenCipher([KEY]).seal(TOKEN)
+        credential_id, tenant_id = await self._insert_sealed_row(async_engine, sealed_under_a)
+        try:
+            rotated_cipher = RegistrationTokenCipher([self.NEW_KEY, KEY])
+            factory = self._session_factory(async_engine)
+
+            original_execute = AsyncSession.execute
+
+            async def _execute_with_conflict(self, statement, *args, **kwargs):  # type: ignore[override]
+                from sqlalchemy.sql.dml import Update
+
+                if isinstance(statement, Update):
+                    # Simulate a concurrent writer that changes the stored token
+                    # to a different ciphertext still sealed under KEY.
+                    async with async_engine.begin() as conn:
+                        concurrent_value = RegistrationTokenCipher([KEY]).seal(TOKEN + "-concurrent")
+                        await conn.execute(
+                            sa.update(MachineCredentialRow)
+                            .where(MachineCredentialRow.id == credential_id)
+                            .values(registration_token=concurrent_value)
+                        )
+                return await original_execute(self, statement, *args, **kwargs)
+
+            monkeypatch.setattr(AsyncSession, "execute", _execute_with_conflict)
+
+            summary = await reseal_keycloak_registration_tokens(factory, rotated_cipher)
+
+            stored = await self._registration_token(async_engine, credential_id)
+            # The token is still sealed under the old key; the reseal did not move it.
+            assert RegistrationTokenCipher([self.NEW_KEY]).opens_with_primary(stored) is False
+            assert RegistrationTokenCipher([KEY]).open(stored).startswith(TOKEN)
+            assert summary.cas_conflicts == 1
+            assert summary.remaining_non_primary == 1
+        finally:
+            await self._remove_row(async_engine, credential_id, tenant_id)
+
+    async def test_concurrent_old_key_writer_inserts_new_token_and_run_is_incomplete(self, async_engine, monkeypatch):
+        """A concurrent writer inserting a new old-key token during the run leaves remaining_non_primary tokens."""
+        sealed_under_a = RegistrationTokenCipher([KEY]).seal(TOKEN)
+        credential_id, tenant_id = await self._insert_sealed_row(async_engine, sealed_under_a)
+        created_ids = {"credential": credential_id, "tenant": tenant_id, "concurrent": None, "concurrent_tenant": None}
+        try:
+            rotated_cipher = RegistrationTokenCipher([self.NEW_KEY, KEY])
+            factory = self._session_factory(async_engine)
+
+            original_execute = AsyncSession.execute
+            select_calls = {"count": 0}
+
+            async def _execute_with_concurrent_insert(self, statement, *args, **kwargs):  # type: ignore[override]
+                from sqlalchemy.sql import Select
+
+                if isinstance(statement, Select):
+                    select_calls["count"] += 1
+                    if select_calls["count"] == 2:
+                        # Insert a new credential sealed under the old key after the reseal updates.
+                        new_id = uuid.uuid4()
+                        new_tenant = uuid.uuid4()
+                        created_ids["concurrent"] = new_id
+                        created_ids["concurrent_tenant"] = new_tenant
+                        async with async_engine.begin() as conn:
+                            await conn.execute(
+                                sa.insert(Tenant).values(id=new_tenant, name=f"reseal-concurrent-{new_tenant}")
+                            )
+                            concurrent_token = RegistrationTokenCipher([KEY]).seal(TOKEN + "-writer")
+                            row = MachineCredentialRow(
+                                id=new_id,
+                                tenant_id=new_tenant,
+                                provider="keycloak",
+                                name="reseal-concurrent",
+                                client_id=f"machine-{new_id}",
+                                subject=f"sub-{new_id}",
+                                external_id=f"kc-{new_id}",
+                                registration_token=concurrent_token,
+                                expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+                            )
+                            values = {
+                                column.name: getattr(row, column.name)
+                                for column in MachineCredentialRow.__table__.columns
+                            }
+                            await conn.execute(sa.insert(MachineCredentialRow).values(values))
+                return await original_execute(self, statement, *args, **kwargs)
+
+            monkeypatch.setattr(AsyncSession, "execute", _execute_with_concurrent_insert)
+
+            summary = await reseal_keycloak_registration_tokens(factory, rotated_cipher)
+
+            assert summary.remaining_non_primary >= 1
+        finally:
+            await self._remove_row(async_engine, credential_id, tenant_id)
+            if created_ids["concurrent"] is not None and created_ids["concurrent_tenant"] is not None:
+                await self._remove_row(async_engine, created_ids["concurrent"], created_ids["concurrent_tenant"])
+
+    async def test_run_completed_exit_code_and_message_without_secrets(self, monkeypatch, capsys):
+        """_run() exits 0 on a clean summary and prints COMPLETED without leaking secrets."""
+        secret_token = "secret-token"
+        secret_key = "secret-key"
+
+        async def _fake_reseal(session_factory, cipher):  # type: ignore[override]
+            return ResealSummary(
+                examined=1,
+                resealed=1,
+                unreadable=0,
+                remaining_non_primary=0,
+                remaining_unreadable=0,
+                cas_conflicts=0,
+            )
+
+        monkeypatch.setenv(KEYS_VARIABLE, secret_key)
+        monkeypatch.setattr(
+            "app.repositories.registration_tokens.registration_token_cipher",
+            lambda: object(),
+        )
+        monkeypatch.setattr("app.models.database.get_session_factory", lambda: object())
+        monkeypatch.setattr(
+            "scripts.reseal_keycloak_registration_tokens.reseal_keycloak_registration_tokens",
+            _fake_reseal,
+        )
+
+        exit_code = await reseal_script_module._run()
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "COMPLETED:" in output
+        assert "INCOMPLETE" not in output
+        assert secret_token not in output
+        assert secret_key not in output
+
+    async def test_run_incomplete_on_remaining_non_primary(self, monkeypatch, capsys):
+        """_run() exits 2 and prints INCOMPLETE when remaining_non_primary > 0."""
+        secret_token = "secret-token"
+        secret_key = "secret-key"
+
+        async def _fake_reseal(session_factory, cipher):  # type: ignore[override]
+            return ResealSummary(
+                examined=2,
+                resealed=1,
+                unreadable=0,
+                remaining_non_primary=1,
+                remaining_unreadable=0,
+                cas_conflicts=0,
+            )
+
+        monkeypatch.setenv(KEYS_VARIABLE, secret_key)
+        monkeypatch.setattr(
+            "app.repositories.registration_tokens.registration_token_cipher",
+            lambda: object(),
+        )
+        monkeypatch.setattr("app.models.database.get_session_factory", lambda: object())
+        monkeypatch.setattr(
+            "scripts.reseal_keycloak_registration_tokens.reseal_keycloak_registration_tokens",
+            _fake_reseal,
+        )
+
+        exit_code = await reseal_script_module._run()
+
+        assert exit_code == 2
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "INCOMPLETE" in output
+        assert "COMPLETED" not in output
+        assert secret_token not in output
+        assert secret_key not in output
+
+    async def test_run_incomplete_on_remaining_unreadable(self, monkeypatch, capsys):
+        """_run() exits 2 and prints INCOMPLETE when remaining_unreadable > 0."""
+        secret_token = "secret-token"
+        secret_key = "secret-key"
+
+        async def _fake_reseal(session_factory, cipher):  # type: ignore[override]
+            return ResealSummary(
+                examined=3,
+                resealed=1,
+                unreadable=1,
+                remaining_non_primary=0,
+                remaining_unreadable=1,
+                cas_conflicts=0,
+            )
+
+        monkeypatch.setenv(KEYS_VARIABLE, secret_key)
+        monkeypatch.setattr(
+            "app.repositories.registration_tokens.registration_token_cipher",
+            lambda: object(),
+        )
+        monkeypatch.setattr("app.models.database.get_session_factory", lambda: object())
+        monkeypatch.setattr(
+            "scripts.reseal_keycloak_registration_tokens.reseal_keycloak_registration_tokens",
+            _fake_reseal,
+        )
+
+        exit_code = await reseal_script_module._run()
+
+        assert exit_code == 2
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "INCOMPLETE" in output
+        assert "COMPLETED" not in output
+        assert secret_token not in output
+        assert secret_key not in output
+
+    async def test_run_incomplete_on_cas_conflicts(self, monkeypatch, capsys):
+        """_run() exits 2 and prints INCOMPLETE when cas_conflicts > 0."""
+        secret_token = "secret-token"
+        secret_key = "secret-key"
+
+        async def _fake_reseal(session_factory, cipher):  # type: ignore[override]
+            return ResealSummary(
+                examined=4,
+                resealed=2,
+                unreadable=0,
+                remaining_non_primary=0,
+                remaining_unreadable=0,
+                cas_conflicts=1,
+            )
+
+        monkeypatch.setenv(KEYS_VARIABLE, secret_key)
+        monkeypatch.setattr(
+            "app.repositories.registration_tokens.registration_token_cipher",
+            lambda: object(),
+        )
+        monkeypatch.setattr("app.models.database.get_session_factory", lambda: object())
+        monkeypatch.setattr(
+            "scripts.reseal_keycloak_registration_tokens.reseal_keycloak_registration_tokens",
+            _fake_reseal,
+        )
+
+        exit_code = await reseal_script_module._run()
+
+        assert exit_code == 2
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "INCOMPLETE" in output
+        assert "COMPLETED" not in output
+        assert secret_token not in output
+        assert secret_key not in output
