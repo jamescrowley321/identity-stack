@@ -9,6 +9,7 @@ into that organization, or by that user, finds them.
 import uuid
 
 import pytest
+from sqlalchemy import select
 
 from app.dependencies.zitadel_sync import RepositoryZitadelLinks, TenantLinkedElsewhere
 from app.models.identity.assignment import UserTenantRole
@@ -31,6 +32,9 @@ OTHER_ORG_ID = "399979343167631999"
 
 
 async def _provider(session, name: str = "zitadel") -> uuid.UUID:
+    existing = (await session.execute(select(Provider).where(Provider.name == name))).scalar_one_or_none()
+    if existing is not None:
+        return existing.id
     provider = Provider(name=name, type=ProviderType.oidc, issuer_url=ISSUER, base_url=ISSUER, capabilities=["sso"])
     session.add(provider)
     await session.flush()

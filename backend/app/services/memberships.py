@@ -16,6 +16,8 @@ from opentelemetry import trace
 from app.logbook import logbook
 from app.repositories.assignment import UserTenantRoleRepository
 from app.services.adapters.base import IdentityProviderAdapter
+from app.services.adapters.keycloak import KeycloakSyncAdapter
+from app.services.keycloak_membership_lock import hold_keycloak_membership_lock
 
 logger = logbook(__name__)
 tracer = trace.get_tracer(__name__)
@@ -39,9 +41,22 @@ async def restore_memberships(
         for row in await assignments.list_by_user_tenants(ended):
             # Every assignment, not one per membership: ending the membership
             # also ended the user's role groups in the organization (Keycloak).
-            pushed = await adapter.sync_role_assignment(
-                user_id=row.user_id, tenant_id=row.tenant_id, role_id=row.role_id
-            )
+            async def push_assignment():
+                return await adapter.sync_role_assignment(
+                    user_id=row.user_id, tenant_id=row.tenant_id, role_id=row.role_id
+                )
+
+            if isinstance(adapter, KeycloakSyncAdapter):
+                async with hold_keycloak_membership_lock(assignments._session, row.user_id, row.tenant_id) as locked:  # type: ignore[attr-defined]
+                    if not locked:
+                        logger.warning(
+                            "IdP sync skipped for role %s (restore_membership): membership lock not acquired",
+                            row.role_id,
+                        )
+                        continue
+                    pushed = await push_assignment()
+            else:
+                pushed = await push_assignment()
             if pushed.is_error():
                 logger.warning(
                     "IdP sync failed for role %s (restore_membership): %s",

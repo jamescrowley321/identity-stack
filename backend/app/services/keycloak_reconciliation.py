@@ -82,6 +82,7 @@ from app.services.keycloak_events import (
     client_role_ref,
     role_attribute,
 )
+from app.services.keycloak_membership_lock import hold_keycloak_membership_lock
 from app.services.reconciliation import PassOutcome
 
 if TYPE_CHECKING:
@@ -123,6 +124,14 @@ def _mark_of(subject_type: str, subject_id: str) -> tuple[str, str] | None:
     if kind == MEMBERSHIP:
         return MEMBERSHIP, ":".join(subject_id.split(":")[:2])
     return kind, subject_id
+
+
+def _parse_membership_key(key: str) -> tuple[uuid.UUID, uuid.UUID] | None:
+    try:
+        user_text, tenant_text = key.split(":", 1)
+        return uuid.UUID(user_text), uuid.UUID(tenant_text)
+    except Exception:
+        return None
 
 
 @dataclass
@@ -515,10 +524,20 @@ class KeycloakReconciliation:
         for mark in sorted(marks, key=lambda entry: (order.get(entry.kind, len(order)), entry.key)):
             kind, key, seq, snapshot = mark.kind, mark.key, mark.seq, dict(mark.snapshot or {})
             try:
+                if kind == MEMBERSHIP:
+                    ids = _parse_membership_key(key)
+                    if ids is None:
+                        await self._failed(
+                            provider_id, run_id, "push_membership", f"{kind} {key}", "invalid membership key", stats
+                        )
+                        await self._session.commit()
+                        continue
+                    await self._push_membership_guarded(provider_id, run_id, ids[0], ids[1], seq, snapshot, stats)
+                    continue
                 failure = await self._push(kind, key, snapshot)
             except Exception as exc:
                 await self._session.rollback()
-                failure = SyncError(message=type(exc).__name__, operation=f"push_{kind}")
+                failure = SyncError(message=f"{type(exc).__name__}: {exc}", operation=f"push_{kind}")
             if failure is None:
                 await self._ledger.clear(kind, key, seq)
                 stats["pushed"] += 1
@@ -590,6 +609,47 @@ class KeycloakReconciliation:
             return _failure(await self._adapter.sync_user(user_id=entity_id, data={**data, STATUS_CHANGED: True}))
         logger.warning("Keycloak reconciliation: a pending push of unknown kind %r is left as it is", kind)
         return SyncError(message=f"unknown pending push kind {kind!r}", operation="push")
+
+    async def _push_membership_guarded(
+        self,
+        provider_id: uuid.UUID,
+        run_id: str,
+        user_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        seq: int,
+        snapshot: dict,
+        stats: dict[str, int],
+    ) -> None:
+        async with hold_keycloak_membership_lock(self._session, user_id, tenant_id) as locked:
+            if not locked:
+                logger.warning(
+                    "Keycloak reconciliation: membership %s:%s left pending: lock not acquired", user_id, tenant_id
+                )
+                return
+            failure = await self._push_membership(user_id, tenant_id, snapshot)
+            if failure is None:
+                await self._ledger.clear(MEMBERSHIP, f"{user_id}:{tenant_id}", seq)
+                stats["pushed"] += 1
+            else:
+                await self._failed(
+                    provider_id,
+                    run_id,
+                    failure.operation,
+                    f"{MEMBERSHIP} {user_id}:{tenant_id}",
+                    failure.message,
+                    stats,
+                )
+            try:
+                await self._session.commit()
+            except Exception as exc:
+                await self._session.rollback()
+                logger.warning(
+                    "Keycloak reconciliation: membership %s:%s commit failed under lock: %s",
+                    user_id,
+                    tenant_id,
+                    type(exc).__name__,
+                )
+                raise
 
     async def _delete_tenant(self, tenant_id: uuid.UUID, snapshot: dict) -> SyncError | None:
         """The tenant row is gone, and its link with it: its organization is the one the snapshot names."""

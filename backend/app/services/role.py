@@ -9,6 +9,8 @@ Sync failure -> log warning, still return Ok.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from expression import Error, Ok, Result
@@ -30,7 +32,9 @@ from app.services.adapters.base import (
     IdentityProviderAdapter,
     SyncError,
 )
+from app.services.adapters.keycloak import KeycloakSyncAdapter
 from app.services.cache_invalidation import CacheInvalidationPublisher
+from app.services.keycloak_membership_lock import hold_keycloak_membership_lock
 from app.services.memberships import restore_memberships
 
 logger = logbook(__name__)
@@ -91,6 +95,34 @@ class RoleService:
         self._assignment_repository = assignment_repository
         self._adapter = adapter
         self._publisher = CacheInvalidationPublisher() if publisher is None else publisher
+
+    def _needs_membership_lock(self) -> bool:
+        return isinstance(self._adapter, KeycloakSyncAdapter)
+
+    async def _guard_membership_push(
+        self,
+        user_id: uuid.UUID,
+        tenant_id: uuid.UUID,
+        push: Callable[[], Awaitable[Result[None, SyncError]]],
+        *,
+        ensure: Callable[[], Awaitable[bool]] | None = None,
+    ) -> Result[None, SyncError]:
+        if not self._needs_membership_lock():
+            return await push()
+
+        session = getattr(self._assignment_repository, "_session", None)
+
+        @asynccontextmanager
+        async def _no_lock():
+            yield True
+
+        lock = hold_keycloak_membership_lock(session, user_id, tenant_id) if session is not None else _no_lock()
+        async with lock as locked:
+            if not locked:
+                return Error(SyncError(message="Keycloak membership lock not acquired", operation="membership_guard"))
+            if ensure is not None and not await ensure():
+                return Error(SyncError(message="membership state changed before sync", operation="membership_guard"))
+            return await push()
 
     async def create_role(
         self,
@@ -288,16 +320,25 @@ class RoleService:
 
             await self._invalidate(assigned, role_id, tenant_id)
 
-            self._log_sync_failure(
-                await self._adapter.sync_role_assignment(
+            async def push_assignment() -> Result[None, SyncError]:
+                return await self._adapter.sync_role_assignment(
                     user_id=user_id,
                     tenant_id=tenant_id,
                     role_id=role_id,
                     data={"role_name": assigned.role_name},
-                ),
-                role_id,
-                "assign_role_to_user",
+                )
+
+            async def still_assigned() -> bool:
+                return await self._assignment_repository.get(user_id, tenant_id, role_id) is not None
+
+            pushed = await self._guard_membership_push(
+                user_id,
+                tenant_id,
+                push_assignment,
+                ensure=still_assigned,
             )
+
+            self._log_sync_failure(pushed, role_id, "assign_role_to_user")
 
             return Ok(
                 {
@@ -388,11 +429,25 @@ class RoleService:
             every_pushed = True
             for event in assigned:
                 await self._invalidate(event, event.role_id, event.tenant_id)
-                pushed = await self._adapter.sync_role_assignment(
-                    user_id=event.user_id,
-                    tenant_id=event.tenant_id,
-                    role_id=event.role_id,
-                    data={"role_name": event.role_name},
+
+                async def push_assignment() -> Result[None, SyncError]:
+                    return await self._adapter.sync_role_assignment(
+                        user_id=event.user_id,
+                        tenant_id=event.tenant_id,
+                        role_id=event.role_id,
+                        data={"role_name": event.role_name},
+                    )
+
+                async def still_assigned() -> bool:
+                    return (
+                        await self._assignment_repository.get(event.user_id, event.tenant_id, event.role_id) is not None
+                    )
+
+                pushed = await self._guard_membership_push(
+                    event.user_id,
+                    event.tenant_id,
+                    push_assignment,
+                    ensure=still_assigned,
                 )
                 self._log_sync_failure(pushed, event.role_id, "push_member_roles")
                 every_pushed = every_pushed and pushed.is_ok()
@@ -564,11 +619,22 @@ class RoleService:
             if not await self._assignment_repository.list_by_user_tenant(user_id, tenant_id):
                 sync_data[LAST_ROLE_IN_TENANT] = True
 
-            pushed = await self._adapter.delete_role_assignment(
-                user_id=user_id,
-                tenant_id=tenant_id,
-                role_id=role_id,
-                data=sync_data,
+            async def push_unassign() -> Result[None, SyncError]:
+                return await self._adapter.delete_role_assignment(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    role_id=role_id,
+                    data=sync_data,
+                )
+
+            async def still_unassigned() -> bool:
+                return await self._assignment_repository.get(user_id, tenant_id, role_id) is None
+
+            pushed = await self._guard_membership_push(
+                user_id,
+                tenant_id,
+                push_unassign,
+                ensure=still_unassigned,
             )
             payload: dict = {
                 "status": "removed",
@@ -602,11 +668,23 @@ class RoleService:
         ended: list[tuple[uuid.UUID, uuid.UUID]] = []
         succeeded = True
         for index, (user_id, tenant_id) in enumerate(leaving):
-            pushed = await self._adapter.delete_role_assignment(
-                user_id=user_id,
-                tenant_id=tenant_id,
-                role_id=role_id,
-                data={"role_name": role_name, LAST_ROLE_IN_TENANT: True},
+
+            async def push_unassign() -> Result[None, SyncError]:
+                return await self._adapter.delete_role_assignment(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    role_id=role_id,
+                    data={"role_name": role_name, LAST_ROLE_IN_TENANT: True},
+                )
+
+            async def still_leaving() -> bool:
+                return (user_id, tenant_id) not in still
+
+            pushed = await self._guard_membership_push(
+                user_id,
+                tenant_id,
+                push_unassign,
+                ensure=still_leaving,
             )
             if pushed.is_ok():
                 ended.append((user_id, tenant_id))
