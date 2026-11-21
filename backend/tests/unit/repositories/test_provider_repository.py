@@ -28,7 +28,7 @@ def _make_provider(**overrides) -> Provider:
         "issuer_url": "https://api.descope.com/P123",
         "base_url": "https://api.descope.com",
         "capabilities": ["sso", "mfa"],
-        "config_ref": "infisical://test",
+        "config_ref": "secret://test",
         "active": True,
     }
     defaults.update(overrides)

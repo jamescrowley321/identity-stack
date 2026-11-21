@@ -42,7 +42,7 @@ These feed the follow-on epics (no secrets among them):
 
 | Credential | Used for | Home |
 |---|---|---|
-| **Workspace API key** (`ory_wak_…`) | Terraform provider auth (create/configure projects) | GitHub secret `ORY_WORKSPACE_API_KEY` on this repo (+ `ORY_WORKSPACE_ID` variable). **Interim** — move to HCP workspace vars / Infisical. |
+| **Workspace API key** (`ory_wak_…`) | Terraform provider auth (create/configure projects) | GitHub secret `ORY_WORKSPACE_API_KEY` on this repo (+ `ORY_WORKSPACE_ID` variable). **Interim** — moves to an HCP Terraform variable set (#418). |
 | **Project API key** (`ory_pat_…`) | The SPA-client resource + backend admin sync | Created by Terraform (`ory_project_api_key.tf`); value in state only. |
 
 > ⚠️ **Rotate the workspace key.** The current `ory_wak_` (name `terraform-auth-stack`, expires

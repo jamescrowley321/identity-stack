@@ -9,8 +9,8 @@ There are **five separate Terraform roots**, each with its own state:
 
 | Root | Providers | TFC workspace | State in-repo? |
 |------|-----------|---------------|----------------|
-| `infra/` | descope (fork `jamescrowley321/descope` `~>1.0`), github (`~>6.0`), local | `jamescrowley321/identity-stack-dev` | yes (`main.tf` `cloud{}`) |
-| `infra/ory/` | ory (`ory/ory` `~>26.3`) | `auth-stack` (comment only) | **no `cloud{}`/`backend{}` block** — effectively local state |
+| `infra/` | descope (fork `jamescrowley321/descope` `~>1.0`), github (`~>6.0`) | `jamescrowley321/identity-stack-dev` | yes (`main.tf` `cloud{}`) |
+| `infra/ory/` | ory (`ory/ory` `~>26.3`) | tags `identity-stack` + `ory` (`identity-stack-ory-dev`/`-prod`) | yes (`versions.tf` `cloud{}`); the bootstrap state was local — one-time `terraform init -migrate-state` |
 | `infra/keycloak/` | keycloak (`keycloak/keycloak` `~>5.10`), random (`hashicorp/random` `~>3.6`) | none | **no** — local state, git-ignored; targets the compose Keycloak only |
 | `infra/zitadel/` | zitadel (`zitadel/zitadel` `~>3.8`), random (`hashicorp/random` `~>3.6`) | none | **no** — local state (`infra/zitadel/terraform.tfstate`), git-ignored; targets the compose Zitadel only |
 | `infra/openfga/` | openfga (`openfga/openfga` `~>0.5.1`) | none | **no** — local state, git-ignored; targets the compose OpenFGA only (no authentication) |
@@ -26,7 +26,7 @@ exported in the shell that runs Terraform. No tfvars file holds a credential.
 ## What TF manages today
 
 - **Descope** (`infra/`): the shared project (imported, `prevent_destroy`), tenants `acme`/`globex`, 12 permissions + 4 roles (`owner`/`admin`/`member`/`viewer`, all imported), access keys `integration_tests` (CI client-creds) + `acme_api`, and the FGA schema.
-- **GitHub** (`infra/github.tf`): pushes 7 CI secrets (see table) + generates `DESCOPE_EXPIRED_TOKEN` via a `local-exec` curl.
+- **GitHub** (`infra/github.tf`): pushes 7 CI secrets (see table).
 - **Ory** (`infra/ory/`): project + config (JWT AT, PKCE), a project admin API key (state-only), the public SPA OAuth2 client, identity schema, optional org.
 - **Shared test fixture** (`infra/fixtures/test-identities.json`): the test tenants, users, memberships and canonical roles. `infra/keycloak` and `infra/zitadel` build theirs from it, and the backend's Keycloak and Zitadel suites take user names from it. It records the Descope tenant each tenant maps to; the Descope and Ory roots are not built from it. See [`fixtures/README.md`](fixtures/README.md).
 - **Keycloak** (`infra/keycloak/`): the identity-stack realm the compose import ships, shaped for the canonical model and the two-way sync: the shared fixture's organizations, members and role assignments (each organization's `owner`, `admin`, `member` and `viewer` groups, which map no role), the SPA's public PKCE client `identity-stack-spa` and the API client `identity-stack-api` (its audience; client roles = canonical permissions, composite client roles = canonical roles, held by no one), `identity-stack-other` for negative tests, the fixture users, admin and user events kept 7 days, and the `identity-stack-admin` service account the backend pushes with and reads events through. The token says who the caller is and the backend's database what the caller may do; with `SYNC_PROVIDER=keycloak` the backend pushes every canonical change to the realm, pulls the realm's changes back from its events and reconciles the two. See [`keycloak/README.md`](keycloak/README.md). Checked in CI against Keycloak 26.8.2: `make keycloak-terraform-check` compares the built realm with the import, and `make keycloak-terraform-integration` runs the backend's Keycloak integration tests against it, which pass as they do against the import. Results, the sync and its limits: [`docs/keycloak.md`](../docs/keycloak.md).
@@ -76,9 +76,9 @@ these outputs: adding them would change their HCP Terraform workspaces.
 | `DESCOPE_PROJECT_ID` | `var.descope_project_id` (no default) | var | CI, provider auth, backend | required var — can't be empty |
 | `DESCOPE_CLIENT_ID` | `descope_access_key.integration_tests.client_id` | resource | CI integ/e2e | ok |
 | `DESCOPE_CLIENT_SECRET` | `descope_access_key.integration_tests.cleartext` | resource | CI integ/e2e | ok (sensitive) |
-| `DESCOPE_EXPIRED_TOKEN` | `local-exec` curl → `local_file` | resource (derived) | CI integ | **fragile** — local curl/python + 3-min expiry; empty on failure |
-| `DESCOPE_MANAGEMENT_KEY` | `descope_management_key.ci_e2e.cleartext` (TF-minted) | resource | CI e2e, backend | ✅ fixed in #410 — was `var` default `""` (the root cause of the E2E gap); now self-provisioning, always valid. (Provider *auth* still uses the workspace env var — separate.) |
-| `E2E_TEST_EMAIL` | `var.e2e_test_email` (default now synthetic) | var | CI e2e | ✅ fixed in #410 — default set to a synthetic non-deliverable address; no longer blanks |
+| `DESCOPE_EXPIRED_TOKEN` | `var.descope_expired_token` (sensitive, no default) | var | CI integ (negative auth tests) | ok — static fixture (an expired token stays expired); `validation` + resource `precondition` refuse a blank value. Re-mint only if the project's signing keys change |
+| `DESCOPE_MANAGEMENT_KEY` | `descope_management_key.ci_e2e.cleartext` (TF-minted, `infra/management_key.tf`) | resource | CI e2e | ok — always populated; rotate by tainting `descope_management_key.ci_e2e`. Was a `var` defaulting to `""` (the root cause of the E2E gap) until #410. Provider *auth* still uses the hand-set workspace env var — separate |
+| `E2E_TEST_EMAIL` | `var.e2e_test_email` (no default) | var | CI e2e | ok — `validation` refuses a blank value |
 | `E2E_TEST_TENANT_ID` | `descope_tenant.acme.id` | resource | CI e2e | ok |
 | GitHub provider token | manual TFC env var | manual | `terraform apply` | not codified |
 | `ORY_WORKSPACE_API_KEY` | manual env / TFC var | manual | Ory provider auth | not in TF; rotation pending (#375) |
@@ -103,27 +103,32 @@ these outputs: adding them would change their HCP Terraform workspaces.
 
 The failure mode this document was born from — a `var` with `default = ""`
 silently overwriting a live CI secret with an empty string — generalises. The
-target is: **every credential flows from one source-of-truth (HCP Vault) through
-Terraform to each provider and consumer, with a guard that no synced secret can
-be empty.**
+target is: **every credential flows from one source-of-truth (HCP Terraform
+variable sets) through Terraform to each provider and consumer, with a guard
+that no synced secret can be empty.** (HCP Vault was the earlier plan; it was
+dropped because HCP Vault Secrets is end-of-life and HCP Vault Dedicated is a
+paid cluster.)
 
-1. **Close the silent-empty class (largely done).** `#410` repaired the
+1. **Close the silent-empty class (done).** `#410` repaired the
    descope-provider drift (which had broken `apply` since ~March, the reason the
    secret rotted) and made `DESCOPE_MANAGEMENT_KEY` **self-provisioning** from a
-   TF-minted `descope_management_key` resource; `E2E_TEST_EMAIL` now defaults to a
-   synthetic address. `#396` adds `github.tf` preconditions + a CI coverage gate.
-   Still to do: source `DESCOPE_EXPIRED_TOKEN` the same way (it can still push
-   empty on a `local-exec` failure).
-2. **Single source-of-truth = HCP Vault.** Read every secret from Vault via the
-   `vault` provider; TF fans out to each provider *and* the GH-secret sync. No
-   hand-set TFC workspace variables (the exact thing that broke here).
-3. **Codify provider auth.** Bring Descope/GitHub/Ory provider credentials under
-   Vault-sourced config instead of out-of-band workspace env vars.
+   TF-minted `descope_management_key` resource (`infra/management_key.tf`). Every
+   remaining `var`-sourced CI secret (`descope_project_id`, `e2e_test_email`,
+   `descope_expired_token`) has no default and a non-empty `validation`, so a
+   blank value fails at plan time instead of blanking the secret.
+   `DESCOPE_EXPIRED_TOKEN` is no longer minted by a `local-exec` provisioner; it
+   is a static sensitive input with an extra `precondition` on the GitHub secret
+   (`infra/github.tf`).
+2. **Single source-of-truth = HCP Terraform variable sets.** Hold each secret
+   once, in a variable set attached to the workspaces that need it (Descope
+   auth, Ory auth, org-wide settings); TF fans out to each provider *and* the
+   GH-secret sync. No values hand-typed into individual workspaces (the exact
+   thing that broke here). The remaining wiring is tracked in #418.
+3. **Codify provider auth.** Move Descope/GitHub/Ory provider credentials out of
+   per-workspace env vars into those variable sets (#418).
 4. **Bring the unmanaged secrets in.** `DESCOPE_WEBHOOK_SECRET`,
    `DESCOPE_FLOW_SYNC_SECRET`, `INTERNAL_IDENTITY_KEY` have *no* source today —
-   generate them as TF resources / Vault entries and deliver to the backend.
-5. **Link the two roots.** Give `infra/ory/` a real state backend and propagate
-   its outputs (issuer, `client_id`, project API key) to backend/frontend config
-   automatically, killing the manual-copy drift on `ORY_ISSUER_URL`/`ORY_AUDIENCE`.
-6. **De-fragilise `DESCOPE_EXPIRED_TOKEN`** — replace the `local-exec` curl with a
-   provider/data-source approach or a stable fixture.
+   generate them as TF resources / variable-set entries and deliver to the
+   backend.
+5. **Link the two hosted roots.** Propagate `infra/ory/`'s outputs (issuer,
+   `client_id`, project API key) to backend/frontend config automatically, killing the manual-copy drift on `ORY_ISSUER_URL`/`ORY_AUDIENCE`.
