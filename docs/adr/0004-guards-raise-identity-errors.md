@@ -10,7 +10,9 @@
 routing-layer guard, such as `routers/idp_links.py::_require_user_in_tenant`, used to
 follow the same style and return `Response | None` for its caller to propagate. That is
 fail-open by construction. A new route that calls the guard and drops its return value
-silently loses tenant isolation, with no type error and no failing test.
+silently loses tenant isolation, with no type error and no failing test. The IdP-link router
+that carried that guard was later removed when manual IdP-link management was disabled; this
+example remains as a record of the pattern the ADR was written to change.
 
 ## Decision
 

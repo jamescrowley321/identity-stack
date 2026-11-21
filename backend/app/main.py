@@ -29,7 +29,6 @@ from app.routers import (
     documents,
     fga,
     health,
-    idp_links,
     internal,
     permissions,
     protected,
@@ -320,7 +319,6 @@ app.include_router(documents.router, prefix="/api")
 app.include_router(fga.router, prefix="/api")
 app.include_router(internal.router, prefix="/api")
 app.include_router(reconciliation.router, prefix="/api")
-app.include_router(idp_links.router, prefix="/api")
 app.include_router(providers.router, prefix="/api")
 app.include_router(sync_status.router, prefix="/api")
 app.include_router(canonical_users.router, prefix="/api")

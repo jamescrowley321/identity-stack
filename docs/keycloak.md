@@ -203,9 +203,8 @@ link whose subject is the account's id. The adapter follows a link a sign-in or 
 as the Zitadel adapter does: just-in-time provisioning records `{"linked_by": "sign_in"}` on the
 link, from the validated token's subject; the adapter (for an account it created) and
 `make keycloak-seed` (`seed_keycloak --link-users`, for an existing account of the realm) record
-`{"linked_by": "backend"}`. `POST /api/users/{id}/idp-links` refuses a link that sets that key
-(422). A link a tenant admin made names whatever account the admin typed in, so the adapter never
-writes to it; nor to a client's service account (`service-account-*`, or one with a
+`{"linked_by": "backend"}`. The manual IdP-link API is not exposed. The adapter still never
+writes through a legacy manual link, nor to a client's service account (`service-account-*`, or one with a
 `serviceAccountClientId`), whatever link names it. Links made before this rule carry no origin and
 are not followed either.
 

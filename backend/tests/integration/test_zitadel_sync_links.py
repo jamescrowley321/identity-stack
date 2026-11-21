@@ -206,7 +206,10 @@ async def test_a_link_a_sign_in_made_is_followed(db_session):
 
 @pytest.mark.parametrize("metadata", [None, {}, {"note": "typed in"}], ids=["none", "empty", "other-keys"])
 async def test_a_link_an_admin_made_is_not_followed(db_session, metadata):
-    """POST /users/{id}/idp-links cannot set LINK_ORIGIN: its subject is whatever the admin typed in."""
+    """An IdP link a tenant admin made (with no LINK_ORIGIN) is not followed.
+
+    Its subject is whatever the admin typed in.
+    """
     provider_id = await _provider(db_session)
     user_id = await _user(db_session)
     db_session.add(
