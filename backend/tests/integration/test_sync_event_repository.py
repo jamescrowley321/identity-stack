@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest_asyncio
+from sqlalchemy import delete
 
 from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.sync_event import SyncEvent, SyncEventVerb
@@ -101,6 +102,9 @@ async def test_latest_overall_returns_global_newest(db_session, two_providers):
 
 async def test_latest_overall_with_no_events_returns_none(db_session):
     """A fresh transactional session with no events returns None."""
+    await db_session.execute(delete(SyncEvent))
+    await db_session.execute(delete(Provider))
+    await db_session.commit()
     repo = SyncEventRepository(db_session)
     result = await repo.latest_overall()
     assert result is None

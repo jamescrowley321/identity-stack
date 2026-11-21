@@ -27,6 +27,7 @@ from app.services.adapters.base import (
     IdentityProviderAdapter,
     SyncError,
 )
+from app.services.adapters.keycloak import KeycloakSyncAdapter
 from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.user import UserService
 
@@ -636,6 +637,35 @@ class TestRemoveUserFromTenant:
 
         assert result.is_error()
         assert isinstance(result.error, Forbidden)
+
+    async def test_remove_user_from_tenant_lock_failure_marks_provider_sync_failed(self, monkeypatch):
+        adapter = AsyncMock(spec=KeycloakSyncAdapter)
+        assign_repo = AsyncMock(spec=UserTenantRoleRepository)
+        assign_repo._session = AsyncMock()
+        service, repo, _adapter_unused, _assign_repo_unused = _build_service(
+            adapter=adapter, assignment_repo=assign_repo
+        )
+        user = _make_user()
+        repo.get.return_value = user
+        repo.exists_in_tenant.return_value = True
+        assign_repo.delete_by_user_tenant.return_value = 1
+        adapter.ends_memberships = True
+        adapter.sync_user.side_effect = AssertionError("sync_user should not be called when lock not held")
+
+        class NeverLock:
+            async def __aenter__(self) -> bool:
+                return False
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+        monkeypatch.setattr("app.services.user.hold_keycloak_membership_lock", lambda *_args, **_kwargs: NeverLock())
+
+        result = await service.remove_user_from_tenant(tenant_id=TENANT_ID, user_id=user.id)
+
+        assert result.is_ok()
+        assert result.ok[PROVIDER_SYNC] == PROVIDER_SYNC_FAILED
+        adapter.sync_user.assert_not_awaited()
 
     async def test_remove_user_sync_failure_still_returns_ok(self):
         """AC-2.4.2: sync failure on remove → log warning, still return Ok."""

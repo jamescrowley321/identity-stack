@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import delete
 
 from app.models.database import get_async_session
 from app.models.identity.provider import Provider, ProviderType
@@ -52,6 +53,10 @@ async def app_with_session(db_session):
     factories that touch app.state don't AttributeError.
     """
     from app.main import app
+
+    await db_session.execute(delete(SyncEvent))
+    await db_session.execute(delete(Provider))
+    await db_session.commit()
 
     async def _yield_db():
         yield db_session

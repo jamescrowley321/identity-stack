@@ -9,9 +9,10 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest_asyncio
+from sqlalchemy import delete
 
 from app.models.identity.provider import Provider, ProviderType
-from app.models.identity.sync_event import SyncEventVerb
+from app.models.identity.sync_event import SyncEvent, SyncEventVerb
 from app.models.identity.user import IdPLink, User, UserStatus
 from app.repositories.idp_link import IdPLinkRepository
 from app.repositories.provider import ProviderRepository
@@ -30,6 +31,10 @@ def _build_service(db_session) -> SyncStatusService:
 @pytest_asyncio.fixture(loop_scope="session")
 async def seeded_topology(db_session):
     """Seed two providers (one active, one inactive), users, links, and events."""
+    await db_session.execute(delete(SyncEvent))
+    await db_session.execute(delete(Provider))
+    await db_session.commit()
+
     suffix = uuid.uuid4().hex[:8]
 
     active_provider = Provider(
@@ -119,6 +124,9 @@ def _build_event(provider_id, verb, occurred_at):
 
 async def test_get_status_empty_database(db_session):
     """No providers, no events — empty providers list and null last_reconciliation."""
+    await db_session.execute(delete(SyncEvent))
+    await db_session.execute(delete(Provider))
+    await db_session.commit()
     svc = _build_service(db_session)
     result = await svc.get_status()
     assert result.is_ok()
