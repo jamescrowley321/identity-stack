@@ -16,6 +16,7 @@ import pytest
 from expression import Error, Ok
 
 from app.errors.identity import Conflict, NotFound, ProviderError
+from app.services import keycloak_reconciliation as reconciliation_module
 from app.services.adapters.base import LAST_ROLE_IN_TENANT, STATUS_CHANGED, SyncError
 from app.services.adapters.keycloak import ROLE_ATTRIBUTE, Refusal
 from app.services.identity_provisioning import DEFAULT_ROLE_NAME
@@ -668,3 +669,65 @@ class TestPushes:
         await _pass(ledger=ledger, adapter=adapter).reconcile()
 
         assert [kind for kind, _, _ in ledger.cleared] == ["tenant", "permission", "role", "user", "membership"]
+
+
+class _AlwaysLock:
+    async def __aenter__(self) -> bool:  # pragma: no cover - test helper
+        return True
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:  # pragma: no cover - test helper
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _mock_membership_lock(monkeypatch):
+    monkeypatch.setattr(reconciliation_module, "hold_keycloak_membership_lock", lambda *_args, **_kwargs: _AlwaysLock())
+    yield
+
+
+@pytest.mark.anyio
+async def test_membership_commit_occurs_under_lock(monkeypatch):
+    class RecordingLock:
+        def __init__(self) -> None:
+            self.active = False
+            self.commit_seen = False
+            self.exited = False
+
+        async def __aenter__(self) -> bool:
+            self.active = True
+            return True
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            assert self.commit_seen
+            self.active = False
+            self.exited = True
+
+    lock = RecordingLock()
+    monkeypatch.setattr(reconciliation_module, "hold_keycloak_membership_lock", lambda *_args, **_kwargs: lock)
+
+    session = AsyncMock()
+
+    async def commit() -> None:
+        if not lock.active:
+            raise AssertionError("commit occurred after lock release")
+        lock.commit_seen = True
+
+    session.commit.side_effect = commit
+    session.rollback = AsyncMock()
+
+    ledger = AsyncMock()
+    ledger.clear = AsyncMock()
+
+    reconciliation = KeycloakReconciliation.__new__(KeycloakReconciliation)
+    reconciliation._session = session
+    reconciliation._ledger = ledger
+    reconciliation._push_membership = AsyncMock(return_value=None)
+    reconciliation._failed = AsyncMock()
+
+    stats = {"pushed": 0}
+
+    await reconciliation._push_membership_guarded(uuid.uuid4(), "run", uuid.uuid4(), uuid.uuid4(), 1, {}, stats)
+
+    assert lock.commit_seen is True
+    assert lock.exited is True
+    ledger.clear.assert_awaited()
