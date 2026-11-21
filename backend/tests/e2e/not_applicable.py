@@ -61,11 +61,6 @@ def missing_internal_endpoint_secrets(provider: str, environment: Mapping[str, s
 #
 # One sentence each, saying what about the provider makes the test inapplicable.
 
-DEFINITIONS_NEED_OPERATOR = (
-    "changing the role and permission definitions needs operator from a canonical principal's sole membership "
-    "(require_definitions_role, #676), and the run's admin is the two-tenant fixture user, a tenant admin: "
-    "no fixture user of this provider is an operator (#710)"
-)
 NOT_THE_SYNC_PROVIDER = (
     "the member, role and permission routes serve the sync provider's principals "
     "(require_sync_provider_principal, #676, #677) and this run's backend syncs to Descope (SYNC_PROVIDER unset: "
@@ -93,7 +88,7 @@ def _both(reason: str) -> dict[str, str]:
     return {KEYCLOAK: reason, ZITADEL: reason}
 
 
-DEFINITIONS = {KEYCLOAK: DEFINITIONS_NEED_OPERATOR, ZITADEL: DEFINITIONS_NOT_SYNCED}
+DEFINITIONS = {ZITADEL: DEFINITIONS_NOT_SYNCED}
 
 
 def _each(module: str, tests: list[str], reasons: dict[str, str]) -> dict[str, dict[str, str]]:

@@ -2,12 +2,13 @@
 
 ``conftest.py`` asks the provider ``E2E_PROVIDER`` names (``not_applicable.py``)
 for everything that differs between providers: whether the run can start, the
-two principals' API tokens and headers, a browser signed in to the SPA as either
+principals' API tokens and headers, a browser signed in to the SPA as either
 of them, and the tenant and user the Descope-era tests name. Tests themselves
 never call a provider's API.
 
-The two principals:
+The principals:
 
+- ``OPERATOR``: changes global definitions (Descope reuses its admin);
 - ``MEMBER``: signed in, with no admin role in the tenant it acts in;
 - ``ADMIN``: owner or admin of the tenant it acts in.
 
@@ -46,6 +47,7 @@ from tests.e2e.not_applicable import (
 
 MEMBER = "member"
 ADMIN = "admin"
+OPERATOR = "operator"
 PRINCIPALS = (MEMBER, ADMIN)
 
 _PROBE_TIMEOUT_SECONDS = 10
@@ -313,6 +315,8 @@ class DescopeProvider(E2EProvider):
         A failed sign-in is tried once per run too, as when the token fixtures
         were session-scoped; a skip (credential not set) still skips each test.
         """
+        if principal == OPERATOR:
+            principal = ADMIN
         if principal not in self._tokens:
             self._tokens[principal] = self._failed.attempt(principal, lambda: self._new_token(principal))
         return self._tokens[principal]
@@ -566,6 +570,38 @@ class KeycloakProvider(TwoTenantUserProvider):
         finally:
             context.close()
 
+    def access_token(self, principal: str, request: pytest.FixtureRequest) -> str:
+        if principal != OPERATOR:
+            return super().access_token(principal, request)
+        from tests.helpers.keycloak_fixture import OPERATOR as operator
+
+        return self._tokens.get(operator.key, self._sign_in_operator)
+
+    def headers(self, principal: str) -> dict[str, str]:
+        return {} if principal == OPERATOR else super().headers(principal)
+
+    def _sign_in_operator(self) -> str:
+        from tests.e2e_keycloak.browser_login import BrowserLogin
+        from tests.helpers.keycloak_fixture import OPERATOR as operator
+
+        if self._browser is None:
+            pytest.fail("the Keycloak provider signs in only after check_ready")
+        context = self._browser.new_context()
+        try:
+            return (
+                BrowserLogin(self._keycloak.KeycloakTokenSource())
+                .authorize(
+                    context,
+                    self._keycloak.TARGET.users[operator.key],
+                    client_id=self._model.SPA_CLIENT_ID,
+                    scope=self._scope,
+                    organization=operator.home,
+                )
+                .access_token
+            )
+        finally:
+            context.close()
+
     def _sign_in_page(self, page: Page) -> None:
         from tests.e2e_keycloak.browser_login import sign_in
 
@@ -586,6 +622,11 @@ class ZitadelProvider(TwoTenantUserProvider):
 
     name = ZITADEL
     seed_step = "make zitadel-seed"
+
+    def access_token(self, principal: str, request: pytest.FixtureRequest) -> str:
+        if principal == OPERATOR:
+            pytest.fail("Zitadel has no seeded operator principal yet (#710, #709)")
+        return super().access_token(principal, request)
 
     @cached_property
     def _instance(self):

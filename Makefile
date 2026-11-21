@@ -167,8 +167,8 @@ keycloak-seed: ## register the keycloak provider, link canonical tenants to the 
 	linked="$$(printf '%s' "$$aliases" | jq -e --slurpfile fixture infra/fixtures/test-identities.json \
 		'with_entries(select($$fixture[0].tenants[.key].canonical))')" || exit 1; \
 	ids="$$(terraform -chdir=infra/keycloak output -json user_ids)" || exit 1; \
-	users="$$(printf '%s' "$$ids" | jq -e --slurpfile fixture infra/fixtures/test-identities.json \
-		'$$fixture[0] as $$f | with_entries(.key as $$name | $$f.users[$$name] as $$user \
+	users="$$(printf '%s' "$$ids" | jq -e --slurpfile fixture infra/fixtures/test-identities.json --slurpfile keycloak infra/keycloak/test-identities.json \
+		'($$fixture[0] | .users += $$keycloak[0].users) as $$f | with_entries(.key as $$name | $$f.users[$$name] as $$user \
 		| select($$user.roles | to_entries | any(.value != null and $$f.tenants[.key].canonical)) \
 		| .value = {external_sub: .value, email: "\($$name)@\($$f.tenants[$$user.home].domain)", \
 			given_name: $$user.first_name, family_name: $$user.last_name})')" || exit 1; \

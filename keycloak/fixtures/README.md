@@ -32,7 +32,7 @@ Every secret and password below is a local fixture. The realm's redirect URIs
 | Client | Kind | What |
 |---|---|---|
 | `identity-stack-spa` | public, standard flow only, PKCE S256, full scope off | The SPA. Default client scopes `basic`, `profile`, `email`, `web-origins`, `acr` (no `roles`); optional `organization`, `offline_access`. An audience mapper (`oidc-audience-mapper`, included client `identity-stack-api`) puts the API client in its access tokens' `aud`, not in its ID tokens'. |
-| `identity-stack-api` | confidential, no flows, full scope off | The API: its client id is the audience. Its client roles are the canonical permissions, `<domain>:<action>` (`billing:manage`, `documents:delete`, `documents:read`, `documents:write`, `members:invite`, `members:remove`, `members:update_role`, `projects:create`, `projects:delete`, `projects:read`, `projects:update`, `settings:manage`), and the canonical roles `owner`, `admin`, `member` and `viewer` as composite client roles of their permissions (`owner` all twelve, `admin` all but `billing:manage`, `member` `documents:read`, `documents:write`, `members:invite`, `projects:read`, `projects:update`, `viewer` `documents:read`, `projects:read`). No user and no group holds any of them, and no client is scope-mapped to them. |
+| `identity-stack-api` | confidential, no flows, full scope off | The API: its client id is the audience. Its client roles are the canonical permissions, `<domain>:<action>` (`billing:manage`, `documents:delete`, `documents:read`, `documents:write`, `members:invite`, `members:remove`, `members:update_role`, `projects:create`, `projects:delete`, `projects:read`, `projects:update`, `settings:manage`), and the canonical roles `owner`, `admin`, `member` and `viewer` as composite client roles of their permissions, and `operator` with no permissions (`owner` all twelve, `admin` all but `billing:manage`, `member` `documents:read`, `documents:write`, `members:invite`, `projects:read`, `projects:update`, `viewer` `documents:read`, `projects:read`). No user and no group holds any of them, and no client is scope-mapped to them. |
 | `identity-stack-other` | public, as the SPA, without the audience mapper | Another client, for tests that its tokens are refused. |
 | `identity-stack-admin` | confidential, service account only, client scope `kc-admin-api`, full scope off | The backend's Keycloak admin adapter (`KEYCLOAK_ADMIN_CLIENT_ID`, secret `local-only-admin-client`): see "The admin service account" below. |
 
@@ -41,8 +41,8 @@ on (`adminPermissionsEnabled`); the import gives it the one permission described
 
 ### Role assignments are organization groups
 
-Each organization owns four groups, one per canonical role: `owner`, `admin`, `member` and
-`viewer`. A user's role in a tenant is membership of that organization's group for the role. The
+Each organization owns five groups, one per canonical role: `owner`, `admin`, `member`,
+`viewer` and `operator`. A user's role in a tenant is membership of that organization's group for the role. The
 groups map no role, realm or client, so the membership is the record of the assignment and grants
 nothing; the backend never reads it from a token, and no protocol mapper writes groups to one. The
 realm has no realm-level groups.
@@ -61,11 +61,11 @@ The realm import accepts them: `organizations[].groups` (each with a fixed `id`)
 5.10.0, the latest) creates them (`keycloak_group.organization_id`) but has no resource for their
 members, so `infra/keycloak` sets those through the Organization API (its README says how).
 
-| Organization | Group ids (`owner`, `admin`, `member`, `viewer`) |
+| Organization | Group ids (`owner`, `admin`, `member`, `viewer`, `operator`) |
 |---|---|
-| `acme` | `9a010000-0000-4000-8000-00000000000{1,2,3,4}` |
-| `globex` | `9a020000-0000-4000-8000-00000000000{1,2,3,4}` |
-| `unlinked` | `9a030000-0000-4000-8000-00000000000{1,2,3,4}` |
+| `acme` | `9a010000-0000-4000-8000-00000000000{1,2,3,4,5}` |
+| `globex` | `9a020000-0000-4000-8000-00000000000{1,2,3,4,5}` |
+| `unlinked` | `9a030000-0000-4000-8000-00000000000{1,2,3,4,5}` |
 
 ### Events
 
@@ -130,10 +130,12 @@ Every fixture user's email is imported as verified. No user holds a client role 
 | `erin` | `e4140000-0000-4000-8000-000000000005` | `local-only-erin` | `acme`: `member` |
 | `frank` | `f4a4c000-0000-4000-8000-000000000006` | `local-only-frank` | `acme`: `admin` |
 | `grace` | `64ace000-0000-4000-8000-000000000007` | `local-only-grace` | `unlinked`: `member` |
+| `helen` | `0e1e0000-0000-4000-8000-000000000008` | `local-only-helen` | `acme`: `operator` |
 
 The users, the organizations, who belongs where and each one's role there are the shared test
 fixture [`infra/fixtures/test-identities.json`](../../infra/fixtures/test-identities.json), which
-every provider's Terraform root builds from; the unit test
+every provider's Terraform root builds from, plus the Keycloak-only operator in
+[`infra/keycloak/test-identities.json`](../../infra/keycloak/test-identities.json); the unit test
 `backend/tests/unit/test_identity_fixture.py` fails when this import disagrees with it. The ids
 and passwords are Keycloak's own.
 

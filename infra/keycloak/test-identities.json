@@ -1,0 +1,6 @@
+{
+  "users": {
+    "helen": { "first_name": "Helen", "last_name": "Operator", "home": "acme", "roles": { "acme": "operator" } }
+  },
+  "operator": "helen"
+}

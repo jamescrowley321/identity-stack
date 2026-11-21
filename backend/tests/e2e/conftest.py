@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from tests.e2e.helpers.pages import signed_in_page
-from tests.e2e.helpers.providers import ADMIN, MEMBER, PROVIDER_CLASSES, E2EProvider
+from tests.e2e.helpers.providers import ADMIN, MEMBER, OPERATOR, PROVIDER_CLASSES, E2EProvider
 from tests.e2e.not_applicable import SUITE, UnknownE2EProvider, reason_not_applicable, selected_provider
 
 FRONTEND_URL = os.environ.get("E2E_FRONTEND_URL", "http://localhost:3000")
@@ -151,6 +151,22 @@ def admin_api_context(playwright, e2e_provider, admin_access_token):
     context = playwright.request.new_context(
         base_url=BACKEND_URL,
         extra_http_headers={"Authorization": f"Bearer {admin_access_token}", **e2e_provider.headers(ADMIN)},
+    )
+    yield context
+    context.dispose()
+
+
+@pytest.fixture
+def operator_access_token(e2e_provider, request):
+    """A principal allowed to change role and permission definitions."""
+    return e2e_provider.access_token(OPERATOR, request)
+
+
+@pytest.fixture
+def operator_api_context(playwright, e2e_provider, operator_access_token):
+    context = playwright.request.new_context(
+        base_url=BACKEND_URL,
+        extra_http_headers={"Authorization": f"Bearer {operator_access_token}", **e2e_provider.headers(OPERATOR)},
     )
     yield context
     context.dispose()
