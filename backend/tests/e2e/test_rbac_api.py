@@ -90,66 +90,66 @@ def test_tf_seeded_permissions_present(admin_api_context: APIRequestContext, bac
 # --- AC-3: Runtime-created resources can be created and deleted ---
 
 
-def test_runtime_permission_create_and_delete(admin_api_context: APIRequestContext, backend_url: str):
+def test_runtime_permission_create_and_delete(operator_api_context: APIRequestContext, backend_url: str):
     """Runtime-created permission can be created and deleted via API."""
     perm_name = unique_name("test-perm")
     try:
         # Create runtime permission
-        resp = admin_api_context.post(
+        resp = operator_api_context.post(
             f"{backend_url}/api/permissions",
             data={"name": perm_name, "description": "E2E test permission"},
         )
         assert resp.status == 201, f"Create failed: {resp.status}"
 
         # Verify it exists by trying to create duplicate (expect 409 or 400)
-        resp = admin_api_context.post(
+        resp = operator_api_context.post(
             f"{backend_url}/api/permissions",
             data={"name": perm_name, "description": "duplicate"},
         )
         assert resp.status in (400, 409), f"Duplicate create should fail, got {resp.status}"
 
         # Delete
-        resp = admin_api_context.delete(f"{backend_url}/api/permissions/{perm_name}")
+        resp = operator_api_context.delete(f"{backend_url}/api/permissions/{perm_name}")
         assert resp.status == 200, f"Delete failed: {resp.status}"
         perm_name = None  # cleaned up
     finally:
         if perm_name:
             with contextlib.suppress(Exception):
-                admin_api_context.delete(f"{backend_url}/api/permissions/{perm_name}")
+                operator_api_context.delete(f"{backend_url}/api/permissions/{perm_name}")
 
 
-def test_runtime_role_create_and_delete(admin_api_context: APIRequestContext, backend_url: str):
+def test_runtime_role_create_and_delete(operator_api_context: APIRequestContext, backend_url: str):
     """Runtime-created role can be created and deleted via API."""
     role_name = unique_name("test-role")
     try:
         # Create runtime role (no permission_names since TF-seeded perms may not exist)
-        resp = admin_api_context.post(
+        resp = operator_api_context.post(
             f"{backend_url}/api/roles",
             data={"name": role_name, "description": "E2E test role"},
         )
         assert resp.status == 201, f"Create failed: {resp.status}"
 
         # Verify it exists by trying to create duplicate (expect 409 or 400)
-        resp = admin_api_context.post(
+        resp = operator_api_context.post(
             f"{backend_url}/api/roles",
             data={"name": role_name, "description": "duplicate"},
         )
         assert resp.status in (400, 409), f"Duplicate create should fail, got {resp.status}"
 
         # Delete
-        resp = admin_api_context.delete(f"{backend_url}/api/roles/{role_name}")
+        resp = operator_api_context.delete(f"{backend_url}/api/roles/{role_name}")
         assert resp.status == 200, f"Delete failed: {resp.status}"
         role_name = None  # cleaned up
     finally:
         if role_name:
             with contextlib.suppress(Exception):
-                admin_api_context.delete(f"{backend_url}/api/roles/{role_name}")
+                operator_api_context.delete(f"{backend_url}/api/roles/{role_name}")
 
 
 # --- AC-4: Permission CRUD lifecycle ---
 
 
-def test_permission_crud_lifecycle(admin_api_context: APIRequestContext, backend_url: str):
+def test_permission_crud_lifecycle(operator_api_context: APIRequestContext, backend_url: str):
     """Full permission lifecycle: create -> update -> delete -> re-create (verify delete worked)."""
     perm_name = unique_name("lifecycle-perm")
     updated_name = perm_name + "-updated"
@@ -157,14 +157,14 @@ def test_permission_crud_lifecycle(admin_api_context: APIRequestContext, backend
 
     try:
         # Create
-        resp = admin_api_context.post(
+        resp = operator_api_context.post(
             f"{backend_url}/api/permissions",
             data={"name": perm_name, "description": "E2E lifecycle test"},
         )
         assert resp.status == 201, f"Create failed: {resp.status}"
 
         # Update (rename)
-        resp = admin_api_context.put(
+        resp = operator_api_context.put(
             f"{backend_url}/api/permissions/{perm_name}",
             data={"new_name": updated_name, "description": "Updated description"},
         )
@@ -172,22 +172,22 @@ def test_permission_crud_lifecycle(admin_api_context: APIRequestContext, backend
         cleanup_name = updated_name
 
         # Verify old name no longer exists (re-create with old name should succeed)
-        resp = admin_api_context.post(
+        resp = operator_api_context.post(
             f"{backend_url}/api/permissions",
             data={"name": perm_name, "description": "re-create after rename"},
         )
         assert resp.status == 201, f"Re-create old name should succeed after rename, got {resp.status}"
         # Clean up the re-created permission
         with contextlib.suppress(Exception):
-            admin_api_context.delete(f"{backend_url}/api/permissions/{perm_name}")
+            operator_api_context.delete(f"{backend_url}/api/permissions/{perm_name}")
 
         # Delete the renamed permission
-        resp = admin_api_context.delete(f"{backend_url}/api/permissions/{updated_name}")
+        resp = operator_api_context.delete(f"{backend_url}/api/permissions/{updated_name}")
         assert resp.status == 200, f"Delete failed: {resp.status}"
         cleanup_name = None
 
         # Verify deletion by re-creating with same name (should succeed if deleted)
-        resp = admin_api_context.post(
+        resp = operator_api_context.post(
             f"{backend_url}/api/permissions",
             data={"name": updated_name, "description": "re-create after delete"},
         )
@@ -196,13 +196,13 @@ def test_permission_crud_lifecycle(admin_api_context: APIRequestContext, backend
     finally:
         if cleanup_name:
             with contextlib.suppress(Exception):
-                admin_api_context.delete(f"{backend_url}/api/permissions/{cleanup_name}")
+                operator_api_context.delete(f"{backend_url}/api/permissions/{cleanup_name}")
 
 
 # --- AC-5: Role CRUD with permission mapping ---
 
 
-def test_role_crud_lifecycle(admin_api_context: APIRequestContext, backend_url: str):
+def test_role_crud_lifecycle(operator_api_context: APIRequestContext, backend_url: str):
     """Full role lifecycle: create -> update -> delete -> re-create (verify delete worked).
 
     Creates test permissions first since TF-seeded permissions may not exist in the
@@ -219,7 +219,7 @@ def test_role_crud_lifecycle(admin_api_context: APIRequestContext, backend_url: 
     try:
         # Create test permissions first
         for perm in [perm_a, perm_b, perm_c]:
-            resp = admin_api_context.post(
+            resp = operator_api_context.post(
                 f"{backend_url}/api/permissions",
                 data={"name": perm, "description": "E2E test perm for role lifecycle"},
             )
@@ -227,7 +227,7 @@ def test_role_crud_lifecycle(admin_api_context: APIRequestContext, backend_url: 
             created_perms.append(perm)
 
         # Create role with permissions
-        resp = admin_api_context.post(
+        resp = operator_api_context.post(
             f"{backend_url}/api/roles",
             data={
                 "name": role_name,
@@ -238,7 +238,7 @@ def test_role_crud_lifecycle(admin_api_context: APIRequestContext, backend_url: 
         assert resp.status == 201, f"Create role failed: {resp.status}"
 
         # Update (rename + change permissions)
-        resp = admin_api_context.put(
+        resp = operator_api_context.put(
             f"{backend_url}/api/roles/{role_name}",
             data={
                 "new_name": updated_name,
@@ -250,12 +250,12 @@ def test_role_crud_lifecycle(admin_api_context: APIRequestContext, backend_url: 
         cleanup_name = updated_name
 
         # Delete
-        resp = admin_api_context.delete(f"{backend_url}/api/roles/{updated_name}")
+        resp = operator_api_context.delete(f"{backend_url}/api/roles/{updated_name}")
         assert resp.status == 200, f"Delete failed: {resp.status}"
         cleanup_name = None
 
         # Verify deletion by re-creating with same name
-        resp = admin_api_context.post(
+        resp = operator_api_context.post(
             f"{backend_url}/api/roles",
             data={"name": updated_name, "description": "re-create after delete"},
         )
@@ -264,10 +264,10 @@ def test_role_crud_lifecycle(admin_api_context: APIRequestContext, backend_url: 
     finally:
         if cleanup_name:
             with contextlib.suppress(Exception):
-                admin_api_context.delete(f"{backend_url}/api/roles/{cleanup_name}")
+                operator_api_context.delete(f"{backend_url}/api/roles/{cleanup_name}")
         for perm in created_perms:
             with contextlib.suppress(Exception):
-                admin_api_context.delete(f"{backend_url}/api/permissions/{perm}")
+                operator_api_context.delete(f"{backend_url}/api/permissions/{perm}")
 
 
 # --- AC-6: Runtime role works with /roles/assign ---
