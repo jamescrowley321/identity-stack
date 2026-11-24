@@ -54,6 +54,9 @@ async def restore_memberships(
                             row.role_id,
                         )
                         continue
+                    # Read again under the lock: an unassign since the rows were read must not be undone.
+                    if await assignments.get_committed(row.user_id, row.tenant_id, row.role_id) is None:
+                        continue
                     pushed = await push_assignment()
             else:
                 pushed = await push_assignment()

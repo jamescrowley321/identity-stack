@@ -50,6 +50,12 @@ class UserTenantRoleRepository(BaseRepository[UserTenantRole]):
         """Fetch an assignment by composite primary key. Returns None if not found."""
         return await self._session.get(UserTenantRole, (user_id, tenant_id, role_id))
 
+    async def get_committed(
+        self, user_id: uuid.UUID, tenant_id: uuid.UUID, role_id: uuid.UUID
+    ) -> UserTenantRole | None:
+        """The assignment as the database holds it now, never the copy the session already holds."""
+        return await self._session.get(UserTenantRole, (user_id, tenant_id, role_id), populate_existing=True)
+
     async def list_by_user_tenant(self, user_id: uuid.UUID, tenant_id: uuid.UUID) -> list[UserTenantRole]:
         """List all role assignments for a user within a tenant."""
         stmt = (
