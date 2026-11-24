@@ -416,6 +416,24 @@ async def test_a_probe_failure_before_the_read_leaves_the_session_usable(async_e
     assert still_answers == 1
 
 
+async def test_a_probe_failure_before_a_link_write_leaves_the_session_usable(async_engine, held_lock, monkeypatch):
+    async def probe(self) -> bool:
+        await self._session.execute(text("SET LOCAL lock_timeout = '50ms'"))
+        await self._session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": HELD_LOCK_KEY})
+        return False
+
+    monkeypatch.setattr(ProviderRepository, "transaction_has_written", probe)
+
+    async with sessions(async_engine)() as session:
+        await session.execute(text("SELECT 1"))
+        links = RepositoryKeycloakLinks(session)
+        with pytest.raises(LocalDatabaseError):
+            await links.link_organization(uuid.uuid4(), "organization")
+        still_answers = (await session.execute(text("SELECT 1"))).scalar_one()
+
+    assert still_answers == 1
+
+
 # --- the organization lock (a push that reads an organization and sends it back) ---
 
 
