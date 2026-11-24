@@ -255,9 +255,8 @@ class RepositoryKeycloakLinks(KeycloakLinks):
 
     async def link_organization(self, tenant_id: uuid.UUID, alias: str) -> None:
         """Record ``alias`` as the tenant's organization. A tenant linked to anything else is refused."""
-        loaded: Loaded | None = None
+        loaded = await self._snapshot("the tenant link write")
         try:
-            loaded = await self._loaded()
             provider_id = await self._provider_id()
             if provider_id is None:
                 raise LinkRefused(f"no {PROVIDER_NAME!r} provider row: run the Keycloak seed first")
@@ -281,9 +280,8 @@ class RepositoryKeycloakLinks(KeycloakLinks):
 
     async def link_user(self, user_id: uuid.UUID, sub: str, email: str) -> None:
         """Link the user to the account the adapter created; the same link already there counts as written."""
-        loaded: Loaded | None = None
+        loaded = await self._snapshot("the IdP link write")
         try:
-            loaded = await self._loaded()
             provider_id = await self._provider_id()
             if provider_id is None:
                 raise LinkRefused(f"no {PROVIDER_NAME!r} provider row: run the Keycloak seed first")
@@ -314,6 +312,15 @@ class RepositoryKeycloakLinks(KeycloakLinks):
         except DATABASE_FAILURES as exc:
             await self._recover(loaded, "the IdP link write", exc)
             raise LocalDatabaseError(failed("the IdP link write", exc)) from exc
+
+    async def _snapshot(self, what: str) -> Loaded | None:
+        """``_loaded`` before a write: a probe failure its savepoint contained leaves the transaction as it was."""
+        try:
+            return await self._loaded()
+        except DATABASE_FAILURES as exc:
+            if connection_lost(exc):
+                await self._recover(None, what, exc)
+            raise LocalDatabaseError(failed(what, exc)) from exc
 
     async def _loaded(self) -> Loaded | None:
         """The rows the session has loaded, to put back after a rollback; ``None`` with work not committed.
