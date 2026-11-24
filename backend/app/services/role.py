@@ -329,7 +329,7 @@ class RoleService:
                 )
 
             async def still_assigned() -> bool:
-                return await self._assignment_repository.get(user_id, tenant_id, role_id) is not None
+                return await self._assignment_repository.get_committed(user_id, tenant_id, role_id) is not None
 
             pushed = await self._guard_membership_push(
                 user_id,
@@ -440,7 +440,8 @@ class RoleService:
 
                 async def still_assigned() -> bool:
                     return (
-                        await self._assignment_repository.get(event.user_id, event.tenant_id, event.role_id) is not None
+                        await self._assignment_repository.get_committed(event.user_id, event.tenant_id, event.role_id)
+                        is not None
                     )
 
                 pushed = await self._guard_membership_push(
@@ -628,7 +629,7 @@ class RoleService:
                 )
 
             async def still_unassigned() -> bool:
-                return await self._assignment_repository.get(user_id, tenant_id, role_id) is None
+                return await self._assignment_repository.get_committed(user_id, tenant_id, role_id) is None
 
             pushed = await self._guard_membership_push(
                 user_id,
@@ -677,8 +678,9 @@ class RoleService:
                     data={"role_name": role_name, LAST_ROLE_IN_TENANT: True},
                 )
 
-            async def still_leaving() -> bool:
-                return (user_id, tenant_id) not in still
+            async def still_leaving(user_id: uuid.UUID = user_id, tenant_id: uuid.UUID = tenant_id) -> bool:
+                # Read again under the lock: a role assigned since ``still`` was read keeps the membership.
+                return not await self._assignment_repository.list_by_user_tenant(user_id, tenant_id)
 
             pushed = await self._guard_membership_push(
                 user_id,
