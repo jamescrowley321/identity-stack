@@ -538,7 +538,7 @@ class KeycloakReconciliation:
                 failure = await self._push(kind, key, snapshot)
             except Exception as exc:
                 await self._session.rollback()
-                failure = SyncError(message=f"{type(exc).__name__}: {exc}", operation=f"push_{kind}")
+                failure = SyncError(message=type(exc).__name__, operation=f"push_{kind}")
             if failure is None:
                 await self._ledger.clear(kind, key, seq)
                 stats["pushed"] += 1
