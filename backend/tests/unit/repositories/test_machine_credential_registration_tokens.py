@@ -200,11 +200,18 @@ class TestMigration:
     @pytest.mark.parametrize(
         "command", [("upgrade", f"{BEFORE_SEALING}:{SEALING}"), ("downgrade", f"{SEALING}:{BEFORE_SEALING}")]
     )
-    def test_offline_sql_generation_runs_without_a_key(self, postgres_url, command):
-        """``--sql`` has no rows to read, so the revision writes no token SQL and needs no key."""
+    async def test_offline_sql_stops_on_a_database_holding_tokens(
+        self, async_engine, postgres_url, plain_text_row, command
+    ):
+        """``--sql`` cannot seal: its script refuses to run, and so to stamp 011, while a token is stored."""
         generated = _alembic(postgres_url, *command, "--sql", key=None)
-
         assert generated.returncode == 0, generated.stderr
+        guard = next(line for line in generated.stdout.splitlines() if line.startswith("DO $$"))
+
+        async with async_engine.connect() as conn:
+            with pytest.raises(sa.exc.DBAPIError, match="must run online"):
+                await conn.execute(sa.text(guard))
+        assert await self._token(async_engine, plain_text_row) == TOKEN
 
     SEALED = CIPHER.seal(TOKEN)
     SEALED_UNDER_ANOTHER_KEY = RegistrationTokenCipher([Fernet.generate_key().decode()]).seal(TOKEN)

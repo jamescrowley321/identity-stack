@@ -37,6 +37,13 @@ KEYS_VARIABLE = "KEYCLOAK_REGISTRATION_TOKEN_KEYS"
 _tokens = sa.table("machine_credentials", sa.column("id", sa.Uuid()), sa.column("registration_token", sa.String()))
 
 
+_OFFLINE_GUARD = (
+    "DO $$ BEGIN IF EXISTS (SELECT 1 FROM machine_credentials WHERE registration_token <> '') THEN "
+    "RAISE EXCEPTION '011_seal_registration_tokens must run online (alembic without --sql) "
+    "while machine_credentials holds registration tokens'; END IF; END $$"
+)
+
+
 def _fernet() -> MultiFernet:
     keys = [key.strip() for key in os.environ.get(KEYS_VARIABLE, "").split(",") if key.strip()]
     if not keys:
@@ -62,9 +69,12 @@ def _seal(fernet: MultiFernet, value: str) -> str | None:
 def _rewrite(transform) -> None:
     """Set each stored token to ``transform(fernet, token)``; a ``None`` leaves that row as it is.
 
-    Offline (``--sql``) there are no rows to read: tokens are sealed only by an online upgrade.
+    Offline (``--sql``) no row can be read and Fernet has no SQL form, so the
+    script gets a guard instead: applied to a database holding a token, it stops
+    before the revision is stamped. Only an online run seals or opens tokens.
     """
     if context.is_offline_mode():
+        op.execute(_OFFLINE_GUARD)
         return
     connection = op.get_bind()
     rows = connection.execute(
