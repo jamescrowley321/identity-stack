@@ -13,6 +13,11 @@ from app.repositories.base import BaseRepository
 class SyncEventRepository(BaseRepository[SyncEvent]):
     _model = SyncEvent
 
+    async def create_now(self, event: SyncEvent) -> SyncEvent:
+        """``create``, with ``occurred_at`` the database's clock (``clock_timestamp()``), not this worker's."""
+        event.occurred_at = sa.func.clock_timestamp()
+        return await self.create(event)
+
     async def list_recent(
         self,
         *,

@@ -16,10 +16,10 @@ from app.models.identity.role import Permission, Role, RolePermission
 from app.models.identity.sync_event import SyncEvent, SyncEventVerb
 from app.models.identity.sync_ledger import PendingPush, ReconciliationRun
 from app.models.identity.tenant import Tenant
-from app.models.identity.user import IdPLink, User
+from app.models.identity.user import IdPLink, User, UserStatus
 from app.repositories.base import BaseRepository
 
-# A mark whose push keeps failing waits ``interval * 2 ** n`` before the next retry, n at most this.
+# A mark whose push keeps failing waits ``interval * 2 ** (n - 1)`` before the next retry, n - 1 at most this.
 MAX_BACKOFF_DOUBLINGS = 6
 
 # The transaction setting a canonical write that brings the canonical model to the
@@ -45,8 +45,10 @@ class PendingPushRepository(BaseRepository[PendingPush]):
 
         A mark is backed off by the ``failed`` sync events of its entity since it was
         marked: after n of them the next retry waits ``interval * 2 ** (n - 1)`` from
-        the last, at most ``interval * 2 ** MAX_BACKOFF_DOUBLINGS``. Read from the
-        database, so every worker sees the same cadence per mark.
+        the last, at most ``interval * 2 ** MAX_BACKOFF_DOUBLINGS``. A revocation is
+        never backed off (``_revocation``): Keycloak keeps granting what it took away
+        until it is pushed. The mark's time, the failures' and now are all the
+        database's clock, so every worker sees the same cadence per mark.
         """
         failures = (
             sa.select(
@@ -76,6 +78,7 @@ class PendingPushRepository(BaseRepository[PendingPush]):
                 PendingPush.marked_at <= now - sa.func.make_interval(0, 0, 0, 0, 0, 0, interval_seconds),
                 sa.or_(
                     failures.c.failures.is_(None),
+                    _revocation(),
                     failures.c.last_failure <= now - sa.func.make_interval(0, 0, 0, 0, 0, 0, backoff),
                 ),
             )
@@ -108,6 +111,18 @@ class PendingPushRepository(BaseRepository[PendingPush]):
         await self._session.execute(
             sa.select(sa.func.set_config(SYNC_ORIGIN_SETTING, PROVIDER_ORIGIN if on else "", True))
         )
+
+
+def _revocation() -> sa.ColumnElement[bool]:
+    """A mark whose push takes access away: a membership a role left, a user deleted or deactivated.
+
+    A membership mark keeps the snapshot of a removed role (migration 009) until it is cleared.
+    """
+    user_kept = sa.exists().where(sa.cast(User.id, sa.Text) == PendingPush.key, User.status != UserStatus.inactive)
+    return sa.or_(
+        sa.and_(PendingPush.kind == "membership", PendingPush.snapshot["role_id"].is_not(None)),
+        sa.and_(PendingPush.kind == "user", ~user_kept),
+    )
 
 
 class ReconciliationRunRepository(BaseRepository[ReconciliationRun]):

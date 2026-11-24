@@ -11,6 +11,8 @@ from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.dependencies import identity
 from app.dependencies.identity import hold_push_retry, hold_reconciliation_pass
@@ -66,6 +68,58 @@ async def test_a_second_pass_is_refused(engine):
         assert passing is True
         assert await _enter(hold_reconciliation_pass) is False
     assert await _enter(hold_reconciliation_pass) is True
+
+
+UNLOCK = identity._UNLOCK
+
+
+@pytest.fixture
+def invalidated(monkeypatch) -> list[AsyncConnection]:
+    """Each connection the locks drop instead of returning to the pool."""
+    dropped: list[AsyncConnection] = []
+    invalidate = AsyncConnection.invalidate
+
+    async def spy(self, exception=None):
+        dropped.append(self)
+        await invalidate(self, exception)
+
+    monkeypatch.setattr(AsyncConnection, "invalidate", spy)
+    return dropped
+
+
+async def test_a_release_that_fails_drops_the_connection_and_its_lock(engine, monkeypatch, invalidated):
+    """Not raised from the holder's exit; closing the connection frees the lock the release did not."""
+    monkeypatch.setattr(identity, "_UNLOCK", text("SELECT pg_advisory_unlock_no_such_function(:lock_id)"))
+
+    assert await _enter(hold_push_retry) is True
+
+    assert len(invalidated) == 1
+    monkeypatch.setattr(identity, "_UNLOCK", UNLOCK)
+    assert await _enter_soon(hold_push_retry) is True
+
+
+async def test_a_release_cancelled_drops_the_connection_and_is_raised(engine, monkeypatch, invalidated):
+    monkeypatch.setattr(identity, "_UNLOCK", text("SELECT pg_sleep(2), pg_advisory_unlock(:lock_id)"))
+    releasing = asyncio.create_task(_enter(hold_push_retry))
+    await asyncio.sleep(0.5)
+
+    releasing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await releasing
+
+    assert len(invalidated) == 1
+    monkeypatch.setattr(identity, "_UNLOCK", UNLOCK)
+    assert await _enter_soon(hold_push_retry) is True
+
+
+async def _enter_soon(hold, within: float = 10.0) -> bool:
+    """Whether ``hold`` is taken within ``within`` seconds: a dropped connection's backend may take a moment to end."""
+    deadline = asyncio.get_running_loop().time() + within
+    while not await _enter(hold):
+        if asyncio.get_running_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(0.2)
+    return True
 
 
 async def _enter(hold) -> bool:

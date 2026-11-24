@@ -42,10 +42,12 @@ from app.services.keycloak_reconciliation import KeycloakReconciliation
 logger = logbook(__name__)
 
 RETRY_INTERVAL_VARIABLE = "KEYCLOAK_PUSH_RETRY_INTERVAL_SECONDS"
+# Below this every worker would re-push every failing mark almost continuously.
+MIN_RETRY_INTERVAL_SECONDS = 1.0
 
 
 class KeycloakPushRetryNotConfigured(ValueError):
-    """``KEYCLOAK_PUSH_RETRY_INTERVAL_SECONDS`` is not a positive number of seconds."""
+    """``KEYCLOAK_PUSH_RETRY_INTERVAL_SECONDS`` is not a finite number of seconds of at least one."""
 
 
 def keycloak_push_retry_interval() -> float:
@@ -55,8 +57,10 @@ def keycloak_push_retry_interval() -> float:
         interval = float(raw)
     except ValueError:
         interval = math.nan
-    if not math.isfinite(interval) or interval <= 0:
-        raise KeycloakPushRetryNotConfigured(f"{RETRY_INTERVAL_VARIABLE} must be a positive number of seconds")
+    if not math.isfinite(interval) or interval < MIN_RETRY_INTERVAL_SECONDS:
+        raise KeycloakPushRetryNotConfigured(
+            f"{RETRY_INTERVAL_VARIABLE} must be a number of seconds, at least {MIN_RETRY_INTERVAL_SECONDS:g}"
+        )
     return interval
 
 

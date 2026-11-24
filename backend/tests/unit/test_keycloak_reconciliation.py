@@ -519,7 +519,7 @@ class TestPushes:
         assert result.ok.stats["push_failed"] == 1
         assert result.ok.stats["pending"] == 1
         assert ledger.cleared == []
-        recorded = events.create.await_args.args[0]
+        recorded = events.create_now.await_args.args[0]
         assert (recorded.subject_type, recorded.subject_id, recorded.detail["operation"]) == (
             "user",
             str(user.id),

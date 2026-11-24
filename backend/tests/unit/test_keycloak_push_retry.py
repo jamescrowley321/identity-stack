@@ -29,7 +29,13 @@ def test_set_value(monkeypatch):
     assert keycloak_push_retry_interval() == 2.5
 
 
-@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "soon"])
+def test_the_floor_is_accepted(monkeypatch):
+    monkeypatch.setenv(RETRY_INTERVAL_VARIABLE, "1")
+
+    assert keycloak_push_retry_interval() == 1.0
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "0.999", "0.001", "nan", "inf", "soon"])
 def test_a_value_out_of_range_is_refused_by_name(monkeypatch, value):
     monkeypatch.setenv(RETRY_INTERVAL_VARIABLE, value)
 

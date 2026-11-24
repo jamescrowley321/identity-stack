@@ -496,7 +496,8 @@ class KeycloakReconciliation:
     ) -> None:
         logger.warning("Keycloak reconciliation: %s %s failed: %s", operation, subject, message)
         stats["failed" if not subject else "push_failed"] += 1
-        await self._events.create(
+        # The database's clock, as the mark's ``marked_at``: the push retry's backoff compares the two.
+        await self._events.create_now(
             SyncEvent(
                 provider_id=provider_id,
                 verb=SyncEventVerb.failed,

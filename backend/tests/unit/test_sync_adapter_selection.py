@@ -224,7 +224,7 @@ class TestStartup:
             await main._start_sync_provider(FakeApp())
 
         assert str(refused.value) == (
-            "SYNC_PROVIDER is keycloak but KEYCLOAK_PUSH_RETRY_INTERVAL_SECONDS must be a positive number of seconds"
+            "SYNC_PROVIDER is keycloak but KEYCLOAK_PUSH_RETRY_INTERVAL_SECONDS must be a number of seconds, at least 1"
         )
         assert api.sent == []
 
