@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 import anyio
 import pytest
 from sqlalchemy import delete, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.dependencies import keycloak_sync
@@ -395,6 +396,26 @@ async def test_a_tenant_link_read_that_fails_is_named_by_its_sqlstate_and_leaves
     )
 
 
+async def test_a_probe_failure_before_the_read_leaves_the_session_usable(async_engine, held_lock, monkeypatch):
+    async def probe(self) -> bool:
+        await self._session.execute(text("SET LOCAL lock_timeout = '50ms'"))
+        await self._session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": HELD_LOCK_KEY})
+        return False
+
+    monkeypatch.setattr(ProviderRepository, "transaction_has_written", probe)
+    tenant_id = uuid.uuid4()
+
+    async with sessions(async_engine)() as session:
+        # Open a transaction without writes: ``_loaded`` asks whether it has written.
+        await session.execute(text("SELECT 1"))
+        links = RepositoryKeycloakLinks(session)
+        with pytest.raises(LocalDatabaseError):
+            await links.organization_alias(tenant_id)
+        still_answers = (await session.execute(text("SELECT 1"))).scalar_one()
+
+    assert still_answers == 1
+
+
 # --- the organization lock (a push that reads an organization and sends it back) ---
 
 
@@ -506,3 +527,252 @@ async def test_keycloak_calls_past_the_deadline_under_the_lock_leave_the_session
 
     assert result.is_error()
     assert (result.error.context["status"], after) == (None, (users[0].email, 1))
+
+
+async def test_uncommitted_work_lost_releasing_the_organization_lock_raises_and_restores_rows(
+    async_engine, members, monkeypatch
+):
+    tenant, _role, _users = members
+
+    async def savepoint_never_rolls_back(self, savepoint, alias: str) -> bool:
+        return False
+
+    monkeypatch.setattr(RepositoryKeycloakLinks, "_savepoint_rolled_back", savepoint_never_rolls_back)
+    alias = str(tenant.id)
+
+    async with sessions(async_engine)() as session:
+        row = await TenantRepository(session).get(tenant.id)
+        original_name = row.name
+        row.name = "renamed, not committed"
+        links = RepositoryKeycloakLinks(session)
+        with pytest.raises(UncommittedWorkLost) as lost:
+            async with links.organization_lock(alias):
+                pass
+        await session.commit()
+    async with sessions(async_engine)() as check:
+        held = await TenantRepository(check).get(tenant.id)
+
+    assert (held.name, str(lost.value)) == (
+        original_name,
+        f"Keycloak organization lock for {alias}: the request's uncommitted changes were rolled back",
+    )
+
+
+async def test_uncommitted_work_lost_releasing_the_organization_lock_outranks_the_body_error(
+    async_engine, members, monkeypatch
+):
+    tenant, _role, _users = members
+
+    async def savepoint_never_rolls_back(self, savepoint, alias: str) -> bool:
+        return False
+
+    monkeypatch.setattr(RepositoryKeycloakLinks, "_savepoint_rolled_back", savepoint_never_rolls_back)
+
+    async with sessions(async_engine)() as session:
+        row = await TenantRepository(session).get(tenant.id)
+        row.name = "renamed, not committed"
+        links = RepositoryKeycloakLinks(session)
+        with pytest.raises(UncommittedWorkLost) as lost:
+            async with links.organization_lock(str(tenant.id)):
+                raise LocalDatabaseError("the push failed under the lock")
+
+    assert isinstance(lost.value.__context__, LocalDatabaseError)
+
+
+async def _try_organization_lock(async_engine, alias: str) -> bool:
+    """Whether another connection can take the organization's lock now (held until its transaction ends)."""
+    async with async_engine.connect() as other, other.begin():
+        statement = text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))")
+        return (await other.execute(statement, {"key": ORGANIZATION_LOCK_NAMESPACE + alias})).scalar_one()
+
+
+async def test_releasing_the_organization_lock_is_bounded_and_releases_the_lock_without_uncommitted_work(
+    async_engine, members, monkeypatch
+):
+    tenant, _role, users = members
+
+    async def never_rollback(self, savepoint, alias: str) -> bool:
+        await anyio.sleep_forever()
+        return False
+
+    monkeypatch.setattr(RepositoryKeycloakLinks, "_savepoint_rolled_back", never_rollback)
+    monkeypatch.setattr(keycloak_sync, "ORGANIZATION_LOCK_RELEASE_SECONDS", 0.1)
+    alias = str(tenant.id)
+
+    async with sessions(async_engine)() as session:
+        await UserRepository(session).get(users[0].id)
+        await session.commit()
+        links = RepositoryKeycloakLinks(session)
+        async with links.organization_lock(alias):
+            # Nothing uncommitted to lose: a release that times out is not the push's failure.
+            pass
+    # After the release timeout, another connection can take the lock.
+    assert await _try_organization_lock(async_engine, alias)
+
+
+async def test_releasing_the_organization_lock_is_bounded_and_releases_the_lock_with_uncommitted_work(
+    async_engine, members, monkeypatch
+):
+    tenant, _role, _users = members
+
+    async def never_rollback(self, savepoint, alias: str) -> bool:
+        await anyio.sleep_forever()
+        return False
+
+    monkeypatch.setattr(RepositoryKeycloakLinks, "_savepoint_rolled_back", never_rollback)
+    monkeypatch.setattr(keycloak_sync, "ORGANIZATION_LOCK_RELEASE_SECONDS", 0.1)
+    alias = str(tenant.id)
+
+    async with sessions(async_engine)() as session:
+        row = await TenantRepository(session).get(tenant.id)
+        original_name = row.name
+        row.name = "renamed, not committed"
+        links = RepositoryKeycloakLinks(session)
+        with pytest.raises(UncommittedWorkLost):
+            async with links.organization_lock(alias):
+                # Normal exit with uncommitted work: release times out and fails closed.
+                pass
+        await session.commit()
+    async with sessions(async_engine)() as check:
+        held = await TenantRepository(check).get(tenant.id)
+
+    assert (held.name, await _try_organization_lock(async_engine, alias)) == (original_name, True)
+
+
+class BodyError(Exception):
+    """Sentinel error for organization_lock bodies in release tests."""
+
+
+async def test_a_release_whose_rollback_fails_invalidates_the_connection_without_failing_the_push(
+    async_engine, members, monkeypatch
+):
+    tenant, _role, users = members
+    alias = str(tenant.id)
+
+    async def savepoint_fails(self, savepoint, alias: str) -> bool:
+        return False
+
+    async def failing_rollback(self: AsyncSession) -> None:
+        raise SQLAlchemyError("rollback failed")
+
+    monkeypatch.setattr(RepositoryKeycloakLinks, "_savepoint_rolled_back", savepoint_fails)
+    monkeypatch.setattr(AsyncSession, "rollback", failing_rollback)
+    monkeypatch.setattr(keycloak_sync, "ORGANIZATION_LOCK_RELEASE_SECONDS", 0.1)
+
+    async with sessions(async_engine)() as session:
+        await UserRepository(session).get(users[0].id)
+        await session.commit()
+        links = RepositoryKeycloakLinks(session)
+        async with links.organization_lock(alias):
+            # Nothing uncommitted to lose: the failed rollback is logged, the connection invalidated.
+            pass
+
+    # After the rollback failure path, another connection can take the lock.
+    assert await _try_organization_lock(async_engine, alias)
+
+
+async def test_release_rollback_failure_preserves_body_exception(async_engine, members, monkeypatch):
+    tenant, _role, _users = members
+    alias = str(tenant.id)
+
+    async def savepoint_fails(self, savepoint, alias: str) -> bool:
+        return False
+
+    async def failing_rollback(self: AsyncSession) -> None:
+        raise SQLAlchemyError("rollback failed")
+
+    monkeypatch.setattr(RepositoryKeycloakLinks, "_savepoint_rolled_back", savepoint_fails)
+    monkeypatch.setattr(AsyncSession, "rollback", failing_rollback)
+    monkeypatch.setattr(keycloak_sync, "ORGANIZATION_LOCK_RELEASE_SECONDS", 0.1)
+
+    async with sessions(async_engine)() as session:
+        await TenantRepository(session).get(tenant.id)
+        await session.commit()
+        links = RepositoryKeycloakLinks(session)
+        with pytest.raises(BodyError):
+            async with links.organization_lock(alias):
+                # The body error is preserved even when rollback fails.
+                raise BodyError("body failed under lock")
+
+    assert await _try_organization_lock(async_engine, alias)
+
+
+async def test_organization_lock_does_not_touch_rows_with_uncommitted_changes_before_lock(async_engine, members):
+    tenant, _role, _users = members
+    alias = str(tenant.id)
+
+    async with sessions(async_engine)() as session:
+        row = await TenantRepository(session).get(tenant.id)
+        original_name = row.name
+        row.name = "pre-lock-change"
+        assert session.sync_session.is_modified(row)
+
+        links = RepositoryKeycloakLinks(session)
+        async with links.organization_lock(alias):
+            # No further changes inside the lock: `_loaded` returns None because the session
+            # already has uncommitted work. The nested savepoint rollback and expiration
+            # of state must not commit the pre-lock change to the database.
+            pass
+
+        # Within the same session, the identity map still reflects the pre-lock change.
+        row_after = await TenantRepository(session).get(tenant.id)
+        assert row_after.name == "pre-lock-change"
+
+    # A fresh session reads from the database and must still see the original value,
+    # so the pre-lock change was not committed by the organization lock.
+    async with sessions(async_engine)() as check:
+        db_row = await TenantRepository(check).get(tenant.id)
+        assert db_row.name == original_name
+
+
+async def test_organization_lock_restores_rows_loaded_before_the_body(async_engine, members):
+    tenant, _role, _users = members
+    alias = str(tenant.id)
+
+    async with sessions(async_engine)() as session:
+        row = await TenantRepository(session).get(tenant.id)
+        original_name = row.name
+        links = RepositoryKeycloakLinks(session)
+
+        async with links.organization_lock(alias):
+            # A change inside the lock that is flushed is undone by the savepoint rollback,
+            # and `_put_back` restores the pre-lock snapshot.
+            row.name = "changed-under-lock"
+            await session.flush()
+
+        row_after = await TenantRepository(session).get(tenant.id)
+        assert row_after.name == original_name
+        assert not session.sync_session.is_modified(row_after)
+
+
+async def test_an_invalidation_that_hangs_is_bounded_and_preserves_the_body_exception(
+    async_engine, members, monkeypatch
+):
+    tenant, _role, _users = members
+    alias = str(tenant.id)
+
+    async def never_rollback(self, savepoint, alias: str) -> bool:
+        await anyio.sleep_forever()
+        return False
+
+    monkeypatch.setattr(RepositoryKeycloakLinks, "_savepoint_rolled_back", never_rollback)
+    monkeypatch.setattr(keycloak_sync, "ORGANIZATION_LOCK_RELEASE_SECONDS", 0.1)
+
+    async with sessions(async_engine)() as session:
+        links = RepositoryKeycloakLinks(session)
+        original_invalidate = session.invalidate
+
+        async def hanging_invalidate() -> None:
+            await anyio.sleep_forever()
+
+        session.invalidate = hanging_invalidate
+        try:
+            with anyio.fail_after(1) as outer:
+                with pytest.raises(BodyError):
+                    async with links.organization_lock(alias):
+                        raise BodyError("body failed while discard_connection times out")
+            # Cleanup is bounded: the outer timeout does not have to cancel the test.
+            assert not outer.cancelled_caught
+        finally:
+            # Restore the session's invalidate method before the fixture tears it down.
+            session.invalidate = original_invalidate
