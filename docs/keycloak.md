@@ -200,12 +200,15 @@ old (an inline push may still be delivering a younger one; a mark whose inline p
 pushed once more, which writes nothing, and removed). After n `failed` sync events of its entity
 since it was marked, it waits `interval × 2^(n−1)` from the last, at most `interval × 64`, so a
 push Keycloak keeps refusing is retried less and less often; a new canonical change of the entity
-starts it again. The cadence is read from the database, so it is per mark whatever the number of
-workers. A turn reads nothing of the realm. It holds a pending-push lock, so one worker pushes at a
-time; a turn skips while a pass pushes, and a reconciliation run started during a turn waits up to
-10 seconds for it, then answers 409. A failed revocation is therefore applied within about one
-interval of Keycloak answering again, with no reconciliation run. Authorization
-never reads it: a removed membership is refused on the next request from the canonical model.
+starts it again. A revocation is never backed off: a membership a role left or that ended, and a
+user deleted or deactivated, are pushed on every turn while they are pending, each failure
+recording a `failed` sync event. The cadence is read from the database, on the database's clock, so
+it is per mark whatever the number of workers. A turn reads nothing of the realm. It holds a
+pending-push lock, so one worker pushes at a time; a turn skips while a pass pushes, and a
+reconciliation run started during a turn waits up to 10 seconds for it, then answers 409. A failed
+revocation is therefore applied within about one interval (plus a turn in progress) of Keycloak
+answering again, however long Keycloak was down, with no reconciliation run. Authorization never
+reads it: a removed membership is refused on the next request from the canonical model.
 `DELETE /api/roles/{name}` returns that answer; `POST /api/roles/remove` builds its own and does not
 show it, so alert on the log. The unit tests replay answers recorded from Keycloak 26.8.2
 ([`backend/tests/fixtures/keycloak_admin/`](../backend/tests/fixtures/keycloak_admin/README.md)).
