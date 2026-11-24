@@ -57,6 +57,12 @@ ORGANIZATION_LOCK_TIMEOUT_MS = round((ORGANIZATION_HOLD_SECONDS + ORGANIZATION_L
 # take: past it the session's connection is invalidated, which ends the transaction and the
 # lock with it, so a hung connection cannot hold the lock or a cancelled push.
 ORGANIZATION_LOCK_RELEASE_SECONDS = ORGANIZATION_HOLD_SECONDS + ORGANIZATION_LOCK_MARGIN_SECONDS
+# How long each step resetting the session after a failed release may take (invalidating
+# the connection, then the session's rollback; or, failing that, invalidating the session).
+# None waits on the server: invalidating closes the connection, and the rollback runs no
+# statement on an invalidated one. A release, reset included, is shielded for at most
+# ``ORGANIZATION_LOCK_RELEASE_SECONDS + 2 * ORGANIZATION_LOCK_RESET_SECONDS``.
+ORGANIZATION_LOCK_RESET_SECONDS = 2
 
 # Every row the session had loaded, with its loaded values: what a rollback expires.
 Loaded = list[tuple[object, dict[str, object]]]
@@ -354,8 +360,9 @@ class RepositoryKeycloakLinks(KeycloakLinks):
     ) -> None:
         """Roll the organization lock's savepoint back, which releases the lock.
 
-        Shielded: it runs as a cancellation unwinds, too, so it is bounded by
-        ``ORGANIZATION_LOCK_RELEASE_SECONDS``. When the savepoint cannot be rolled
+        Shielded: it runs as a cancellation unwinds, too, so it is bounded: by
+        ``ORGANIZATION_LOCK_RELEASE_SECONDS``, and each step of a reset after it by
+        ``ORGANIZATION_LOCK_RESET_SECONDS``. When the savepoint cannot be rolled
         back (the connection lost, or a cancellation mid-statement left it
         unusable), the request's transaction is rolled back whole, which releases
         the lock as well, and the rows ``loaded`` holds are put back. When that
@@ -424,7 +431,7 @@ class RepositoryKeycloakLinks(KeycloakLinks):
         the session is invalidated whole, which detaches its rows.
         """
         try:
-            with anyio.fail_after(ORGANIZATION_LOCK_RELEASE_SECONDS):
+            with anyio.fail_after(ORGANIZATION_LOCK_RESET_SECONDS):
                 if connection is not None:
                     await connection.invalidate()
                 await self._session.rollback()
@@ -432,7 +439,7 @@ class RepositoryKeycloakLinks(KeycloakLinks):
         except DATABASE_FAILURES as exc:  # TimeoutError (fail_after) is an OSError
             logger.warning("Keycloak link: resetting the session failed: %s", type(exc).__name__)
         try:
-            with anyio.fail_after(ORGANIZATION_LOCK_RELEASE_SECONDS):
+            with anyio.fail_after(ORGANIZATION_LOCK_RESET_SECONDS):
                 await self._session.invalidate()
         except DATABASE_FAILURES as exc:
             logger.warning("Keycloak link: invalidating the session failed: %s", type(exc).__name__)

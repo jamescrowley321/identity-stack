@@ -761,6 +761,7 @@ async def test_a_reset_and_an_invalidation_that_hang_are_bounded(async_engine, m
 
     monkeypatch.setattr(RepositoryKeycloakLinks, "_savepoint_rolled_back", never_rollback)
     monkeypatch.setattr(keycloak_sync, "ORGANIZATION_LOCK_RELEASE_SECONDS", 0.1)
+    monkeypatch.setattr(keycloak_sync, "ORGANIZATION_LOCK_RESET_SECONDS", 0.1)
 
     async with sessions(async_engine)() as session:
         links = RepositoryKeycloakLinks(session)
