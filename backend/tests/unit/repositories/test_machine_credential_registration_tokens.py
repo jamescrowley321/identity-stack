@@ -227,6 +227,16 @@ class TestMigration:
         assert await self._token(async_engine, plain_text_row) == self.SEALED
 
     @pytest.mark.parametrize("plain_text_row", [SEALED_UNDER_ANOTHER_KEY], indirect=True)
+    async def test_the_upgrade_leaves_a_token_sealed_under_a_retired_key_as_it_is(
+        self, async_engine, postgres_url, plain_text_row
+    ):
+        """Sealing it again would open to ciphertext, sent to Keycloak as the token: it stays unreadable instead."""
+        upgraded = _alembic(postgres_url, "upgrade", "head", key=KEY)
+
+        assert upgraded.returncode == 0, upgraded.stderr
+        assert await self._token(async_engine, plain_text_row) == self.SEALED_UNDER_ANOTHER_KEY
+
+    @pytest.mark.parametrize("plain_text_row", [SEALED_UNDER_ANOTHER_KEY], indirect=True)
     async def test_the_downgrade_leaves_a_token_no_key_opens_as_it_is(self, async_engine, postgres_url, plain_text_row):
         assert _alembic(postgres_url, "stamp", "head", key=None).returncode == 0
 

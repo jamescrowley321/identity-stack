@@ -7,8 +7,10 @@ client's secret. The upgrade seals every stored token with the first key of
 opens them again. With no stored token neither needs the key; with one, an unset
 or invalid key stops the migration rather than leave a token in plain text.
 
-Both directions are safe to repeat. The upgrade leaves a value that already opens
-under a configured key as it is: a backend of this revision may have sealed it
+Both directions are safe to repeat. The upgrade leaves a value that is already a
+Fernet token as it is, whether it opens under a configured key or under one
+since retired (the backend then treats it as unreadable rather than open it to
+ciphertext): a backend of this revision may have sealed it
 while the database was still at 010 (a new image started before ``alembic
 upgrade``), or the revision was stamped back and run again. The downgrade leaves
 a value that opens under no configured key as it is, rather than stop: it was
@@ -19,6 +21,8 @@ The key parsing is repeated here, not imported from ``app``, so this revision
 keeps running whatever later happens to the application module.
 """
 
+import base64
+import binascii
 import os
 from typing import Union
 
@@ -62,8 +66,19 @@ def _opened(fernet: MultiFernet, value: str) -> str | None:
         return None
 
 
+def _is_fernet_token(value: str) -> bool:
+    """Whether the value has a Fernet token's shape: url-safe base64 opening with version byte 0x80."""
+    try:
+        return base64.urlsafe_b64decode(value.encode())[:1] == b"\x80"
+    except (ValueError, binascii.Error):
+        return False
+
+
 def _seal(fernet: MultiFernet, value: str) -> str | None:
-    return None if _opened(fernet, value) is not None else fernet.encrypt(value.encode()).decode()
+    """The value sealed; ``None`` for one already sealed, under a listed key or a retired one."""
+    if _opened(fernet, value) is not None or _is_fernet_token(value):
+        return None
+    return fernet.encrypt(value.encode()).decode()
 
 
 def _rewrite(transform) -> None:
