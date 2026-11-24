@@ -9,6 +9,7 @@ Tests cover:
 """
 
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -665,6 +666,37 @@ class TestRemoveUserFromTenant:
 
         assert result.is_ok()
         assert result.ok[PROVIDER_SYNC] == PROVIDER_SYNC_FAILED
+        adapter.sync_user.assert_not_awaited()
+
+    async def test_remove_user_from_tenant_keeps_a_membership_a_role_was_assigned_to_under_the_lock(self, monkeypatch):
+        """A role assigned between the removal's commit and its push: the membership is not ended."""
+        adapter = AsyncMock(spec=KeycloakSyncAdapter)
+        assign_repo = AsyncMock(spec=UserTenantRoleRepository)
+        assign_repo._session = AsyncMock()
+        service, repo, _adapter_unused, _assign_repo_unused = _build_service(
+            adapter=adapter, assignment_repo=assign_repo
+        )
+        user = _make_user()
+        repo.get.return_value = user
+        repo.exists_in_tenant.return_value = True
+        assign_repo.delete_by_user_tenant.return_value = 1
+        assign_repo.list_by_user_tenant.return_value = [SimpleNamespace(role_id=uuid.uuid4())]
+        assign_repo.list_by_user_tenants.return_value = []
+        adapter.ends_memberships = True
+
+        class Lock:
+            async def __aenter__(self) -> bool:
+                return True
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+        monkeypatch.setattr("app.services.user.hold_keycloak_membership_lock", lambda *_args, **_kwargs: Lock())
+
+        result = await service.remove_user_from_tenant(tenant_id=TENANT_ID, user_id=user.id)
+
+        assert result.is_ok()
+        assert PROVIDER_SYNC not in result.ok
         adapter.sync_user.assert_not_awaited()
 
     async def test_remove_user_sync_failure_still_returns_ok(self):

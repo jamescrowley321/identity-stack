@@ -391,7 +391,12 @@ class UserService:
         user_id: uuid.UUID,
         tenant_id: uuid.UUID,
         push: Callable[[], Awaitable[Result[None, SyncError]]],
+        *,
+        still_leaving: bool = False,
     ) -> Result[None, SyncError]:
+        """Push under the membership lock. ``still_leaving``: first re-read that the user holds no role in the
+        tenant; one assigned since the removal keeps the membership, and that assignment's push owns it.
+        """
         if not isinstance(self._adapter, KeycloakSyncAdapter):
             return await push()
         session = getattr(self._assignment_repository, "_session", None)
@@ -400,6 +405,8 @@ class UserService:
         async with hold_keycloak_membership_lock(session, user_id, tenant_id) as locked:
             if not locked:
                 return Error(SyncError(message="Keycloak membership lock not acquired", operation="sync_user"))
+            if still_leaving and await self._assignment_repository.list_by_user_tenant(user_id, tenant_id):
+                return Ok(None)
             return await push()
 
     async def remove_user_from_tenant(
@@ -444,7 +451,7 @@ class UserService:
                     data={"email": user.email, "status": user.status.value, "left_tenant_id": str(tenant_id)},
                 )
 
-            pushed = await self._guard_membership_push(user_id, tenant_id, _push)
+            pushed = await self._guard_membership_push(user_id, tenant_id, _push, still_leaving=True)
             if self._revocation_failed(pushed, user_id, "remove_user_from_tenant"):
                 payload[PROVIDER_SYNC] = PROVIDER_SYNC_FAILED
             elif self._adapter.ends_memberships is True and pushed.is_ok():
