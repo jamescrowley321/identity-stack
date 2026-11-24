@@ -47,8 +47,9 @@ class PendingPushRepository(BaseRepository[PendingPush]):
         marked: after n of them the next retry waits ``interval * 2 ** (n - 1)`` from
         the last, at most ``interval * 2 ** MAX_BACKOFF_DOUBLINGS``. A revocation is
         never backed off (``_revocation``): Keycloak keeps granting what it took away
-        until it is pushed. The mark's time, the failures' and now are all the
-        database's clock, so every worker sees the same cadence per mark.
+        until it is pushed, so it is due one interval after its last failure. The
+        mark's time, the failures' and now are all the database's clock, so every
+        worker sees the same cadence per mark.
         """
         failures = (
             sa.select(
@@ -78,7 +79,10 @@ class PendingPushRepository(BaseRepository[PendingPush]):
                 PendingPush.marked_at <= now - sa.func.make_interval(0, 0, 0, 0, 0, 0, interval_seconds),
                 sa.or_(
                     failures.c.failures.is_(None),
-                    _revocation(),
+                    sa.and_(
+                        _revocation(),
+                        failures.c.last_failure <= now - sa.func.make_interval(0, 0, 0, 0, 0, 0, interval_seconds),
+                    ),
                     failures.c.last_failure <= now - sa.func.make_interval(0, 0, 0, 0, 0, 0, backoff),
                 ),
             )
@@ -114,14 +118,17 @@ class PendingPushRepository(BaseRepository[PendingPush]):
 
 
 def _revocation() -> sa.ColumnElement[bool]:
-    """A mark whose push takes access away: a membership a role left, a user deleted or deactivated.
+    """A mark whose push may take access away: a membership a role left, a user deleted or deactivated,
+    any role (a permission it lost, its deletion) and any tenant (its suspension, its deletion).
 
     A membership mark keeps the snapshot of a removed role (migration 009) until it is cleared.
+    Role and tenant marks are few, so every one of them counts.
     """
     user_kept = sa.exists().where(sa.cast(User.id, sa.Text) == PendingPush.key, User.status != UserStatus.inactive)
     return sa.or_(
         sa.and_(PendingPush.kind == "membership", PendingPush.snapshot["role_id"].is_not(None)),
         sa.and_(PendingPush.kind == "user", ~user_kept),
+        PendingPush.kind.in_(("role", "tenant")),
     )
 
 
