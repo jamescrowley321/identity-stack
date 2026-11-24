@@ -23,7 +23,7 @@ import os
 from typing import Union
 
 import sqlalchemy as sa
-from alembic import op
+from alembic import context, op
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 
 # revision identifiers, used by Alembic.
@@ -60,7 +60,12 @@ def _seal(fernet: MultiFernet, value: str) -> str | None:
 
 
 def _rewrite(transform) -> None:
-    """Set each stored token to ``transform(fernet, token)``; a ``None`` leaves that row as it is."""
+    """Set each stored token to ``transform(fernet, token)``; a ``None`` leaves that row as it is.
+
+    Offline (``--sql``) there are no rows to read: tokens are sealed only by an online upgrade.
+    """
+    if context.is_offline_mode():
+        return
     connection = op.get_bind()
     rows = connection.execute(
         sa.select(_tokens.c.id, _tokens.c.registration_token).where(_tokens.c.registration_token != "")

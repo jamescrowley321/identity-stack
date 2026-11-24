@@ -277,7 +277,7 @@ class CanonicalMachineCredentials(MachineCredentials):
         disabled = await self._push.set_machine_client_enabled(client=_ref(credential), enabled=False)
         if disabled.is_error():
             logger.warning(
-                "machine clients: disabling client %s without its registration token failed: %s",
+                "machine clients: disabling client %s (#698) failed: %s",
                 credential.client_id,
                 disabled.error.message,
             )
