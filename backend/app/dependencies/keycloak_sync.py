@@ -237,9 +237,10 @@ class RepositoryKeycloakLinks(KeycloakLinks):
             else:
                 await self._release(savepoint, alias, loaded, raise_lost=True)
             raise LocalDatabaseError(failed("the organization lock", exc)) from exc
-        except BaseException:
-            # A cancellation mid-wait: leave no savepoint holding the lock or lock_timeout.
-            await self._release(savepoint, alias, loaded, raise_lost=False)
+        except BaseException as exc:
+            # A cancellation mid-wait, or any other failure: leave no savepoint holding the
+            # lock or lock_timeout. As for the body, only a cancellation keeps propagating.
+            await self._release(savepoint, alias, loaded, raise_lost=isinstance(exc, Exception))
             raise
         # A cancellation unwinding through the body keeps propagating; any other outcome
         # gives way to UncommittedWorkLost when the release rolled back uncommitted work.
