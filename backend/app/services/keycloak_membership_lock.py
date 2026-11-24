@@ -10,8 +10,8 @@ import asyncio
 import uuid
 
 from opentelemetry import trace
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import Connection, text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.logbook import logbook
 
@@ -65,56 +65,45 @@ class _MembershipLock:
         self._lock_session: AsyncSession | None = None
         self._engine: AsyncEngine | None = None
         self._taken = False
-        self._close_connection = False
-        self._dispose_engine = False
 
     async def __aenter__(self) -> bool:
+        """Take the lock on a connection of its own from the session's engine pool (never a new engine)."""
         try:
             bind = self._session.get_bind()
-            if isinstance(bind, AsyncConnection):
-                engine = bind.engine
-                self._dispose_engine = False
-            elif isinstance(bind, AsyncEngine):
-                engine = bind
-                self._dispose_engine = False
-            else:
-                url = getattr(bind, "url", None)
-                if url is None and hasattr(bind, "engine"):
-                    url = getattr(bind.engine, "url", None)
-                if url is None:
-                    raise RuntimeError("Keycloak membership lock requires a database URL")
-                rendered = url.render_as_string(hide_password=False) if hasattr(url, "render_as_string") else str(url)
-                engine = create_async_engine(rendered)
-                self._dispose_engine = True
-            self._engine = engine
-            factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-            self._lock_session = factory()
+            # The sync engine the session's AsyncEngine wraps: its pool and options are the app's.
+            self._engine = AsyncEngine(bind.engine if isinstance(bind, Connection) else bind)
+            self._lock_session = async_sessionmaker(self._engine, class_=AsyncSession, expire_on_commit=False)()
             self._connection = await self._lock_session.connection()
-            self._close_connection = True
-        except Exception as exc:  # pragma: no cover - defensive logging only
+        except BaseException as exc:
+            await self._drop()
+            if not isinstance(exc, Exception):
+                raise
             logger.warning("Keycloak membership lock skipped: %s", type(exc).__name__)
-            self._lock_session = None
-            self._connection = None
-            self._close_connection = False
-            self._engine = None
-            self._dispose_engine = False
-            self._taken = False
             return False
         deadline = asyncio.get_running_loop().time() + self._wait_seconds
-        while True:
-            try:
+        try:
+            while True:
                 self._taken = await _try_lock(self._connection, self._member_key)
-            except Exception as exc:  # pragma: no cover - defensive logging only
-                logger.warning(
-                    "Keycloak membership lock acquisition failed; dropping connection: %s", type(exc).__name__
-                )
-                await self._connection.invalidate()
-                self._taken = False
-                break
-            if self._taken or asyncio.get_running_loop().time() >= deadline:
-                break
-            await asyncio.sleep(_LOCK_POLL_SECONDS)
+                if self._taken or asyncio.get_running_loop().time() >= deadline:
+                    break
+                await asyncio.sleep(_LOCK_POLL_SECONDS)
+        except BaseException as exc:
+            # Closing the connection frees a lock Postgres granted before the failure or cancel.
+            logger.warning("Keycloak membership lock acquisition failed; dropping connection: %s", type(exc).__name__)
+            self._taken = False
+            await self._drop(invalidate=True)
+            if not isinstance(exc, Exception):
+                raise
         return self._taken
+
+    async def _drop(self, *, invalidate: bool = False) -> None:
+        """Close the lock's session, dropping its connection (not back to the pool) when ``invalidate``."""
+        connection, session = self._connection, self._lock_session
+        self._connection = self._lock_session = None
+        if invalidate and connection is not None:
+            await connection.invalidate()
+        if session is not None:
+            await session.close()
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         if self._connection is None:
@@ -122,17 +111,13 @@ class _MembershipLock:
         try:
             if self._taken:
                 await _unlock(self._connection, self._member_key)
-        except Exception as error:  # pragma: no cover - defensive logging only
+        except BaseException as error:
             logger.warning("Keycloak membership lock release failed; dropping connection: %s", type(error).__name__)
-            if self._close_connection and self._connection is not None:
-                await self._connection.invalidate()
-        finally:
-            if self._lock_session is not None:
-                await self._lock_session.close()
-            elif self._close_connection and self._connection is not None:
-                await self._connection.close()
-            if self._dispose_engine and self._engine is not None:
-                await self._engine.dispose()
+            await self._drop(invalidate=True)
+            if not isinstance(error, Exception):
+                raise
+            return
+        await self._drop()
 
 
 def hold_keycloak_membership_lock(
