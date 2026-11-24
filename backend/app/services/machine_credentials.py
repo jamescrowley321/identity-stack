@@ -144,10 +144,10 @@ UNREADABLE_REGISTRATION_TOKEN = ProviderError(
     "deactivated, and a realm admin must remove its client"
 )
 
-# The answer to a delete whose stored registration token was never sealed: nothing is changed.
+# The answer to a delete whose stored registration token was never sealed: deactivated, client untouched.
 UNSEALED_REGISTRATION_TOKEN = ProviderError(
-    message="The machine client's registration token is stored unsealed: run migration "
-    "011_seal_registration_tokens, then delete again"
+    message="The machine client's registration token is stored unsealed: the credential is deactivated; "
+    "run migration 011_seal_registration_tokens, then delete again"
 )
 
 # The answer when the service account could not be disabled after an unreadable registration token.
@@ -318,8 +318,10 @@ class CanonicalMachineCredentials(MachineCredentials):
             try:
                 token = await self._repository.registration_token(found.ok.id)
             except RegistrationTokenNotSealed:
+                await self._repository.set_status(found.ok.id, credentials.CredentialStatus.INACTIVE)
+                await self._repository.commit()
                 logger.warning(
-                    "machine clients: %s left as it is; its stored value predates 011_seal_registration_tokens",
+                    "machine clients: %s deactivated; its stored value predates 011_seal_registration_tokens",
                     found.ok.id,
                 )
                 return Error(UNSEALED_REGISTRATION_TOKEN)

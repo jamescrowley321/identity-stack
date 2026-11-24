@@ -113,8 +113,8 @@ class TestRepository:
         push.delete_machine_client.assert_not_awaited()
         push.machine_client_exists.assert_awaited_once()
 
-    async def test_a_delete_of_an_unsealed_token_changes_nothing_and_calls_no_provider(self, db_session):
-        """A row written before 011 is not "sealed under a lost key": it is refused until the migration seals it."""
+    async def test_a_delete_of_an_unsealed_token_deactivates_and_calls_no_provider(self, db_session):
+        """A row written before 011 is not "sealed under a lost key": deactivated, its value never read."""
         credential = _credential((await _tenant(db_session)).id)
         await MachineCredentialRepository(db_session, cipher=CIPHER).create(
             credential, role_ids=(), registration_token=TOKEN
@@ -135,7 +135,7 @@ class TestRepository:
         stored = await MachineCredentialRepository(db_session).get(
             credential.tenant_id, credential.id, provider="keycloak"
         )
-        assert stored.status is credentials.CredentialStatus.ACTIVE
+        assert stored.status is credentials.CredentialStatus.INACTIVE
         assert push.mock_calls == []
 
     async def test_without_a_cipher_no_token_is_written_or_read(self, db_session):
@@ -186,8 +186,8 @@ class TestMigration:
             )
             values = {column.name: getattr(row, column.name) for column in MachineCredentialRow.__table__.columns}
             await conn.execute(sa.insert(MachineCredentialRow).values(values))
-        assert _alembic(postgres_url, "stamp", BEFORE_SEALING, key=None).returncode == 0
         try:
+            assert _alembic(postgres_url, "stamp", BEFORE_SEALING, key=None).returncode == 0
             yield credential_id
         finally:
             async with async_engine.begin() as conn:
