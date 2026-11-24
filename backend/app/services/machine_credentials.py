@@ -33,7 +33,7 @@ from app.errors.identity import Conflict, IdentityError, NotFound, ProviderError
 from app.logbook import logbook
 from app.repositories.base import RepositoryConflictError
 from app.repositories.machine_credential import MachineCredentialRepository
-from app.repositories.registration_tokens import RegistrationTokenUnreadable
+from app.repositories.registration_tokens import RegistrationTokenNotSealed, RegistrationTokenUnreadable
 from app.services.adapters.base import MachineClient, MachineClientRef, MachineCredentialPush, SyncError
 from app.services.descope_management import DescopeManagementAdapter
 
@@ -142,6 +142,12 @@ def _ref(credential: credentials.MachineCredential, registration_token: str = ""
 UNREADABLE_REGISTRATION_TOKEN = ProviderError(
     message="The machine client's registration token opens under no configured key: the credential is "
     "deactivated, and a realm admin must remove its client"
+)
+
+# The answer to a delete whose stored registration token was never sealed: nothing is changed.
+UNSEALED_REGISTRATION_TOKEN = ProviderError(
+    message="The machine client's registration token is stored unsealed: run migration "
+    "011_seal_registration_tokens, then delete again"
 )
 
 # The answer when the service account could not be disabled after an unreadable registration token.
@@ -311,6 +317,12 @@ class CanonicalMachineCredentials(MachineCredentials):
                 return Error(found.error)
             try:
                 token = await self._repository.registration_token(found.ok.id)
+            except RegistrationTokenNotSealed:
+                logger.warning(
+                    "machine clients: %s left as it is; its stored value predates 011_seal_registration_tokens",
+                    found.ok.id,
+                )
+                return Error(UNSEALED_REGISTRATION_TOKEN)
             except RegistrationTokenUnreadable:
                 await self._repository.set_status(found.ok.id, credentials.CredentialStatus.INACTIVE)
                 await self._repository.commit()
