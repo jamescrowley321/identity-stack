@@ -669,7 +669,7 @@ class TestRemoveUserFromTenant:
         adapter.sync_user.assert_not_awaited()
 
     async def test_remove_user_from_tenant_keeps_a_membership_a_role_was_assigned_to_under_the_lock(self, monkeypatch):
-        """A role assigned between the removal's commit and its push: the membership is not ended."""
+        """A role assigned between the removal's commit and its push: the membership is not ended, and not told done."""
         adapter = AsyncMock(spec=KeycloakSyncAdapter)
         assign_repo = AsyncMock(spec=UserTenantRoleRepository)
         assign_repo._session = AsyncMock()
@@ -696,7 +696,7 @@ class TestRemoveUserFromTenant:
         result = await service.remove_user_from_tenant(tenant_id=TENANT_ID, user_id=user.id)
 
         assert result.is_ok()
-        assert PROVIDER_SYNC not in result.ok
+        assert result.ok[PROVIDER_SYNC] == PROVIDER_SYNC_FAILED
         adapter.sync_user.assert_not_awaited()
 
     async def test_remove_user_sync_failure_still_returns_ok(self):

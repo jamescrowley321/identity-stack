@@ -395,7 +395,8 @@ class UserService:
         still_leaving: bool = False,
     ) -> Result[None, SyncError]:
         """Push under the membership lock. ``still_leaving``: first re-read that the user holds no role in the
-        tenant; one assigned since the removal keeps the membership, and that assignment's push owns it.
+        tenant; one assigned since the removal keeps the membership, and the push is not made (an error: the
+        groups the removal ended stay pending, for the push retry to bring to the canonical state).
         """
         if not isinstance(self._adapter, KeycloakSyncAdapter):
             return await push()
@@ -406,7 +407,10 @@ class UserService:
             if not locked:
                 return Error(SyncError(message="Keycloak membership lock not acquired", operation="sync_user"))
             if still_leaving and await self._assignment_repository.list_by_user_tenant(user_id, tenant_id):
-                return Ok(None)
+                # Keycloak may still hold the groups the removal ended: left pending for the push retry.
+                return Error(
+                    SyncError(message="a role was assigned in the tenant since the removal", operation="sync_user")
+                )
             return await push()
 
     async def remove_user_from_tenant(
