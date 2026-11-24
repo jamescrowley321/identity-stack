@@ -57,6 +57,7 @@ ORGANIZATION_NOT_FOUND_ANSWER = {"errorMessage": "Organization not found."}
 USER_NOT_FOUND_ANSWER = {"error": "User not found"}
 ALREADY_A_MEMBER_ANSWER = {"errorMessage": "User is already a member of the organization."}
 ROLE_NOT_FOUND_ANSWER = {"error": "Could not find role with id"}
+CLIENT_NOT_FOUND_ANSWER = {"error": "Could not find client"}
 GROUP_NOT_FOUND_ANSWER = {"errorMessage": "Group does not exist"}
 ALREADY_IN_GROUP_ANSWER = {"errorMessage": "User is already a member of the group"}
 NOT_IN_GROUP_ANSWER = {"errorMessage": "User not a member"}
@@ -647,6 +648,30 @@ class KeycloakAdminApi:
                 logger.warning("keycloak admin: client registration answered without the created client")
                 raise KeycloakAdminError("client registration answer unreadable", status=response.status_code)
             return created
+
+    async def client_exists(self, client_uuid: str) -> bool:
+        """Whether the realm has a client with this Keycloak id.
+
+        ``True`` on 200, ``False`` only on Keycloak's own "Could not find client"
+        404. Any other answer, including a 403 for a client the admin client may
+        not view, is ``KeycloakAdminError``. An id that is empty or a dot segment
+        is refused unsent: escaping cannot keep it inside ``/clients/``.
+        """
+        with tracer.start_as_current_span("KeycloakAdminApi.client_exists"):
+            if client_uuid in ("", ".", ".."):
+                raise KeycloakAdminError("client id is not a path segment")
+            response = await self._expect(
+                "GET",
+                f"/clients/{quote(client_uuid, safe='')}",
+                ok=frozenset({200}),
+                also_done=_answers(404, CLIENT_NOT_FOUND_ANSWER),
+            )
+            if response.status_code == 404:
+                return False
+            found = _body(response)
+            if not isinstance(found, dict) or found.get("id") != client_uuid:
+                raise KeycloakAdminError("admin API answer unreadable")
+            return True
 
     async def unregister_client(self, client_id: str, registration_token: str) -> bool:
         """Delete a registered client with its registration access token.

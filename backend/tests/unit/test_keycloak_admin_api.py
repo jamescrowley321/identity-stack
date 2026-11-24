@@ -283,6 +283,65 @@ class TestReadsById:
 
 
 @pytest.mark.anyio
+class TestClientExists:
+    """A machine client is gone only on Keycloak's own "Could not find client" (#698, #619)."""
+
+    CLIENT_UUID = "0b1e1c55-1d2f-4a3b-9c4d-5e6f7a8b9c0d"
+
+    async def test_a_client_the_realm_has_exists(self):
+        api = RecordedAdminApi(["token", httpx.Response(200, json={"id": self.CLIENT_UUID})])
+
+        assert await api.api().client_exists(self.CLIENT_UUID) is True
+        assert api.calls()[-1] == ("GET", admin_path(f"/clients/{self.CLIENT_UUID}"))
+
+    async def test_could_not_find_client_is_gone(self):
+        api = RecordedAdminApi(["token", httpx.Response(404, json=keycloak_admin.CLIENT_NOT_FOUND_ANSWER)])
+
+        assert await api.api().client_exists(self.CLIENT_UUID) is False
+
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            httpx.Response(404, json=keycloak_admin.GENERIC_NOT_FOUND_ANSWER),
+            httpx.Response(404, json={"error": "Realm not found."}),
+            httpx.Response(403, json={"error": "unknown_error"}),
+        ],
+    )
+    async def test_any_other_refusal_is_an_error_not_absence(self, answer):
+        api = RecordedAdminApi(["token", answer])
+
+        with pytest.raises(KeycloakAdminError) as refused:
+            await api.api().client_exists(self.CLIENT_UUID)
+
+        assert refused.value.status == answer.status_code
+
+    async def test_an_answer_for_another_client_is_an_error(self):
+        api = RecordedAdminApi(["token", httpx.Response(200, json={"id": "another"})])
+
+        with pytest.raises(KeycloakAdminError):
+            await api.api().client_exists(self.CLIENT_UUID)
+
+    async def test_the_id_is_escaped_into_one_path_segment(self):
+        hostile = "a/../b?first=0#frag%2e..%"
+        api = RecordedAdminApi(["token", httpx.Response(404, json=keycloak_admin.CLIENT_NOT_FOUND_ANSWER)])
+
+        await api.api().client_exists(hostile)
+
+        sent = api.sent[-1]
+        assert sent.raw_path == admin_path("/clients/a%2F..%2Fb%3Ffirst%3D0%23frag%252e..%25")
+        assert sent.query == {}
+
+    @pytest.mark.parametrize("unsendable", ["", ".", ".."])
+    async def test_an_id_that_is_not_a_path_segment_is_refused_unsent(self, unsendable):
+        api = RecordedAdminApi([])
+
+        with pytest.raises(KeycloakAdminError):
+            await api.api().client_exists(unsendable)
+
+        assert api.sent == []
+
+
+@pytest.mark.anyio
 class TestRemoveMember:
     """A 404 ends a membership only once the user is confirmed not to be a member (#619)."""
 

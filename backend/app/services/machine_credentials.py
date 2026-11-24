@@ -144,6 +144,15 @@ UNREADABLE_REGISTRATION_TOKEN = ProviderError(
     "deactivated, and a realm admin must remove its client"
 )
 
+# The answer when the service account could not be disabled after an unreadable registration token.
+UNREADABLE_REGISTRATION_TOKEN_DISABLE_FAILED = ProviderError(
+    message=(
+        "The machine client's registration token opens under no configured key and its service account "
+        "could not be disabled in the identity provider: the credential is deactivated here and must be "
+        "disabled or deleted in the provider"
+    )
+)
+
 
 def _provider_error(operation: str, error: SyncError) -> ProviderError:
     logger.warning("machine clients: %s failed in the provider: %s", operation, error.message)
@@ -263,13 +272,38 @@ class CanonicalMachineCredentials(MachineCredentials):
                 )
             return Ok(None)
 
+    async def _retire_unreadable(self, credential: credentials.MachineCredential) -> Result[None, IdentityError]:
+        """Disable the client without its registration token; drop the row only once the client is gone."""
+        disabled = await self._push.set_machine_client_enabled(client=_ref(credential), enabled=False)
+        if disabled.is_error():
+            logger.warning(
+                "machine clients: disabling client %s without its registration token failed: %s",
+                credential.client_id,
+                disabled.error.message,
+            )
+        exists = await self._push.machine_client_exists(client=_ref(credential))
+        if exists.is_error():
+            logger.warning(
+                "machine clients: could not confirm whether client %s is gone: %s",
+                credential.client_id,
+                exists.error.message,
+            )
+        elif not exists.ok:
+            await self._repository.delete(credential.id)
+            await self._repository.commit()
+            return Ok(None)
+        return Error(
+            UNREADABLE_REGISTRATION_TOKEN_DISABLE_FAILED if disabled.is_error() else UNREADABLE_REGISTRATION_TOKEN
+        )
+
     async def delete(self, *, tenant_id: str, credential_id: str) -> Result[None, IdentityError]:
         """The provider's client first, with the stored registration token, then the row.
 
         When the provider refuses, the credential is deactivated instead and kept,
         so its tokens are refused and the delete can be asked again. When the stored
-        token opens under no configured key (#698), the credential is deactivated and
-        kept too: only a realm admin can remove its client then.
+        token opens under no configured key (#698), the credential is deactivated, its
+        client's service account disabled, and the row kept until the provider proves
+        the client gone (a realm admin removed it); the next delete then removes the row.
         """
         with tracer.start_as_current_span("CanonicalMachineCredentials.delete"):
             found = await self._find(tenant_id, credential_id)
@@ -285,7 +319,7 @@ class CanonicalMachineCredentials(MachineCredentials):
                     found.ok.id,
                     found.ok.client_id,
                 )
-                return Error(UNREADABLE_REGISTRATION_TOKEN)
+                return await self._retire_unreadable(found.ok)
             pushed = await self._push.delete_machine_client(client=_ref(found.ok, token))
             if pushed.is_error():
                 await self._repository.set_status(found.ok.id, credentials.CredentialStatus.INACTIVE)

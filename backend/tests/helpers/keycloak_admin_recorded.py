@@ -67,6 +67,7 @@ class Sent:
     query: dict[str, str]
     body: object
     authorization: str | None
+    raw_path: str = field(default="", compare=False)
 
 
 @dataclass
@@ -92,6 +93,7 @@ class RecordedAdminApi:
                 query=dict(request.url.params),
                 body=body,
                 authorization=request.headers.get("authorization"),
+                raw_path=request.url.raw_path.decode().split("?", 1)[0],
             )
         )
         if isinstance(step, Exception):
