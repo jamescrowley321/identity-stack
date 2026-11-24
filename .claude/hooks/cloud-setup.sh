@@ -45,9 +45,17 @@ else
   note "uv sync failed; backend deps are missing"
 fi
 
-# CI runs the frontend on Node 22.
+# CI runs the frontend on Node 22, at or above the engines floor in
+# frontend/package.json. frontend/.npmrc sets engine-strict, so an older 22.x
+# fails npm ci; ask npm itself rather than copy the floor here.
 node_major() { node --version 2> /dev/null | sed -E 's/^v([0-9]+).*/\1/'; }
-if [[ "$(node_major)" != 22 ]]; then
+node_fits() {
+  [[ "$(node_major)" == 22 ]] || return 1
+  local out
+  out=$(cd frontend && npm ci --dry-run 2>&1)
+  [[ "$out" != *EBADENGINE* ]]
+}
+if ! node_fits; then
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
   # nvm does not support nounset, so relax it around nvm only.
   set +u
@@ -56,15 +64,18 @@ if [[ "$(node_major)" != 22 ]]; then
   if command -v nvm > /dev/null; then
     nvm install 22 > /dev/null 2>&1 && nvm use 22 > /dev/null 2>&1
   elif command -v npm > /dev/null; then
-    npm install -g n > /dev/null 2>&1 && n 22 > /dev/null 2>&1 && hash -r
+    # n installs under N_PREFIX (default /usr/local), which can sit behind a
+    # preinstalled Node on PATH; put it first.
+    npm install -g n > /dev/null 2>&1 && n 22 > /dev/null 2>&1 \
+      && export PATH="${N_PREFIX:-/usr/local}/bin:$PATH" && hash -r
   fi
   set -u
 fi
-if [[ "$(node_major)" == 22 ]]; then
+if node_fits; then
   note "node $(node --version)"
   persist_path "$(dirname "$(command -v node)")"
 else
-  note "node 22 is not available (found: $(node --version 2>&1)); frontend checks may differ from CI"
+  note "node 22 at the frontend's engines floor is not available (found: $(node --version 2>&1)); npm ci will fail"
 fi
 
 if (cd frontend && npm ci > /dev/null 2>&1); then
