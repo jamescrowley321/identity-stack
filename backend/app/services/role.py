@@ -629,7 +629,13 @@ class RoleService:
                 )
 
             async def still_unassigned() -> bool:
-                return await self._assignment_repository.get_committed(user_id, tenant_id, role_id) is None
+                if await self._assignment_repository.get_committed(user_id, tenant_id, role_id) is not None:
+                    return False
+                # Counted again under the lock: a role assigned since keeps the membership, so only the group goes.
+                sync_data.pop(LAST_ROLE_IN_TENANT, None)
+                if not await self._assignment_repository.list_by_user_tenant(user_id, tenant_id):
+                    sync_data[LAST_ROLE_IN_TENANT] = True
+                return True
 
             pushed = await self._guard_membership_push(
                 user_id,

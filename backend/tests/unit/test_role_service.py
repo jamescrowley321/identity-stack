@@ -20,7 +20,8 @@ from app.repositories.assignment import UserTenantRoleRepository
 from app.repositories.base import RepositoryConflictError
 from app.repositories.permission import PermissionRepository
 from app.repositories.role import RoleRepository
-from app.services.adapters.base import IdentityProviderAdapter, SyncError
+from app.services.adapters.base import LAST_ROLE_IN_TENANT, IdentityProviderAdapter, SyncError
+from app.services.adapters.keycloak import KeycloakSyncAdapter
 from app.services.cache_invalidation import CacheInvalidationPublisher
 from app.services.role import RoleService
 
@@ -575,6 +576,35 @@ class TestUnassignRoleFromUser:
         assert result.ok["status"] == "removed"
         assign_repo.commit.assert_awaited_once()
         adapter.delete_role_assignment.assert_awaited_once()
+
+    async def test_unassign_keeps_a_membership_a_role_was_assigned_to_before_the_lock(self, monkeypatch):
+        """The last role counted before the lock, another assigned since: only the removed role's group goes."""
+        adapter = AsyncMock(spec=KeycloakSyncAdapter)
+        assign_repo = AsyncMock(spec=UserTenantRoleRepository)
+        assign_repo._session = AsyncMock()
+        service, repo, _perm, _assign, _adapter = _build_service(assignment_repo=assign_repo, adapter=adapter)
+        role = _make_role()
+        repo.get.return_value = role
+        assign_repo.delete.return_value = True
+        assign_repo.get_committed.return_value = None
+        assigned_since = UserTenantRole(user_id=uuid.uuid4(), tenant_id=TENANT_ID, role_id=uuid.uuid4())
+        assign_repo.list_by_user_tenant.side_effect = [[], [assigned_since]]
+        adapter.ends_memberships = True
+        adapter.delete_role_assignment.return_value = Ok(None)
+
+        class Lock:
+            async def __aenter__(self) -> bool:
+                return True
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+        monkeypatch.setattr("app.services.role.hold_keycloak_membership_lock", lambda *_args, **_kwargs: Lock())
+
+        result = await service.unassign_role_from_user(user_id=uuid.uuid4(), tenant_id=TENANT_ID, role_id=role.id)
+
+        assert result.is_ok()
+        assert LAST_ROLE_IN_TENANT not in adapter.delete_role_assignment.await_args.kwargs["data"]
 
     async def test_unassign_not_found(self):
         service, repo, _perm, assign_repo, _adapter = _build_service()
