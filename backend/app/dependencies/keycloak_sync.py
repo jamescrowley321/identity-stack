@@ -16,7 +16,7 @@ from typing import TypeVar
 import anyio
 import sqlalchemy as sa
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, AsyncSessionTransaction
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.logbook import logbook
@@ -107,6 +107,9 @@ def failed(what: str, exc: BaseException) -> str:
 
 class UncommittedWorkLost(Exception):
     """A push's database failure rolled back changes the request had not committed.
+
+    Also raised when a failed release of an organization lock left the session
+    unusable (its rows detached).
 
     Not a ``LocalDatabaseError``: the adapter does not turn it into a sync error,
     so the request fails rather than answer for changes that were not made.
@@ -356,31 +359,36 @@ class RepositoryKeycloakLinks(KeycloakLinks):
         back (the connection lost, or a cancellation mid-statement left it
         unusable), the request's transaction is rolled back whole, which releases
         the lock as well, and the rows ``loaded`` holds are put back. When that
-        rollback fails or runs out of time, the connection is invalidated, which
-        ends the transaction and the lock. With work not committed (``loaded`` is
-        ``None``) either undid it: ``UncommittedWorkLost`` is raised when
-        ``raise_lost``, and logged otherwise (a cancellation is what propagates).
+        rollback fails or runs out of time, the connection is invalidated (the
+        server ends its transaction and the lock) and the session reset; see
+        ``_reset``. With work not committed (``loaded`` is ``None``), or a session
+        that could not be reset (its rows detached), ``UncommittedWorkLost`` is
+        raised when ``raise_lost``, and logged otherwise (a cancellation is what
+        propagates).
         """
         with anyio.CancelScope(shield=True):
-            rolled_back = False
+            connection: AsyncConnection | None = None
+            reset = True
             try:
                 with anyio.fail_after(ORGANIZATION_LOCK_RELEASE_SECONDS):
+                    connection = await self._session.connection()
                     if await self._savepoint_rolled_back(savepoint, alias):
                         if loaded is not None:
                             _put_back(loaded)
                         return
                     await self._session.rollback()
-                    rolled_back = True
             except DATABASE_FAILURES as exc:  # TimeoutError (fail_after) is an OSError
                 logger.warning(
                     "Keycloak organization lock for %s: releasing the lock failed: %s", alias, type(exc).__name__
                 )
-                await self._discard_connection()
-            if loaded is not None:
-                if rolled_back:
-                    _put_back(loaded)
+                reset = await self._reset(connection)
+            if loaded is None:
+                message = f"Keycloak organization lock for {alias}: the request's uncommitted changes were rolled back"
+            elif reset:
+                _put_back(loaded)
                 return
-            message = f"Keycloak organization lock for {alias}: the request's uncommitted changes were rolled back"
+            else:
+                message = f"Keycloak organization lock for {alias}: the session could not be reset after its release"
             if raise_lost:
                 raise UncommittedWorkLost(message)
             logger.warning(message)
@@ -406,13 +414,29 @@ class RepositoryKeycloakLinks(KeycloakLinks):
             # The failure that called for the rollback is what the push reports.
             logger.warning("Keycloak link: the rollback failed too: %s", type(exc).__name__)
 
-    async def _discard_connection(self) -> None:
-        """Invalidate the session's connection: the server ends its transaction, and the lock with it."""
+    async def _reset(self, connection: AsyncConnection | None) -> bool:
+        """After a failed release: invalidate ``connection``, then roll the session back.
+
+        Invalidating closes the connection outright, outside the session's state
+        (which a rollback cancelled midway can leave unusable): the server ends
+        its transaction, and the lock with it. The session's rollback then runs
+        without a statement, keeping its rows. ``False`` when it fails anyway:
+        the session is invalidated whole, which detaches its rows.
+        """
+        try:
+            with anyio.fail_after(ORGANIZATION_LOCK_RELEASE_SECONDS):
+                if connection is not None:
+                    await connection.invalidate()
+                await self._session.rollback()
+            return True
+        except DATABASE_FAILURES as exc:  # TimeoutError (fail_after) is an OSError
+            logger.warning("Keycloak link: resetting the session failed: %s", type(exc).__name__)
         try:
             with anyio.fail_after(ORGANIZATION_LOCK_RELEASE_SECONDS):
                 await self._session.invalidate()
-        except DATABASE_FAILURES as exc:  # TimeoutError (fail_after) is an OSError
-            logger.warning("Keycloak link: invalidating the connection failed: %s", type(exc).__name__)
+        except DATABASE_FAILURES as exc:
+            logger.warning("Keycloak link: invalidating the session failed: %s", type(exc).__name__)
+        return False
 
 
 def _put_back(loaded: Loaded) -> None:

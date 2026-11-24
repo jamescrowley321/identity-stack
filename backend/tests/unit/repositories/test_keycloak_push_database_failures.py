@@ -600,14 +600,19 @@ async def test_releasing_the_organization_lock_is_bounded_and_releases_the_lock_
     alias = str(tenant.id)
 
     async with sessions(async_engine)() as session:
-        await UserRepository(session).get(users[0].id)
+        row = await TenantRepository(session).get(tenant.id)
         await session.commit()
         links = RepositoryKeycloakLinks(session)
         async with links.organization_lock(alias):
             # Nothing uncommitted to lose: a release that times out is not the push's failure.
             pass
-    # After the release timeout, another connection can take the lock.
-    assert await _try_organization_lock(async_engine, alias)
+        # The connection was invalidated, the session kept its rows: a later change is written.
+        row.name = "renamed after the release"
+        await session.commit()
+    async with sessions(async_engine)() as check:
+        held = await TenantRepository(check).get(tenant.id)
+
+    assert (held.name, await _try_organization_lock(async_engine, alias)) == ("renamed after the release", True)
 
 
 async def test_releasing_the_organization_lock_is_bounded_and_releases_the_lock_with_uncommitted_work(
@@ -643,7 +648,7 @@ class BodyError(Exception):
     """Sentinel error for organization_lock bodies in release tests."""
 
 
-async def test_a_release_whose_rollback_fails_invalidates_the_connection_without_failing_the_push(
+async def test_a_release_whose_session_cannot_be_reset_fails_the_request_and_frees_the_lock(
     async_engine, members, monkeypatch
 ):
     tenant, _role, users = members
@@ -663,15 +668,16 @@ async def test_a_release_whose_rollback_fails_invalidates_the_connection_without
         await UserRepository(session).get(users[0].id)
         await session.commit()
         links = RepositoryKeycloakLinks(session)
-        async with links.organization_lock(alias):
-            # Nothing uncommitted to lose: the failed rollback is logged, the connection invalidated.
-            pass
+        with pytest.raises(UncommittedWorkLost, match="the session could not be reset"):
+            async with links.organization_lock(alias):
+                # The session's rollback fails even on the invalidated connection: its rows are detached.
+                pass
 
     # After the rollback failure path, another connection can take the lock.
     assert await _try_organization_lock(async_engine, alias)
 
 
-async def test_release_rollback_failure_preserves_body_exception(async_engine, members, monkeypatch):
+async def test_a_session_that_cannot_be_reset_outranks_the_body_error(async_engine, members, monkeypatch):
     tenant, _role, _users = members
     alias = str(tenant.id)
 
@@ -689,10 +695,10 @@ async def test_release_rollback_failure_preserves_body_exception(async_engine, m
         await TenantRepository(session).get(tenant.id)
         await session.commit()
         links = RepositoryKeycloakLinks(session)
-        with pytest.raises(BodyError):
+        with pytest.raises(UncommittedWorkLost) as lost:
             async with links.organization_lock(alias):
-                # The body error is preserved even when rollback fails.
                 raise BodyError("body failed under lock")
+        assert isinstance(lost.value.__context__, BodyError)
 
     assert await _try_organization_lock(async_engine, alias)
 
@@ -745,9 +751,7 @@ async def test_organization_lock_restores_rows_loaded_before_the_body(async_engi
         assert not session.sync_session.is_modified(row_after)
 
 
-async def test_an_invalidation_that_hangs_is_bounded_and_preserves_the_body_exception(
-    async_engine, members, monkeypatch
-):
+async def test_a_reset_and_an_invalidation_that_hang_are_bounded(async_engine, members, monkeypatch):
     tenant, _role, _users = members
     alias = str(tenant.id)
 
@@ -760,19 +764,19 @@ async def test_an_invalidation_that_hangs_is_bounded_and_preserves_the_body_exce
 
     async with sessions(async_engine)() as session:
         links = RepositoryKeycloakLinks(session)
-        original_invalidate = session.invalidate
+        original_invalidate, original_rollback = session.invalidate, session.rollback
 
-        async def hanging_invalidate() -> None:
+        async def hang() -> None:
             await anyio.sleep_forever()
 
-        session.invalidate = hanging_invalidate
+        session.invalidate = session.rollback = hang
         try:
             with anyio.fail_after(1) as outer:
-                with pytest.raises(BodyError):
+                with pytest.raises(UncommittedWorkLost, match="the session could not be reset"):
                     async with links.organization_lock(alias):
-                        raise BodyError("body failed while discard_connection times out")
+                        raise BodyError("body failed while the reset hangs")
             # Cleanup is bounded: the outer timeout does not have to cancel the test.
             assert not outer.cancelled_caught
         finally:
-            # Restore the session's invalidate method before the fixture tears it down.
-            session.invalidate = original_invalidate
+            # Restore the session's methods before the fixture tears it down.
+            session.invalidate, session.rollback = original_invalidate, original_rollback
