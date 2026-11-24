@@ -3,7 +3,8 @@
 A mark is due once it is ``interval`` old; after n failed pushes of its entity
 since it was marked, the next retry waits ``interval * 2 ** (n - 1)`` from the
 last, at most ``interval * 2 ** MAX_BACKOFF_DOUBLINGS``. A revocation (a
-membership a role left, a user deleted or deactivated) is never backed off. The
+membership a role left, a user deleted or deactivated, any role or tenant) is
+never backed off: it is due one interval after its last failure. The
 marks and the failures are written directly, with the ages each case needs.
 """
 
@@ -61,8 +62,8 @@ async def _user(db_session, status: UserStatus) -> str:
     return str(user.id)
 
 
-# Failed just now, many times: any backed-off mark waits.
-RECENT_FAILURES = tuple(float(index) for index in range(1, 6))
+# Five failures, the last one and a half intervals ago: a backed-off mark waits 16 intervals, a revocation is due.
+FAILURES = tuple(INTERVAL * (1.5 + index) for index in range(5))
 
 
 async def _due(ledger: PendingPushRepository) -> set[str]:
@@ -112,34 +113,40 @@ async def test_failures_before_the_mark_do_not_count(db_session, ledger):
 
 async def test_a_membership_a_role_left_is_not_backed_off(db_session, ledger):
     """Keycloak still holds the group a removed role stands for: it is retried every interval."""
-    revoked = await _mark(
-        db_session, marked_ago=3600, failures_ago=RECENT_FAILURES, snapshot={"role_id": str(uuid.uuid4())}
-    )
-    granted = await _mark(db_session, marked_ago=3600, failures_ago=RECENT_FAILURES)
+    revoked = await _mark(db_session, marked_ago=3600, failures_ago=FAILURES, snapshot={"role_id": str(uuid.uuid4())})
+    granted = await _mark(db_session, marked_ago=3600, failures_ago=FAILURES)
 
     assert await _due(ledger) == {revoked}
     assert granted not in await _due(ledger)
 
 
 async def test_a_deleted_or_deactivated_user_is_not_backed_off(db_session, ledger):
-    deleted = await _mark(db_session, kind="user", key=str(uuid.uuid4()), marked_ago=3600, failures_ago=RECENT_FAILURES)
+    deleted = await _mark(db_session, kind="user", key=str(uuid.uuid4()), marked_ago=3600, failures_ago=FAILURES)
     deactivated = await _mark(
         db_session,
         kind="user",
         key=await _user(db_session, UserStatus.inactive),
         marked_ago=3600,
-        failures_ago=RECENT_FAILURES,
+        failures_ago=FAILURES,
     )
     active = await _mark(
         db_session,
         kind="user",
         key=await _user(db_session, UserStatus.active),
         marked_ago=3600,
-        failures_ago=RECENT_FAILURES,
+        failures_ago=FAILURES,
     )
 
     assert await _due(ledger) == {deleted, deactivated}
     assert active not in await _due(ledger)
+
+
+async def test_every_role_and_tenant_mark_is_not_backed_off(db_session, ledger):
+    """A permission a role lost, a role deleted, a tenant suspended or deleted: few, and they may take access away."""
+    role = await _mark(db_session, kind="role", key=str(uuid.uuid4()), marked_ago=3600, failures_ago=FAILURES)
+    tenant = await _mark(db_session, kind="tenant", key=str(uuid.uuid4()), marked_ago=3600, failures_ago=FAILURES)
+
+    assert await _due(ledger) == {role, tenant}
 
 
 async def test_a_revocation_still_waits_one_interval_after_it_is_marked(db_session, ledger):
@@ -147,6 +154,19 @@ async def test_a_revocation_still_waits_one_interval_after_it_is_marked(db_sessi
     young = await _mark(db_session, kind="user", key=str(uuid.uuid4()), marked_ago=INTERVAL / 2)
 
     assert young not in await _due(ledger)
+
+
+async def test_a_revocation_waits_one_interval_after_its_last_failure(db_session, ledger):
+    """One push per interval per mark, whatever the number of workers taking turns."""
+    waiting = await _mark(
+        db_session, kind="user", key=str(uuid.uuid4()), marked_ago=3600, failures_ago=(INTERVAL / 2, INTERVAL * 3)
+    )
+    waited = await _mark(
+        db_session, kind="user", key=str(uuid.uuid4()), marked_ago=3600, failures_ago=(INTERVAL * 1.5, INTERVAL * 3)
+    )
+
+    assert await _due(ledger) == {waited}
+    assert waiting not in await _due(ledger)
 
 
 async def test_a_failure_is_timed_by_the_database_clock_not_the_worker(db_session, ledger, monkeypatch):

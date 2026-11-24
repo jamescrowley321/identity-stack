@@ -200,9 +200,11 @@ old (an inline push may still be delivering a younger one; a mark whose inline p
 pushed once more, which writes nothing, and removed). After n `failed` sync events of its entity
 since it was marked, it waits `interval × 2^(n−1)` from the last, at most `interval × 64`, so a
 push Keycloak keeps refusing is retried less and less often; a new canonical change of the entity
-starts it again. A revocation is never backed off: a membership a role left or that ended, and a
-user deleted or deactivated, are pushed on every turn while they are pending, each failure
-recording a `failed` sync event. The cadence is read from the database, on the database's clock, so
+starts it again. A change that may take access away is never backed off: a membership a role left
+or that ended, a user deleted or deactivated, and every role and tenant mark (a permission a role
+lost, a role deleted, a tenant suspended or deleted) are pushed again one interval after each
+failure, once per interval whatever the number of workers, each failure recording a `failed`
+sync event. The cadence is read from the database, on the database's clock, so
 it is per mark whatever the number of workers. A turn reads nothing of the realm. It holds a
 pending-push lock, so one worker pushes at a time; a turn skips while a pass pushes, and a
 reconciliation run started during a turn waits up to 10 seconds for it, then answers 409. A failed
