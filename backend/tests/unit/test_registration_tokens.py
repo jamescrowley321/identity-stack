@@ -7,6 +7,7 @@ from app.repositories.registration_tokens import (
     KEYS_VARIABLE,
     RegistrationTokenCipher,
     RegistrationTokenKeysNotConfigured,
+    RegistrationTokenNotSealed,
     RegistrationTokenUnreadable,
     registration_token_cipher,
 )
@@ -32,10 +33,14 @@ class TestCipher:
             RegistrationTokenCipher([KEY]).open(sealed)
 
         assert KEYS_VARIABLE in str(refused.value)
+        assert not isinstance(refused.value, RegistrationTokenNotSealed)
 
-    def test_a_plain_text_token_is_unreadable(self):
-        with pytest.raises(RegistrationTokenUnreadable):
-            RegistrationTokenCipher([KEY]).open(TOKEN)
+    @pytest.mark.parametrize("stored", [TOKEN, "not base64 at all!", "AAAA"])
+    def test_a_value_that_is_no_fernet_token_is_not_sealed_and_never_read(self, stored):
+        with pytest.raises(RegistrationTokenNotSealed) as refused:
+            RegistrationTokenCipher([KEY]).open(stored)
+
+        assert stored not in str(refused.value)
 
     def test_the_first_key_seals_and_every_key_opens(self):
         old = RegistrationTokenCipher([OTHER_KEY]).seal(TOKEN)

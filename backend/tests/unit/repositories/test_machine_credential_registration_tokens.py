@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
-from expression import Ok
+from expression import Error, Ok
 
 from app.domain import credentials
 from app.models.identity.machine_credential import MachineCredentialRow
@@ -25,7 +25,7 @@ from app.repositories.registration_tokens import (
     RegistrationTokenUnreadable,
 )
 from app.services.adapters.base import MachineCredentialPush
-from app.services.machine_credentials import CanonicalMachineCredentials
+from app.services.machine_credentials import UNSEALED_REGISTRATION_TOKEN, CanonicalMachineCredentials
 
 pytestmark = pytest.mark.asyncio
 
@@ -112,6 +112,31 @@ class TestRepository:
         push.set_machine_client_enabled.assert_awaited_once()
         push.delete_machine_client.assert_not_awaited()
         push.machine_client_exists.assert_awaited_once()
+
+    async def test_a_delete_of_an_unsealed_token_changes_nothing_and_calls_no_provider(self, db_session):
+        """A row written before 011 is not "sealed under a lost key": it is refused until the migration seals it."""
+        credential = _credential((await _tenant(db_session)).id)
+        await MachineCredentialRepository(db_session, cipher=CIPHER).create(
+            credential, role_ids=(), registration_token=TOKEN
+        )
+        await db_session.execute(
+            sa.update(MachineCredentialRow)
+            .where(MachineCredentialRow.id == credential.id)
+            .values(registration_token=TOKEN)
+        )
+        push = AsyncMock(spec=MachineCredentialPush)
+        service = CanonicalMachineCredentials(
+            provider="keycloak", repository=MachineCredentialRepository(db_session, cipher=CIPHER), push=push
+        )
+
+        result = await service.delete(tenant_id=str(credential.tenant_id), credential_id=str(credential.id))
+
+        assert result == Error(UNSEALED_REGISTRATION_TOKEN)
+        stored = await MachineCredentialRepository(db_session).get(
+            credential.tenant_id, credential.id, provider="keycloak"
+        )
+        assert stored.status is credentials.CredentialStatus.ACTIVE
+        assert push.mock_calls == []
 
     async def test_without_a_cipher_no_token_is_written_or_read(self, db_session):
         credential = _credential((await _tenant(db_session)).id)
