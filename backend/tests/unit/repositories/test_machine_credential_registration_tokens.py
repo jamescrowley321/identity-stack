@@ -34,6 +34,7 @@ TOKEN = "eyJhbGciOiJIUzUxMiJ9.registration-token.signature"
 KEY = Fernet.generate_key().decode()
 CIPHER = RegistrationTokenCipher([KEY])
 BEFORE_SEALING = "010_machine_credentials"
+SEALING = "011_seal_registration_tokens"
 
 
 def _credential(tenant_id: uuid.UUID) -> credentials.MachineCredential:
@@ -195,6 +196,15 @@ class TestMigration:
         assert refused.returncode != 0
         assert KEYS_VARIABLE in refused.stderr
         assert await self._token(async_engine, plain_text_row) == TOKEN
+
+    @pytest.mark.parametrize(
+        "command", [("upgrade", f"{BEFORE_SEALING}:{SEALING}"), ("downgrade", f"{SEALING}:{BEFORE_SEALING}")]
+    )
+    def test_offline_sql_generation_runs_without_a_key(self, postgres_url, command):
+        """``--sql`` has no rows to read, so the revision writes no token SQL and needs no key."""
+        generated = _alembic(postgres_url, *command, "--sql", key=None)
+
+        assert generated.returncode == 0, generated.stderr
 
     SEALED = CIPHER.seal(TOKEN)
     SEALED_UNDER_ANOTHER_KEY = RegistrationTokenCipher([Fernet.generate_key().decode()]).seal(TOKEN)
