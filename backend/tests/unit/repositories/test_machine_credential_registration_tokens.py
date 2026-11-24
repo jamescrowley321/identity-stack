@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 import sqlalchemy as sa
 from cryptography.fernet import Fernet
-from expression import Error
+from expression import Ok
 
 from app.domain import credentials
 from app.models.identity.machine_credential import MachineCredentialRow
@@ -25,7 +25,7 @@ from app.repositories.registration_tokens import (
     RegistrationTokenUnreadable,
 )
 from app.services.adapters.base import MachineCredentialPush
-from app.services.machine_credentials import UNREADABLE_REGISTRATION_TOKEN, CanonicalMachineCredentials
+from app.services.machine_credentials import CanonicalMachineCredentials
 
 pytestmark = pytest.mark.asyncio
 
@@ -87,13 +87,15 @@ class TestRepository:
         with pytest.raises(RegistrationTokenUnreadable):
             await MachineCredentialRepository(db_session, cipher=other).registration_token(credential.id)
 
-    async def test_a_delete_under_another_key_deactivates_the_credential_and_calls_no_provider(self, db_session):
+    async def test_delete_under_another_key_deactivates_and_best_effort_disables_service_account(self, db_session):
         """#698: sealed under key A, read under key B: the credential's tokens are refused, not a 500."""
         credential = _credential((await _tenant(db_session)).id)
         await MachineCredentialRepository(db_session, cipher=CIPHER).create(
             credential, role_ids=(), registration_token=TOKEN
         )
         push = AsyncMock(spec=MachineCredentialPush)
+        push.set_machine_client_enabled.return_value = Ok(None)
+        push.machine_client_exists.return_value = Ok(False)
         other = RegistrationTokenCipher([Fernet.generate_key().decode()])
         service = CanonicalMachineCredentials(
             provider="keycloak", repository=MachineCredentialRepository(db_session, cipher=other), push=push
@@ -101,12 +103,14 @@ class TestRepository:
 
         result = await service.delete(tenant_id=str(credential.tenant_id), credential_id=str(credential.id))
 
-        assert result == Error(UNREADABLE_REGISTRATION_TOKEN)
+        assert result == Ok(None)
         stored = await MachineCredentialRepository(db_session).get(
             credential.tenant_id, credential.id, provider="keycloak"
         )
-        assert stored.status is credentials.CredentialStatus.INACTIVE
-        assert push.mock_calls == []
+        assert stored is None
+        push.set_machine_client_enabled.assert_awaited_once()
+        push.delete_machine_client.assert_not_awaited()
+        push.machine_client_exists.assert_awaited_once()
 
     async def test_without_a_cipher_no_token_is_written_or_read(self, db_session):
         credential = _credential((await _tenant(db_session)).id)

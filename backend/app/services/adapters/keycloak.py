@@ -1103,3 +1103,21 @@ class KeycloakSyncAdapter(IdentityProviderAdapter, MachineCredentialPush, Custom
         with tracer.start_as_current_span("keycloak.delete_machine_client") as span:
             span.set_attribute("machine_client.id", client.client_id)
             return await _run("delete_machine_client", {"client_id": client.client_id}, push)
+
+    async def machine_client_exists(self, *, client: MachineClientRef) -> Result[bool, SyncError]:
+        """Whether the machine client's Keycloak client exists.
+
+        The admin client is refused (403) a client it registered, so a present
+        client is an error, not ``Ok(True)``. Only Keycloak's "Could not find
+        client" answer proves the client gone.
+        """
+        exists = True
+
+        async def push() -> None:
+            nonlocal exists
+            exists = await self._api.client_exists(client.external_id)
+
+        with tracer.start_as_current_span("keycloak.machine_client_exists") as span:
+            span.set_attribute("machine_client.id", client.client_id)
+            result = await _run("machine_client_exists", {"client_id": client.client_id}, push)
+        return result.map(lambda _: exists)

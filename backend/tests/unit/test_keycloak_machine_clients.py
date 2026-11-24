@@ -174,3 +174,21 @@ class TestDelete:
         result = await KeycloakSyncAdapter(api, links).delete_machine_client(client=REF)
 
         assert result.error.context["refusal"] is Refusal.REGISTRATION_REFUSED
+
+
+class TestExists:
+    @pytest.mark.parametrize("present", [True, False])
+    async def test_answers_what_the_admin_api_finds_by_keycloak_id(self, api, links, present):
+        api.client_exists.return_value = present
+
+        result = await KeycloakSyncAdapter(api, links).machine_client_exists(client=REF)
+
+        assert result == Ok(present)
+        api.client_exists.assert_awaited_once_with(REF.external_id)
+
+    async def test_a_refused_read_is_an_error_not_absence(self, api, links):
+        api.client_exists.side_effect = KeycloakAdminError("admin API refused the call", status=403)
+
+        result = await KeycloakSyncAdapter(api, links).machine_client_exists(client=REF)
+
+        assert (result.error.operation, result.error.context["status"]) == ("machine_client_exists", 403)

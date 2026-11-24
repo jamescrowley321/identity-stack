@@ -32,6 +32,7 @@ from app.middleware.auth import TokenValidationMiddleware
 from app.middleware.providers import KEYCLOAK_MACHINE_CLIENT_PREFIX, descope_config, keycloak_config
 from app.middleware.rate_limit import limiter
 from app.models.identity.assignment import UserTenantRole
+from app.models.identity.machine_credential import MachineCredentialRow
 from app.models.identity.provider import Provider, ProviderType
 from app.models.identity.role import Role
 from app.models.identity.tenant import Tenant, TenantStatus
@@ -46,6 +47,7 @@ from app.services.keycloak_admin import (
     API_CLIENT_VARIABLE,
     ISSUER_VARIABLE,
     KeycloakAdminApi,
+    KeycloakAdminError,
     connect_keycloak_admin,
 )
 from tests.helpers.identity_fixture import IDENTITIES
@@ -294,6 +296,42 @@ class TestADeactivatedOrDeletedCredentialIsRefused:
         assert (refused.status_code, refused.json()) == (403, NO_TENANT)
         assert (grant.status_code, grant.json()["error"]) == (401, "invalid_client")
         assert _registered_client(keycloak_token_source, key["clientId"]) is None
+
+
+async def _external_id(db_session, key_id: str) -> str:
+    query = select(MachineCredentialRow.external_id).where(MachineCredentialRow.id == uuid.UUID(key_id))
+    return (await db_session.execute(query)).scalar_one()
+
+
+class TestWhetherAClientIsGone:
+    """What ``client_exists`` reads as gone (#698): only Keycloak's "Could not find client"."""
+
+    async def test_a_registered_client_is_refused_not_read_as_gone(self, admin_api, db_session, credential):
+        with pytest.raises(KeycloakAdminError) as refused:
+            await admin_api.client_exists(await _external_id(db_session, credential["key"]["id"]))
+
+        assert refused.value.status == 403
+
+    async def test_a_deleted_client_is_gone(self, admin_api, db_session, client, realm):
+        response = await client.post(
+            KEYS,
+            json={"name": "presence", "expire_time": int(time.time()) + DAY, "role_names": ["admin"]},
+            headers=_headers(realm.bob_token, realm.acme),
+        )
+        assert response.status_code == 200, response.text
+        key_id = response.json()["key"]["id"]
+        external_id = await _external_id(db_session, key_id)
+
+        deleted = await client.delete(f"{KEYS}/{key_id}", headers=_headers(realm.bob_token, realm.acme))
+        assert deleted.status_code == 200, deleted.text
+
+        assert await admin_api.client_exists(external_id) is False
+
+    async def test_an_id_the_realm_never_had_is_gone(self, admin_api):
+        assert await admin_api.client_exists(str(uuid.uuid4())) is False
+
+    async def test_a_hostile_id_stays_one_path_segment(self, admin_api):
+        assert await admin_api.client_exists("../x/y?first=0#frag%2e..%") is False
 
 
 class TestWhatACredentialMayCarry:

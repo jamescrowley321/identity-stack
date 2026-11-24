@@ -135,6 +135,15 @@ class MachineCredentialPush(ABC):
     async def delete_machine_client(self, *, client: MachineClientRef) -> Result[None, SyncError]:
         """Delete the client. One that is already gone is deleted."""
 
+    @abstractmethod
+    async def machine_client_exists(self, *, client: MachineClientRef) -> Result[bool, SyncError]:
+        """Whether the client exists at the provider.
+
+        ``Ok(True)`` when the client is present; ``Ok(False)`` when it is proven absent.
+        Any error means presence could not be determined and is treated as a provider
+        failure by the caller.
+        """
+
 
 @dataclass(frozen=True)
 class TenantAttributes:

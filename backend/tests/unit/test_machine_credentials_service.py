@@ -17,8 +17,10 @@ from app.errors.identity import Conflict, GrantRefused, NotFound, ProviderError,
 from app.repositories.base import RepositoryConflictError
 from app.repositories.registration_tokens import RegistrationTokenUnreadable
 from app.services.adapters.base import MachineClient, MachineClientRef, MachineCredentialPush, SyncError
+from app.services.adapters.keycloak import Refusal
 from app.services.machine_credentials import (
     UNREADABLE_REGISTRATION_TOKEN,
+    UNREADABLE_REGISTRATION_TOKEN_DISABLE_FAILED,
     CanonicalMachineCredentials,
     DescopeAccessKeys,
     MachineCredentialService,
@@ -38,6 +40,16 @@ CLIENT = MachineClient(
     registration_token="rat",
 )
 REFUSED = SyncError(message="refused", operation="op", context={"status": 403})
+NO_SERVICE_ACCOUNT_ERROR = SyncError(
+    message="no service account",
+    operation="set_machine_client_enabled",
+    context={"refusal": Refusal.NO_SERVICE_ACCOUNT},
+)
+UNAVAILABLE_ERROR = SyncError(
+    message="unavailable",
+    operation="set_machine_client_enabled",
+    context={"status": 503},
+)
 
 
 @dataclass
@@ -93,6 +105,7 @@ class FakePush(MachineCredentialPush):
     create_answer: object = field(default_factory=lambda: Ok(CLIENT))
     enable_answer: object = field(default_factory=lambda: Ok(None))
     delete_answer: object = field(default_factory=lambda: Ok(None))
+    exists_answer: object = field(default_factory=lambda: Ok(True))
     calls: list = field(default_factory=list)
 
     async def create_machine_client(self, *, credential_id, tenant_id, name):
@@ -106,6 +119,10 @@ class FakePush(MachineCredentialPush):
     async def delete_machine_client(self, *, client: MachineClientRef):
         self.calls.append(("delete", client))
         return self.delete_answer
+
+    async def machine_client_exists(self, *, client: MachineClientRef):
+        self.calls.append(("exists", client))
+        return self.exists_answer
 
 
 def _service(repository: FakeRepository, push: FakePush) -> MachineCredentialService:
@@ -286,18 +303,93 @@ class TestStatusAndDelete:
         assert [(call[0], call[1].registration_token) for call in push.calls] == [("delete", CLIENT.registration_token)]
 
     async def test_a_delete_whose_token_opens_under_no_key_deactivates_and_keeps_the_credential(self):
-        """#698: the client cannot be deleted without its token, so its tokens are refused instead."""
+        """#698: the client cannot be deleted without its token.
+
+        Its tokens are refused and its service account disabled.
+
+        A present client (machine_client_exists -> Ok(True)) keeps the inactive row.
+        """
         repository, push = FakeRepository(), FakePush()
         key = await _stored(repository, push)
         repository.unreadable_token = True
         commits = repository.commits
+        push.exists_answer = Ok(True)
 
         result = await _service(repository, push).delete(tenant_id=str(TENANT), credential_id=key)
 
         assert result == Error(UNREADABLE_REGISTRATION_TOKEN)
         assert repository.rows[uuid.UUID(key)][0].status is credentials.CredentialStatus.INACTIVE
         assert repository.commits == commits + 1
-        assert push.calls == []
+        assert [call[0] for call in push.calls] == ["enabled", "exists"]
+
+    async def test_a_delete_whose_token_opens_under_no_key_keeps_the_row_while_the_client_is_unconfirmed(self):
+        """The admin client is refused (403) a client it registered: that is not proof the client is gone."""
+        repository, push = FakeRepository(), FakePush()
+        key = await _stored(repository, push)
+        repository.unreadable_token = True
+        push.exists_answer = Error(REFUSED)
+
+        result = await _service(repository, push).delete(tenant_id=str(TENANT), credential_id=key)
+
+        assert result == Error(UNREADABLE_REGISTRATION_TOKEN)
+        assert repository.rows[uuid.UUID(key)][0].status is credentials.CredentialStatus.INACTIVE
+        assert [call[0] for call in push.calls] == ["enabled", "exists"]
+
+    async def test_a_delete_whose_token_opens_under_no_key_and_client_account_missing_returns_disable_failed(self):
+        """Unreadable token plus missing service account: the row is kept inactive and deletion is not assumed."""
+        repository, push = FakeRepository(), FakePush()
+        key = await _stored(repository, push)
+        repository.unreadable_token = True
+        push.enable_answer = Error(NO_SERVICE_ACCOUNT_ERROR)
+        push.exists_answer = Error(UNAVAILABLE_ERROR)
+
+        result = await _service(repository, push).delete(tenant_id=str(TENANT), credential_id=key)
+
+        assert result == Error(UNREADABLE_REGISTRATION_TOKEN_DISABLE_FAILED)
+        assert result.error.message == UNREADABLE_REGISTRATION_TOKEN_DISABLE_FAILED.message
+        assert repository.rows[uuid.UUID(key)][0].status is credentials.CredentialStatus.INACTIVE
+        assert [call[0] for call in push.calls] == ["enabled", "exists"]
+
+    async def test_a_delete_whose_token_opens_under_no_key_and_disable_fails_keeps_the_row(self):
+        repository, push = FakeRepository(), FakePush()
+        key = await _stored(repository, push)
+        repository.unreadable_token = True
+        push.enable_answer = Error(UNAVAILABLE_ERROR)
+        push.exists_answer = Error(UNAVAILABLE_ERROR)
+
+        result = await _service(repository, push).delete(tenant_id=str(TENANT), credential_id=key)
+
+        assert result == Error(UNREADABLE_REGISTRATION_TOKEN_DISABLE_FAILED)
+        assert result.error.message == UNREADABLE_REGISTRATION_TOKEN_DISABLE_FAILED.message
+        assert repository.rows[uuid.UUID(key)][0].status is credentials.CredentialStatus.INACTIVE
+        assert [call[0] for call in push.calls] == ["enabled", "exists"]
+
+    async def test_delete_unreadable_token_disable_fails_client_present_returns_disable_failed(self):
+        repository, push = FakeRepository(), FakePush()
+        key = await _stored(repository, push)
+        repository.unreadable_token = True
+        push.enable_answer = Error(UNAVAILABLE_ERROR)
+        push.exists_answer = Ok(True)
+
+        result = await _service(repository, push).delete(tenant_id=str(TENANT), credential_id=key)
+
+        assert result == Error(UNREADABLE_REGISTRATION_TOKEN_DISABLE_FAILED)
+        assert result.error.message == UNREADABLE_REGISTRATION_TOKEN_DISABLE_FAILED.message
+        assert repository.rows[uuid.UUID(key)][0].status is credentials.CredentialStatus.INACTIVE
+        assert [call[0] for call in push.calls] == ["enabled", "exists"]
+
+    async def test_delete_unreadable_token_disable_fails_client_absent_is_deleted(self):
+        repository, push = FakeRepository(), FakePush()
+        key = await _stored(repository, push)
+        repository.unreadable_token = True
+        push.enable_answer = Error(UNAVAILABLE_ERROR)
+        push.exists_answer = Ok(False)
+
+        result = await _service(repository, push).delete(tenant_id=str(TENANT), credential_id=key)
+
+        assert result == Ok({"status": "deleted", "key_id": key})
+        assert repository.rows == {}
+        assert [call[0] for call in push.calls] == ["enabled", "exists"]
 
     async def test_a_delete_the_provider_refuses_deactivates_and_keeps_the_credential(self):
         repository, push = FakeRepository(), FakePush()
