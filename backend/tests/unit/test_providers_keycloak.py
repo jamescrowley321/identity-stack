@@ -108,7 +108,7 @@ class TestKeycloakConfig:
 
         assert provider.name == "Keycloak"
         assert provider.accepted_issuers == frozenset({ISSUER})
-        assert provider.disco_address == f"{ISSUER}/.well-known/openid-configuration"
+        assert provider.discovery_issuer == ISSUER
         assert provider.logout_kind == "rp_initiated"
 
     def test_trailing_slash_is_dropped_because_the_token_issuer_has_none(self):
@@ -330,7 +330,7 @@ class TestTokenValidationMiddleware:
         assert strict.require_https is True
         assert relaxed.require_https is False
         assert strict.algorithms == ["RS256"]
-        assert validate.await_args.kwargs["disco_doc_address"] == f"{ISSUER}/.well-known/openid-configuration"
+        assert validate.await_args.kwargs["issuer"] == ISSUER
 
     @patch("app.middleware.auth.validate_token", new_callable=AsyncMock)
     def test_library_gets_https_and_the_algorithm_for_ory(self, validate):

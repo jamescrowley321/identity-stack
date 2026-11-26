@@ -71,7 +71,7 @@ def provider(zitadel_settings, machine):
 
 async def test_discovery_names_the_instance_and_its_keys(zitadel_settings, machine_token, provider):
     disco = await get_discovery_document(
-        DiscoveryDocumentRequest(address=provider.disco_address, policy=DiscoveryPolicy(require_https=False))
+        DiscoveryDocumentRequest(issuer=provider.discovery_issuer, policy=DiscoveryPolicy(require_https=False))
     )
     assert disco.is_successful, disco.error
     assert disco.issuer == zitadel_settings.base_url
@@ -94,7 +94,7 @@ async def test_the_signature_issuer_and_audience_hold_and_the_client_binding_ref
             options={"verify_aud": False},
             require_https=False,
         ),
-        disco_doc_address=provider.disco_address,
+        issuer=provider.discovery_issuer,
     )
     assert claims["iss"] == zitadel_settings.base_url
     assert claims["client_id"] == machine["ZITADEL_TEST_MACHINE_CLIENT_ID"]

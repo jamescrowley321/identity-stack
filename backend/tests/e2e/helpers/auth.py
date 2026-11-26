@@ -111,8 +111,7 @@ def get_oidc_access_token() -> str:
     if not client_id or not client_secret:
         raise RuntimeError("DESCOPE_CLIENT_ID/DESCOPE_CLIENT_SECRET not set")
 
-    disco_addr = f"{DESCOPE_BASE_URL}/{DESCOPE_PROJECT_ID}/.well-known/openid-configuration"
-    disco = get_discovery_document(DiscoveryDocumentRequest(address=disco_addr))
+    disco = get_discovery_document(DiscoveryDocumentRequest(issuer=f"{DESCOPE_BASE_URL}/{DESCOPE_PROJECT_ID}"))
     if not disco.is_successful:
         raise RuntimeError(f"Discovery failed: {disco.error}")
 

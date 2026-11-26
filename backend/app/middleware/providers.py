@@ -90,7 +90,10 @@ class ProviderTokenConfig:
 
     name: str
     accepted_issuers: frozenset[str]
-    disco_address: str
+    # The issuer py-identity-model fetches discovery for, exactly as the
+    # provider's discovery document declares it: the library builds the
+    # discovery URL from it and requires the document's ``issuer`` to equal it.
+    discovery_issuer: str
     audience: str | None = None
     infer_single_tenant_dct: bool = False
     # When True, a token MUST carry an ``aud`` that matches ``audience`` (fail
@@ -220,6 +223,9 @@ def descope_config(project_id: str) -> ProviderTokenConfig:
 
     Only RS256 is accepted: it is the one algorithm a Descope project's JWKS
     publishes and its discovery document advertises.
+
+    Discovery is for ``https://api.descope.com/{pid}``, the ``issuer`` its
+    document declares (no trailing slash).
     """
     accepted = (
         frozenset(
@@ -235,7 +241,7 @@ def descope_config(project_id: str) -> ProviderTokenConfig:
     return ProviderTokenConfig(
         name="Descope",
         accepted_issuers=accepted,
-        disco_address=f"https://api.descope.com/{project_id}/.well-known/openid-configuration",
+        discovery_issuer=f"https://api.descope.com/{project_id}",
         audience=project_id or None,
         infer_single_tenant_dct=True,
         bare_issuer=project_id or None,
@@ -272,7 +278,7 @@ def ory_config(
     return ProviderTokenConfig(
         name="Ory",
         accepted_issuers=frozenset({issuer}),
-        disco_address=f"{issuer}/.well-known/openid-configuration",
+        discovery_issuer=issuer,
         audience=audience or None,
         infer_single_tenant_dct=False,
         require_audience=require_audience,
@@ -404,7 +410,7 @@ def keycloak_config(
     return ProviderTokenConfig(
         name=KEYCLOAK_PROVIDER_NAME,
         accepted_issuers=frozenset({issuer}),
-        disco_address=f"{issuer}/.well-known/openid-configuration",
+        discovery_issuer=issuer,
         audience=audience,
         require_audience=True,
         algorithms=frozenset({RS256}),
@@ -473,7 +479,7 @@ def zitadel_config(
     return ProviderTokenConfig(
         name=ZITADEL_PROVIDER_NAME,
         accepted_issuers=frozenset({issuer}),
-        disco_address=f"{issuer}/.well-known/openid-configuration",
+        discovery_issuer=issuer,
         audience=audience,
         require_audience=True,
         algorithms=frozenset({RS256}),
@@ -823,20 +829,20 @@ def id_token_client_id(provider: ProviderTokenConfig) -> str | None:
     return provider.audience if provider.descope_managed else None
 
 
-def id_token_disco_address(provider: ProviderTokenConfig, iss: str | None) -> str:
-    """Where the discovery document for an ID token of ``provider`` on ``iss`` is fetched.
+def id_token_discovery_issuer(provider: ProviderTokenConfig, iss: str | None) -> str:
+    """The issuer whose discovery document validates an ID token of ``provider`` on ``iss``.
 
-    For a provider with several ID-token issuers (Descope), the document of the
-    token's own issuer: each of Descope's URL issuers serves one naming itself as
+    For a provider with several ID-token issuers (Descope), the token's own
+    issuer: each of Descope's URL issuers serves a document naming itself as
     ``issuer``, over the project's one JWKS, and py-identity-model checks an ID
     token's ``iss`` against the discovery issuer. ``iss`` is one of the provider's
     configured issuers (``select_id_token_provider``), never an arbitrary URL.
-    For every other provider, its configured discovery address.
+    For every other provider, its configured discovery issuer.
     """
     issuers = id_token_issuers(provider)
     if iss is not None and len(issuers) > 1 and iss in issuers:
-        return f"{iss.rstrip('/')}/.well-known/openid-configuration"
-    return provider.disco_address
+        return iss
+    return provider.discovery_issuer
 
 
 def select_id_token_provider(providers: Iterable[ProviderTokenConfig], iss: object) -> ProviderTokenConfig | None:

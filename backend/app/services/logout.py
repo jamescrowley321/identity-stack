@@ -82,7 +82,7 @@ async def _rp_initiated_logout(provider: ProviderTokenConfig, claims: dict, id_t
     with tracer.start_as_current_span("logout.rp_initiated"):
         disco = await get_discovery_document(
             DiscoveryDocumentRequest(
-                address=provider.disco_address,
+                issuer=provider.discovery_issuer,
                 policy=DiscoveryPolicy(require_https=provider.require_https),
             )
         )

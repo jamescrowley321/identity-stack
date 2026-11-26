@@ -69,10 +69,6 @@ class OryTokenSource:
         self.redirect_uri = redirect_uri
         self.is_live = is_live
 
-    @property
-    def disco_address(self) -> str:
-        return f"{self.issuer}/.well-known/openid-configuration"
-
     def mint(
         self,
         *,
