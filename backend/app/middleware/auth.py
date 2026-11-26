@@ -36,7 +36,7 @@ class _Authenticated(NamedTuple):
 class TokenValidationMiddleware(BaseHTTPMiddleware):
     """Validates OIDC JWTs on protected routes using py-identity-model.
 
-    Provider-agnostic: the accepted issuers, discovery address, audience, and
+    Provider-agnostic: the accepted issuers, discovery issuer, audience, and
     claim handling come from the configured provider list (see
     ``app.middleware.providers``) rather than being hardcoded to Descope. Descope
     stays a configured provider; Ory (or any OIDC provider) is added by
@@ -156,7 +156,7 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
                 claims = await validate_token(
                     jwt=token,
                     token_validation_config=config,
-                    disco_doc_address=provider.disco_address,
+                    issuer=provider.discovery_issuer,
                 )
             except Exception:
                 # Wrong provider (signature verified against the wrong JWKS) or

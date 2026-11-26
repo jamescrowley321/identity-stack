@@ -185,7 +185,7 @@ async def test_logout_ory_returns_rp_initiated_url(mock_validate, mock_disco, mo
     assert "post_logout_redirect_uri=" in data["logout_url"]
     assert "client_id=spa-client-id" in data["logout_url"]
     # Discovery was consulted against Ory's issuer, not Descope's.
-    assert mock_disco.await_args.args[0].address.startswith(_ORY_ISSUER)
+    assert mock_disco.await_args.args[0].issuer == _ORY_ISSUER
 
 
 @pytest.mark.anyio

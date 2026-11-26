@@ -182,7 +182,7 @@ class TestOryResponseIsUnchanged:
         _, disco = await _logout(ory, ORY_END_SESSION)
 
         request = disco.await_args.args[0]
-        assert request.address == f"{ORY_ISSUER}/.well-known/openid-configuration"
+        assert request.issuer == ORY_ISSUER
         assert request.policy in (None, DiscoveryPolicy())
 
 
@@ -247,7 +247,7 @@ class TestKeycloakLogout:
         _, disco = await _logout(keycloak, KEYCLOAK_END_SESSION)
 
         request = disco.await_args.args[0]
-        assert request.address == f"{KEYCLOAK_ISSUER}/.well-known/openid-configuration"
+        assert request.issuer == KEYCLOAK_ISSUER
         assert request.policy in (None, DiscoveryPolicy())
 
     async def test_discovery_allows_plain_http_only_when_the_switch_is_off(self, keycloak, monkeypatch):
@@ -309,7 +309,7 @@ class TestZitadelLogout:
         _, disco = await _logout(zitadel, ZITADEL_END_SESSION)
 
         request = disco.await_args.args[0]
-        assert request.address == f"{ZITADEL_ISSUER}/.well-known/openid-configuration"
+        assert request.issuer == ZITADEL_ISSUER
         assert request.policy == DiscoveryPolicy(require_https=False)
 
     async def test_the_id_token_itself_cannot_call_logout(self, zitadel):

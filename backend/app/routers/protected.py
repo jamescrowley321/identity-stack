@@ -7,6 +7,7 @@ from py_identity_model import (
     JwksValidationError,
     NetworkException,
     TokenValidationConfig,
+    TokenValidationException,
 )
 from py_identity_model.aio import validate_id_token as validate_oidc_id_token
 from py_identity_model.identity import ClaimsPrincipal
@@ -24,7 +25,7 @@ from app.middleware.providers import (
     ProviderTokenConfig,
     configured_providers,
     id_token_client_id,
-    id_token_disco_address,
+    id_token_discovery_issuer,
     select_id_token_provider,
     unverified_claims,
     unverified_issuer,
@@ -290,7 +291,7 @@ async def validate_id_token(request: Request, authorization: str = Header()):
     provider (the middlewares' registry, ``configured_providers``) one of whose
     ID-token issuers is the token's unverified ``iss``, and validates the token
     as an OIDC ID token with that provider's discovery document (of the token's
-    issuer, for Descope's two URL issuers: ``id_token_disco_address``), signing
+    issuer, for Descope's two URL issuers: ``id_token_discovery_issuer``), signing
     algorithms and client id as audience and ``azp``. An ``iss`` no provider
     has, a refused token and an access token get the uniform 401; a provider
     that cannot be read gets 503.
@@ -323,7 +324,7 @@ async def validate_id_token(request: Request, authorization: str = Header()):
         claims = await validate_oidc_id_token(
             id_token,
             config,
-            disco_doc_address=id_token_disco_address(provider, iss),
+            issuer=id_token_discovery_issuer(provider, iss),
             nonce=None,
             trusted_audiences=_trusted_audiences(provider, id_token),
             validate_azp=True,
@@ -331,11 +332,9 @@ async def validate_id_token(request: Request, authorization: str = Header()):
     except PROVIDER_FAULTS as exc:
         logger.error("ID validation hit a provider fault: %s", _cause(exc))
         raise HTTPException(status_code=503, detail=UNAVAILABLE_DETAIL) from exc
-    except Exception as exc:
-        # Anything else refuses the token, as in TokenValidationMiddleware, with
-        # the body every token refusal gets. Not narrowed to
-        # TokenValidationException: in discovery mode the library lets PyJWT's
-        # DecodeError out for a token that is not a JWT (identity-model#1179).
+    except TokenValidationException as exc:
+        # A refused token, including one that is not a compact JWS
+        # (MalformedTokenException), gets the body every token refusal gets.
         logger.warning("ID validation refused: %s", _cause(exc))
         raise HTTPException(status_code=401, detail=REFUSED_DETAIL) from exc
     if not SCOPE_CLAIMS.isdisjoint(claims):

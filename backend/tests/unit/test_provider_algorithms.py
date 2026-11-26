@@ -60,7 +60,7 @@ def _descope(op: LocalProvider, **changes) -> ProviderTokenConfig:
     """The shipped Descope config, its discovery and issuers moved to the loopback provider."""
     return replace(
         descope_config(DESCOPE_PROJECT_ID),
-        **{"disco_address": op.disco_address, "accepted_issuers": _descope_issuers(op), **changes},
+        **{"discovery_issuer": op.issuer, "accepted_issuers": _descope_issuers(op), **changes},
     )
 
 
@@ -189,7 +189,7 @@ class TestDescopeIssuers:
             await validate_token(
                 jwt=op.token(RS256, claims),
                 token_validation_config=config,
-                disco_doc_address=op.disco_address,
+                issuer=op.issuer,
             )
 
 
@@ -229,7 +229,7 @@ class TestTheLibraryRefuses:
             await validate_token(
                 jwt=op.token(alg, _descope_claims(op)),
                 token_validation_config=config,
-                disco_doc_address=op.disco_address,
+                issuer=op.issuer,
             )
 
     def test_a_dpop_bound_token_sent_as_a_bearer_token_is_refused(self, op):

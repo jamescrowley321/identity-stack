@@ -76,7 +76,7 @@ def _fake_tenant_claims(claims: dict) -> TenantClaims:
 FAKE_PROVIDER = ProviderTokenConfig(
     name="Fake",
     accepted_issuers=frozenset({FAKE_ISSUER}),
-    disco_address=f"{FAKE_ISSUER}/.well-known/openid-configuration",
+    discovery_issuer=FAKE_ISSUER,
     tenant_claims=_fake_tenant_claims,
 )
 
@@ -84,7 +84,7 @@ FAKE_PROVIDER = ProviderTokenConfig(
 UNSOURCED_PROVIDER = ProviderTokenConfig(
     name="Unsourced",
     accepted_issuers=frozenset({UNSOURCED_ISSUER}),
-    disco_address=f"{UNSOURCED_ISSUER}/.well-known/openid-configuration",
+    discovery_issuer=UNSOURCED_ISSUER,
     audience=UNSOURCED_AUDIENCE,
     require_audience=True,
 )

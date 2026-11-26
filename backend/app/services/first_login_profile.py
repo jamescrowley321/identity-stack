@@ -70,7 +70,7 @@ async def userinfo_profile(
         async with AsyncHTTPClient(config=config) as client:
             disco = await get_discovery_document(
                 DiscoveryDocumentRequest(
-                    address=provider.disco_address,
+                    issuer=provider.discovery_issuer,
                     policy=DiscoveryPolicy(require_https=provider.require_https),
                 ),
                 http_client=client,
