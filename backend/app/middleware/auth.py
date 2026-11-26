@@ -156,7 +156,7 @@ class TokenValidationMiddleware(BaseHTTPMiddleware):
                 claims = await validate_token(
                     jwt=token,
                     token_validation_config=config,
-                    disco_doc_address=provider.disco_address,
+                    issuer=provider.discovery_issuer,
                 )
             except Exception:
                 # Wrong provider (signature verified against the wrong JWKS) or

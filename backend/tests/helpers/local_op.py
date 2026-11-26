@@ -70,10 +70,6 @@ class LocalProvider:
         )
 
     @property
-    def disco_address(self) -> str:
-        return f"{self.issuer}{_WELL_KNOWN}"
-
-    @property
     def jwks_path(self) -> str:
         return _JWKS
 

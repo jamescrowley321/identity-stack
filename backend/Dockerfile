@@ -10,15 +10,9 @@ ENV UV_PROJECT_ENVIRONMENT=/usr/local \
     UV_NO_CACHE=1
 
 COPY pyproject.toml uv.lock ./
-# git fetches py-identity-model, pinned to a commit (pyproject.toml); it is
-# removed again in the same layer.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
-    && pip install --no-cache-dir uv==0.12.5 \
+RUN pip install --no-cache-dir uv==0.12.5 \
     && uv sync --locked --no-dev --no-install-project \
-    && pip uninstall -y uv \
-    && apt-get purge -y --auto-remove git \
-    && rm -rf /var/lib/apt/lists/*
+    && pip uninstall -y uv
 
 COPY . .
 

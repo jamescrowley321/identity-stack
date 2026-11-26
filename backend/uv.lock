@@ -983,7 +983,7 @@ requires-dist = [
     { name = "opentelemetry-instrumentation-logging", specifier = ">=0.62b0" },
     { name = "opentelemetry-instrumentation-sqlalchemy", specifier = ">=0.62b0" },
     { name = "opentelemetry-sdk", specifier = ">=1.41.0" },
-    { name = "py-identity-model", git = "https://github.com/jamescrowley321/identity-model?subdirectory=py&rev=23cf375f47b94413dda7c2ee214f9092546c4783" },
+    { name = "py-identity-model", specifier = "==5.0.0a1" },
     { name = "pydantic", extras = ["email"], specifier = ">=2.12.5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.3.0" },
@@ -1578,14 +1578,18 @@ wheels = [
 
 [[package]]
 name = "py-identity-model"
-version = "4.1.1"
-source = { git = "https://github.com/jamescrowley321/identity-model?subdirectory=py&rev=23cf375f47b94413dda7c2ee214f9092546c4783#23cf375f47b94413dda7c2ee214f9092546c4783" }
+version = "5.0.0a1"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "async-lru" },
     { name = "cryptography" },
     { name = "httpx" },
     { name = "pyjwt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c3/29/6972e6c3ad2aee3eb16b4cf7dac79c0a3e97d3f7422de2ac6a814bb93f6d/py_identity_model-5.0.0a1.tar.gz", hash = "sha256:1e8faff42e71078f29f6b85f1a8d6cce5ffbddcc740a6e892308a8e922baa902", size = 241015, upload-time = "2026-11-26T16:14:39.362Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/90/56/22121462ba8c948ab7068c918e9a799b682840a336f9259a3f6c67493426/py_identity_model-5.0.0a1-py3-none-any.whl", hash = "sha256:fda2b120aa2f32e0c6c38db61347147cdc067abcb718f5cf84d14ad1c9cce50a", size = 283613, upload-time = "2026-11-26T16:14:38.332Z" },
 ]
 
 [[package]]

@@ -41,7 +41,7 @@ class TestDescopeConfig:
         )
         assert cfg.audience == "P123"
         assert cfg.infer_single_tenant_dct is True
-        assert cfg.disco_address == "https://api.descope.com/P123/.well-known/openid-configuration"
+        assert cfg.discovery_issuer == "https://api.descope.com/P123"
         assert cfg.logout_kind == "management"
 
     def test_session_token_bare_project_id_issuer_is_accepted(self):
@@ -113,7 +113,7 @@ class TestOryConfig:
         assert cfg == ProviderTokenConfig(
             name="Ory",
             accepted_issuers=frozenset({ORY_ISSUER}),
-            disco_address=f"{ORY_ISSUER}/.well-known/openid-configuration",
+            discovery_issuer=ORY_ISSUER,
             audience="identity-stack-api",
             infer_single_tenant_dct=False,
             require_audience=True,
@@ -128,7 +128,7 @@ class TestOryConfig:
     def test_trailing_slash_stripped(self):
         cfg = ory_config(ORY_ISSUER + "/", audience="identity-stack")
         assert cfg.accepted_issuers == frozenset({ORY_ISSUER})
-        assert cfg.disco_address == f"{ORY_ISSUER}/.well-known/openid-configuration"
+        assert cfg.discovery_issuer == ORY_ISSUER
         assert cfg.audience == "identity-stack"
 
 
