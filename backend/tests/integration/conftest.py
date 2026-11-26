@@ -81,13 +81,13 @@ def descope_client_secret():
 
 
 @pytest.fixture(scope="session")
-def disco_address(descope_project_id):
-    return f"https://api.descope.com/{descope_project_id}/.well-known/openid-configuration"
+def descope_issuer(descope_project_id):
+    return f"https://api.descope.com/{descope_project_id}"
 
 
 @pytest.fixture(scope="session")
-def discovery_document(disco_address):
-    response = get_discovery_document(DiscoveryDocumentRequest(address=disco_address))
+def discovery_document(descope_issuer):
+    response = get_discovery_document(DiscoveryDocumentRequest(issuer=descope_issuer))
     assert response.is_successful, f"Discovery failed: {response.error}"
     return response
 

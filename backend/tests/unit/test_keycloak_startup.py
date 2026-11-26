@@ -78,7 +78,7 @@ class TestTheRegistration:
         provider = _keycloak()
 
         assert provider.accepted_issuers == frozenset({LOCAL_ISSUER})
-        assert provider.disco_address == f"{LOCAL_ISSUER}/.well-known/openid-configuration"
+        assert provider.discovery_issuer == LOCAL_ISSUER
         assert provider.audience == API_AUDIENCE
         assert provider.require_audience is True
         assert provider.algorithms == frozenset({"RS256"})

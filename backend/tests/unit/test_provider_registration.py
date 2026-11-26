@@ -83,7 +83,7 @@ def _second_provider() -> ProviderTokenConfig:
     return ProviderTokenConfig(
         name=SECOND_NAME,
         accepted_issuers=frozenset({SECOND_ISSUER}),
-        disco_address=f"{SECOND_ISSUER}/.well-known/openid-configuration",
+        discovery_issuer=SECOND_ISSUER,
         audience=SECOND_AUDIENCE,
         require_audience=True,
         require_https=False,
@@ -327,7 +327,7 @@ class TestRegisteredProviderReachesTheMiddlewares:
         descope_call = validate.await_args.kwargs
 
         assert second.json() == {"provider": SECOND_NAME, "registered_as": SECOND_NAME, "tenant_id": None}
-        assert second_call["disco_doc_address"] == f"{SECOND_ISSUER}/.well-known/openid-configuration"
+        assert second_call["issuer"] == SECOND_ISSUER
         assert second_call["token_validation_config"].require_https is False
         assert ory.json() == {"provider": "Ory", "registered_as": "Ory", "tenant_id": None}
         assert ory_call["token_validation_config"].require_https is True
@@ -386,7 +386,7 @@ class TestRegisteredProviderLogsOut:
         _, second_request = self._logout(second_registered, _second_claims(), SECOND_END_SESSION)
         _, ory_request = self._logout(second_registered, _ory_claims(), ORY_END_SESSION)
 
-        assert second_request.address == f"{SECOND_ISSUER}/.well-known/openid-configuration"
+        assert second_request.issuer == SECOND_ISSUER
         assert second_request.policy == DiscoveryPolicy(require_https=False)
         assert ory_request.policy == DiscoveryPolicy(require_https=True)
 

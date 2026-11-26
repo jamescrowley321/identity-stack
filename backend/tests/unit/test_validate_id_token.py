@@ -30,7 +30,7 @@ from app.middleware.providers import (
     ProviderTokenConfig,
     descope_config,
     id_token_client_id,
-    id_token_disco_address,
+    id_token_discovery_issuer,
     id_token_issuers,
     keycloak_config,
     ory_config,
@@ -87,7 +87,7 @@ def _descope(op: LocalProvider, inbound_app: LocalProvider | None = None, **chan
     issuers = frozenset({op.issuer, second, DESCOPE_PROJECT_ID})
     return replace(
         descope_config(DESCOPE_PROJECT_ID),
-        **{"disco_address": op.disco_address, "accepted_issuers": issuers, **changes},
+        **{"discovery_issuer": op.issuer, "accepted_issuers": issuers, **changes},
     )
 
 
@@ -244,14 +244,12 @@ class TestProviderSelection:
         descope = descope_config(DESCOPE_PROJECT_ID)
         issuers = sorted(id_token_issuers(descope))
 
-        assert {iss: id_token_disco_address(descope, iss) for iss in issuers} == {
-            iss: f"{iss}/.well-known/openid-configuration" for iss in issuers
-        }
+        assert {iss: id_token_discovery_issuer(descope, iss) for iss in issuers} == {iss: iss for iss in issuers}
 
     def test_another_providers_discovery_address_is_its_configured_one(self, deployment):
         keycloak = deployment.providers[KEYCLOAK]
 
-        assert id_token_disco_address(keycloak, deployment.ops[KEYCLOAK].issuer) == keycloak.disco_address
+        assert id_token_discovery_issuer(keycloak, deployment.ops[KEYCLOAK].issuer) == keycloak.discovery_issuer
 
     def test_descope_with_no_project_id_has_no_id_token_issuer(self):
         assert select_id_token_provider([descope_config("")], "") is None
@@ -423,15 +421,15 @@ class TestLogging:
         assert [(record.levelname, record.exc_info, record.exc_text) for record in ours] == [("WARNING", None, None)]
         assert CALLER_CHOSEN_ALG not in caplog.text
 
-    def test_an_error_the_library_does_not_type_still_refuses_the_token(self, monkeypatch, deployment, caplog):
-        """PyJWT's ``DecodeError`` for a header that is not JSON (identity-model#1179)."""
+    def test_a_malformed_token_is_refused(self, monkeypatch, deployment, caplog):
+        """A header that is not JSON (identity-model#1196)."""
         token = deployment.ops[DESCOPE].token(RS256, deployment.id_token_claims(DESCOPE))
         _header, payload, signature = token.split(".")
 
         with caplog.at_level("DEBUG"):
             _assert_uniform_401(_post(_deployed(monkeypatch, deployment), f"bm90LWpzb24.{payload}.{signature}"))
 
-        assert _route_records(caplog) == [("WARNING", "ID validation refused: DecodeError")]
+        assert _route_records(caplog) == [("WARNING", "ID validation refused: MalformedTokenException")]
 
 
 class TestProviderFault:
@@ -463,7 +461,7 @@ class TestProviderFault:
         assert response.status_code == 200, response.text
 
     def test_a_discovery_address_that_refuses_the_connection(self, monkeypatch, faulty, caplog):
-        provider = replace(_keycloak(faulty), disco_address=f"http://127.0.0.1:{_closed_port()}{faulty.discovery_path}")
+        provider = replace(_keycloak(faulty), discovery_issuer=f"http://127.0.0.1:{_closed_port()}")
 
         with caplog.at_level("DEBUG"):
             self._assert_503(_post(_client(monkeypatch, [provider]), self._token(faulty)))
@@ -508,9 +506,7 @@ class TestProviderFault:
 
     def test_a_plain_http_provider_where_https_is_required(self, monkeypatch, faulty, caplog):
         """Refused by the library's discovery policy before any request is sent."""
-        provider = replace(
-            _keycloak(faulty), disco_address=f"http://provider.invalid{faulty.discovery_path}", require_https=True
-        )
+        provider = replace(_keycloak(faulty), discovery_issuer="http://provider.invalid", require_https=True)
 
         with caplog.at_level("DEBUG"):
             self._assert_503(_post(_client(monkeypatch, [provider]), self._token(faulty)))
